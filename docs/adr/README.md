@@ -1,0 +1,33 @@
+# Architecture decision records
+
+An ADR captures one significant decision: the context, the options considered, what we chose, and the consequences. We use a short version of [MADR](https://adr.github.io/madr/) (see [`template.md`](template.md)).
+
+## How we use them
+
+- **When to write one:** a decision is hard to reverse, shapes public API, or will be questioned later. Small, reversible choices do not need one.
+- **Numbering:** sequential, `NNNN-short-title.md`. Numbers are never reused.
+- **Status:** `Proposed` → `Accepted` (or `Rejected`). A later decision that reverses one is a new ADR. It marks the old one `Superseded by NNNN` and links back. We never delete or rewrite an accepted ADR's decision.
+- **Who decides:** anyone can propose. The maintainer accepts.
+
+Questions not yet decided are in [open-questions.md](../open-questions.md).
+
+## Index
+
+| # | Decision | Status |
+|---|---|---|
+| [0001](0001-record-architecture-decisions.md) | Record architecture decisions | Accepted |
+| [0002](0002-django-app-is-the-unit-of-deployment.md) | The Django app is the unit of deployment | Accepted |
+| [0003](0003-apps-communicate-through-contracts.md) | Apps communicate only through contracts and connectors | Accepted |
+| [0004](0004-each-app-owns-its-data.md) | Each app owns its data | Accepted |
+| [0005](0005-small-core-optional-hub-apps.md) | Small required core; no bundled shared-service apps | Proposed |
+| [0006](0006-contracts-are-typed-and-published-as-openapi.md) | Contracts are typed and published as OpenAPI | Accepted |
+| [0007](0007-local-connector-serializes.md) | The local connector serializes, like the remote one | Proposed |
+| [0008](0008-typed-contract-errors-in-both-modes.md) | Contract errors are typed and identical in both modes | Proposed |
+| [0009](0009-one-database-alias-per-app.md) | One database alias per app | Proposed |
+| [0010](0010-pluggable-principal-resolution.md) | Pluggable principal resolution in core | Proposed |
+| [0011](0011-django-ninja-for-contract-endpoints.md) | django-ninja for contract endpoints | Proposed |
+| [0012](0012-supported-python-and-django-versions.md) | Supported Python and Django versions | Proposed |
+| [0013](0013-license.md) | License: BSD-3-Clause | Accepted |
+| [0014](0014-pluggable-connector-transports.md) | Connector transports are pluggable | Proposed |
+| [0015](0015-specification-first-django-reference-implementation.md) | Specification first; django-neolith is the reference implementation | Proposed |
+| [0016](0016-an-app-may-run-attached-and-detached-at-once.md) | An app may run attached and detached at the same time | Proposed |
