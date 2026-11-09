@@ -5,12 +5,17 @@
 
 ## Context
 
-Every call carries a **call context**, separate from the request: at least the principal on whose behalf the call is made, a trace identifier, an idempotency key and a deadline. Over HTTP it travels in headers (`Authorization`, `traceparent`, `Idempotency-Key`, `Neolith-Deadline`). Apps must not put it inside request types. The question, recorded as open question 6, is how it reaches the code that implements an action, and how it reaches the calls that code makes in turn.
+Every call carries a **call context**, separate from the request. The draft specification (spec 00) gives it two kinds of field:
+
+- **Propagated fields** pass from a call to the calls it makes: the principal on whose behalf the call is made, the trace identifier and the deadline.
+- **Per-call fields** belong to one outbound call: the idempotency key. Each outbound call gets a fresh key, kept only across retries of that same call.
+
+Over HTTP the context travels in headers (`Authorization`, `traceparent`, `Neolith-Timeout`, `Idempotency-Key`). The deadline crosses as a relative budget, and the receiving host computes its own local deadline from it (spec 03). Apps must not put it inside request types. The question, recorded as open question 6, is how it reaches the code that implements an action, and how it reaches the calls that code makes in turn.
 
 Two directions have to work, and they pull different ways:
 
 - **Inbound.** An implementation needs to read the context, mostly the principal ([0010](0010-pluggable-principal-resolution.md)), sometimes the deadline.
-- **Outbound.** When an action calls another contract, the outgoing call must inherit the deadline (never extend it), continue the trace, and carry the principal. If this depends on every author remembering to pass something along, it will sometimes be forgotten, and the failure is silent: a call runs past its caller's deadline, or the trace breaks.
+- **Outbound.** When an action calls another contract, the outgoing call must inherit the deadline (never extend it), continue the trace, carry the principal, and get its own idempotency key. If this depends on every author remembering to pass something along, it will sometimes be forgotten, and the failure is silent: a call runs past its caller's deadline, or the trace breaks.
 
 Constraints from existing decisions and rules:
 
@@ -122,12 +127,13 @@ Evaluation:
 
 Option 4.
 
-1. **`CallContext` is a frozen, typed value**, not a live object. It holds the principal as a principal value resolved through [0010](0010-pluggable-principal-resolution.md), never a user model instance. It also holds the trace identifier, the idempotency key and the absolute deadline. An implementation sees an equal value over every transport, apart from the span identifier and, for now, the principal. Over HTTP the principal is whatever the provider's 0010 backend resolves from `Authorization`. With the v0.1 shared-secret backend that is the calling app, while in-process it is the original principal. Closing that gap is listed under Consequences as a decision still to make.
+1. **`CallContext` is a frozen, typed value**, not a live object. It holds the principal as a principal value resolved through [0010](0010-pluggable-principal-resolution.md), never a user model instance. It also holds the trace identifier and the deadline, as an absolute time on the local host; these and the principal are the propagated fields. The idempotency key is the per-call field: the key of the call this context belongs to. An implementation sees an equal value over every transport, apart from the span identifier and, for now, the principal. Over HTTP the principal is whatever the provider's 0010 backend resolves from `Authorization`. With the v0.1 shared-secret backend that is the calling app, while in-process it is the original principal. Closing that gap is listed under Consequences as a decision still to make.
 2. **Inbound is explicit.** An implementation receives the context by declaring a second parameter annotated `CallContext`. An action that does not read the context omits the parameter. These are the only two shapes accepted. A mismatch fails at import time with a message naming the action.
 3. **Outbound is ambient.** The app host keeps one private context variable that holds a call scope. Transports set it around each action, mark the scope closed when the action returns or raises, and then reset the variable. Connectors reject a closed scope as they reject a missing one (Decision 5). A connector call may instead pass `context=`. That value is treated as the parent in place of the ambient scope, never sent as is. Either way, the outgoing context is derived from the parent:
    - the deadline is the earlier of the parent's deadline and the call's own timeout;
    - the trace continues from the parent;
-   - the principal is carried over unchanged.
+   - the principal is carried over unchanged;
+   - the idempotency key is not inherited. The outgoing call gets a fresh key, which the connector reuses only when it retries that same call.
 4. **Roots are created only at the app host's entry points:**
    - the provider side of each transport (the HTTP transport builds the context from its headers);
    - the host's handling of ordinary Django requests (the principal from the request, through 0010);
@@ -156,10 +162,10 @@ Follows principles 5 (*same semantics over same mechanics*), 6 (*visible failure
   - a connector call made through a scope that has already closed fails the same way.
 - The roadmap's public surface changes in one place: the `ctx` parameter becomes optional per action. CONTRIBUTING K6 is reworded to name this context variable as host-owned state once this record is Accepted.
 - The specification needs:
-  - the derivation rules for a child context (deadline, trace, principal);
+  - the derivation rules for a child context (propagated fields: deadline, trace, principal; per-call field: a fresh idempotency key);
   - the list of places a root context may be created.
 - Left for later records or the specification:
-  - **Idempotency keys for child calls.** A child call needs its own key. Whether it is derived deterministically from the parent's key, so that a retried parent reproduces its children's keys, belongs to the spec for transports.
+  - **How a child call's fresh key is made.** The draft specification fixes that each outbound call gets its own key. Whether that key is random or derived deterministically from the parent's key, so that a retried parent reproduces its children's keys, belongs to the spec for transports.
   - **The principal over HTTP.** In-process, the provider sees the original principal. Over HTTP with the v0.1 shared-secret backend of 0010, it sees the calling app. There are two ways to close the gap, and they have different trust costs:
     - the HTTP transport forwards the original principal, and the service token asserts it on the caller's behalf. Parity holds, but anyone holding the shared secret can then assert any principal;
     - the provider sees the calling app, and parity for the principal is narrowed to attached mode until a backend can carry delegated identity.
