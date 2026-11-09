@@ -26,7 +26,7 @@ Questions not yet decided are in [open-questions.md](../open-questions.md).
 | [0009](0009-one-database-alias-per-app.md) | One database alias per app | Proposed |
 | [0010](0010-pluggable-principal-resolution.md) | Pluggable principal resolution in core | Proposed |
 | [0011](0011-django-ninja-for-contract-endpoints.md) | django-ninja for contract endpoints | Proposed |
-| [0012](0012-supported-python-and-django-versions.md) | Supported Python and Django versions | Proposed |
+| [0012](0012-supported-python-and-django-versions.md) | Supported Python and Django versions | Accepted |
 | [0013](0013-license.md) | License: BSD-3-Clause | Accepted |
 | [0014](0014-pluggable-connector-transports.md) | Connector transports are pluggable | Proposed |
 | [0015](0015-specification-first-django-reference-implementation.md) | Specification first; django-neolith is the reference implementation | Proposed |
