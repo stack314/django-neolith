@@ -1,0 +1,105 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "django-neolith"
+dynamic = ["version"]
+description = "Deploy Django apps, not Django projects."
+readme = "README.md"
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
+authors = [{ name = "Vignesh Pai and django-neolith contributors" }]
+requires-python = ">=3.12"
+# Runtime dependencies need an Accepted decision record (CONTRIBUTING K5).
+# Floor and milestone: ADR 0012.
+dependencies = ["Django>=5.2"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Framework :: Django",
+    "Framework :: Django :: 5.2",
+    "Framework :: Django :: 6.1",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Source = "https://github.com/vignzpie/django-neolith"
+Issues = "https://github.com/vignzpie/django-neolith/issues"
+Changelog = "https://github.com/vignzpie/django-neolith/blob/main/CHANGELOG.md"
+
+[dependency-groups]
+test = ["pytest>=8.4", "pytest-django>=4.11", "packaging>=25"]
+lint = ["ruff>=0.14", "mypy>=1.18", "django-stubs>=5.2"]
+dev = [{ include-group = "test" }, { include-group = "lint" }]
+
+[tool.hatch.version]
+path = "src/neolith/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/neolith"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/neolith", "tests", "LICENSE", "README.md", "CHANGELOG.md"]
+
+[tool.pytest.ini_options]
+minversion = "8.4"
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers", "--strict-config", "--import-mode=importlib"]
+xfail_strict = true
+DJANGO_SETTINGS_MODULE = "tests.settings"
+django_find_project = false
+pythonpath = ["."]
+# ADR 0012: deprecations are errors. Django's RemovedInDjango*Warning classes
+# subclass DeprecationWarning or PendingDeprecationWarning, so they are covered.
+# A filter for a third-party warning names the package and the upstream issue.
+filterwarnings = [
+    "error",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+src = ["src", "tests"]
+# Python sources only: Markdown code blocks are illustrative sketches.
+extend-exclude = ["*.md"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W", "F",  # pycodestyle, pyflakes
+    "I",            # isort
+    "UP",           # pyupgrade: no syntax older than the floor
+    "B",            # bugbear
+    "SIM",          # simplify
+    "PT",           # pytest style
+    "DJ",           # django
+    "TID",          # tidy imports
+    "RUF",          # ruff-specific
+    "S",            # bandit: secure by default (K9)
+    "ANN",          # annotations (K1)
+    "FIX", "TD",    # no TODO/FIXME (K3)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.mypy]
+strict = true
+python_version = "3.12"
+files = ["src", "tests"]
+warn_unreachable = true
+enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
+plugins = ["mypy_django_plugin.main"]
+
+[tool.django-stubs]
+django_settings_module = "tests.settings"

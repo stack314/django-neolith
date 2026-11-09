@@ -52,6 +52,22 @@ These rules apply to the `neolith` package. Tests and examples follow them too, 
 - **T3.** Tests are deterministic. No sleeping to wait for something, no network beyond the local machine, and no dependence on test order.
 - **T4.** The full CI matrix passes before review is requested. Deprecation warnings are errors ([ADR 0012](docs/adr/0012-supported-python-and-django-versions.md)).
 
+### Running the checks locally
+
+You need Python 3.12 or newer and pip 25.1 or newer, which reads the dependency groups in `pyproject.toml`.
+
+```
+python -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e . --group dev
+pytest
+ruff check . && ruff format --check .
+mypy
+```
+
+CI runs the same commands on Django 5.2 with Python 3.12 and on the newest supported pair, on x86-64 and arm64 ([ADR 0012](docs/adr/0012-supported-python-and-django-versions.md)). To try another Django locally, add it to the install line, for example `"Django~=5.2.0"`.
+
 ## Writing
 
 These rules apply to documentation, docstrings, error messages, commit messages and pull request text.
