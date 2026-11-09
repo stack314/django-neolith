@@ -13,8 +13,13 @@ item is one statement. markdown-it-py is a development dependency only.
 
 A normative lead-in is the last sentence or clause of a paragraph (after the
 last ".", "!", "?" or ";") when it uses a normative word and either ends in
-":" or is followed directly by a list. Each item of that list is a
-requirement with its own ID, and the lead-in carries none.
+":" or is followed by a list, with only HTML blocks between. Each item of that
+list is a requirement with its own ID, and the lead-in carries none. A list
+that CommonMark starts right after a governed list (a changed bullet or
+delimiter, or a split by an HTML block) is governed by the same lead-in. So
+is a list introduced right after it by a paragraph that only ends in ":", such
+as "And also:", and an ordered list that resumes its numbering before the
+next heading.
 
 It always reports a problem, and exits 1, when:
 
@@ -171,13 +176,14 @@ class _Unit:
     kind: str
     # The level of the lead-in that governs this list item, if any.
     governed: str | None = None
-    # True for a paragraph followed directly by a list.
+    # True for a paragraph followed by a list, with only HTML blocks between.
     before_list: bool = False
 
 
 @dataclass
 class _List:
     lead: str | None  # the level of the lead-in that introduced it, if any
+    last_number: int | None = None  # of the last item, in an ordered list
 
 
 @dataclass
@@ -225,19 +231,43 @@ class _DocumentReader:
         tokens = _MARKDOWN.parse(text)
         lines = text.splitlines()
         stack: list[_List | _Item] = []
-        lead: str | None = None  # from a lead-in, for the list right after it
+        # The level of a lead-in, for the list that opens next. It survives
+        # HTML blocks, and a governed list hands it on: CommonMark starts a new
+        # list when the bullet or delimiter changes, and an HTML comment is the
+        # usual way to split a list, yet a reader sees one list. Any other
+        # token clears it.
+        lead: str | None = None
+        # A governed ordered list, as (lead, next number), until the next
+        # heading: an ordered list that resumes its numbering after a note is
+        # read as the same list.
+        numbered: tuple[str, int] | None = None
         index = 0
         while index < len(tokens):
             token = tokens[index]
+            carried = lead
+            if token.type not in (*_LIST_OPEN, *_LIST_CLOSE, "html_block"):
+                lead = None
             if token.type in _LIST_OPEN:
+                start = int(token.attrGet("start") or 1)
+                if lead is None and numbered is not None and start == numbered[1]:
+                    lead = numbered[0]
                 stack.append(_List(lead))
                 lead = None
             elif token.type in _LIST_CLOSE:
-                stack.pop()
+                closed = stack.pop()
+                lead = closed.lead if isinstance(closed, _List) else None
+                if (
+                    isinstance(closed, _List)
+                    and closed.lead is not None
+                    and closed.last_number is not None
+                ):
+                    numbered = (closed.lead, closed.last_number + 1)
             elif token.type == "list_item_open":
                 parent = stack[-1]
                 if isinstance(parent, _List):
                     stack.append(_Item(_line(token), parent))
+                    if token.info.isdigit():
+                        parent.last_number = int(token.info)
             elif token.type == "list_item_close":
                 item = stack.pop()
                 if (
@@ -250,6 +280,7 @@ class _DocumentReader:
                 if not _fence_closed(token, lines):
                     self.problem(_line(token), "code fence is never closed")
             elif token.type == "heading_open":
+                numbered = None
                 inline = tokens[index + 1]
                 self.read_unit(_Unit(_line(token), inline.content, "heading"))
             elif token.type == "tr_open":
@@ -266,7 +297,9 @@ class _DocumentReader:
                 )
             elif token.type == "paragraph_open":
                 inline = tokens[index + 1]
-                after = tokens[index + 3] if index + 3 < len(tokens) else None
+                after = index + 3  # the first token after paragraph_close
+                while after < len(tokens) and tokens[after].type == "html_block":
+                    after += 1
                 kind, governed = "paragraph", None
                 container = stack[-1] if stack else None
                 if isinstance(container, _Item):
@@ -278,9 +311,21 @@ class _DocumentReader:
                     inline.content.replace("\n", " "),
                     kind,
                     governed,
-                    after is not None and after.type in _LIST_OPEN,
+                    after < len(tokens) and tokens[after].type in _LIST_OPEN,
                 )
                 lead = self.read_unit(unit)
+                if (
+                    lead is None
+                    and carried is not None
+                    and kind == "paragraph"
+                    and unit.before_list
+                    and unit.text.rstrip().endswith(":")
+                    and not _NORMATIVE.search(unit.text)
+                    and not _ID.search(unit.text)
+                ):
+                    # "And also:" right after a governed list introduces more
+                    # of the same list.
+                    lead = carried
                 index += 2  # the inline and paragraph_close tokens
             index += 1
 

@@ -388,6 +388,94 @@ def test_paragraph_before_a_list_is_a_lead_in(repo: Repo) -> None:
     ]
 
 
+LEAD_IN = (
+    "A transport MUST:\n\n- **TRN-1.** carry it;\n- **TRN-2.** enforce a deadline;\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("first", "added"),
+    [
+        (LEAD_IN, "* retry every failed call forever.\n"),
+        (
+            "A transport MUST:\n\n1. **TRN-1.** carry it;\n2. **TRN-2.** enforce it;\n",
+            "3) retry every failed call forever.\n",
+        ),
+        (LEAD_IN, "\n<!-- added in 0.2 -->\n\n- retry every failed call forever.\n"),
+    ],
+    ids=["changed-bullet", "changed-delimiter", "html-comment"],
+)
+def test_list_split_off_a_governed_list_is_governed(
+    repo: Repo, first: str, added: str
+) -> None:
+    root = repo("", transports=first + added)
+    (only,) = problems(root)
+    assert only.endswith(": item under a normative lead-in has no ID")
+
+
+def test_lead_in_reaches_its_list_across_an_html_block(repo: Repo) -> None:
+    root = repo(
+        "",
+        transports="A transport MUST:\n\n<!-- note -->\n\n- **TRN-1.** carry it;\n"
+        "- retry forever.\n",
+    )
+    assert problems(root) == [
+        "02-transports.md:6: item under a normative lead-in has no ID"
+    ]
+
+
+@pytest.mark.parametrize(
+    "between",
+    ["Other rules follow.\n", "## Routing\n", "---\n", "```\nsketch\n```\n"],
+    ids=["paragraph", "heading", "rule", "code"],
+)
+def test_other_blocks_end_the_lead_in(repo: Repo, between: str) -> None:
+    root = repo("", transports=LEAD_IN + "\n" + between + "\n- an ordinary item.\n")
+    assert problems(root) == []
+
+
+def test_nested_governed_list_does_not_govern_the_next_item(repo: Repo) -> None:
+    root = repo(
+        "- A host MUST:\n  - **CON-1.** boot;\n  - **CON-2.** stop.\n"
+        "- An ordinary item.\n"
+    )
+    assert problems(root) == []
+
+
+def test_plain_colon_paragraph_after_a_governed_list_continues_it(
+    repo: Repo,
+) -> None:
+    root = repo("", transports=LEAD_IN + "\nAnd also:\n\n- retry forever.\n")
+    assert problems(root) == [
+        "02-transports.md:8: item under a normative lead-in has no ID"
+    ]
+
+
+def test_ordered_list_resuming_its_numbers_is_governed(repo: Repo) -> None:
+    root = repo(
+        "",
+        transports="A transport MUST:\n\n1. **TRN-1.** carry it;\n"
+        "2. **TRN-2.** enforce it;\n\nA note.\n\n3. retry forever.\n",
+    )
+    assert problems(root) == [
+        "02-transports.md:8: item under a normative lead-in has no ID"
+    ]
+
+
+@pytest.mark.parametrize(
+    "between", ["A note.\n\n1. restart.\n", "## Routing\n\n3. other.\n"]
+)
+def test_new_numbering_or_section_ends_an_ordered_list(
+    repo: Repo, between: str
+) -> None:
+    root = repo(
+        "",
+        transports="A transport MUST:\n\n1. **TRN-1.** carry it;\n"
+        "2. **TRN-2.** enforce it;\n\n" + between,
+    )
+    assert problems(root) == []
+
+
 def test_clause_after_a_semicolon_is_the_last_clause(repo: Repo) -> None:
     root = repo(
         "**CON-1.** A failure MUST stop the host; nothing is deferred.\n\n"
