@@ -29,7 +29,7 @@ Request and reply types are built only from these forms, so that every transport
 - `enum`: a closed set of string names;
 - `optional<T>`.
 
-Records are nominal within a contract and structural across the wire. **CON-6.** Unknown fields in a request MUST be ignored by providers; unknown fields in a reply MUST be ignored by callers. This is what makes additive changes compatible.
+Records are nominal within a contract and structural across the wire. **CON-6.** Unknown fields in a request MUST be ignored by providers. **CON-7.** Unknown fields in a reply MUST be ignored by callers. This is what makes additive changes compatible.
 
 ## Errors
 
@@ -45,10 +45,10 @@ Every action's error set includes the standard kinds, whether declared or not:
 | `timeout` | The provider did not reply in time | yes, if idempotent |
 | `internal` | The provider failed | no |
 
-**CON-7.** A contract MAY declare additional error kinds per action, each with a typed detail record. Error kinds are part of the contract and follow its compatibility rules.
+**CON-8.** A contract MAY declare additional error kinds per action, each with a typed detail record. Error kinds are part of the contract and follow its compatibility rules.
 
 Decision record: [0008](../docs/adr/0008-typed-contract-errors-in-both-modes.md).
 
 ## Publication
 
-**CON-8.** A contract MUST be publishable as a neutral description of its actions, types and errors. For the HTTP transport this is OpenAPI 3.1 ([03](03-http-transport.md)). Other transports define their own projection. The projection is derived from the contract, never hand-written.
+**CON-9.** A contract MUST be publishable as a neutral description of its actions, types and errors. For the HTTP transport this is OpenAPI 3.1 ([03](03-http-transport.md)). Other transports define their own projection. The projection is derived from the contract, never hand-written.

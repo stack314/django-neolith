@@ -5,7 +5,7 @@ Neolith is defined by this specification. It says how an app declares contracts,
 - **Status:** draft 0.1. Nothing here is stable until django-neolith 0.1 ships against it.
 - **Normative words:** MUST, MUST NOT, REQUIRED, SHOULD, MAY, as in RFC 2119.
 - **Versioning:** the specification is versioned on its own (`spec 0.1`, `spec 0.2`). An implementation states which specification version it conforms to.
-- **Requirement IDs:** every statement that uses a normative word carries an ID, such as **CON-4**: the document's area, from the table below, and a number. An ID is never renumbered or reused. A withdrawn requirement keeps its ID, struck through, with the version that withdrew it and why. Tests and other implementations cite a requirement by version and ID, for example `spec 0.1 CON-4` ([ADR 0018](../docs/adr/0018-requirement-ids-and-spec-to-test-traceability.md)).
+- **Requirement IDs:** every statement that uses a normative word carries an ID, such as **CON-4**: the document's area, from the table below, and a number. An ID is never renumbered or reused. One ID marks one requirement. A withdrawn requirement stays in place, struck through, with the version that withdrew it and why: `~~**CON-4.** <statement>~~ Withdrawn in spec 0.2: <reason>.` Tests and other implementations cite a requirement by version and ID, for example `spec 0.1 CON-4` ([ADR 0018](../docs/adr/0018-requirement-ids-and-spec-to-test-traceability.md)).
 
 ## Documents
 

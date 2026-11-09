@@ -40,7 +40,7 @@ jobs:
 
   spec-trace:
     # ADR 0018: requirement IDs in spec/ and the tests that cite them.
-    # Report mode: must-level coverage is enforced from roadmap step 6.
+    # Coverage is enforced per document, as listed in tests/spec_trace.toml.
     name: Spec trace
     runs-on: ubuntu-24.04
     timeout-minutes: 5

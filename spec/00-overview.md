@@ -37,7 +37,7 @@ A call is the invocation of one action on one contract.
 3. The connector chooses a provider by its routing policy and hands the call to that provider's transport.
 4. The transport carries the request, together with the **call context**, to the provider and returns either a reply of the action's reply type or an error.
 
-The call context travels with every call and is separate from the request. **OVR-6.** Transports MUST carry the context; apps MUST NOT smuggle it inside request types. It has two kinds of field:
+The call context travels with every call and is separate from the request. **OVR-6.** Transports MUST carry the context. **OVR-7.** Apps MUST NOT smuggle it inside request types. It has two kinds of field:
 
 - **Propagated fields**, which a call passes on to the calls it makes: the principal on whose behalf the call is made, the trace identifier, and the deadline. A nested call's deadline is never later than its parent's.
 - **Per-call fields**, which belong to one outbound call: the idempotency key. Each outbound call gets a fresh key. The key stays the same only across retries of that same call, so a provider never mistakes two different nested calls for a repeat.
