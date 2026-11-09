@@ -11,6 +11,7 @@ Everyone taking part is expected to follow the [code of conduct](CODE_OF_CONDUCT
 - **S1.** Small, obvious fixes (a typo, a broken link, a wrong example) can go straight to a pull request.
 - **S2.** For anything else, open an issue first. Describe the problem before the solution, and agree on the approach before writing code. This saves you from building something that conflicts with a recorded decision.
 - **S3.** If the change is hard to reverse, shapes public API, adds a runtime dependency or changes what the specification means, it needs a decision record (**D1**). Propose it in the issue or in the same pull request.
+- **S4.** For a roadmap step, the issue holds the plan: the specification documents the step implements, the decisions and open questions it depends on, and a task list that names the requirement IDs each task covers (**P5**). A plan does not settle an open question or a Proposed decision record; that takes a record the maintainer accepts. Applies once [ADR 0018](docs/adr/0018-requirement-ids-and-spec-to-test-traceability.md) is Accepted.
 
 ## Decisions
 
@@ -25,12 +26,14 @@ The [vision](VISION.md), the [guiding principles](docs/principles.md) and the Ac
 
 Neolith is defined by a specification under `spec/`, written independently of Django and Python. django-neolith is its reference implementation ([ADR 0015](docs/adr/0015-specification-first-django-reference-implementation.md)).
 
-P1 to P4 apply once ADR 0015 is Accepted. Until then they describe the intended practice.
+P1 to P4 apply once ADR 0015 is Accepted, and P5 and P6 once [ADR 0018](docs/adr/0018-requirement-ids-and-spec-to-test-traceability.md) is Accepted. Until then they describe the intended practice.
 
 - **P1.** A change to behaviour the specification defines updates the specification in the same pull request. On `main`, the code and the specification never disagree.
 - **P2.** Specification text names no Django or Python construct. Framework-specific detail belongs in the implementation's documentation.
-- **P3.** The normative words MUST, MUST NOT, SHOULD and MAY are used in capitals, with their RFC 2119 meaning, only in `spec/`.
+- **P3.** The normative words MUST, MUST NOT, REQUIRED, SHOULD and MAY are used in capitals, with their RFC 2119 meaning, only in `spec/`.
 - **P4.** A change to the specification changes the conformance tests to match, in the same pull request.
+- **P5.** Every statement in `spec/` that uses a normative word carries a requirement ID, such as **CON-4**, in its document's area as listed in `spec/README.md`. IDs are never renumbered or reused. A withdrawn requirement stays in place, struck through, with the specification version that withdrew it and the reason.
+- **P6.** A pull request that adds, changes or withdraws a requirement lists those IDs in the *Spec trace* section of its description, with the tests that cite them.
 
 ## Code
 
@@ -53,6 +56,7 @@ These rules apply to the `neolith` package. Tests and examples follow them too, 
 - **T2.** Contract behaviour is tested through the shared contract suite, which runs over every transport. A test that exercises only one transport needs a reason.
 - **T3.** Tests are deterministic. No sleeping to wait for something, no network beyond the local machine, and no dependence on test order.
 - **T4.** The full CI matrix passes before review is requested. Deprecation warnings are errors ([ADR 0012](docs/adr/0012-supported-python-and-django-versions.md)).
+- **T5.** A test that verifies a requirement cites it with the `spec` marker, for example `@pytest.mark.spec("CON-4")`. A test that cites an unknown or withdrawn ID fails the build. From roadmap step 6, every requirement stated with MUST, MUST NOT or REQUIRED in a document of the current release has at least one citing test. Applies once [ADR 0018](docs/adr/0018-requirement-ids-and-spec-to-test-traceability.md) is Accepted.
 
 ### Running the checks locally
 
@@ -66,9 +70,10 @@ python -m pip install -e . --group dev
 pytest
 ruff check . && ruff format --check .
 mypy
+python scripts/spec_trace.py
 ```
 
-CI runs the same commands on Django 5.2 with Python 3.12 and on the newest supported pair, on x86-64 and arm64 ([ADR 0012](docs/adr/0012-supported-python-and-django-versions.md)). To try another Django locally, add it to the install line, for example `"Django~=5.2.0"`.
+`scripts/spec_trace.py` checks the requirement IDs in `spec/` and the tests that cite them, and prints the trace (**P5**, **T5**). CI runs the same commands on Django 5.2 with Python 3.12 and on the newest supported pair, on x86-64 and arm64 ([ADR 0012](docs/adr/0012-supported-python-and-django-versions.md)). To try another Django locally, add it to the install line, for example `"Django~=5.2.0"`.
 
 ## Writing
 

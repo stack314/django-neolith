@@ -1,6 +1,8 @@
 # 03. HTTP transport
 
-**Status:** outline. The default network transport, REQUIRED in every implementation.
+**Status:** outline.
+
+**HTTP-1.** This is the default network transport, REQUIRED in every implementation.
 
 ## Addressing
 
@@ -46,7 +48,7 @@ A connector takes the kind from the body only, never from the status. A non-succ
 
 ## Projection
 
-A provider MUST serve an OpenAPI 3.1 document describing every contract version it provides, derived from the contracts. The document is the HTTP transport's publication of the contract ([01](01-contracts.md)). Its location is `GET /.well-known/neolith/openapi.json`.
+**HTTP-2.** A provider MUST serve an OpenAPI 3.1 document describing every contract version it provides, derived from the contracts. The document is the HTTP transport's publication of the contract ([01](01-contracts.md)). Its location is `GET /.well-known/neolith/openapi.json`.
 
 ## Principal resolution
 

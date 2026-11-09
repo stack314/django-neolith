@@ -38,6 +38,24 @@ jobs:
       - run: ruff format --check .
       - run: mypy
 
+  spec-trace:
+    # ADR 0018: requirement IDs in spec/ and the tests that cite them.
+    # Report mode: must-level coverage is enforced from roadmap step 6.
+    name: Spec trace
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Check requirement IDs and citations (standard library only)
+        run: python scripts/spec_trace.py
+
   test:
     # ADR 0012: the floor and the newest supported pair, on x86-64 and arm64.
     name: Python ${{ matrix.python }}, Django ${{ matrix.django }}, ${{ matrix.arch }}

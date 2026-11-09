@@ -18,7 +18,7 @@ Every app declares, in a form the host can read without importing the app's impl
 
 ## Lifecycle
 
-A host takes a set of apps through these phases in order. A failure in any phase before *serve* MUST stop the host with a diagnostic; nothing is deferred to the first request.
+A host takes a set of apps through these phases in order. **APP-1.** A failure in any phase before *serve* MUST stop the host with a diagnostic; nothing is deferred to the first request.
 
 1. **Declare.** Read every app's declaration.
 2. **Resolve.** For every `requires`, find a provider: an app in this host that `provides` it, or a configured remote provider. An unsatisfied requirement is an error here, not at call time.
@@ -34,4 +34,4 @@ A host running one app is a detached deployment. A host running several is a sha
 
 ## Operational settings
 
-Settings that do not change topology, such as log level, MAY be changed at runtime by the host. Mode and routing are deployment configuration ([00](00-overview.md)). Runtime mode switching is not specified; see [open questions](../docs/open-questions.md).
+**APP-2.** Settings that do not change topology, such as log level, MAY be changed at runtime by the host. Mode and routing are deployment configuration ([00](00-overview.md)). Runtime mode switching is not specified; see [open questions](../docs/open-questions.md).

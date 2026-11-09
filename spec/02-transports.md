@@ -12,16 +12,16 @@ call(contract, version, action, request, context) -> reply | error
 
 A transport MUST:
 
-- serialize the request into the portable type system before it leaves the caller, and deserialize the reply before it reaches the caller, even when caller and provider share a process;
-- carry the call context intact;
-- map every failure it can observe onto a standard error kind ([01](01-contracts.md)); a transport MUST NOT surface its own exception types to the caller;
-- enforce a deadline, and fail with `timeout` when it passes.
+- **TRN-1.** serialize the request into the portable type system before it leaves the caller, and deserialize the reply before it reaches the caller, even when caller and provider share a process;
+- **TRN-2.** carry the call context intact;
+- **TRN-3.** map every failure it can observe onto a standard error kind ([01](01-contracts.md)); a transport MUST NOT surface its own exception types to the caller;
+- **TRN-4.** enforce a deadline, and fail with `timeout` when it passes.
 
 ## In-process transport
 
-Defined by this specification and REQUIRED in every implementation. Caller and provider share a process. The transport still serializes and deserializes ([ADR 0007](../docs/adr/0007-in-process-transport-serializes.md)), so that a provider cannot leak a live object and a caller cannot depend on one.
+**TRN-5.** Defined by this specification and REQUIRED in every implementation. Caller and provider share a process. The transport still serializes and deserializes ([ADR 0007](../docs/adr/0007-in-process-transport-serializes.md)), so that a provider cannot leak a live object and a caller cannot depend on one.
 
-The in-process transport MUST run the provider's action in the caller's thread of control, so that attached mode has no hidden concurrency.
+**TRN-6.** The in-process transport MUST run the provider's action in the caller's thread of control, so that attached mode has no hidden concurrency.
 
 ## Providers and routing
 
@@ -35,7 +35,7 @@ A **routing policy** chooses the provider for each call. Defined policies:
 - `weighted`: distribute by configured weights;
 - `explicit`: chosen by a function of the call context.
 
-Fallback after a failed call MUST happen only for idempotent actions and only on `unavailable` or `timeout`.
+**TRN-7.** Fallback after a failed call MUST happen only for idempotent actions and only on `unavailable` or `timeout`.
 
 Decision records: [0014](../docs/adr/0014-pluggable-connector-transports.md), [0016](../docs/adr/0016-an-app-may-run-attached-and-detached-at-once.md).
 

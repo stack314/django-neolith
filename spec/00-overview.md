@@ -7,10 +7,10 @@ These terms are used with exactly these meanings throughout the specification an
 - **App.** A unit of code that owns its data and exposes zero or more contracts. The app is the unit of deployment.
 - **Contract.** A named, versioned set of actions and the types they use. A contract is the only surface through which one app reaches another. Identity: `<name>.v<N>`, for example `inventory.v1`.
 - **Action.** A named operation on a contract, with a typed request, a typed reply and a declared set of errors.
-- **Contract package.** The distributable form of a contract: its interface and types, with no implementation. A caller MAY depend on a contract package natively. A caller MUST NOT depend on anything else of the providing app.
+- **Contract package.** The distributable form of a contract: its interface and types, with no implementation. **OVR-1.** A caller MAY depend on a contract package natively. **OVR-2.** A caller MUST NOT depend on anything else of the providing app.
 - **Provider.** A running implementation of a contract that can be reached over a transport.
 - **Connector.** The object through which a caller invokes a contract. A connector holds one or more providers and a routing policy, and delegates each call to a transport.
-- **Transport.** The mechanism that carries one call from a connector to a provider and the reply back. In-process and HTTP are defined by this specification. Others MAY exist.
+- **Transport.** The mechanism that carries one call from a connector to a provider and the reply back. In-process and HTTP are defined by this specification. **OVR-3.** Others MAY exist.
 - **Event.** A named, versioned fact that an app publishes without knowing who consumes it. Identity: `<name>.v<N>`, for example `order.placed.v1`.
 - **Declaration.** What an app states about itself: the contracts it provides, the contracts it requires, the events it publishes and subscribes to, and the resources it needs.
 - **App host** (*host* for short). The runtime that boots one or more apps from their declarations and serves their contracts.
@@ -24,9 +24,9 @@ An app is **attached** when it runs in the same host as its caller. The connecto
 
 An app is **detached** when it runs in its own host. The connector reaches it over a network transport such as HTTP.
 
-The same app MAY run attached and detached at the same time. The connector then holds several providers for the contract and routes between them ([02](02-transports.md)).
+**OVR-4.** The same app MAY run attached and detached at the same time. The connector then holds several providers for the contract and routes between them ([02](02-transports.md)).
 
-Mode is applied when a deployment is configured. Changing mode MUST NOT require any change to the app or to its callers.
+Mode is applied when a deployment is configured. **OVR-5.** Changing mode MUST NOT require any change to the app or to its callers.
 
 ## The call model
 
@@ -37,7 +37,7 @@ A call is the invocation of one action on one contract.
 3. The connector chooses a provider by its routing policy and hands the call to that provider's transport.
 4. The transport carries the request, together with the **call context**, to the provider and returns either a reply of the action's reply type or an error.
 
-The call context travels with every call and is separate from the request. Transports MUST carry the context; apps MUST NOT smuggle it inside request types. It has two kinds of field:
+The call context travels with every call and is separate from the request. **OVR-6.** Transports MUST carry the context; apps MUST NOT smuggle it inside request types. It has two kinds of field:
 
 - **Propagated fields**, which a call passes on to the calls it makes: the principal on whose behalf the call is made, the trace identifier, and the deadline. A nested call's deadline is never later than its parent's.
 - **Per-call fields**, which belong to one outbound call: the idempotency key. Each outbound call gets a fresh key. The key stays the same only across retries of that same call, so a provider never mistakes two different nested calls for a repeat.
