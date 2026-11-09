@@ -129,7 +129,7 @@ Option 4.
 
 1. **`CallContext` is a frozen, typed value**, not a live object. Its fields:
    - **Propagated:** the *principal* on whose behalf the call is made, as a principal value resolved through [0010](0010-pluggable-principal-resolution.md), never a user model instance; the trace identifier; the deadline, as an absolute time on the local host.
-   - **Per-call:** the idempotency key of this call, and the *caller*, the app that made this call. The caller is authenticated by the transport, not asserted, and is absent on a root context (Decision 4).
+   - **Per-call:** the idempotency key of this call, and the *caller*, the app that made this call. The caller is authenticated by the transport, not asserted, and is absent on a root that is not itself a call (Decision 4).
 
    An implementation sees an equal value over every transport, apart from the span identifier. Keeping the principal and the caller apart is what makes that possible; Decision 6 says how they cross HTTP.
 2. **Inbound is explicit.** An implementation receives the context by declaring a second parameter annotated `CallContext`. An action that does not read the context omits the parameter. These are the only two shapes accepted. A mismatch fails at import time with a message naming the action.
@@ -138,7 +138,17 @@ Option 4.
    - the trace continues from the parent;
    - the principal is carried over unchanged;
    - the caller is the app making the call: the app the parent scope belongs to, or the app a root was opened for;
-   - the idempotency key is not inherited. The outgoing call gets its own key, which the connector reuses only when it retries that same call. When the parent has a key, the child's key is derived from it deterministically: a hash of the parent's key, the contract identity and version, the action name, and the ordinal of this call among the parent scope's calls to that action. When the parent has none (a root that was not itself a call), the key is random. A retried parent therefore reproduces its children's keys, so a child that completed during the failed attempt is answered from the provider's record instead of running twice. If a retried parent sends a different request under a reproduced key, the provider answers `conflict`, as the IETF draft prescribes for a reused key with a different payload.
+   - the idempotency key is not inherited. The outgoing call gets its own key, which the connector reuses only when it retries that same call. When the parent has a key, the child's key is derived from it deterministically, as a hash of:
+     - the parent's key;
+     - the contract identity and version, and the action name;
+     - a hash of the request in its canonical serialized form;
+     - an occurrence count: how many calls with the same contract, version, action and request hash the parent has made before this one.
+
+     The derivation does not depend on the order in which calls reach the connector, so it gives the same keys under concurrent fan-out (`asyncio.gather`, or an executor running each task in its own copy of the context). Only identical requests share a count, and those are interchangeable. When the parent has no key (a root that is not itself a call), the child's key is random.
+
+     The occurrence counts belong to the parent's scope, not to a context value. The host keeps them on the scope it opened for the parent call, behind a lock. A value passed as `context=` is matched to the scope that issued it, so ambient calls and explicit `context=` calls from any thread share one set of counts. A `context=` value whose scope has closed, or that no open scope issued, is rejected as in Decision 5.
+
+     A retried parent therefore reproduces its children's keys, and an idempotent child keeps its own promise (spec 01) across the parent's retry. The specification does not make a host remember completed calls, so this record promises nothing more: a non-idempotent child still runs again when its parent is retried. A host-side idempotency record would close that gap; see Consequences.
 4. **Roots are created only at the app host's entry points:**
    - the provider side of each transport (the HTTP transport builds the context from its headers);
    - the host's handling of ordinary Django requests (the principal from the request, through 0010);
@@ -149,7 +159,9 @@ Option 4.
 5. **A connector call with no active context and no `context=` argument fails** with a contract error that says where a context is expected. It does not silently start a new, unauthenticated trace. This turns the known weakness of context variables, a context lost across a thread started by app code, into a visible failure (principle 6). OpenTelemetry starts a new root trace when no context is active, which suits it because a trace carries no authority. Our context carries the principal and the deadline, so a silent root would drop both. Go's `context` package makes the same distinction: a root is chosen explicitly (`context.Background()`), never inferred. Our explicit root is the scope from Decision 4.
 
    The closed scope covers the opposite weakness, a context that is kept too long. From Python 3.14, a new `threading.Thread` copies the caller's context when `sys.flags.thread_inherit_context` is set, which is the default on free-threaded builds. Executor workers keep the context they were started with for their whole life. A worker started during call A, or during a view request that the host rooted, would otherwise make later calls under that principal and deadline. Because every scope closes on exit, those calls fail instead. One case remains that the host cannot detect: a long-lived worker, started during A, that runs work for another call while A is still in progress. The documentation must say that a shared executor is used only with `context=` or with a per-task copy of the context (see Consequences).
-6. **Over HTTP the caller is authenticated and the principal is asserted, in separate headers.** `Authorization` authenticates the calling app through the provider's 0010 backend, which becomes `caller`. The principal travels in a separate header as an assertion made by that caller. The provider's declaration lists which calling apps may assert a principal for it; an assertion from any other caller is refused with `permission_denied`, and a call without one runs with the caller as its principal. In-process, the host already knows both, so the two modes see the same pair. This is the shape of OAuth token exchange ([RFC 8693](https://www.rfc-editor.org/rfc/rfc8693)), where a token names a subject and, in its `act` claim, the actor, and `may_act` limits who may act; and of service meshes, where mTLS authenticates the workload and a separate token carries the end user. A later 0010 backend can replace the bare assertion with a signed delegation token in the same header without changing `CallContext`.
+6. **Over HTTP the caller is authenticated and the principal is asserted, in separate headers.** `Authorization` authenticates the calling app through the provider's 0010 backend, which becomes `caller`. The principal travels in a separate header as an assertion made by that caller. For each contract it provides, the provider's declaration lists which calling apps may assert a principal. A call without an assertion runs with the caller as its principal.
+
+   The provider host checks this list on every transport, in-process included. In-process, the host already knows both the caller and the propagated principal, and treats the principal as asserted by the caller exactly as the HTTP transport does. A call that carries a principal from a caller the contract does not list is refused with `permission_denied` in both modes. Otherwise an attached caller that is not listed would succeed with the end user's principal and start failing the day it is detached ([0007](0007-in-process-transport-serializes.md), principle 5). With [0016](0016-an-app-may-run-attached-and-detached-at-once.md), the same call could also pass or fail depending on which provider the connector picks. Separating the caller from the principal follows OAuth token exchange ([RFC 8693](https://www.rfc-editor.org/rfc/rfc8693)), where a token names a subject and, in its `act` claim, the actor, and `may_act` limits who may act, and the service-mesh pattern, where mTLS authenticates the workload and a separate token carries the end user. A later 0010 backend can replace the bare assertion with a signed delegation token in the same header without changing `CallContext`.
 7. **No public accessor in 0.1.** `current_context()` from option 2 is not provided. Code below an action that needs the context takes it as a parameter, as option 1 does. If a real need appears, adding it later is a compatible change. Removing it after release would not be.
 8. **`ctx` is optional per action** (Decision 2), rather than required on every action. A required parameter that most actions ignore is noise in exactly the code authors read most, and the import-time check already makes the two shapes unambiguous.
 
@@ -164,17 +176,21 @@ Follows principles 5 (*same semantics over same mechanics*), 6 (*visible failure
   - where no `ctx` is at hand, such as a view rooted by the host, by running each task with `contextvars.copy_context().run(...)`. That is one copy per task, because a `Context` cannot be entered by two threads at once.
 
   Work that outlives the call that started it opens its own explicit scope (Decision 4), because the inherited scope is closed by then. The documentation must show all three cases.
-- The conformance suite gets two tests:
+- The conformance suite gets four tests:
   - a connector call from a thread whose target runs inside a fresh, empty `contextvars.Context()` fails as described. The empty context makes the result the same on every build;
-  - a connector call made through a scope that has already closed fails the same way, tested for both a closed action scope and a closed root scope.
+  - a connector call made through a scope that has already closed fails the same way, tested for both a closed action scope and a closed root scope;
+  - a call carrying a principal from a caller the contract does not list is refused with `permission_denied`, both in-process and over HTTP, and the same call from a listed caller succeeds in both;
+  - a parent that fans out concurrently and is then retried derives the same child keys on both attempts.
 - The roadmap's public surface changes in one place: the `ctx` parameter becomes optional per action. CONTRIBUTING K6 is reworded to name this context variable as host-owned state once this record is Accepted.
 - The specification needs:
   - the derivation rules for a child context (propagated fields: deadline, trace, principal; per-call fields: the caller and the idempotency key, with the key derivation of Decision 3);
+  - a canonical serialized form of a request, so that every implementation hashes it the same way (for example [RFC 8785](https://www.rfc-editor.org/rfc/rfc8785), the JSON Canonicalization Scheme);
   - a header for the asserted principal, and `Authorization` redefined in spec 03 as authenticating the calling app;
-  - in the app declaration (spec 05), the list of calling apps that may assert a principal for each contract;
+  - in the app declaration (spec 05), for each contract the app provides, the list of calling apps that may assert a principal;
   - the list of places a root context may be created.
 - Trust cost of Decision 6: a calling app that a provider lists can assert any principal to it. With the v0.1 shared-secret backend, anyone holding the secret can also claim to be any app, which is why 0010 already says that backend is for development only. A production backend narrows this with per-app credentials or signed delegation tokens.
 - Left for later records or the specification:
+  - **A host-side idempotency record**, so that a retried parent does not run a non-idempotent child twice. It must say which actions it covers, what it stores (the key, the request hash, and the reply or error), how long it keeps an entry, and a distinct error for a key reused with a different request, separate from `conflict`, which spec 01 reserves for a clash with current state. Stripe's idempotent requests and the IETF draft below are the models. This becomes a new open question.
   - **Calling under a different principal**, for example as the calling app's own principal. Not decided here.
   - **Interop with OpenTelemetry**, if installed, as the source of the trace. Not decided here, and no new runtime dependency is implied (K5).
 
