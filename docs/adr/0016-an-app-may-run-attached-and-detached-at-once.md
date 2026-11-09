@@ -20,7 +20,7 @@ Constraints that keep this sound:
 
 - **One owner of the data.** Both instances of the app use the app's single database ([0004](0004-each-app-owns-its-data.md)). Redundancy is of the process, not of the data.
 - **Idempotent actions** ([0008](0008-typed-contract-errors-in-both-modes.md)) so that a fallback after a failed call is safe.
-- **Same serialization everywhere** ([0007](0007-local-connector-serializes.md)) so that callers cannot tell which provider answered.
+- **Same serialization everywhere** ([0007](0007-in-process-transport-serializes.md)) so that callers cannot tell which provider answered.
 
 Follows principles 3 (*configuration over code changes*) and 5 (*same semantics over same mechanics*).
 

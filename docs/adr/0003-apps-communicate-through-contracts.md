@@ -18,7 +18,7 @@ If one app imports another's models, services or signals, the two can never run 
 Option 3.
 
 - A **contract** (`@contract("name.vN")` with `@action` methods) is an app's only public surface. It lives in a contract package that other apps may import natively for its interface and types. The implementation is private to the app.
-- Callers use `connect("name.vN")`. The host wires that to a **local** or **remote** connector depending on where the provider runs.
+- Callers use `connect("name.vN")`, which returns a **connector**. The host gives the connector its provider and **transport**: in-process when the provider runs in the same host, a network transport such as HTTP otherwise ([0014](0014-pluggable-connector-transports.md)).
 - **Events** (`event(...).publish`, `@subscribe`) replace cross-app Django signals, and work in both modes.
 - A **neolith check**, built on existing import linting, enforces the boundary in CI.
 

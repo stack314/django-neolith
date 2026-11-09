@@ -20,7 +20,7 @@ Seen this way, attached mode is not special. It is one more way of carrying a ca
 Option 2.
 
 - A connector delegates to a **transport**, chosen per provider in configuration. The calling code does not change when the transport does.
-- The core ships two transports. **In-process** is attached mode, and serializes per [0007](0007-local-connector-serializes.md). **HTTP/JSON** is the default for detached apps, described by OpenAPI.
+- The core ships two transports. **In-process** is attached mode, and serializes per [0007](0007-in-process-transport-serializes.md). **HTTP/JSON** is the default for detached apps, described by OpenAPI.
 - Other transports, such as gRPC or a message queue, can be added as separate packages behind the same interface.
 - Contracts stay transport-neutral. They are defined once in Python types, and each transport projects them into its own schema: OpenAPI for HTTP, protobuf for gRPC.
 - Every transport must pass the same contract test suite. This is principle 8 (*one test suite over many code paths*) applied to every transport.

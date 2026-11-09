@@ -17,7 +17,7 @@
 Option 2.
 
 - Actions declare their domain errors in the contract. These serialize on the wire and are re-raised as the same types on the caller's side.
-- Transport failures (timeout, unavailable, protocol error) raise a common `ContractError` hierarchy. The local connector can raise these too, and the test harness can simulate them in attached mode.
+- Transport failures (timeout, unavailable, protocol error) raise a common `ContractError` hierarchy. The in-process transport can raise these too, and the test harness can simulate them in attached mode.
 - Any undeclared exception from an implementation surfaces to callers as a generic contract error, in both modes.
 
 Follows principle 6 (*visible failure over transparent calls*).
@@ -25,4 +25,4 @@ Follows principle 6 (*visible failure over transparent calls*).
 ## Consequences
 
 - Callers write one set of error handling that is correct in both modes.
-- Retries rely on idempotent actions and idempotency keys, owned by the remote connector.
+- Retries rely on idempotent actions and idempotency keys, owned by the connector and its transport.
