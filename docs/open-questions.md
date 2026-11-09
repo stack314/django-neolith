@@ -16,3 +16,6 @@ Things that need research or a decision before code depends on them. When one is
 
 5. **The outbox and event delivery guarantees.**
    [ADR 0004](adr/0004-each-app-owns-its-data.md) relies on events for cross-app consistency, and [ADR 0016](adr/0016-an-app-may-run-attached-and-detached-at-once.md) relies on the outbox to de-duplicate. Neither is recorded as a decision yet: outbox table shape, at-least-once delivery, ordering, subscriber idempotency, and the in-process versus broker paths. Needs its own ADR before events are built.
+
+6. **How the call context reaches an action.**
+   Every call carries a context: at least the principal, a trace identifier and an idempotency key. Open: whether the implementation receives it as an explicit argument, reads it from a context variable scoped to the call, or both. This shapes every action's signature and how ADR [0010](adr/0010-pluggable-principal-resolution.md)'s principal reaches code. Needs a decision record before the contract API is built.

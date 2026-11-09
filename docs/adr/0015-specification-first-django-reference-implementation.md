@@ -17,7 +17,7 @@ The first draft described neolith as a Django library whose only neutral part wa
 
 Option 3. Neolith is a specification plus a reference implementation.
 
-- The **specification** lives in this repository under `spec/` and is written without reference to Django or Python. It covers contract definition and versioning, the transport interface and the HTTP binding, events, the app declaration and lifecycle, and conformance tests.
+- The **specification** lives in this repository under `spec/` and is written without reference to Django or Python. It covers contract definition and versioning, the transport interface and the HTTP transport, events, the app declaration and lifecycle, and conformance tests.
 - **django-neolith** is the reference implementation and the first thing shipped. The spec is written alongside the Django implementation, not ahead of it, so it stays grounded.
 - Another implementation (for example for FastAPI, or in another language) is conformant when it passes the conformance tests. Its apps and Django apps then call each other through the same contracts.
 
@@ -26,6 +26,6 @@ Follows principle 11 (*specification over implementation*).
 ## Consequences
 
 - Every core design decision is written twice: once in the spec and once in Django. This costs time and keeps Django-specific assumptions out of the core.
-- The HTTP binding and OpenAPI projection ([0006](0006-contracts-are-typed-and-published-as-openapi.md), [0014](0014-pluggable-connector-transports.md)) are part of the spec, not of the Django package.
+- The HTTP transport and its OpenAPI projection ([0006](0006-contracts-are-typed-and-published-as-openapi.md), [0014](0014-pluggable-connector-transports.md)) are part of the spec, not of the Django package.
 - Conformance tests are the authoritative definition of "implements neolith".
 - The spec is versioned separately from django-neolith.

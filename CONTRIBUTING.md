@@ -12,7 +12,7 @@ Neolith is young. Nothing is installable yet, and the specification and the refe
 
 ## Decisions
 
-The [vision](VISION.md), the [guiding principles](docs/principles.md) and the [architecture decision records](docs/adr/README.md) are binding. They are how the project settles arguments once instead of in every review.
+The [vision](VISION.md), the [guiding principles](docs/principles.md) and the Accepted [architecture decision records](docs/adr/README.md) are binding. They are how the project settles arguments once instead of in every review. Proposed records are working assumptions: follow them by default, and challenge them in the pull request or an issue.
 
 - **D1.** A change that contradicts a principle or an Accepted decision record must come with a new decision record that explains why. Use the [template](docs/adr/template.md) and the next free number, with status Proposed. The maintainer accepts or rejects it.
 - **D2.** An Accepted record's decision is never edited. To reverse it, write a new record and mark the old one `Superseded by NNNN`. Typos and broken links in an Accepted record may be fixed.
@@ -22,6 +22,8 @@ The [vision](VISION.md), the [guiding principles](docs/principles.md) and the [a
 ## Specification
 
 Neolith is defined by a specification under `spec/`, written independently of Django and Python. django-neolith is its reference implementation ([ADR 0015](docs/adr/0015-specification-first-django-reference-implementation.md)).
+
+P1 to P4 apply once ADR 0015 is Accepted. Until then they describe the intended practice.
 
 - **P1.** A change to behaviour the specification defines updates the specification in the same pull request. On `main`, the code and the specification never disagree.
 - **P2.** Specification text names no Django or Python construct. Framework-specific detail belongs in the implementation's documentation.
@@ -37,9 +39,9 @@ These rules apply to the `neolith` package. Tests and examples follow them too, 
 - **K3.** No placeholders in shipped code: no `TODO`, `FIXME`, stub bodies or `NotImplementedError` on a reachable path. Unfinished work stays on a branch or in an issue. The `...` body of a contract action is a declaration and is allowed.
 - **K4.** No deprecated APIs. Neolith does not use a Python or Django feature that is deprecated or scheduled for removal when a newer approach exists. Code that differs by version lives only in `neolith._compat` ([ADR 0012](docs/adr/0012-supported-python-and-django-versions.md)).
 - **K5.** No new runtime dependency without an Accepted decision record. Every dependency becomes a dependency of every adopter. Development-only dependencies need a one-line reason in the pull request.
-- **K6.** No hidden state. The call context is passed explicitly, never read from thread-local or global state. Process-wide state is owned by the host and documented.
-- **K7.** Errors that cross a contract are contract errors with a defined kind. A transport's own exceptions never reach the caller.
-- **K8.** The boundary applies to our own code. An example or test application imports another application's contract package only, never its models, services or signals ([ADR 0003](docs/adr/0003-apps-communicate-through-contracts.md)).
+- **K6.** No hidden state. Process-wide state is owned by the app host and documented. How the call context reaches an action is not decided yet; see [open questions](docs/open-questions.md).
+- **K7.** Errors that cross a contract are contract errors with a defined kind. A transport's own exceptions never reach the caller. Applies once [ADR 0008](docs/adr/0008-typed-contract-errors-in-both-modes.md) is Accepted.
+- **K8.** The boundary applies to our own code. An example or test app imports another app's contract package only, never its models, services or signals ([ADR 0003](docs/adr/0003-apps-communicate-through-contracts.md)).
 - **K9.** Secure by default. No secrets in code, tests or fixtures. No disabled TLS verification or authentication outside test code. Every value arriving over a transport is validated before it reaches an implementation.
 - **K10.** Performance claims come with a measurement. A change made for speed shows the benchmark and its numbers in the pull request.
 
@@ -54,7 +56,7 @@ These rules apply to the `neolith` package. Tests and examples follow them too, 
 
 These rules apply to documentation, docstrings, error messages, commit messages and pull request text.
 
-- **W1.** Use the project's terms with one meaning each: *application*, *contract*, *action*, *contract package*, *provider*, *connector*, *transport*, *event*, *declaration*, *host*, *mode* (*attached* or *detached*). Do not use *interface*, *client*, *adapter*, *port*, *binding* or *service* as names for these.
+- **W1.** Each core concept has one name: *app*, *contract*, *action*, *contract package*, *provider*, *connector*, *transport*, *event*, *declaration*, *app host* (*host* for short), and *mode* (*attached* or *detached*). Do not give these concepts other names. For example, say "HTTP transport", not "HTTP binding". Do not call a connector a *client*, a transport an *adapter*, or a contract an *interface* or *port*. Ordinary uses of those words are fine, such as "the transport interface". In plain prose, *service* means an app deployed detached. W1 is provisional until [open question 3](docs/open-questions.md) is closed.
 - **W2.** Describe trade-offs. Do not call Django, other projects or other approaches wrong. Credit prior work where it is relevant.
 - **W3.** No unverifiable claims, such as *first*, *only*, *fastest* or *best*, unless a source is linked.
 - **W4.** The principles, decision records and specification never address the reader as *you*. Guides and this document may.
@@ -63,7 +65,7 @@ These rules apply to documentation, docstrings, error messages, commit messages 
 
 ## Privacy
 
-- **X1.** Nothing committed or posted to this repository refers to private or environment-specific things: internal or chat links, session links, hostnames, machine or hardware names, personal file paths, or credentials. This includes commit trailers, which must be removed before pushing.
+- **X1.** Nothing committed or posted to this repository refers to private or environment-specific things: internal or chat links, session links, hostnames, machine or hardware names, personal file paths, or credentials. This includes commit trailers that carry such references, which must be removed before pushing. Ordinary trailers such as `Co-authored-by` are fine.
 
 ## Commits and pull requests
 
