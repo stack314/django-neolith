@@ -7,6 +7,8 @@ Neolith lets a Django app run inside a shared process or as its own service with
 This repository holds the specification work and its reference implementation. Nothing is installable yet.
 
 - [Vision](VISION.md)
+- [Specification](spec/README.md) (draft 0.1)
+- [Roadmap to 0.1](docs/roadmap.md)
 - [Guiding principles](docs/principles.md)
 - [Architecture decision records](docs/adr/README.md)
 - [Open questions](docs/open-questions.md)
