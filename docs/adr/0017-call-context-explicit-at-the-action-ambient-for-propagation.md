@@ -137,7 +137,7 @@ Option 4.
    - the deadline is the earlier of the parent's deadline and the call's own timeout;
    - the trace continues from the parent;
    - the principal is carried over unchanged;
-   - the caller is the app making the call: the app the parent scope belongs to, or the app a root was opened for (a principal value of the kind 0010 calls a service);
+   - the caller is the app making the call: the app the parent scope belongs to, or the app a root was opened for;
    - the idempotency key is not inherited. The outgoing call gets its own key, which the connector reuses only when it retries that same call. When the parent has a key, the child's key is derived from it deterministically: a hash of the parent's key, the contract identity and version, the action name, and the ordinal of this call among the parent scope's calls to that action. When the parent has none (a root that was not itself a call), the key is random. A retried parent therefore reproduces its children's keys, so a child that completed during the failed attempt is answered from the provider's record instead of running twice. If a retried parent sends a different request under a reproduced key, the provider answers `conflict`, as the IETF draft prescribes for a reused key with a different payload.
 4. **Roots are created only at the app host's entry points:**
    - the provider side of each transport (the HTTP transport builds the context from its headers);
