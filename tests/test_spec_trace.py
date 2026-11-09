@@ -1,7 +1,8 @@
-"""The requirement-ID and spec-to-test trace check (ADR 0018)."""
+"""The spec trace checker (ADR 0018): the specification, settings and report."""
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from pathlib import Path
 
@@ -23,17 +24,14 @@ Repo = Callable[..., Path]
 
 @pytest.fixture
 def repo(tmp_path: Path) -> Repo:
-    """Write a small spec/ and tests/ tree and return its root."""
+    """Write a small spec/ tree, and optionally the settings, and return the root."""
 
-    def make(
-        spec: str, tests: str = "", transports: str = "", settings: str | None = None
-    ) -> Path:
+    def make(spec: str, transports: str = "", settings: str | None = None) -> Path:
         (tmp_path / "spec").mkdir(exist_ok=True)
         (tmp_path / "tests").mkdir(exist_ok=True)
         (tmp_path / "spec" / "README.md").write_text(README)
         (tmp_path / "spec" / "01-contracts.md").write_text(spec)
         (tmp_path / "spec" / "02-transports.md").write_text(transports)
-        (tmp_path / "tests" / "test_example.py").write_text(tests)
         settings_file = tmp_path / "tests" / "spec_trace.toml"
         settings_file.unlink(missing_ok=True)
         if settings is not None:
@@ -43,20 +41,26 @@ def repo(tmp_path: Path) -> Repo:
     return make
 
 
-def problems(root: Path, enforce: tuple[str, ...] = ()) -> list[str]:
-    return spec_trace.check(root, enforce).problems
+def write_report(root: Path, tests: dict[str, tuple[list[str], str]]) -> Path:
+    """A report as the pytest plugin writes it: test -> (IDs, outcome)."""
+    path = root / "spec-report.json"
+    entries = {
+        test: {"ids": ids, "outcome": outcome} for test, (ids, outcome) in tests.items()
+    }
+    path.write_text(json.dumps({"format": 1, "tests": entries}))
+    return path
 
 
-def cites(*rids: str, mark: str = "pytest.mark") -> str:
-    """A test module with one test citing ``rids``."""
-    args = ", ".join(repr(rid) for rid in rids)
-    return f"import pytest\n\n@{mark}.spec({args})\ndef test_it() -> None: ...\n"
+def problems(
+    root: Path, enforce: tuple[str, ...] = (), report: Path | None = None
+) -> list[str]:
+    return spec_trace.check(root, enforce, report).problems
 
 
 # The repository itself
 
 
-def test_repository_spec_citations_and_settings_are_consistent() -> None:
+def test_repository_spec_and_settings_are_consistent() -> None:
     trace = spec_trace.check(spec_trace.ROOT)
     assert trace.problems == []
     assert trace.requirements
@@ -257,7 +261,9 @@ def test_malformed_id_is_a_problem(repo: Repo, rid: str) -> None:
 def test_unnumbered_document_is_a_problem(repo: Repo, name: str) -> None:
     root = repo("")
     (root / "spec" / name).write_text("It MUST work.\n")
-    assert problems(root) == [f"{name}: not named NN-lowercase-words.md"]
+    assert problems(root) == [
+        f"{name}: not a top-level document named NN-lowercase-words.md"
+    ]
 
 
 def test_two_documents_with_one_number_are_a_problem(repo: Repo) -> None:
@@ -283,6 +289,124 @@ def test_document_without_an_area_is_a_problem(repo: Repo) -> None:
     assert problems(root) == ["07-extra.md: no ID area in the table in spec/README.md"]
 
 
+# Code fences
+
+
+@pytest.mark.parametrize("fence", ["```", "~~~", "````", "  ```"])
+def test_fenced_code_is_skipped(repo: Repo, fence: str) -> None:
+    root = repo(
+        f"{fence} text\nA MUST in a sketch\n{fence.strip()}\n\n"
+        "**CON-1.** It MUST work.\n"
+    )
+    trace = spec_trace.check(root)
+    assert trace.problems == []
+    assert list(trace.requirements) == ["CON-1"]
+
+
+@pytest.mark.parametrize(
+    "closing",
+    ["~~~", "``", "```` x", "    ```"],
+    ids=["other-char", "shorter", "info", "indented"],
+)
+def test_fence_closes_only_on_a_matching_fence(repo: Repo, closing: str) -> None:
+    root = repo(
+        f"````\nsketch\n{closing}\nA MUST hidden\n````\n\n**CON-1.** It MUST work.\n"
+    )
+    trace = spec_trace.check(root)
+    assert trace.problems == []
+    assert list(trace.requirements) == ["CON-1"]
+
+
+def test_unclosed_fence_is_a_problem(repo: Repo) -> None:
+    root = repo(
+        "**CON-1.** It MUST work.\n\nExample:\n\n```\ncall()\n\nProviders MUST retry.\n"
+    )
+    assert problems(root) == ["01-contracts.md:5: code fence is never closed"]
+
+
+def test_backtick_fence_info_cannot_hold_a_backtick(repo: Repo) -> None:
+    root = repo("``` a`b\nA provider MUST serve it.\n")
+    assert problems(root) == [
+        "01-contracts.md:1: normative statement has no requirement ID"
+    ]
+
+
+def test_four_space_indent_is_not_a_fence(repo: Repo) -> None:
+    root = repo("Intro.\n\n    ```\n    A provider MUST serve it.\n")
+    assert problems(root) == [
+        "01-contracts.md:3: normative statement has no requirement ID"
+    ]
+
+
+# Lead-ins without a colon, and other block shapes
+
+
+def test_paragraph_before_a_list_is_a_lead_in(repo: Repo) -> None:
+    root = repo(
+        "**CON-1.** An app MUST do all of the following.\n\n"
+        "- log every call;\n- never sleep.\n"
+    )
+    assert problems(root) == [
+        "01-contracts.md:1: CON-1 is on a normative lead-in; "
+        "give the IDs to its list items",
+        "01-contracts.md:3: item under a normative lead-in has no ID",
+        "01-contracts.md:4: item under a normative lead-in has no ID",
+    ]
+
+
+def test_clause_after_a_semicolon_is_the_last_clause(repo: Repo) -> None:
+    root = repo(
+        "**CON-1.** A failure MUST stop the host; nothing is deferred.\n\n"
+        "1. **Declare.** Read every declaration.\n2. **Resolve.** Find providers.\n"
+    )
+    assert problems(root) == []
+
+
+def test_ordered_items_with_a_parenthesis_are_items(repo: Repo) -> None:
+    root = repo("A transport MUST:\n\n1) **CON-1.** carry it;\n2) retry forever.\n")
+    assert problems(root) == [
+        "01-contracts.md:4: item under a normative lead-in has no ID"
+    ]
+
+
+def test_id_in_a_heading_is_a_problem(repo: Repo) -> None:
+    root = repo("## **CON-1.** Contracts\n")
+    assert problems(root) == ["01-contracts.md:1: CON-1 is in a heading"]
+
+
+def test_hash_without_a_space_is_not_a_heading(repo: Repo) -> None:
+    root = repo("#tag A provider MUST serve it.\n")
+    assert problems(root) == [
+        "01-contracts.md:1: normative statement has no requirement ID"
+    ]
+
+
+def test_setext_heading_text_is_still_checked(repo: Repo) -> None:
+    root = repo("Providers MUST serve\n====================\n")
+    assert problems(root) == [
+        "01-contracts.md:1: normative statement has no requirement ID"
+    ]
+
+
+def test_document_in_a_subdirectory_is_a_problem(repo: Repo) -> None:
+    root = repo("")
+    (root / "spec" / "extra").mkdir()
+    (root / "spec" / "extra" / "01-more.md").write_text("It MUST work.\n")
+    assert problems(root) == [
+        "extra/01-more.md: not a top-level document named NN-lowercase-words.md"
+    ]
+
+
+def test_item_lead_in_governs_only_its_nested_items(repo: Repo) -> None:
+    root = repo(
+        "- **CON-1.** It MUST work.\n- A host MUST:\n  - **CON-2.** boot;\n"
+        "  - stop.\n- An ordinary item.\n"
+    )
+    assert problems(root) == [
+        "01-contracts.md:4: item under a normative lead-in has no ID"
+    ]
+
+
 # Withdrawn requirements
 
 
@@ -296,12 +420,21 @@ def test_document_without_an_area_is_a_problem(repo: Repo) -> None:
 def test_withdrawn_requirement_is_kept_and_cannot_be_cited(
     repo: Repo, line: str
 ) -> None:
-    root = repo(line + "- **CON-2.** It MUST work.\n", cites("CON-1"))
-    trace = spec_trace.check(root)
+    root = repo(line + "- **CON-2.** It MUST work.\n")
+    report = write_report(root, {"tests/t.py::test_a": (["CON-1"], "passed")})
+    trace = spec_trace.check(root, report=report)
     assert trace.requirements["CON-1"].withdrawn
     assert trace.requirements["CON-1"].level is None
-    assert trace.problems == [
-        "tests/test_example.py:3: cites withdrawn requirement CON-1"
+    assert trace.problems == ["tests/t.py::test_a: cites withdrawn requirement CON-1"]
+
+
+def test_live_text_after_a_withdrawal_needs_an_id(repo: Repo) -> None:
+    root = repo(
+        "~~**CON-1.** It MUST retry.~~ Withdrawn in spec 0.2: unsafe. "
+        "Providers MUST log.\n"
+    )
+    assert problems(root) == [
+        "01-contracts.md:1: normative text after withdrawn CON-1 has no requirement ID"
     ]
 
 
@@ -313,105 +446,7 @@ def test_withdrawn_requirement_says_when_and_why(repo: Repo) -> None:
     ]
 
 
-# Citations
-
-
-def test_citations_are_read_from_markers(repo: Repo) -> None:
-    root = repo(
-        "**CON-1.** It MUST work.\n\n**CON-2.** It SHOULD work.\n",
-        "import pytest\n\n"
-        "pytestmark = pytest.mark.spec('CON-2')\n\n"
-        "class TestThing:\n"
-        "    @pytest.mark.spec('CON-1', 'CON-2')\n"
-        "    def test_it(self) -> None: ...\n",
-    )
-    trace = spec_trace.check(root)
-    assert trace.problems == []
-    assert [(c.rid, c.owner) for c in trace.citations] == [
-        ("CON-2", "<module>"),
-        ("CON-1", "test_it"),
-        ("CON-2", "test_it"),
-    ]
-
-
-@pytest.mark.parametrize("mark", ["pytest.mark", "pt.mark", "mark"])
-def test_citing_an_unknown_id_is_a_problem(repo: Repo, mark: str) -> None:
-    root = repo("**CON-1.** It MUST work.\n", cites("NOPE-1", mark=mark))
-    assert problems(root) == [
-        "tests/test_example.py:3: cites unknown requirement NOPE-1"
-    ]
-
-
-@pytest.mark.parametrize(
-    "marker",
-    [
-        "pytest.mark.spec(REQ)",
-        "pytest.mark.spec()",
-        "pytest.mark.spec(id='CON-1')",
-    ],
-)
-def test_marker_arguments_must_be_literal_ids(repo: Repo, marker: str) -> None:
-    root = repo(
-        "**CON-1.** It MUST work.\n",
-        f"import pytest\n\nREQ = 'CON-1'\n\n@{marker}\ndef test_it() -> None: ...\n",
-    )
-    assert len(problems(root)) == 1
-
-
-def test_marker_used_through_an_alias_is_a_problem(repo: Repo) -> None:
-    root = repo(
-        "**CON-1.** It MUST work.\n",
-        "import pytest\n\ncites = pytest.mark.spec\n\n"
-        "@cites('NOPE-1')\ndef test_it() -> None: ...\n",
-    )
-    assert problems(root) == [
-        "tests/test_example.py:3: use the spec marker as a direct call "
-        "with literal IDs, so the trace can read it"
-    ]
-
-
-@pytest.mark.parametrize(
-    "decorator",
-    [
-        "@pytest.mark.skip(reason='later')",
-        "@pytest.mark.xfail",
-        "@pytest.mark.skipif(True, reason='never')",
-    ],
-)
-def test_skipped_test_does_not_cover_its_requirement(
-    repo: Repo, decorator: str
-) -> None:
-    root = repo(
-        "**CON-1.** It MUST work.\n",
-        f"import pytest\n\nclass TestIt:\n    {decorator}\n"
-        "    @pytest.mark.spec('CON-1')\n    def test_it(self) -> None: ...\n",
-    )
-    trace = spec_trace.check(root, ("01",))
-    assert trace.citations[0].skipped
-    assert trace.problems == [
-        "01-contracts.md:1: CON-1 is must-level and no running test cites it"
-    ]
-
-
-def test_skip_in_pytestmark_reaches_the_module(repo: Repo) -> None:
-    root = repo(
-        "**CON-1.** It MUST work.\n",
-        "import pytest\n\npytestmark = [pytest.mark.django_db, pytest.mark.skip]\n\n"
-        "@pytest.mark.spec('CON-1')\ndef test_it() -> None: ...\n",
-    )
-    assert spec_trace.check(root).citations[0].skipped
-
-
-def test_skip_on_the_class_reaches_its_tests(repo: Repo) -> None:
-    root = repo(
-        "**CON-1.** It MUST work.\n",
-        "import pytest\n\n@pytest.mark.skip\nclass TestIt:\n"
-        "    @pytest.mark.spec('CON-1')\n    def test_it(self) -> None: ...\n",
-    )
-    assert spec_trace.check(root).citations[0].skipped
-
-
-# Enforcement and the settings file
+# Coverage from the report
 
 
 SPEC = (
@@ -420,19 +455,67 @@ SPEC = (
 )
 
 
-def test_enforce_needs_a_test_for_each_must_level_requirement(repo: Repo) -> None:
-    root = repo(SPEC, transports="**TRN-1.** It MUST NOT fail.\n")
-    assert problems(root) == []
-    assert problems(root, ("01",)) == [
-        "01-contracts.md:1: CON-1 is must-level and no running test cites it"
+def test_unknown_citation_in_the_report_is_a_problem(repo: Repo) -> None:
+    root = repo(SPEC)
+    report = write_report(root, {"tests/t.py::test_a": (["NOPE-1"], "skipped")})
+    assert problems(root, report=report) == [
+        "tests/t.py::test_a: cites unknown requirement NOPE-1"
     ]
-    assert problems(repo(SPEC, cites("CON-1")), ("01",)) == []
+
+
+@pytest.mark.parametrize(
+    "outcome", ["skipped", "xfailed", "xpassed", "failed", "error", "not run"]
+)
+def test_only_a_passing_test_covers(repo: Repo, outcome: str) -> None:
+    root = repo(SPEC)
+    report = write_report(root, {"tests/t.py::test_a": (["CON-1"], outcome)})
+    assert problems(root, ("01",), report) == [
+        "01-contracts.md:1: CON-1 is must-level and no passing test cites it"
+    ]
+
+
+def test_passing_test_covers_and_only_must_level_is_enforced(repo: Repo) -> None:
+    root = repo(SPEC, transports="**TRN-1.** It MUST NOT fail.\n")
+    report = write_report(root, {"tests/t.py::test_a": (["CON-1"], "passed")})
+    trace = spec_trace.check(root, ("01",), report)
+    assert trace.problems == []
+    assert [c.test for c in trace.covering("CON-1")] == ["tests/t.py::test_a"]
 
 
 def test_enforced_documents_are_read_from_the_settings(repo: Repo) -> None:
     root = repo(SPEC, settings='enforce = ["01"]\n')
+    report = write_report(root, {})
+    assert problems(root, report=report) == [
+        "01-contracts.md:1: CON-1 is must-level and no passing test cites it"
+    ]
+
+
+def test_enforcing_without_a_report_is_a_problem(repo: Repo) -> None:
+    root = repo(SPEC, settings='enforce = ["01"]\n')
     assert problems(root) == [
-        "01-contracts.md:1: CON-1 is must-level and no running test cites it"
+        "enforce: coverage cannot be checked without --report; run pytest with "
+        "--spec-report first"
+    ]
+
+
+@pytest.mark.parametrize(
+    "content",
+    ["not json", '{"format": 2, "tests": {}}', "[]", '{"format": 1, "tests": []}'],
+)
+def test_unreadable_report_is_a_problem(repo: Repo, content: str) -> None:
+    root = repo(SPEC)
+    path = root / "spec-report.json"
+    path.write_text(content)
+    (only,) = problems(root, report=path)
+    assert only.startswith("report spec-report.json: ")
+
+
+def test_malformed_report_entry_is_a_problem(repo: Repo) -> None:
+    root = repo(SPEC)
+    path = root / "spec-report.json"
+    path.write_text('{"format": 1, "tests": {"t::a": {"ids": "CON-1"}}}')
+    assert problems(root, report=path) == [
+        "report spec-report.json: malformed entry for t::a"
     ]
 
 
@@ -441,27 +524,40 @@ def test_not_tested_entry_stands_in_for_a_test(repo: Repo) -> None:
         SPEC,
         settings='enforce = ["01"]\n\n[not-tested]\nCON-1 = "Binds app code."\n',
     )
-    trace = spec_trace.check(root)
+    trace = spec_trace.check(root, report=write_report(root, {}))
     assert trace.problems == []
     assert trace.not_tested == {"CON-1": "Binds app code."}
     assert "not tested" in spec_trace.render(trace)
 
 
 @pytest.mark.parametrize(
-    ("rid", "reason", "tests", "problem"),
+    ("rid", "reason", "outcome", "problem"),
     [
-        ("CON-1", "", "", "needs a reason"),
-        ("CON-9", "x", "", "is not a live requirement"),
-        ("CON-3", "x", "", "is not a live requirement"),
-        ("CON-2", "x", "", "is not must-level, so it needs no entry"),
-        ("CON-1", "x", cites("CON-1"), "is cited by a test; remove the entry"),
+        ("CON-1", "", None, "needs a reason"),
+        ("CON-9", "x", None, "is not a live requirement"),
+        ("CON-3", "x", None, "is not a live requirement"),
+        ("CON-2", "x", None, "is not must-level, so it needs no entry"),
+        ("CON-1", "x", "passed", "is covered by a passing test; remove the entry"),
     ],
 )
 def test_not_tested_entries_are_checked(
-    repo: Repo, rid: str, reason: str, tests: str, problem: str
+    repo: Repo, rid: str, reason: str, outcome: str | None, problem: str
 ) -> None:
-    root = repo(SPEC, tests, settings=f'[not-tested]\n{rid} = "{reason}"\n')
-    assert problems(root) == [f"tests/spec_trace.toml: [not-tested] {rid} {problem}"]
+    root = repo(SPEC, settings=f'[not-tested]\n{rid} = "{reason}"\n')
+    tests = {"tests/t.py::test_a": (["CON-1"], outcome)} if outcome else {}
+    report = write_report(root, tests)
+    assert problems(root, report=report) == [
+        f"tests/spec_trace.toml: [not-tested] {rid} {problem}"
+    ]
+
+
+def test_skipped_test_does_not_clear_a_not_tested_entry(repo: Repo) -> None:
+    root = repo(SPEC, settings='[not-tested]\nCON-1 = "Binds app code."\n')
+    report = write_report(root, {"tests/t.py::test_a": (["CON-1"], "skipped")})
+    assert problems(root, report=report) == []
+
+
+# The settings file
 
 
 @pytest.mark.parametrize("number", ["1", "07", "01-contracts"])
@@ -499,7 +595,12 @@ def test_main_reports_and_sets_the_exit_code(
 ) -> None:
     root = repo("**CON-1.** It MUST work.\n")
     assert spec_trace.main(["--root", str(root)]) == 0
+    assert "coverage not measured (no --report)" in capsys.readouterr().out
+    report = write_report(root, {"tests/t.py::test_a": (["CON-1"], "passed")})
+    assert spec_trace.main(["--root", str(root), "--report", str(report)]) == 0
     out = capsys.readouterr().out
-    assert "1 requirements, 0 cited by tests, 0 marked not tested, 0 problems" in out
-    assert spec_trace.main(["--root", str(root), "--enforce", "01"]) == 1
+    assert "1 requirements, 1 covered by passing tests, 0 marked not tested" in out
+    empty = write_report(root, {})
+    argv = ["--root", str(root), "--report", str(empty), "--enforce", "01"]
+    assert spec_trace.main(argv) == 1
     assert "problem: 01-contracts.md:1: CON-1" in capsys.readouterr().out

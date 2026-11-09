@@ -52,7 +52,8 @@ include = ["src/neolith", "tests", "scripts", "spec", "LICENSE", "README.md", "C
 [tool.pytest.ini_options]
 minversion = "8.4"
 testpaths = ["tests"]
-addopts = ["-ra", "--strict-markers", "--strict-config", "--import-mode=importlib"]
+# pytester: the spec trace plugin is tested by running pytest on sample tests.
+addopts = ["-ra", "--strict-markers", "--strict-config", "--import-mode=importlib", "-p", "pytester"]
 xfail_strict = true
 DJANGO_SETTINGS_MODULE = "tests.settings"
 django_find_project = false
