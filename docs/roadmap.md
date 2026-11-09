@@ -9,7 +9,7 @@
 | 3 | In-process transport with serialization round-trip; connector with `single` routing | 02 |
 | 4 | App declaration and host: `NeolithAppConfig`, settings built from declarations, `neolith run <app>` boots one app on SQLite | 05 |
 | 5 | HTTP transport: provider endpoints via django-ninja, OpenAPI at the well-known path, connector over httpx, shared-secret principal resolver | 03 |
-| 6 | Conformance suite running every contract test over both transports; failover test with two providers | 06, 02 |
+| 6 | Conformance suite running every contract test over both transports; `local-first` routing and a failover test with two providers | 06, 02 |
 | 7 | Boundary check: `neolith check` wrapping import-linter, report-only then enforce per app | — |
 | 8 | Two small example apps under `examples/` showing attached, detached and both-at-once; the 0.1 proof | all |
 
@@ -28,10 +28,10 @@ from neolith import NeolithAppConfig, contract, action, connect, ContractError
 
 @contract("inventory.v1")
 class Inventory:
-    @action
+    @action(idempotent=True)
     def reserve(self, request: ReserveRequest) -> ReserveReply: ...
 
-    @action(idempotent=False)
+    @action
     def release(self, request: ReleaseRequest) -> None: ...
 
 @Inventory.implement

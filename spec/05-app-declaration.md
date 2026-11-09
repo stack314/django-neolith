@@ -4,7 +4,7 @@
 
 ## Declaration
 
-Every app declares, in a form the host can read without running the app's code:
+Every app declares, in a form the host can read without importing the app's implementation modules:
 
 | Field | Meaning |
 |---|---|
@@ -24,9 +24,11 @@ A host takes a set of apps through these phases in order. A failure in any phase
 2. **Resolve.** For every `requires`, find a provider: an app in this host that `provides` it, or a configured remote provider. An unsatisfied requirement is an error here, not at call time.
 3. **Configure.** Build the host's configuration from the declarations plus environment: resources, transports, routing policies.
 4. **Validate.** Check every provided contract against its implementation: every action implemented, types match, declared errors exist.
-5. **Boot.** Initialise apps, apply pending schema changes to each app's own database.
+5. **Boot.** Initialise apps. Check that each app's database schema is current, and stop if it is not.
 6. **Serve.** Accept calls and, where configured, HTTP requests.
 7. **Drain.** On shutdown, stop accepting calls, finish in-flight calls up to their deadlines, then stop.
+
+Schema changes are not part of the lifecycle. They are an explicit step, run once per database before hosts that serve the app start. Several hosts can serve the same app at once ([ADR 0016](../docs/adr/0016-an-app-may-run-attached-and-detached-at-once.md)), and they must never race on its schema.
 
 A host running one app is a detached deployment. A host running several is a shared process. The host is the same program in both cases.
 

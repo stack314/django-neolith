@@ -15,7 +15,8 @@ Decision records: [0003](../docs/adr/0003-apps-communicate-through-contracts.md)
 
 - An action has a name, a request type, a reply type and a set of declared error kinds.
 - Action names are unique within a contract.
-- An action is **idempotent** by default: repeating a call with the same idempotency key MUST produce the same effect as one call. An action MAY be declared non-idempotent, in which case connectors MUST NOT retry it.
+- An action is **non-idempotent** unless it is declared idempotent. Connectors MUST NOT retry or fall back on a non-idempotent action. Forgetting the declaration therefore costs a retry, never a duplicated effect.
+- An action declared **idempotent** MUST produce the same effect when called repeatedly with the same idempotency key as when called once. The declaration is the app author's promise; the conformance suite checks it for the reference contract ([06](06-conformance.md)).
 
 ## The portable type system
 
@@ -40,7 +41,7 @@ Every action's error set includes the standard kinds, whether declared or not:
 | `not_found` | A referenced entity does not exist | no |
 | `permission_denied` | The principal may not perform the action | no |
 | `conflict` | The action conflicts with current state | no |
-| `unavailable` | No provider could be reached | yes |
+| `unavailable` | No provider could be reached | yes, if idempotent |
 | `timeout` | The provider did not reply in time | yes, if idempotent |
 | `internal` | The provider failed | no |
 

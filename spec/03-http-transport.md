@@ -21,7 +21,9 @@ The context travels in headers. Names and semantics are fixed by this document s
 | `Authorization: Bearer <token>` | The principal, as a token the provider's host can resolve |
 | `Idempotency-Key` | The idempotency key |
 | `traceparent` | The trace identifier, per W3C Trace Context |
-| `Neolith-Deadline` | The absolute deadline, RFC 3339 |
+| `Neolith-Timeout` | The remaining time budget, in whole milliseconds |
+
+The deadline is sent as a relative budget, not an absolute time, so that hosts do not depend on synchronised clocks. The receiving host computes its own local deadline from the budget when the request arrives.
 
 ## Errors
 
@@ -39,6 +41,8 @@ Errors are carried as a JSON body with a fixed shape and an HTTP status that fol
 | declared kinds | 422 |
 
 Body: `{"kind": "<kind>", "message": "<text>", "detail": {<typed detail record>}}`.
+
+A connector takes the kind from the body only, never from the status. A non-success response without a neolith error body maps to `unavailable`. Examples are a 404 from a host that does not serve that contract version, or an error page from a proxy. A success response whose body is not a valid reply maps to `internal`.
 
 ## Projection
 

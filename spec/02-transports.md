@@ -29,8 +29,8 @@ A connector holds an ordered set of providers for a contract version. Each provi
 
 A **routing policy** chooses the provider for each call. Defined policies:
 
-- `single`: exactly one provider; the only policy required in 0.1;
-- `local-first`: prefer an in-process provider, fall back to others on `unavailable`;
+- `single`: exactly one provider; required in 0.1;
+- `local-first`: prefer an in-process provider, and fall back to the others under the fallback rule below; required in 0.1;
 - `remote-first`: the reverse;
 - `weighted`: distribute by configured weights;
 - `explicit`: chosen by a function of the call context.

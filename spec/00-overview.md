@@ -37,7 +37,10 @@ A call is the invocation of one action on one contract.
 3. The connector chooses a provider by its routing policy and hands the call to that provider's transport.
 4. The transport carries the request, together with the **call context**, to the provider and returns either a reply of the action's reply type or an error.
 
-The call context travels with every call and is separate from the request. It carries at least: the principal on whose behalf the call is made, a trace identifier, and an idempotency key. Transports MUST carry the context; apps MUST NOT smuggle it inside request types.
+The call context travels with every call and is separate from the request. Transports MUST carry the context; apps MUST NOT smuggle it inside request types. It has two kinds of field:
+
+- **Propagated fields**, which a call passes on to the calls it makes: the principal on whose behalf the call is made, the trace identifier, and the deadline. A nested call's deadline is never later than its parent's.
+- **Per-call fields**, which belong to one outbound call: the idempotency key. Each outbound call gets a fresh key. The key stays the same only across retries of that same call, so a provider never mistakes two different nested calls for a repeat.
 
 Every call is synchronous from the caller's point of view: it ends in a reply or an error. Asynchronous communication is done with events ([04](04-events.md)).
 
@@ -49,4 +52,4 @@ These hold in every mode and over every transport.
 2. **Serialized boundary.** The request and reply cross the contract boundary as values of the portable type system ([01](01-contracts.md)), even in-process. No live object, reference or handle crosses.
 3. **Visible failure.** Any call can fail with a transport error. The caller's code cannot assume otherwise, and the contract's error set always includes the standard errors.
 4. **Owned data.** An app reads and writes only its own data. It holds other apps' identifiers, not references into their data.
-5. **Typed context.** The call context is propagated, never fabricated, by transports.
+5. **Typed context.** Transports carry the call context and never fabricate it. Propagated fields pass from a call to the calls it makes; per-call fields do not.
