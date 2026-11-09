@@ -10,5 +10,6 @@ This repository holds the specification work and its reference implementation. N
 - [Guiding principles](docs/principles.md)
 - [Architecture decision records](docs/adr/README.md)
 - [Open questions](docs/open-questions.md)
+- [Contributing](CONTRIBUTING.md)
 
 Licensed under the [BSD 3-Clause License](LICENSE).
