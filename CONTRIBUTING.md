@@ -56,7 +56,7 @@ These rules apply to the `neolith` package. Tests and examples follow them too, 
 
 These rules apply to documentation, docstrings, error messages, commit messages and pull request text.
 
-- **W1.** Each core concept has one name: *app*, *contract*, *action*, *contract package*, *provider*, *connector*, *transport*, *event*, *declaration*, *app host* (*host* for short), and *mode* (*attached* or *detached*). Do not give these concepts other names. For example, say "HTTP transport", not "HTTP binding". Do not call a connector a *client*, a transport an *adapter*, or a contract an *interface* or *port*. Ordinary uses of those words are fine, such as "the transport interface". In plain prose, *service* means an app deployed detached. W1 is provisional until [open question 3](docs/open-questions.md) is closed.
+- **W1.** Each core concept has one name: *app*, *contract*, *action*, *contract package*, *provider*, *connector*, *transport*, *event*, *declaration*, *app host* (*host* for short), and *mode* (*attached* or *detached*). Do not give these concepts other names. For example, say "HTTP transport", not "HTTP binding". Do not call a connector a *client*, a transport an *adapter*, or a contract an *interface* or *port*. Ordinary uses of those words are fine, such as "the transport interface". In plain prose, *service* means an app deployed detached. Each term is defined in [spec 00](spec/00-overview.md#terms). W1 is provisional until [open question 3](docs/open-questions.md) is closed.
 - **W2.** Describe trade-offs. Do not call Django, other projects or other approaches wrong. Credit prior work where it is relevant.
 - **W3.** No unverifiable claims, such as *first*, *only*, *fastest* or *best*, unless a source is linked.
 - **W4.** The principles, decision records and specification never address the reader as *you*. Guides and this document may.
@@ -91,6 +91,7 @@ Reviewers look in this order, because an early problem can make later ones moot:
 ## Responsibility
 
 - **R1.** You are responsible for every line you submit, however it was produced, including with AI tools. You should be able to explain any part of the change and why it is needed.
+- **R2.** The maintainers use AI tools too, and are held to R1 the same way.
 
 Be respectful and assume good faith, in issues, reviews and everywhere else in the project.
 

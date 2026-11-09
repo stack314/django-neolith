@@ -1,0 +1,52 @@
+name: Bug report
+description: Something behaves differently from what the documentation, the specification or a decision record says.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for the report. For a security problem, please do not use this form; use the Security tab instead.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, and what you saw.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: Link the documentation, specification section or decision record that describes the expected behaviour, if there is one.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: The smallest steps or code that show the problem.
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: Neolith commit or version, Python version, Django version.
+      placeholder: "neolith <commit>, Python 3.12, Django 5.2"
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Mode
+      description: How the apps involved were running.
+      options:
+        - Attached
+        - Detached
+        - Both
+        - Not sure
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: Logs, tracebacks or context. Please remove secrets, hostnames and personal paths first (CONTRIBUTING X1).
