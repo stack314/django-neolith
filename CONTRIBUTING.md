@@ -91,6 +91,7 @@ Reviewers look in this order, because an early problem can make later ones moot:
 ## Responsibility
 
 - **R1.** You are responsible for every line you submit, however it was produced, including with AI tools. You should be able to explain any part of the change and why it is needed.
+- **R2.** The maintainers use AI tools too, and are held to R1 the same way.
 
 Be respectful and assume good faith, in issues, reviews and everywhere else in the project.
 
