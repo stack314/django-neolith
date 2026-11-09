@@ -138,7 +138,7 @@ def test_never_collected(): pass
     assert tests == {}
 
 
-def test_deselected_test_is_not_run(pytester: pytest.Pytester) -> None:
+def test_deselected_test_is_recorded_as_not_run(pytester: pytest.Pytester) -> None:
     tests = run(
         pytester,
         """
@@ -147,13 +147,13 @@ import pytest
 @pytest.mark.spec("CON-1")
 def test_kept(): pass
 
-@pytest.mark.spec("CON-2")
+@pytest.mark.spec("NOPE-1")
 def test_dropped(): pass
 """,
         "-k",
         "kept",
     )
-    assert outcomes(tests) == {"test_kept": "passed"}
+    assert outcomes(tests) == {"test_kept": "passed", "test_dropped": "not run"}
 
 
 @pytest.mark.parametrize(

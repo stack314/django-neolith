@@ -11,7 +11,8 @@ Outcomes:
   expected to fail;
 - ``skipped``, ``xfailed``, ``xpassed``: the test did not verify anything;
 - ``failed``: the call failed; ``error``: setup or teardown failed;
-- ``not run``: collected but deselected, or the run stopped before it.
+- ``not run``: deselected (by ``-k``, ``-m`` or a plugin), or the run
+  stopped before it.
 
 The marker is read from pytest itself, so it applies however it is attached:
 on the test, its class, the module's ``pytestmark`` or a parameter set.
@@ -45,26 +46,33 @@ class _Recorder:
         self.config = config
         self.tests: dict[str, dict[str, object]] = {}
 
+    def record(self, item: pytest.Item) -> None:
+        """Note the IDs an item cites, with the outcome "not run" for now."""
+        ids: list[str] = []
+        for mark in item.iter_markers("spec"):
+            if (
+                not mark.args
+                or mark.kwargs
+                or not all(isinstance(rid, str) for rid in mark.args)
+            ):
+                raise pytest.UsageError(
+                    f"{item.nodeid}: the spec marker takes one or more "
+                    "requirement IDs as strings, and nothing else"
+                )
+            ids.extend(mark.args)
+        if ids:
+            self.tests[item.nodeid] = {"ids": sorted(set(ids)), "outcome": "not run"}
+
+    def pytest_deselected(self, items: list[pytest.Item]) -> None:
+        # Deselected by -k, -m or another plugin: recorded as "not run", so
+        # an unknown or withdrawn ID on them is still checked.
+        for item in items:
+            self.record(item)
+
     @pytest.hookimpl(trylast=True)
     def pytest_collection_modifyitems(self, items: list[pytest.Item]) -> None:
         for item in items:
-            ids: list[str] = []
-            for mark in item.iter_markers("spec"):
-                if (
-                    not mark.args
-                    or mark.kwargs
-                    or not all(isinstance(rid, str) for rid in mark.args)
-                ):
-                    raise pytest.UsageError(
-                        f"{item.nodeid}: the spec marker takes one or more "
-                        "requirement IDs as strings, and nothing else"
-                    )
-                ids.extend(mark.args)
-            if ids:
-                self.tests[item.nodeid] = {
-                    "ids": sorted(set(ids)),
-                    "outcome": "not run",
-                }
+            self.record(item)
 
     def pytest_runtest_logreport(self, report: pytest.TestReport) -> None:
         entry = self.tests.get(report.nodeid)

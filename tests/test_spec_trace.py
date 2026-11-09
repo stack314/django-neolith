@@ -331,10 +331,44 @@ def test_backtick_fence_info_cannot_hold_a_backtick(repo: Repo) -> None:
     ]
 
 
-def test_four_space_indent_is_not_a_fence(repo: Repo) -> None:
-    root = repo("Intro.\n\n    ```\n    A provider MUST serve it.\n")
+def test_indented_code_is_skipped(repo: Repo) -> None:
+    root = repo("Intro.\n\n    A provider MUST serve it.\n")
+    assert problems(root) == []
+
+
+def test_fence_left_open_in_a_list_item_ends_with_the_item(repo: Repo) -> None:
+    # The review's probe: an unclosed fence under TRN-2 must not hide the rest.
+    root = repo(
+        "",
+        transports=(
+            "A transport MUST:\n\n- **TRN-1.** serialize the request;\n"
+            "- **TRN-2.** carry the call context intact;\n\n"
+            "  ```\n  context -> headers\n"
+            "- **TRN-3.** map every failure onto a standard error kind.\n\n"
+            "## In-process transport\n\n"
+            "Providers MUST retry every call forever.\n\n"
+            "Example:\n\n```text\ncall()\n```\n"
+        ),
+    )
+    trace = spec_trace.check(root)
+    assert list(trace.requirements) == ["TRN-1", "TRN-2", "TRN-3"]
+    assert trace.problems == [
+        "02-transports.md:6: code fence is never closed",
+        "02-transports.md:12: normative statement has no requirement ID",
+    ]
+
+
+def test_item_with_no_paragraph_under_a_lead_in_needs_an_id(repo: Repo) -> None:
+    root = repo("A transport MUST:\n\n- **CON-1.** carry it;\n- ```\n  x\n  ```\n")
     assert problems(root) == [
-        "01-contracts.md:3: normative statement has no requirement ID"
+        "01-contracts.md:4: item under a normative lead-in has no ID"
+    ]
+
+
+def test_normative_word_in_an_html_block_needs_an_id(repo: Repo) -> None:
+    root = repo("<!-- A provider MUST hide this. -->\n")
+    assert problems(root) == [
+        "01-contracts.md:1: normative statement has no requirement ID"
     ]
 
 
@@ -381,11 +415,9 @@ def test_hash_without_a_space_is_not_a_heading(repo: Repo) -> None:
     ]
 
 
-def test_setext_heading_text_is_still_checked(repo: Repo) -> None:
+def test_setext_heading_is_a_heading(repo: Repo) -> None:
     root = repo("Providers MUST serve\n====================\n")
-    assert problems(root) == [
-        "01-contracts.md:1: normative statement has no requirement ID"
-    ]
+    assert problems(root) == ["01-contracts.md:1: heading uses a normative word"]
 
 
 def test_document_in_a_subdirectory_is_a_problem(repo: Repo) -> None:
@@ -455,9 +487,10 @@ SPEC = (
 )
 
 
-def test_unknown_citation_in_the_report_is_a_problem(repo: Repo) -> None:
+@pytest.mark.parametrize("outcome", ["passed", "skipped", "not run"])
+def test_unknown_citation_in_the_report_is_a_problem(repo: Repo, outcome: str) -> None:
     root = repo(SPEC)
-    report = write_report(root, {"tests/t.py::test_a": (["NOPE-1"], "skipped")})
+    report = write_report(root, {"tests/t.py::test_a": (["NOPE-1"], outcome)})
     assert problems(root, report=report) == [
         "tests/t.py::test_a: cites unknown requirement NOPE-1"
     ]

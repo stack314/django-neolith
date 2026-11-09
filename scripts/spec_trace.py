@@ -1,30 +1,32 @@
 """Check requirement IDs in spec/ and the coverage tests report (ADR 0018).
 
-The script reads the specification and ``tests/spec_trace.toml`` statically.
-Coverage comes from the report that ``scripts/spec_trace_plugin.py`` writes
-when pytest runs with ``--spec-report PATH``: only a test that ran and passed
-covers the requirements it cites. The script needs only the standard library.
+The script reads the specification and ``tests/spec_trace.toml``. Coverage
+comes from the report that ``scripts/spec_trace_plugin.py`` writes when pytest
+runs with ``--spec-report PATH``: only a test that ran and passed covers the
+requirements it cites.
 
-The specification is read as CommonMark blocks, not physical lines: a wrapped
-paragraph or list item is one statement, and an indented paragraph belongs to
-the list item above it. Fenced code (``` or ~~~, closed by a fence of the same
-character at least as long) is a sketch and is skipped.
+The specification is parsed with markdown-it-py, a CommonMark parser, with
+GFM tables and strikethrough enabled. The checker walks its token stream:
+paragraphs, list items, headings, table rows and HTML blocks are prose; fenced
+and indented code are sketches and are skipped. A wrapped paragraph or list
+item is one statement. markdown-it-py is a development dependency only.
 
-A normative lead-in is the last sentence or clause of a block (after the last
-".", "!", "?" or ";") when it uses a normative word and either ends in ":" or
-is a paragraph followed directly by a list. Each item of its list is a
+A normative lead-in is the last sentence or clause of a paragraph (after the
+last ".", "!", "?" or ";") when it uses a normative word and either ends in
+":" or is followed directly by a list. Each item of that list is a
 requirement with its own ID, and the lead-in carries none.
 
 It always reports a problem, and exits 1, when:
 
 - the text uses an RFC 2119 word that spec/README.md does not list, such as
   SHALL;
-- normative text carries no requirement ID of its own: a statement or table
-  row without one, text before the first ID in a block, a heading, or an item
-  in the list of a normative lead-in;
+- normative text carries no requirement ID of its own: a statement, table
+  row or HTML block without one, text before the first ID in a paragraph, text
+  after a withdrawal, a heading, or an item in the list of a normative lead-in;
 - a heading carries an ID;
 - a normative lead-in carries an ID, or ends in ":" with no list after it;
-- a code fence is never closed;
+- a code fence is not closed by its own closing line (CommonMark then ends it
+  at the end of its container, such as a list item);
 - an ID is malformed, uses another document's area or is defined twice;
 - an ID marks no normative word, or more than one;
 - a withdrawn requirement does not say "Withdrawn in spec <version>: <reason>";
@@ -56,9 +58,12 @@ import json
 import re
 import sys
 import tomllib
-from collections.abc import Iterator, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from markdown_it import MarkdownIt
+from markdown_it.token import Token
 
 ROOT = Path(__file__).resolve().parent.parent
 SETTINGS = "tests/spec_trace.toml"
@@ -90,14 +95,12 @@ _USED = ("MUST", "MUST NOT", "REQUIRED", "SHOULD", "MAY")
 _ID = re.compile(r"(~~)?\*\*([A-Z]+-\d+)\.\*\*")
 _WELL_FORMED = re.compile(r"([A-Z]{2,5})-([1-9]\d*)")
 _WITHDRAWN = re.compile(r"Withdrawn in spec \d+\.\d+: \S")
-_LIST_ITEM = re.compile(r"\s*(?:[-*+]|\d{1,9}[.)])(?:\s|$)")
-_HEADING = re.compile(r" {0,3}#{1,6}(?:\s|$)")
-_FENCE_OPEN = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
-_FENCE_CLOSE = re.compile(r" {0,3}(`{3,}|~{3,})\s*")
 _SENTENCE_BREAK = re.compile(r"(?<=[.!?;])\s+")
 _DOCUMENT = re.compile(r"(\d{2})-[a-z0-9-]+\.md")
 _AREA_ROW = re.compile(r"\|\s*(\d{2})\s*\|.*\|\s*`([A-Z]{2,5})`\s*\|\s*$")
 _SETTINGS_KEYS = {"enforce", "not-tested"}
+# CommonMark, plus the GFM tables and strikethrough the specification uses.
+_MARKDOWN = MarkdownIt("commonmark").enable(["table", "strikethrough"])
 
 
 @dataclass(frozen=True)
@@ -153,80 +156,51 @@ def read_areas(readme: Path, trace: Trace | None = None) -> dict[str, str]:
     return areas
 
 
+_LIST_OPEN = ("bullet_list_open", "ordered_list_open")
+_LIST_CLOSE = ("bullet_list_close", "ordered_list_close")
+
+
 @dataclass(frozen=True)
-class _Block:
-    line: int  # first physical line
-    text: str  # physical lines joined by spaces
-    # "item", "continuation", "paragraph", "row", "heading" or "unclosed fence"
+class _Unit:
+    """One piece of prose that can hold requirements."""
+
+    line: int  # first physical line, 1-based
+    text: str  # the inline Markdown, wrapped lines joined by spaces
+    # "item" (first paragraph of a list item), "continuation" (a later one),
+    # "paragraph", "row" (a table row), "heading" or "html"
     kind: str
-    indent: int = 0  # leading spaces of the first line
+    # The level of the lead-in that governs this list item, if any.
+    governed: str | None = None
+    # True for a paragraph followed directly by a list.
+    before_list: bool = False
 
 
-def _blocks(text: str) -> Iterator[_Block]:
-    """Split Markdown into the blocks a statement can span.
+@dataclass
+class _List:
+    lead: str | None  # the level of the lead-in that introduced it, if any
 
-    A list item runs until the next item or blank line, so wrapped lines join
-    it. A paragraph indented under a list item is a continuation of that item.
-    Table rows and headings are blocks of their own. Fenced code is skipped,
-    and a fence still open at the end is yielded as "unclosed fence".
-    """
-    fence: tuple[str, int, int] | None = None  # character, length, line
-    current: list[str] = []
-    start = 0
-    kind = "paragraph"
-    in_list = False
-    after_blank = True
 
-    def flush() -> Iterator[_Block]:
-        if current:
-            first = current[0].expandtabs(4)
-            indent = len(first) - len(first.lstrip())
-            yield _Block(start, " ".join(s.strip() for s in current), kind, indent)
-            current.clear()
+@dataclass
+class _Item:
+    line: int
+    parent: _List
+    paragraphs: int = 0
 
-    for number, line in enumerate(text.splitlines(), start=1):
-        if fence is not None:
-            closing = _FENCE_CLOSE.fullmatch(line)
-            if (
-                closing
-                and closing.group(1)[0] == fence[0]
-                and len(closing.group(1)) >= fence[1]
-            ):
-                fence = None
-                after_blank = True
-            continue
-        opening = _FENCE_OPEN.fullmatch(line)
-        if opening and not (opening.group(1)[0] == "`" and "`" in opening.group(2)):
-            yield from flush()
-            fence = (opening.group(1)[0], len(opening.group(1)), number)
-            continue
-        if not line.strip():
-            yield from flush()
-            after_blank = True
-            continue
-        if _HEADING.match(line) or line.lstrip().startswith("|"):
-            yield from flush()
-            is_heading = bool(_HEADING.match(line))
-            yield _Block(number, line.strip(), "heading" if is_heading else "row")
-            in_list = in_list and not is_heading
-            after_blank = False
-            continue
-        if _LIST_ITEM.match(line):
-            yield from flush()
-            start, kind, in_list = number, "item", True
-        elif current and not after_blank:
-            pass  # a wrapped line of the current block
-        else:
-            yield from flush()
-            indented = line[:1].isspace()
-            start = number
-            kind = "continuation" if indented and in_list else "paragraph"
-            in_list = in_list and indented
-        current.append(line)
-        after_blank = False
-    yield from flush()
-    if fence is not None:
-        yield _Block(fence[2], "", "unclosed fence")
+
+def _line(token: Token) -> int:
+    return token.map[0] + 1 if token.map else 0
+
+
+def _fence_closed(token: Token, lines: list[str]) -> bool:
+    """True if a fence ends on its own closing line, not at its container's end."""
+    if token.map is None:
+        return False
+    start, end = token.map
+    if end - start < 2:
+        return False
+    last = re.sub(r"^[\s>]*", "", lines[end - 1]).rstrip()
+    character, length = token.markup[0], len(token.markup)
+    return re.fullmatch(rf"{re.escape(character)}{{{length},}}", last) is not None
 
 
 def _last_clause(text: str) -> int:
@@ -242,40 +216,77 @@ class _DocumentReader:
         self.name = name
         self.area = area
         self.trace = trace
-        # The level of the current normative lead-in, while its list lasts,
-        # and the indent its items must exceed (-1 for a paragraph lead-in).
-        self.lead_in: str | None = None
-        self.lead_in_indent = -1
 
     def problem(self, number: int, text: str) -> None:
         self.trace.problems.append(f"{self.name}:{number}: {text}")
 
     def read(self, text: str) -> None:
-        blocks = list(_blocks(text))
-        for index, block in enumerate(blocks):
-            following = blocks[index + 1].kind if index + 1 < len(blocks) else None
-            self.read_block(block, following)
+        """Walk the CommonMark token stream of one document."""
+        tokens = _MARKDOWN.parse(text)
+        lines = text.splitlines()
+        stack: list[_List | _Item] = []
+        lead: str | None = None  # from a lead-in, for the list right after it
+        index = 0
+        while index < len(tokens):
+            token = tokens[index]
+            if token.type in _LIST_OPEN:
+                stack.append(_List(lead))
+                lead = None
+            elif token.type in _LIST_CLOSE:
+                stack.pop()
+            elif token.type == "list_item_open":
+                parent = stack[-1]
+                if isinstance(parent, _List):
+                    stack.append(_Item(_line(token), parent))
+            elif token.type == "list_item_close":
+                item = stack.pop()
+                if (
+                    isinstance(item, _Item)
+                    and item.paragraphs == 0
+                    and item.parent.lead is not None
+                ):
+                    self.problem(item.line, "item under a normative lead-in has no ID")
+            elif token.type == "fence":
+                if not _fence_closed(token, lines):
+                    self.problem(_line(token), "code fence is never closed")
+            elif token.type == "heading_open":
+                inline = tokens[index + 1]
+                self.read_unit(_Unit(_line(token), inline.content, "heading"))
+            elif token.type == "tr_open":
+                cells = []
+                row = index
+                while tokens[index].type != "tr_close":
+                    if tokens[index].type == "inline":
+                        cells.append(tokens[index].content)
+                    index += 1
+                self.read_unit(_Unit(_line(tokens[row]), " | ".join(cells), "row"))
+            elif token.type == "html_block":
+                self.read_unit(
+                    _Unit(_line(token), token.content.replace("\n", " "), "html")
+                )
+            elif token.type == "paragraph_open":
+                inline = tokens[index + 1]
+                after = tokens[index + 3] if index + 3 < len(tokens) else None
+                kind, governed = "paragraph", None
+                container = stack[-1] if stack else None
+                if isinstance(container, _Item):
+                    kind = "item" if container.paragraphs == 0 else "continuation"
+                    governed = container.parent.lead if kind == "item" else None
+                    container.paragraphs += 1
+                unit = _Unit(
+                    _line(token),
+                    inline.content.replace("\n", " "),
+                    kind,
+                    governed,
+                    after is not None and after.type in _LIST_OPEN,
+                )
+                lead = self.read_unit(unit)
+                index += 2  # the inline and paragraph_close tokens
+            index += 1
 
-    def lead_in_start(self, block: _Block, following: str | None) -> int | None:
-        """Where the block's normative lead-in starts, if it has one."""
-        if block.kind not in ("paragraph", "continuation", "item"):
-            return None
-        start = _last_clause(block.text)
-        if not _NORMATIVE.search(block.text[start:]):
-            return None
-        colon = block.text.rstrip().endswith(":")
-        before_list = block.kind == "paragraph" and following == "item"
-        if not (colon or before_list):
-            return None
-        if colon and following != "item":
-            self.problem(block.line, "normative lead-in has no list after it")
-        return start
-
-    def read_block(self, block: _Block, following: str | None) -> None:
-        number, text, kind = block.line, block.text, block.kind
-        if kind == "unclosed fence":
-            self.problem(number, "code fence is never closed")
-            return
+    def read_unit(self, unit: _Unit) -> str | None:
+        """Check one unit. Return the level of its lead-in if a list follows."""
+        number, text, kind = unit.line, unit.text, unit.kind
         for word in dict.fromkeys(m.group(1) for m in _NORMATIVE.finditer(text)):
             if word not in _USED:
                 self.problem(
@@ -283,46 +294,51 @@ class _DocumentReader:
                     f"{word} is not one of the normative words in spec/README.md; "
                     f"use {', '.join(_USED)}",
                 )
-        if kind in ("paragraph", "heading"):
-            self.lead_in = None
         if kind == "heading":
             if _NORMATIVE.search(text):
                 self.problem(number, "heading uses a normative word")
             for match in _ID.finditer(text):
                 self.problem(number, f"{match.group(2)} is in a heading")
-            return
-        if kind == "item" and block.indent <= self.lead_in_indent:
-            self.lead_in = None  # a sibling of the item that led in
-        under_lead_in = kind == "item" and self.lead_in is not None
+            return None
 
-        lead = self.lead_in_start(block, following)
-        body = text if lead is None else text[:lead]
-        if lead is not None:
-            for match in _ID.finditer(text[lead:]):
-                self.problem(
-                    number,
-                    f"{match.group(2)} is on a normative lead-in; "
-                    "give the IDs to its list items",
-                )
-            words = [m.group(1) for m in _NORMATIVE.finditer(text[lead:])]
-            self.lead_in = min((_LEVELS[w] for w in words), key=_STRENGTH.index)
-            self.lead_in_indent = block.indent if kind == "item" else -1
+        lead_level: str | None = None
+        start: int | None = None
+        if kind in ("paragraph", "item", "continuation"):
+            start = _last_clause(text)
+            words = [m.group(1) for m in _NORMATIVE.finditer(text[start:])]
+            colon = text.rstrip().endswith(":")
+            if words and (colon or unit.before_list):
+                lead_level = min((_LEVELS[w] for w in words), key=_STRENGTH.index)
+                if not unit.before_list:
+                    self.problem(number, "normative lead-in has no list after it")
+                for match in _ID.finditer(text[start:]):
+                    self.problem(
+                        number,
+                        f"{match.group(2)} is on a normative lead-in; "
+                        "give the IDs to its list items",
+                    )
+            else:
+                start = None
+        body = text if start is None else text[:start]
 
         matches = list(_ID.finditer(body))
         if not matches:
             if _NORMATIVE.search(body):
                 self.problem(number, "normative statement has no requirement ID")
-            elif under_lead_in and lead is None:
+            elif unit.governed is not None and lead_level is None:
                 self.problem(number, "item under a normative lead-in has no ID")
-            return
-        if _NORMATIVE.search(body[: matches[0].start()]):
-            self.problem(number, "normative text before the first requirement ID")
-        for index, match in enumerate(matches):
-            end = matches[index + 1].start() if index + 1 < len(matches) else None
-            self.read_requirement(number, match, body[match.end() : end], under_lead_in)
+        else:
+            if _NORMATIVE.search(body[: matches[0].start()]):
+                self.problem(number, "normative text before the first requirement ID")
+            for index, match in enumerate(matches):
+                end = matches[index + 1].start() if index + 1 < len(matches) else None
+                self.read_requirement(
+                    number, match, body[match.end() : end], unit.governed
+                )
+        return lead_level if unit.before_list else None
 
     def read_requirement(
-        self, number: int, match: re.Match[str], statement: str, under_lead_in: bool
+        self, number: int, match: re.Match[str], statement: str, governed: str | None
     ) -> None:
         rid = match.group(2)
         withdrawn = match.group(1) is not None
@@ -364,8 +380,8 @@ class _DocumentReader:
                 )
             if words:
                 level = _LEVELS[words[0]]
-            elif under_lead_in:
-                level = self.lead_in
+            elif governed is not None:
+                level = governed
             else:
                 self.problem(number, f"{rid} marks no normative statement")
         self.trace.requirements[rid] = Requirement(

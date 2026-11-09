@@ -36,7 +36,9 @@ Issues = "https://github.com/vignzpie/django-neolith/issues"
 Changelog = "https://github.com/vignzpie/django-neolith/blob/main/CHANGELOG.md"
 
 [dependency-groups]
-test = ["pytest>=8.4", "pytest-django>=4.11", "packaging>=25"]
+# markdown-it-py: the spec trace parses spec/ as CommonMark (ADR 0018). Development
+# and CI only, never a runtime dependency; pinned so the parse cannot drift.
+test = ["pytest>=8.4", "pytest-django>=4.11", "packaging>=25", "markdown-it-py==4.2.0"]
 lint = ["ruff>=0.14", "mypy>=1.18", "django-stubs>=5.2"]
 dev = [{ include-group = "test" }, { include-group = "lint" }]
 
