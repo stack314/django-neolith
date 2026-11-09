@@ -32,7 +32,7 @@ P1 to P4 apply once ADR 0015 is Accepted, and P5 and P6 once [ADR 0018](docs/adr
 - **P2.** Specification text names no Django or Python construct. Framework-specific detail belongs in the implementation's documentation.
 - **P3.** The normative words MUST, MUST NOT, REQUIRED, SHOULD and MAY are used in capitals, with their RFC 2119 meaning, only in `spec/`.
 - **P4.** A change to the specification changes the conformance tests to match, in the same pull request.
-- **P5.** Every statement in `spec/` that uses a normative word carries a requirement ID, such as **CON-4**, in its document's area as listed in `spec/README.md`. One ID marks one requirement. Each item of a list introduced by a normative lead-in carries its own ID. IDs are never renumbered or reused. A withdrawn requirement stays in place in the form `~~**CON-4.** <statement>~~ Withdrawn in spec 0.2: <reason>.`
+- **P5.** Every statement in `spec/` that uses a normative word carries a requirement ID, such as **CON-4**, in its document's area as listed in `spec/README.md`. One ID marks one requirement. Each item of a list introduced by a normative lead-in carries its own ID, and the lead-in carries none. Headings use no normative word. IDs are never renumbered or reused. A withdrawn requirement stays in place in the form `~~**CON-4.** <statement>~~ Withdrawn in spec 0.2: <reason>.`
 - **P6.** A pull request that adds, changes or withdraws a requirement lists those IDs in the *Spec trace* section of its description, with the tests that cite them.
 
 ## Code
@@ -56,7 +56,7 @@ These rules apply to the `neolith` package. Tests and examples follow them too, 
 - **T2.** Contract behaviour is tested through the shared contract suite, which runs over every transport. A test that exercises only one transport needs a reason.
 - **T3.** Tests are deterministic. No sleeping to wait for something, no network beyond the local machine, and no dependence on test order.
 - **T4.** The full CI matrix passes before review is requested. Deprecation warnings are errors ([ADR 0012](docs/adr/0012-supported-python-and-django-versions.md)).
-- **T5.** A test that verifies a requirement cites it with the `spec` marker, for example `@pytest.mark.spec("CON-4")`. A test that cites an unknown or withdrawn ID fails the build. Once a document's coverage is enforced, from the roadmap step that implements it, every requirement in it stated with MUST, MUST NOT or REQUIRED has a citing test or an entry under `[not-tested]` in `tests/spec_trace.toml` that gives the reason. Applies once [ADR 0018](docs/adr/0018-requirement-ids-and-spec-to-test-traceability.md) is Accepted.
+- **T5.** A test that verifies a requirement cites it with the `spec` marker, for example `@pytest.mark.spec("CON-4")`. A test that cites an unknown or withdrawn ID fails the build. Once a document's coverage is enforced, from the roadmap step that implements it, every requirement in it stated with MUST, MUST NOT or REQUIRED has a citing test that is not marked to skip or to fail expectedly, or an entry under `[not-tested]` in `tests/spec_trace.toml` that gives the reason. Applies once [ADR 0018](docs/adr/0018-requirement-ids-and-spec-to-test-traceability.md) is Accepted.
 
 ### Running the checks locally
 
