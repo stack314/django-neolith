@@ -5,7 +5,7 @@
 
 ## Context
 
-A detached app has no shared user table, so `request.user` needs another source. Some projects will have an identity app or an external identity provider (OIDC, tokens, permission checks), but [0005](0005-small-core-optional-hub-apps.md) says the core depends on no particular app.
+A detached app has no shared user table, so `request.user` needs another source. Some projects will have an identity app or an external identity provider (OIDC, tokens, permission checks), but [0005](0005-small-required-core.md) says the core depends on no particular app.
 
 ## Options
 

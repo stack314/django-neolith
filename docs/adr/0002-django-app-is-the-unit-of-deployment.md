@@ -15,10 +15,12 @@ Django's app is a great unit of modularity, and its unit of deployment is the pr
 
 ## Decision
 
-The Django app is the unit. Each app declares its needs on a `NeolithAppConfig` (contracts provided and required, contrib apps, resources). The **app host** builds settings from those declarations and boots one app or many. Each app runs in one of two modes, chosen per app in configuration:
+The Django app is the unit. Each app declares its needs on a `NeolithAppConfig` (contracts provided and required, contrib apps, resources). The **app host** builds settings from those declarations and boots one app or many. Each app runs in a mode, chosen per app in configuration:
 
 - **Attached:** in a shared process, inside a host running several apps. A conventional Django project is just such a host.
 - **Detached:** booted alone by `neolith run <app>`, reached over the network (HTTP by default; see [0014](0014-pluggable-connector-transports.md)).
+
+The same app may also run in both modes at once ([0016](0016-an-app-may-run-attached-and-detached-at-once.md)).
 
 Follows principles 1 (*the app over the project*) and 3 (*configuration over code changes*).
 

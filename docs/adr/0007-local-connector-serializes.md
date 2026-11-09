@@ -17,7 +17,7 @@ The obvious local connector just calls the implementation and returns its result
 
 Option 3. Local calls round-trip arguments and results through the same Pydantic serialization the remote connector uses. Callers get fresh contract-typed objects, never shared references.
 
-Follows principles 5 (*behave detached, even when attached*) and 8 (*one test suite over two code paths*).
+Follows principles 5 (*same semantics over same mechanics*) and 8 (*one test suite over many code paths*).
 
 ## Consequences
 

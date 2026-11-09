@@ -16,7 +16,7 @@
 
 Option 2. The app host gives every app its own database alias, and a router pins each app's models to it. Django opens a separate connection per alias, and `transaction.atomic()` is per alias. So two attached apps cannot share a transaction even on one server, which is exactly how they behave once detached.
 
-Follows principle 5 (*behave detached, even when attached*).
+Follows principle 5 (*same semantics over same mechanics*).
 
 ## Consequences
 

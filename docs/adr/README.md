@@ -19,7 +19,7 @@ Questions not yet decided are in [open-questions.md](../open-questions.md).
 | [0002](0002-django-app-is-the-unit-of-deployment.md) | The Django app is the unit of deployment | Accepted |
 | [0003](0003-apps-communicate-through-contracts.md) | Apps communicate only through contracts and connectors | Accepted |
 | [0004](0004-each-app-owns-its-data.md) | Each app owns its data | Accepted |
-| [0005](0005-small-core-optional-hub-apps.md) | Small required core; no bundled shared-service apps | Proposed |
+| [0005](0005-small-required-core.md) | Small required core; no bundled shared-service apps | Proposed |
 | [0006](0006-contracts-are-typed-and-published-as-openapi.md) | Contracts are typed and published as OpenAPI | Accepted |
 | [0007](0007-local-connector-serializes.md) | The local connector serializes, like the remote one | Proposed |
 | [0008](0008-typed-contract-errors-in-both-modes.md) | Contract errors are typed and identical in both modes | Proposed |

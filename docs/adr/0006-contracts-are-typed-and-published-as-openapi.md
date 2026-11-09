@@ -17,7 +17,7 @@ A contract has to be usable in-process, over the network, and eventually by serv
 
 Option 3. Contracts are defined with type hints and Pydantic models or dataclasses. Neolith generates the OpenAPI spec and the REST endpoints from them. Contracts are versioned by name (`<contract>.v1`, `<contract>.v2`). A breaking change creates a new version, and old versions stay until no caller uses them.
 
-Follows principle 11 (*language-neutral contracts over Python-only ones*).
+Follows principle 11 (*specification over implementation*).
 
 ## Consequences
 

@@ -22,7 +22,7 @@ Option 3.
 - **Events** (`event(...).publish`, `@subscribe`) replace cross-app Django signals, and work in both modes.
 - A **neolith check**, built on existing import linting, enforces the boundary in CI.
 
-Follows principles 2 (*contracts over imports*) and 5 (*behave detached, even when attached*).
+Follows principles 2 (*contracts over imports*) and 5 (*same semantics over same mechanics*).
 
 ## Consequences
 

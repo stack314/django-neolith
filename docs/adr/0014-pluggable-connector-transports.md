@@ -23,7 +23,7 @@ Option 2.
 - The core ships two transports. **In-process** is attached mode, and serializes per [0007](0007-local-connector-serializes.md). **HTTP/JSON** is the default for detached apps, described by OpenAPI.
 - Other transports, such as gRPC or a message queue, can be added as separate packages behind the same interface.
 - Contracts stay transport-neutral. They are defined once in Python types, and each transport projects them into its own schema: OpenAPI for HTTP, protobuf for gRPC.
-- Every transport must pass the same contract test suite. This extends principle 8 (*one test suite over two code paths*) from two modes to any number of transports.
+- Every transport must pass the same contract test suite. This is principle 8 (*one test suite over many code paths*) applied to every transport.
 
 GraphQL is not planned as a transport. Contracts are named actions, while GraphQL is a query language over a data graph. A GraphQL API over several apps' contracts fits better as a gateway in front of them than as a way for apps to call each other.
 
