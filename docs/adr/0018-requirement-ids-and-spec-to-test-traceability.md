@@ -27,7 +27,7 @@ Option 4.
 **IDs.**
 
 - Every statement in `spec/` that uses a normative word carries an ID of the form `<AREA>-<n>`. The ID is written in bold before the statement, as `**<AREA>-<n>.**`.
-- Each document has one area, listed in the document table in `spec/README.md`: `OVR` (00), `CON` (01), `TRN` (02), `HTTP` (03), `EVT` (04), `APP` (05) and `CNF` (06). A new document gets its area in the same table.
+- Each document has one area, listed in the document table in `spec/README.md`: `OVR` (00), `CON` (01), `TRN` (02), `HTTP` (03), `EVT` (04), `APP` (05) and `CNF` (06). An area is two to five capital letters named after the document's subject, not its number, so it stays valid if documents are renumbered or split. A new document gets its area in the same table, and an area is never reused.
 - Numbers are assigned in order within an area. An ID is never renumbered or reused. A withdrawn requirement keeps its ID, struck through, with the specification version that withdrew it and the reason.
 - A statement written as plain fact, without a normative word, gets no ID. Making such a statement normative changes what the specification means, and follows the rules for that in `spec/README.md`.
 - An implementation cites a requirement by specification version and ID, for example `spec 0.1 <AREA>-<n>`.
@@ -41,7 +41,7 @@ Option 4.
 **Workflow for a roadmap step.**
 
 1. The issue holds the plan: the specification documents the step implements, the decisions and open questions it depends on, and a task list that names the requirement IDs each task covers.
-2. The pull request changes the specification first, with IDs, then adds tests that cite them, then the code.
+2. One pull request carries the specification change with its IDs, the tests that cite them and the code, in that order. The specification is not merged ahead of the code, so `main` never has one without the other (P1, P4).
 3. The pull request description carries a *Spec trace* section listing the IDs added, changed or withdrawn, and the tests that cite them.
 4. A plan never settles an open question or a Proposed decision record. Those are settled by a record the maintainer accepts.
 
