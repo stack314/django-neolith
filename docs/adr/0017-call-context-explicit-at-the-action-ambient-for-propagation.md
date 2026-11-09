@@ -106,7 +106,7 @@ class InventoryImpl:
 
 - An action that reads the context declares a second parameter annotated `CallContext`, and receives it explicitly. An action that does not read it omits the parameter. The import-time check (K2) accepts exactly these two shapes.
 - The app host also holds the same immutable value in one context variable for the duration of the action. Connectors read that variable only to derive the outgoing call's context. App code has no public way to read the variable in 0.1.
-- A connector call may pass `context=` explicitly. This overrides the ambient value and covers the cases where it is absent, such as a thread started by app code.
+- A connector call may pass `context=` explicitly. It is treated as the parent in place of the ambient value, and the outgoing context is derived from it by the same rules. It covers the cases where the ambient value is absent, such as a thread started by app code.
 
 Evaluation:
 
@@ -115,16 +115,16 @@ Evaluation:
 - **Parity:** as in options 1 and 2.
 - **Propagation:** automatic, as in option 2.
 - **Concurrency:** as in option 2 for propagation, but a lost context fails loudly (see Decision) instead of silently.
-- **K6:** the variable is state owned by the app host and documented. App code never reads it, so no app function has a hidden dependency.
+- **K6:** the variable is state owned by the app host and documented, and app code never reads it directly. Any helper that calls a connector still depends on it, though, and fails without it. This is the same implicit dependency as option 2, with one difference: Decision 5 makes a missing context an error instead of a silent gap. It is not removed, only made visible.
 - **DX:** close to option 2. Only actions that read the context mention it.
 
 ## Decision
 
 Option 4.
 
-1. **`CallContext` is a frozen, typed value**, not a live object. It holds the principal as a principal value resolved through [0010](0010-pluggable-principal-resolution.md), never a user model instance. It also holds the trace identifier, the idempotency key and the absolute deadline. An implementation sees an equal value over every transport, apart from the span identifier.
-2. **Inbound is explicit.** An implementation receives the context by declaring a second parameter annotated `CallContext`. No other shape is accepted. A mismatch fails at import time with a message naming the action.
-3. **Outbound is ambient.** The app host keeps one private context variable. Transports set it around each action and reset it afterwards. Connectors derive each outgoing context from it:
+1. **`CallContext` is a frozen, typed value**, not a live object. It holds the principal as a principal value resolved through [0010](0010-pluggable-principal-resolution.md), never a user model instance. It also holds the trace identifier, the idempotency key and the absolute deadline. An implementation sees an equal value over every transport, apart from the span identifier and, for now, the principal. Over HTTP the principal is whatever the provider's 0010 backend resolves from `Authorization`. With the v0.1 shared-secret backend that is the calling app, while in-process it is the original principal. Closing that gap is listed under Consequences as a decision still to make.
+2. **Inbound is explicit.** An implementation receives the context by declaring a second parameter annotated `CallContext`. An action that does not read the context omits the parameter. These are the only two shapes accepted. A mismatch fails at import time with a message naming the action.
+3. **Outbound is ambient.** The app host keeps one private context variable that holds a call scope. Transports set it around each action, mark the scope closed when the action returns or raises, and then reset the variable. Connectors reject a closed scope as they reject a missing one (Decision 5). A connector call may instead pass `context=`. That value is treated as the parent in place of the ambient scope, never sent as is. Either way, the outgoing context is derived from the parent:
    - the deadline is the earlier of the parent's deadline and the call's own timeout;
    - the trace continues from the parent;
    - the principal is carried over unchanged.
@@ -136,6 +136,8 @@ Option 4.
 
    Transports never fabricate a context.
 5. **A connector call with no active context and no `context=` argument fails** with a contract error that says where a context is expected. It does not silently start a new, unauthenticated trace. This turns the known weakness of context variables, a context lost across a thread started by app code, into a visible failure (principle 6).
+
+   The closed scope covers the opposite weakness, a context that is kept too long. From Python 3.14, a new `threading.Thread` copies the caller's context when `sys.flags.thread_inherit_context` is set, which is the default on free-threaded builds. Executor workers keep the context they were started with for their whole life. A worker started during call A would otherwise make later calls under A's principal and deadline. With the scope closed after A returns, those calls fail instead. One case remains that the host cannot detect: a long-lived worker, started during A, that runs work for another call while A is still in progress. The documentation must say that a shared executor is used only with `context=` or with a per-task copy of the context (see Consequences).
 6. **No public accessor in 0.1.** `current_context()` from option 2 is not provided. If a real need appears, adding it later is a compatible change. Removing it after release would not be.
 
 Follows principles 5 (*same semantics over same mechanics*), 6 (*visible failure over transparent calls*) and 10 (*Django-native over framework-new*): explicit arguments where code reads them, as views do, and context-local state where the framework carries it, as Django does with language and time zone.
@@ -144,12 +146,24 @@ Follows principles 5 (*same semantics over same mechanics*), 6 (*visible failure
 
 - Action signatures stay close to the contract's. The context appears only where it is used.
 - Deadlines and traces propagate without author effort, and a lost context is an error, not a silent gap.
-- App code that starts its own threads or executors must pass `context=` explicitly. The documentation must show this, and the conformance suite gets a test that a call from such a thread fails as described.
+- App code that starts its own threads or executors passes the context on in one of two supported ways:
+  - inside an action, by passing `ctx` as `context=`;
+  - where no `ctx` is at hand, such as a view rooted by the host, by running each task with `contextvars.copy_context().run(...)`. That is one copy per task, because a `Context` cannot be entered by two threads at once.
+
+  Work that outlives the call that started it opens its own explicit scope (Decision 4), because the inherited scope is closed by then. The documentation must show all three cases.
+- The conformance suite gets two tests:
+  - a connector call from a thread whose target runs inside a fresh, empty `contextvars.Context()` fails as described. The empty context makes the result the same on every build;
+  - a connector call made through a scope that has already closed fails the same way.
 - The roadmap's public surface changes in one place: the `ctx` parameter becomes optional per action. CONTRIBUTING K6 is reworded to name this context variable as host-owned state once this record is Accepted.
 - The specification needs:
   - the derivation rules for a child context (deadline, trace, principal);
   - the list of places a root context may be created.
 - Left for later records or the specification:
   - **Idempotency keys for child calls.** A child call needs its own key. Whether it is derived deterministically from the parent's key, so that a retried parent reproduces its children's keys, belongs to the spec for transports.
+  - **The principal over HTTP.** In-process, the provider sees the original principal. Over HTTP with the v0.1 shared-secret backend of 0010, it sees the calling app. There are two ways to close the gap, and they have different trust costs:
+    - the HTTP transport forwards the original principal, and the service token asserts it on the caller's behalf. Parity holds, but anyone holding the shared secret can then assert any principal;
+    - the provider sees the calling app, and parity for the principal is narrowed to attached mode until a backend can carry delegated identity.
+
+    To be decided before this record is Accepted, or in a record of its own.
   - **Calling under a different principal**, for example as the calling app's own principal. Not decided here.
   - **Interop with OpenTelemetry**, if installed, as the source of the trace. Not decided here, and no new runtime dependency is implied (K5).
