@@ -15,5 +15,6 @@ This repository holds the specification work and its reference implementation.
 - [Architecture decision records](docs/adr/README.md)
 - [Open questions](docs/open-questions.md)
 - [Contributing](CONTRIBUTING.md)
+- [Code of conduct](CODE_OF_CONDUCT.md)
 
 Licensed under the [BSD 3-Clause License](LICENSE).

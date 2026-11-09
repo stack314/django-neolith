@@ -4,6 +4,8 @@ Thank you for considering a contribution. This document is the standard every pu
 
 Neolith is young. Nothing is installable yet, and the specification and the reference implementation are being written together. That makes design discussion as valuable as code right now.
 
+Everyone taking part is expected to follow the [code of conduct](CODE_OF_CONDUCT.md).
+
 ## Before you start
 
 - **S1.** Small, obvious fixes (a typo, a broken link, a wrong example) can go straight to a pull request.
