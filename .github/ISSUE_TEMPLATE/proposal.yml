@@ -1,0 +1,38 @@
+name: Proposal
+description: Suggest a change or a new capability. Describe the problem before the solution (CONTRIBUTING S2).
+labels: ["proposal"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please check the [decision records](https://github.com/vignzpie/django-neolith/blob/main/docs/adr/README.md) and [open questions](https://github.com/vignzpie/django-neolith/blob/main/docs/open-questions.md) first. A change that is hard to reverse, shapes public API, adds a runtime dependency or changes what the specification means needs a decision record (CONTRIBUTING S3, D1).
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is hard or impossible today, and for whom.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed approach
+      description: How you would solve it. Alternatives you considered are welcome too.
+    validations:
+      required: true
+  - type: textarea
+    id: records
+    attributes:
+      label: Related decisions and open questions
+      description: Decision records, open questions or specification sections this touches, and whether it contradicts any of them (D1).
+  - type: dropdown
+    id: needs-adr
+    attributes:
+      label: Needs a decision record?
+      description: See CONTRIBUTING S3.
+      options:
+        - "Yes"
+        - "No"
+        - Not sure
+    validations:
+      required: true

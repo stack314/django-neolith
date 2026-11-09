@@ -2,9 +2,11 @@
 
 Deploy Django apps, not Django projects.
 
+**Status: pre-alpha. Nothing is installable yet.**
+
 Neolith lets a Django app run inside a shared process or as its own service without changing its code. Apps talk to each other only through typed contracts, so the same code and the same tests hold in both arrangements.
 
-This repository holds the specification work and its reference implementation. Nothing is installable yet.
+This repository holds the specification work and its reference implementation.
 
 - [Vision](VISION.md)
 - [Guiding principles](docs/principles.md)
