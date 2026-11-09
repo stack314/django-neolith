@@ -37,6 +37,8 @@ The sketches use one implementation that reads the principal and calls a second 
 @Inventory.implement
 class InventoryImpl:
     def reserve(self, request: ReserveRequest, ctx: CallContext) -> ReserveReply:
+        if ctx.principal is None:
+            raise ContractError(kind="permission_denied", message="reserving needs a principal")
         owner = ctx.principal.id
         quote = connect("pricing.v1").quote(QuoteRequest(sku=request.sku), context=ctx)
         ...
@@ -101,6 +103,8 @@ One object bundles the request and the context, much as Django's `HttpRequest` b
 @Inventory.implement
 class InventoryImpl:
     def reserve(self, request: ReserveRequest, ctx: CallContext) -> ReserveReply:
+        if ctx.principal is None:
+            raise ContractError(kind="permission_denied", message="reserving needs a principal")
         owner = ctx.principal.id
         quote = connect("pricing.v1").quote(QuoteRequest(sku=request.sku))  # child context derived by the host
         ...
@@ -111,7 +115,7 @@ class InventoryImpl:
 
 - An action that reads the context declares a second parameter annotated `CallContext`, and receives it explicitly. An action that does not read it omits the parameter. The import-time check (K2) accepts exactly these two shapes.
 - The app host also holds the same immutable value in one context variable for the duration of the action. Connectors read that variable only to derive the outgoing call's context. App code has no public way to read the variable in 0.1.
-- A connector call may pass `context=` explicitly. It is treated as the parent in place of the ambient value, and the outgoing context is derived from it by the same rules. It covers the cases where the ambient value is absent, such as a thread started by app code.
+- A connector call may pass `context=` explicitly. The value selects the parent scope in place of the ambient one, and the outgoing context is derived from that scope by the same rules. It covers the cases where the ambient value is absent, such as a thread started by app code.
 
 Evaluation:
 
@@ -134,8 +138,8 @@ Option 4.
 
    An implementation sees an equal value over every transport. Equality here means equality of the propagated and per-call fields, compared with the trace's span identifier and the scope id left out: the span identifier changes at each hop by design, and the scope id is local to one host. `CallContext.__eq__` follows the same rule, so tests can compare values across transports directly. Keeping the principal and the caller apart is what makes that possible; Decision 6 says how they cross HTTP.
 2. **Inbound is explicit.** An implementation receives the context by declaring a second parameter annotated `CallContext`. An action that does not read the context omits the parameter. These are the only two shapes accepted. A mismatch fails at import time with a message naming the action.
-3. **Outbound is ambient.** The app host keeps one private context variable that holds a call scope. Every scope, whether a root (Decision 4) or the scope a transport opens around an action, is marked closed when it exits, by return or by exception, and the variable is then reset. Connectors reject a closed scope as they reject a missing one (Decision 5). A connector call may instead pass `context=`. That value is treated as the parent in place of the ambient scope, never sent as is. Either way, the outgoing context is derived from the parent:
-   - the deadline is the earlier of the parent's deadline and the call's own timeout;
+3. **Outbound is ambient.** The app host keeps one private context variable that holds a call scope. Every scope, whether a root (Decision 4) or the scope a transport opens around an action, is marked closed when it exits, by return or by exception, and the variable is then reset. Connectors reject a closed scope as they reject a missing one (Decision 5). A connector call may instead pass `context=`. That value only selects the parent scope, in place of the ambient one; it is never sent as is, and its fields are never read. Either way, the outgoing context is derived from the fields the parent scope issued:
+   - the deadline is the earlier of the parent's deadline and the call's own `timeout=`, if given. A call's timeout can only shorten the deadline, never extend it, as with gRPC's per-call deadlines;
    - the trace continues from the parent;
    - the principal is carried over unchanged;
    - the caller is the app making the call: the app the parent scope belongs to, or the app a root was opened for;
@@ -147,14 +151,16 @@ Option 4.
 
      The derivation does not depend on the order in which calls reach the connector, so it gives the same keys under concurrent fan-out (`asyncio.gather`, or an executor running each task in its own copy of the context). Only identical requests share a count, and those are interchangeable. When the parent has no key (a root that is not itself a call), the child's key is random.
 
-     The occurrence counts belong to the parent's scope, not to a context value. The host keeps them on the scope it opened for the parent call, behind a lock. A value passed as `context=` is matched to its scope by the value's scope id (Decision 1), looked up in the host's table of open scopes. Matching never uses object identity, so a copy of the value, or one rebuilt with `dataclasses.replace` without changing the scope id, still matches. Ambient calls and explicit `context=` calls from any thread therefore share one set of counts. A `context=` value whose scope has closed, or whose scope id names no open scope on this host, is rejected as in Decision 5.
+     The occurrence counts belong to the parent's scope, not to a context value. The host keeps them on the scope it opened for the parent call, behind a lock. A value passed as `context=` is matched to its scope by the value's scope id (Decision 1), looked up in the host's table of open scopes. Matching never uses object identity, so a copy of the value still matches. The scope id proves only which open scope is meant; the parent's deadline, trace, principal and key are read from that scope, never from the passed value. A value rebuilt with `dataclasses.replace` to carry a later deadline, another principal or another key therefore changes nothing, and a child's deadline is never later than its parent's (spec 00). Ambient calls and explicit `context=` calls from any thread therefore share one set of counts and one set of parent fields. A `context=` value whose scope has closed, or whose scope id names no open scope on this host, is rejected as in Decision 5.
 
      A retried parent therefore reproduces its children's keys, and an idempotent child keeps its own promise (spec 01) across the parent's retry. The specification does not make a host remember completed calls, so this record promises nothing more: a non-idempotent child still runs again when its parent is retried. A host-side idempotency record would close that gap; see Consequences.
 4. **Roots are created only at the app host's entry points:**
    - the provider side of each transport (the HTTP transport builds the context from its headers);
-   - the host's handling of ordinary Django requests (the principal from the request, through 0010, or none for an anonymous request). The app the root is opened for is the app that contains the resolved view's module, found with Django's app registry (`apps.get_containing_app_config`, which returns the innermost app whose name prefixes the dotted path). For a class-based view, the module is that of the view class. A view in no installed app, such as a project-level view, gives a root with no app, so calls from it have no caller (see Decision 6). `neolith check` warns at startup about every URL pattern whose view is in no app (K2);
+   - the host's handling of ordinary Django requests (the principal from the request, through 0010, or none for an anonymous request). The app the root is opened for is the app that contains the resolved view's module, found with Django's app registry (`apps.get_containing_app_config`, which returns the innermost app whose name prefixes the dotted path). For a class-based view, the module is that of the view class. A view in no installed app, such as a project-level view, gives a root with no app, so calls from it have no caller (see Decision 6). `neolith check` warns at startup about every URL pattern whose view is in no app (K2).
+
+     The request root's extent is fixed, because closing decides whether a call succeeds (Decision 3). The root opens when the request starts, in the host's middleware, placed outermost. It has no app until the URL resolves, so a connector call from middleware before resolution has no caller (Decision 6); it takes its app once the URL resolves. It closes when the response is closed: Django sends `request_finished` from `HttpResponseBase.close()`, which the WSGI server calls after the body is sent and the ASGI handler calls through `sync_to_async` (or sends directly when the request is cancelled). Django closes database connections on the same signal. The middleware therefore does not reset the variable when it returns, so the root stays current while a `TemplateResponse` renders after the view and while the server iterates a `StreamingHttpResponse` body. On a reused worker thread, a root left in the variable is closed, and the next request's root replaces it;
    - an explicit scope for management commands and background work. Opening one requires naming the app it runs for, and optionally a principal;
-   - the test harness. It opens a scope for the app under test, and the context factory that unit tests use builds its values inside that scope, so a `ctx` a test hands to an action, and passes on as `context=`, was issued by an open scope.
+   - the test harness. It opens a scope for the app under test. The context factory that unit tests use registers each value it builds as its own scope inside the harness scope, carrying the fields the test chose. A test can therefore vary the principal or the deadline, and a `ctx` it hands to an action, and passes on as `context=`, was issued by an open scope whose fields match it.
 
    Transports never fabricate a context.
 5. **A connector call with no active context and no `context=` argument fails** with a contract error that says where a context is expected. It does not silently start a new, unauthenticated trace. This turns the known weakness of context variables, a context lost across a thread started by app code, into a visible failure (principle 6). OpenTelemetry starts a new root trace when no context is active, which suits it because a trace carries no authority. Our context carries the principal and the deadline, so a silent root would drop both. Go's `context` package makes the same distinction: a root is chosen explicitly (`context.Background()`), never inferred. Our explicit root is the scope from Decision 4.
@@ -163,7 +169,7 @@ Option 4.
 6. **Over HTTP the caller is authenticated and the principal is asserted, in separate headers.** `Authorization` authenticates the calling app through the provider's 0010 backend, which becomes `caller`. The principal travels in a separate header as an assertion made by that caller. For each contract it provides, the provider's declaration lists which calling apps may assert a principal. The list governs only principal assertions, that is, a caller acting on behalf of someone else, as an actor does for a subject in RFC 8693. It is not a list of who may call at all.
 
    - **A call that carries a principal** is an assertion. The caller must be listed on that contract, or the call is refused with `permission_denied`. An app that calls a contract on behalf of a user must therefore be listed on it.
-   - **A call that carries no principal**, because its root had none (Decision 1), sends no assertion. It runs as the caller app alone, with no principal, and the list does not apply. Whether the action allows that is the action's own check.
+   - **A call that carries no principal**, because its root had none (Decision 1), sends no assertion. It runs as the caller app alone, with no principal, and the list does not apply. Whether the action allows that is the action's own check: an action that needs a principal refuses with `permission_denied`, the spec 01 kind for a call that is not allowed.
    - **A call with no caller** (from a root with no app, Decision 4) that carries a principal is refused with `permission_denied`, because no listed app is asserting it.
 
    The provider host checks this on every transport, in-process included. In-process, the host already knows both the caller and the propagated principal, and treats a present principal as asserted by the caller exactly as the HTTP transport does. Otherwise an attached caller that is not listed would succeed with the end user's principal and start failing the day it is detached ([0007](0007-in-process-transport-serializes.md), principle 5). With [0016](0016-an-app-may-run-attached-and-detached-at-once.md), the same call could also pass or fail depending on which provider the connector picks. Separating the caller from the principal follows OAuth token exchange ([RFC 8693](https://www.rfc-editor.org/rfc/rfc8693)), where a token names a subject and, in its `act` claim, the actor, and `may_act` limits who may act, and the service-mesh pattern, where mTLS authenticates the workload and a separate token carries the end user. A later 0010 backend can replace the bare assertion with a signed delegation token in the same header without changing `CallContext`.
@@ -181,9 +187,10 @@ Follows principles 5 (*same semantics over same mechanics*), 6 (*visible failure
   - where no `ctx` is at hand, such as a view rooted by the host, by running each task with `contextvars.copy_context().run(...)`. That is one copy per task, because a `Context` cannot be entered by two threads at once.
 
   Work that outlives the call that started it opens its own explicit scope (Decision 4), because the inherited scope is closed by then. The documentation must show all three cases.
-- The conformance suite gets four tests:
+- The conformance suite gets five tests:
   - a connector call from a thread whose target runs inside a fresh, empty `contextvars.Context()` fails as described. The empty context makes the result the same on every build;
-  - a connector call made through a scope that has already closed fails the same way, tested for both a closed action scope and a closed root scope;
+  - a connector call made through a scope that has already closed fails the same way, tested for both a closed action scope and a closed root scope. The request root is also tested at its edges, on WSGI and on ASGI: a connector call made while a `TemplateResponse` renders lazily, and one made from a `StreamingHttpResponse` body while the server iterates it, both succeed; the same call after the response is closed fails;
+  - a `context=` value rebuilt with a later deadline, another principal or another key derives the same child as the value its scope issued;
   - a call carrying a principal from a caller the contract does not list is refused with `permission_denied`, both in-process and over HTTP, and the same call from a listed caller succeeds in both. A call with no principal from an unlisted caller is not refused by the list in either mode;
   - a parent that fans out concurrently and is then retried derives the same child keys on both attempts.
 - The roadmap's public surface changes in one place: the `ctx` parameter becomes optional per action. CONTRIBUTING K6 is reworded to name this context variable as host-owned state once this record is Accepted.
