@@ -19,7 +19,7 @@ that CommonMark starts right after a governed list (a changed bullet or
 delimiter, or a split by an HTML block) is governed by the same lead-in. So
 is a list introduced right after it by a paragraph that ends in ":" and has no
 normative word or ID, such as "And also:" (any other paragraph makes its list
-description, unless it is itself a normative lead-in or the list is an ordered
+description, unless it ends in a normative lead-in or the list is an ordered
 list that resumes the numbering), and an ordered list that resumes its numbering
 before the next heading.
 
