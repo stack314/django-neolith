@@ -29,7 +29,7 @@ Questions not yet decided are in [open-questions.md](../open-questions.md).
 | [0012](0012-supported-python-and-django-versions.md) | Supported Python and Django versions | Accepted |
 | [0013](0013-license.md) | License: BSD-3-Clause | Accepted |
 | [0014](0014-pluggable-connector-transports.md) | Connector transports are pluggable | Proposed |
-| [0015](0015-specification-first-django-reference-implementation.md) | Specification first; django-neolith is the reference implementation | Proposed |
+| [0015](0015-specification-first-django-reference-implementation.md) | Specification first; django-neolith is the reference implementation | Accepted |
 | [0016](0016-an-app-may-run-attached-and-detached-at-once.md) | An app may run attached and detached at the same time | Proposed |
 | [0017](0017-call-context-explicit-at-the-action-ambient-for-propagation.md) | The call context is explicit at the action and ambient for propagation | Proposed |
-| [0018](0018-requirement-ids-and-spec-to-test-traceability.md) | Requirement IDs and spec-to-test traceability | Proposed |
+| [0018](0018-requirement-ids-and-spec-to-test-traceability.md) | Requirement IDs and spec-to-test traceability | Accepted |

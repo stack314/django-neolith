@@ -1,6 +1,7 @@
 # 0015. Specification first; django-neolith is the reference implementation
 
-- **Status:** Proposed
+- **Status:** Accepted
+- **Accepted:** 2026-11-10
 - **Date:** 2026-11-09
 
 ## Context

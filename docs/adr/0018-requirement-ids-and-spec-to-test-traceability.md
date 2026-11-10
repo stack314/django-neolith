@@ -1,11 +1,12 @@
 # 0018. Requirement IDs and spec-to-test traceability
 
-- **Status:** Proposed
+- **Status:** Accepted
+- **Accepted:** 2026-11-10
 - **Date:** 2026-11-10
 
 ## Context
 
-[ADR 0015](0015-specification-first-django-reference-implementation.md) (Proposed) makes the specification the definition of neolith and the conformance tests the arbiter. P1 and P4 in the contributing guide ask that the specification, the conformance tests and the code change together.
+[ADR 0015](0015-specification-first-django-reference-implementation.md) makes the specification the definition of neolith and the conformance tests the arbiter. P1 and P4 in the contributing guide ask that the specification, the conformance tests and the code change together.
 
 The specification has no way to name a single requirement. A reference can point only at a document and a heading. Headings move as outlines become prose, and one heading often holds several requirements. A test cannot say which requirement it verifies. Nothing shows a normative statement that no test covers. Another implementation cannot cite a requirement precisely when it reports a difference.
 
@@ -27,7 +28,7 @@ Option 4.
 **IDs.**
 
 - Every statement in `spec/` that uses a normative word carries an ID of the form `<AREA>-<n>`. The ID is written in bold before the statement, as `**<AREA>-<n>.**`. Each ID marks one requirement, with at most one normative word of its own, so that coverage counted per ID means what it says.
-- A normative lead-in is the last sentence or clause of a block that uses a normative word and either ends in a colon or, in a paragraph, is followed by a list, as for the transport interface in `spec/02`. Each item of its list is a requirement, carries its own ID and takes its level from the lead-in. The list is what a reader sees as one list, even where CommonMark splits it: a list that starts right after it with a changed bullet or delimiter, or after an HTML block, a list introduced right after it by a plain "And also:", and an ordered list that resumes its numbering before the next heading. The lead-in itself carries no ID. Headings use no normative word and carry no ID.
+- A normative lead-in is the last sentence or clause of a block that uses a normative word and either ends in a colon or, in a paragraph, is followed by a list, as for the transport interface in `spec/02`. Each item of its list is a requirement, carries its own ID and takes its level from the lead-in. The list is what a reader sees as one list, even where CommonMark splits it: a list that starts right after it with a changed bullet or delimiter, or after an HTML block, a list introduced right after it by a paragraph that ends in a colon and has no normative word or ID, such as "And also:", and an ordered list that resumes its numbering before the next heading. A list introduced by a paragraph that ends in a full stop instead is description, so that is how an example follows a governed list. The lead-in itself carries no ID. Headings use no normative word and carry no ID.
 - Each document has one area, listed in the document table in `spec/README.md`: `OVR` (00), `CON` (01), `TRN` (02), `HTTP` (03), `EVT` (04), `APP` (05) and `CNF` (06). An area is two to five capital letters named after the document's subject, not its number, so it stays valid if documents are renumbered or split. A new document gets its area in the same table, and an area is never reused.
 - Numbers are assigned in order within an area. An ID is never renumbered or reused. A withdrawn requirement stays in place: the ID and its statement are struck through, followed by the version and the reason, as `~~**<AREA>-<n>.** <statement>~~ Withdrawn in spec <version>: <reason>.`
 - A statement written as plain fact, without a normative word, gets no ID. Making such a statement normative changes what the specification means, and follows the rules for that in `spec/README.md`.
