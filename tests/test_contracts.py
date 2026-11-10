@@ -23,8 +23,10 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    GetJsonSchemaHandler,
     PlainSerializer,
     RootModel,
+    WithJsonSchema,
     WrapSerializer,
     computed_field,
     create_model,
@@ -33,6 +35,8 @@ from pydantic import (
     model_serializer,
 )
 from pydantic.alias_generators import to_camel
+from pydantic.json_schema import JsonSchemaValue
+from pydantic_core import CoreSchema
 
 from neolith import (
     Action,
@@ -528,6 +532,17 @@ def _nested_annotated_serializer() -> type[BaseModel]:
     return create_model("Deep", values=(list[Annotated[int, pairs]], ...))
 
 
+def _configured(config: ConfigDict) -> type[BaseModel]:
+    return create_model(
+        "Configured",
+        __config__=config,
+        when=(AwareDatetime, ...),
+        day=(date, ...),
+        span=(timedelta, ...),
+        ratio=(float, ...),
+    )
+
+
 def _nested_record_serializer() -> type[BaseModel]:
     return create_model("Holder", inner=(_field_serializer(), ...))
 
@@ -563,6 +578,35 @@ _SERIALIZING = [
         _nested_record_serializer,
         "field Holder.inner.cents has a custom serializer",
         id="nested record",
+    ),
+    pytest.param(
+        lambda: create_model(
+            "Partial", keep=(int, ...), secret=(int, Field(exclude=True))
+        ),
+        "field Partial.secret has an exclusion from serialization",
+        id="exclude",
+    ),
+    pytest.param(
+        lambda: create_model(
+            "Partial",
+            keep=(int, ...),
+            secret=(int, Field(exclude_if=lambda value: value == 0)),
+        ),
+        "field Partial.secret has an exclusion from serialization",
+        id="exclude_if",
+    ),
+    *(
+        pytest.param(
+            lambda key=key, value=value: _configured(cast("ConfigDict", {key: value})),
+            f"record Configured has {key} set",
+            id=key,
+        )
+        for key, value in [
+            ("ser_json_temporal", "milliseconds"),
+            ("ser_json_timedelta", "float"),
+            ("ser_json_inf_nan", "strings"),
+            ("ser_json_bytes", "base64"),
+        ]
     ),
 ]
 
@@ -606,6 +650,99 @@ def test_validators_do_not_change_the_wire_form() -> None:
             return abs(value)
 
     declare_with_field(Checked)
+
+
+def _custom_json_schema() -> type[BaseModel]:
+    class Custom(BaseModel):
+        value: int
+
+        @classmethod
+        def __get_pydantic_json_schema__(
+            cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
+        ) -> JsonSchemaValue:
+            return {"type": "string"}
+
+    return Custom
+
+
+@pytest.mark.spec("CON-16", "CON-17")
+@pytest.mark.parametrize(
+    ("make", "message"),
+    [
+        pytest.param(
+            lambda: create_model(
+                "Shown",
+                n=(
+                    cast("Any", Annotated[int, WithJsonSchema({"type": "string"})]),
+                    ...,
+                ),
+            ),
+            "field Shown.n has a JSON Schema override",
+            id="WithJsonSchema",
+        ),
+        pytest.param(
+            lambda: create_model(
+                "Shown",
+                n=(
+                    cast(
+                        "Any", list[Annotated[int, WithJsonSchema({"type": "string"})]]
+                    ),
+                    ...,
+                ),
+            ),
+            "field Shown.n has a JSON Schema override",
+            id="nested WithJsonSchema",
+        ),
+        pytest.param(
+            lambda: create_model(
+                "Shown", n=(int, Field(json_schema_extra={"type": "string"}))
+            ),
+            "field Shown.n has a JSON Schema override",
+            id="field json_schema_extra",
+        ),
+        pytest.param(
+            lambda: create_model(
+                "Shown",
+                __config__=ConfigDict(
+                    json_schema_extra={"properties": {"z": {"type": "string"}}}
+                ),
+                a=(int, ...),
+            ),
+            "record Shown has json_schema_extra set",
+            id="config json_schema_extra",
+        ),
+        pytest.param(
+            _custom_json_schema,
+            "record Custom has __get_pydantic_json_schema__ set",
+            id="__get_pydantic_json_schema__",
+        ),
+    ],
+)
+def test_record_whose_description_is_rewritten_is_rejected(
+    make: Callable[[], type[BaseModel]], message: str
+) -> None:
+    record = make()
+
+    def send(self: object, request: record) -> None: ...  # type: ignore[valid-type]
+
+    with pytest.raises(ContractDefinitionError, match=re.escape(message)):
+        contract("echo.v1")(declaration("Echo", {"send": action(send)}))
+
+
+@pytest.mark.spec("CON-16")
+def test_documentation_and_constraints_are_allowed() -> None:
+    class Documented(BaseModel):
+        count: int = Field(
+            ge=0, description="How many.", title="Count", examples=[1], deprecated=True
+        )
+        name: Annotated[str, Field(min_length=1, max_length=20)]
+
+    class Derived(Documented):
+        extra: bool = False
+
+    declare_with_field(Derived)
+    defs = Contract.of(declare_with_field(Documented, "docs.v1")).describe()["$defs"]
+    assert defs["Documented"]["properties"]["count"]["minimum"] == 0
 
 
 @pytest.mark.spec("CON-16")

@@ -421,12 +421,24 @@ class _TypeChecker:
                     "description and the wire agree"
                 )
             self.check(field.annotation, f"{path}.{field_name}")
-        for changed, kind in _serialization_changes(_model_schema(model), None):
+        overrides = [key for key in model.model_config if key.startswith("ser_json_")]
+        if "json_schema_extra" in model.model_config:
+            overrides.append("json_schema_extra")
+        if (
+            model.__get_pydantic_json_schema__.__func__  # type: ignore[attr-defined]
+            is not BaseModel.__get_pydantic_json_schema__.__func__  # type: ignore[attr-defined]
+        ):
+            overrides.append("__get_pydantic_json_schema__")
+        changes: list[tuple[str | None, str]] = [
+            (None, f"{key} set") for key in overrides
+        ]
+        changes += _wire_or_description_changes(_model_schema(model), None)
+        for changed, kind in changes:
             at = f"field {path}.{changed}" if changed else f"record {path}"
             raise ContractDefinitionError(
                 f"{self.where}: {at} has {kind}; a record travels as its declared "
-                "fields, each in its portable form, so custom serialization is not "
-                "supported"
+                "fields, each in its portable form, and is described from them, so "
+                "custom serialization and JSON Schema overrides are not supported"
             )
 
     def check(self, annotation: object, path: str) -> None:
@@ -484,15 +496,17 @@ def _model_schema(model: type[BaseModel]) -> dict[str, Any]:
     )
 
 
-def _serialization_changes(
+def _wire_or_description_changes(
     node: object, field: str | None, *, root: bool = True
 ) -> Iterator[tuple[str | None, str]]:
-    """Yield what makes a record serialise other than as its declared fields.
+    """Yield what makes a record travel or be described other than as declared.
 
-    Walks the record's own core schema, which is what Pydantic serialises:
-    serializers on the record or a field (``model_serializer``,
-    ``field_serializer``, ``PlainSerializer`` and ``WrapSerializer``, at any
-    depth) and computed fields. Nested records are checked on their own.
+    Walks the record's own core schema, which is what Pydantic serialises and
+    describes from. On the wire: serializers on the record or a field
+    (``model_serializer``, ``field_serializer``, ``PlainSerializer`` and
+    ``WrapSerializer``, at any depth), computed fields, and fields excluded
+    from serialization. In the description: ``WithJsonSchema`` at any depth and
+    ``json_schema_extra`` on a field. Nested records are checked on their own.
     """
     if isinstance(node, dict):
         if node.get("type") == "model" and not root:
@@ -501,15 +515,23 @@ def _serialization_changes(
             yield field, "a custom serializer"
         if node.get("computed_fields"):
             yield field, "computed fields"
+        if node.get("serialization_exclude") or node.get("serialization_exclude_if"):
+            yield field, "an exclusion from serialization"
+        metadata = node.get("metadata")
+        if isinstance(metadata, dict) and (
+            metadata.get("pydantic_js_annotation_functions")
+            or metadata.get("pydantic_js_extra")
+        ):
+            yield field, "a JSON Schema override"
         if node.get("type") == "model-fields":
             for name, sub in node.get("fields", {}).items():
-                yield from _serialization_changes(sub, name, root=False)
+                yield from _wire_or_description_changes(sub, name, root=False)
             return
         for value in node.values():
-            yield from _serialization_changes(value, field, root=False)
+            yield from _wire_or_description_changes(value, field, root=False)
     elif isinstance(node, list):
         for value in node:
-            yield from _serialization_changes(value, field, root=False)
+            yield from _wire_or_description_changes(value, field, root=False)
 
 
 def _unwrap(annotation: object) -> object:
