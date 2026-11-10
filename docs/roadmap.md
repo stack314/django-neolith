@@ -5,7 +5,7 @@
 | Step | Delivers | Spec |
 |---|---|---|
 | 1 | Package layout, `pyproject.toml`, lint, type checks, test harness. CI matrix per [ADR 0012](adr/0012-supported-python-and-django-versions.md): Django 5.2 on Python 3.12 and the newest supported pair, on x86-64 and arm64, with deprecation warnings as errors | — |
-| 2 | Contracts: `@contract`, `@action`, portable types, typed errors, `.implement`, validation at import time | 01 |
+| 2 | Contracts: `@contract`, `@action`, portable types, typed errors, `@implements`, validation at import time | 01 |
 | 3 | In-process transport with serialization round-trip; connector with `single` routing | 02 |
 | 4 | App declaration and host: `NeolithAppConfig`, settings built from declarations, `neolith run <app>` boots one app on SQLite | 05 |
 | 5 | HTTP transport: provider endpoints via django-ninja, OpenAPI at the well-known path, connector over httpx, shared-secret principal resolver | 03 |
@@ -24,17 +24,19 @@ Deferred past 0.1: events and the outbox (spec 04), `neolith detach` data moves,
 Everything an app author touches. Designed before the internals; the internals serve this.
 
 ```python
-from neolith import NeolithAppConfig, contract, action, connect, ContractError
+from typing import Protocol
+
+from neolith import NeolithAppConfig, contract, action, implements, connect, ContractError
 
 @contract("inventory.v1")
-class Inventory:
+class Inventory(Protocol):
     @action(idempotent=True)
     def reserve(self, request: ReserveRequest) -> ReserveReply: ...
 
     @action
     def release(self, request: ReleaseRequest) -> None: ...
 
-@Inventory.implement
+@implements(Inventory)
 class InventoryImpl:
     def reserve(self, request: ReserveRequest, ctx: CallContext) -> ReserveReply: ...
     def release(self, request: ReleaseRequest, ctx: CallContext) -> None: ...
@@ -56,9 +58,10 @@ except ContractError as e:
 Rules that shape it:
 
 - Request and reply types are Pydantic models restricted to the portable type system. Anything else fails at import time with a message naming the field.
-- A contract class declares; it is never instantiated by app code. `connect()` returns a connector whose methods mirror the actions.
+- A contract is declared as a `Protocol` class; it is never instantiated. `connect()` returns a connector whose methods mirror the actions.
+- Why `Protocol` and `@implements(Inventory)` rather than a plain class and `@Inventory.implement`: mypy accepts the `...` bodies of the actions only inside a Protocol, and it does not apply a class decorator's return type ([python/mypy#3135](https://github.com/python/mypy/issues/3135)), so an `implement` attribute added by `@contract` would not type-check.
 - An implementation class is checked against its contract when the module is imported: every action present, signatures compatible. Missing or extra methods are errors, not warnings.
-- How `CallContext` reaches an implementation is undecided ([open question 6](open-questions.md)). The sketch above shows the explicit-argument option; the choice gets a decision record before step 2.
+- How `CallContext` reaches an implementation is undecided ([open question 6](open-questions.md)). The sketch above shows the explicit-argument option that [ADR 0017](adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md) proposes. Until a record on it is Accepted, an implementation's actions take the request only.
 - Configuration of providers, transports and routing lives in Django settings under one key, `NEOLITH`, and is validated by the host at startup.
 
 Shell:

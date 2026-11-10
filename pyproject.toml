@@ -12,8 +12,10 @@ license-files = ["LICENSE"]
 authors = [{ name = "Vignesh Pai and django-neolith contributors" }]
 requires-python = ">=3.12"
 # Runtime dependencies need an Accepted decision record (CONTRIBUTING K5).
-# Floor and milestone: ADR 0012.
-dependencies = ["Django>=5.2"]
+# Django: ADR 0012 sets the floor and milestone. Pydantic: ADR 0006 makes
+# contract types Pydantic v2 models; 2.12 is the oldest release the suite has
+# been run against.
+dependencies = ["Django>=5.2", "pydantic>=2.12,<3"]
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
     "Framework :: Django",
@@ -108,6 +110,12 @@ files = ["src", "tests", "scripts"]
 warn_unreachable = true
 enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
 plugins = ["mypy_django_plugin.main"]
+
+[[tool.mypy.overrides]]
+# These tests build contract declarations from free functions, whose "..."
+# bodies mypy accepts only inside a Protocol class.
+module = "tests.test_contracts"
+disable_error_code = ["empty-body"]
 
 [tool.django-stubs]
 django_settings_module = "tests.settings"
