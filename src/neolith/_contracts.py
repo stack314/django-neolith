@@ -447,7 +447,7 @@ class _TypeChecker:
             self.markers(field.metadata, f"{path}.{field_name}")
             self.check(field.annotation, f"{path}.{field_name}")
             self.default(field, f"{path}.{field_name}")
-        for changed, kind in _record_changes(model):
+        for changed, kind in _record_changes(model, self.where):
             at = f"field {path}.{changed}" if changed else f"record {path}"
             raise ContractDefinitionError(
                 f"{self.where}: {at} has {kind}; a record travels as its declared "
@@ -480,7 +480,7 @@ class _TypeChecker:
         if field.default is PydanticUndefined or field.default_factory is not None:
             return
         try:
-            TypeAdapter(field.rebuild_annotation()).validate_python(
+            validated = TypeAdapter(field.rebuild_annotation()).validate_python(
                 field.default, strict=True
             )
         except ValidationError as error:
@@ -488,6 +488,14 @@ class _TypeChecker:
                 f"{self.where}: field {path} has the default {field.default!r}, "
                 "which is not a value of its type"
             ) from error
+        # Pydantic sends a default as written, without validating it, so a
+        # validator that would change it must not have anything to change.
+        if validated != field.default:
+            raise ContractDefinitionError(
+                f"{self.where}: field {path} has the default {field.default!r}, "
+                f"which its validators turn into {validated!r}; a default travels "
+                f"as written, so write it as {validated!r}"
+            )
 
     def unwrap(self, annotation: object, path: str) -> object:
         """Strip ``Annotated``, checking its markers, and resolve ``type`` aliases."""
@@ -548,8 +556,11 @@ class _TypeChecker:
         )
 
 
-def _model_schema(model: type[BaseModel]) -> dict[str, Any]:
+def _model_schema(model: type[BaseModel], where: str) -> dict[str, Any]:
     """Find the model's own node in its Pydantic core schema."""
+    if not isinstance(model.__pydantic_core_schema__, dict):
+        # A record with defer_build=True has a placeholder until it is built.
+        model.model_rebuild(force=True)
     pending: list[object] = [model.__pydantic_core_schema__]
     while pending:
         node = pending.pop()
@@ -561,7 +572,7 @@ def _model_schema(model: type[BaseModel]) -> dict[str, Any]:
             pending.extend(node)
     # Pydantic builds a model node for every model; this guards its internals.
     raise ContractDefinitionError(
-        f"cannot read the core schema of {model.__qualname__}"
+        f"{where}: cannot read the core schema of record {model.__qualname__}"
     )
 
 
@@ -603,7 +614,9 @@ def _wire_or_description_changes(
             yield from _wire_or_description_changes(value, field, root=False)
 
 
-def _record_changes(model: type[BaseModel]) -> Iterator[tuple[str | None, str]]:
+def _record_changes(
+    model: type[BaseModel], where: str
+) -> Iterator[tuple[str | None, str]]:
     """Yield what makes a record travel or be described other than as declared.
 
     Settings and schema hooks come first: a record with a core-schema hook may
@@ -617,7 +630,7 @@ def _record_changes(model: type[BaseModel]) -> Iterator[tuple[str | None, str]]:
             yield None, f"{key} set"
     for hook in _own_hooks(model):
         yield None, f"{hook} defined"
-    yield from _wire_or_description_changes(_model_schema(model), None)
+    yield from _wire_or_description_changes(_model_schema(model, where), None)
 
 
 def _own_hooks(model: type[BaseModel]) -> list[str]:

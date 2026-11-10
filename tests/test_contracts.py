@@ -11,7 +11,7 @@ import json
 import re
 import types
 from collections.abc import Callable, Mapping
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Annotated, Any, Literal, Optional, Protocol, TypedDict, cast
 from uuid import UUID
@@ -872,6 +872,48 @@ def test_default_outside_the_field_type_is_rejected(
         declare_with_field(record)
 
 
+def _split_commas(value: object) -> object:
+    return value.split(",") if isinstance(value, str) else value
+
+
+@pytest.mark.spec("CON-13", "CON-16", "CON-17")
+@pytest.mark.parametrize(
+    ("annotation", "default", "becomes"),
+    [
+        pytest.param(
+            Annotated[int, BeforeValidator(lambda v: 0 if v is None else v)],
+            None,
+            "0",
+            id="BeforeValidator None",
+        ),
+        pytest.param(
+            Annotated[int, WrapValidator(lambda v, h: h(0 if v is None else v))],
+            None,
+            "0",
+            id="WrapValidator None",
+        ),
+        pytest.param(Annotated[int, BeforeValidator(int)], "3", "3", id="int('3')"),
+        pytest.param(
+            Annotated[list[str], BeforeValidator(_split_commas)],
+            "a,b",
+            "['a', 'b']",
+            id="split commas",
+        ),
+        pytest.param(
+            Annotated[str, AfterValidator(str.lower)], "ABC", "'abc'", id="lower"
+        ),
+    ],
+)
+def test_default_that_validators_change_is_rejected(
+    annotation: object, default: object, becomes: str
+) -> None:
+    record = create_model("Defaulted", n=(cast("Any", annotation), default))
+    with pytest.raises(
+        ContractDefinitionError, match=re.escape(f"validators turn into {becomes}")
+    ):
+        declare_with_field(record)
+
+
 @pytest.mark.spec("CON-13", "CON-16")
 def test_defaults_of_the_field_type_are_allowed() -> None:
     class Defaults(BaseModel):
@@ -883,6 +925,13 @@ def test_defaults_of_the_field_type_are_allowed() -> None:
         raw: bytes = b""
         ratio: float = 1
         lines: list[Line] = []
+        counts: dict[str, int] = {"a": 1}
+        line: Line = Line(sku="A1", quantity=1)
+        day: date = date(2026, 1, 1)
+        when: AwareDatetime = datetime(2026, 1, 1, tzinfo=UTC)
+        positive: int | None = Field(None, gt=0)
+        upper: Annotated[str, AfterValidator(str.upper)] = "ABC"
+        parsed: Annotated[int, BeforeValidator(int)] = 3
         made: list[int] = Field(default_factory=list)
 
     declare_with_field(Defaults)
@@ -936,6 +985,40 @@ def test_alias_generator_is_rejected() -> None:
     )
     with pytest.raises(ContractDefinitionError, match=r"Shape\.value\.item_id"):
         declare_with_field(camel)
+
+
+@pytest.mark.spec("CON-13", "CON-16")
+def test_record_built_on_first_use_is_checked() -> None:
+    lazy = create_model(
+        "Lazy", __config__=ConfigDict(defer_build=True), value=(int, ...)
+    )
+    contract_class = declare_with_field(list[lazy])  # type: ignore[valid-type]
+    defs = Contract.of(contract_class).describe()["$defs"]
+    assert defs["Lazy"]["properties"]["value"]["type"] == "integer"
+
+
+@pytest.mark.spec("CON-13", "CON-17")
+def test_record_built_on_first_use_is_still_checked_for_serializers() -> None:
+    class Lazy(BaseModel):
+        model_config = ConfigDict(defer_build=True)
+        value: int
+
+        @model_serializer
+        def as_list(self) -> list[int]:
+            return [self.value]
+
+    with pytest.raises(
+        ContractDefinitionError, match="record Lazy has a custom serializer"
+    ):
+        contract("lazy.v1")(
+            declaration("LazyContract", {"send": action(_sender(Lazy))})
+        )
+
+
+def _sender(record: type[BaseModel]) -> Callable[..., None]:
+    def send(self: object, request: record) -> None: ...  # type: ignore[valid-type]
+
+    return send
 
 
 # Record names
