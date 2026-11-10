@@ -40,6 +40,7 @@ from pydantic import (
     ModelWrapValidatorHandler,
     PlainSerializer,
     PlainValidator,
+    PrivateAttr,
     RootModel,
     SerializeAsAny,
     Strict,
@@ -935,6 +936,13 @@ def test_config_that_splits_description_and_wire_is_rejected(
         pytest.param(int, "abc", id="int = 'abc'"),
         pytest.param(str, 3, id="str = 3"),
         pytest.param(AwareDatetime, "2026-01-01", id="timestamp = date text"),
+        pytest.param(int, True, id="int = True"),
+        pytest.param(float, True, id="float = True"),
+        pytest.param(Decimal, "2", id="Decimal = '2'"),
+        pytest.param(date, "2026-01-01", id="date = text"),
+        pytest.param(list[int], [True], id="list[int] = [True]"),
+        pytest.param(dict[str, int], {"a": True}, id="dict[str, int] = {'a': True}"),
+        pytest.param(Colour, "red", id="enum = its value"),
         pytest.param(Annotated[int, Field(ge=0)], -1, id="ge=0 = -1"),
     ],
 )
@@ -943,7 +951,7 @@ def test_default_outside_the_field_type_is_rejected(
 ) -> None:
     record = create_model("Defaulted", n=(cast("Any", annotation), default))
     with pytest.raises(
-        ContractDefinitionError, match="does not read back as a value of its type"
+        ContractDefinitionError, match="which is not a value of its type"
     ):
         declare_with_field(record)
 
@@ -959,61 +967,61 @@ def _split_commas(value: object) -> object:
         pytest.param(
             Annotated[int, BeforeValidator(lambda v: 0 if v is None else v)],
             None,
-            "null but reads back as 0",
+            "turn into 0",
             id="BeforeValidator None",
         ),
         pytest.param(
             Annotated[int, WrapValidator(lambda v, h: h(0 if v is None else v))],
             None,
-            "null but reads back as 0",
+            "turn into 0",
             id="WrapValidator None",
         ),
         pytest.param(
             Annotated[int, BeforeValidator(int)],
             "3",
-            '"3" but reads back as 3',
+            "turn into 3",
             id="int('3')",
         ),
         pytest.param(
             Annotated[list[str], BeforeValidator(_split_commas)],
             "a,b",
-            '"a,b" but reads back as ["a","b"]',
+            "turn into ['a', 'b']",
             id="split commas",
         ),
         pytest.param(
             Annotated[str, AfterValidator(str.lower)],
             "ABC",
-            '"ABC" but reads back as "abc"',
+            "turn into 'abc'",
             id="lower",
         ),
         pytest.param(
             Annotated[Decimal, BeforeValidator(Decimal)],
             0,
-            '0 but reads back as "0"',
+            "turn into Decimal('0')",
             id="Decimal = 0",
         ),
         pytest.param(
             Annotated[Decimal, BeforeValidator(Decimal)],
             3,
-            '3 but reads back as "3"',
+            "turn into Decimal('3')",
             id="Decimal = 3",
         ),
         pytest.param(
             list[Annotated[Decimal, BeforeValidator(Decimal)]],
             [3],
-            '[3] but reads back as ["3"]',
+            "turn into [Decimal('3')]",
             id="list[Decimal] = [3]",
         ),
         pytest.param(
             Annotated[int, BeforeValidator(int)],
             3.0,
-            "3.0 but reads back as 3",
+            "turn into 3",
             id="int = 3.0",
         ),
         pytest.param(
             list[Annotated[int, BeforeValidator(int)]],
             [3.0],
-            "[3.0] but reads back as [3]",
+            "turn into [3]",
             id="list[int] = [3.0]",
         ),
     ],
@@ -1022,9 +1030,7 @@ def test_default_that_does_not_read_back_as_itself_is_rejected(
     annotation: object, default: object, becomes: str
 ) -> None:
     record = create_model("Defaulted", n=(cast("Any", annotation), default))
-    with pytest.raises(
-        ContractDefinitionError, match=re.escape(f"which travels as {becomes}")
-    ):
+    with pytest.raises(ContractDefinitionError, match=re.escape(becomes)):
         declare_with_field(record)
 
 
@@ -1058,12 +1064,9 @@ def test_defaults_of_the_field_type_are_allowed() -> None:
 @pytest.mark.parametrize(
     ("annotation", "default", "described"),
     [
-        pytest.param(int, True, 1, id="int = True"),
-        pytest.param(float, True, 1.0, id="float = True"),
         pytest.param(float, 1, 1.0, id="float = 1"),
-        pytest.param(
-            Annotated[int, BeforeValidator(int)], True, 1, id="coerced int = True"
-        ),
+        pytest.param(float, 1.5, 1.5, id="float = 1.5"),
+        pytest.param(int, 3, 3, id="int = 3"),
     ],
 )
 def test_default_is_described_as_it_travels(
@@ -1564,6 +1567,151 @@ def test_wrap_model_validator_on_a_request_is_accepted() -> None:
     def send(self: object, request: renamed) -> None: ...  # type: ignore[valid-type]
 
     contract("wrap.v1")(declaration("Wrap", {"send": action(send)}))
+
+
+# A node is judged with the record's settings and pydantic-core's order of
+# work: whitespace is stripped, then the pattern and lengths are checked, then
+# the case is converted.
+
+
+def _strings(**constraints: object) -> object:
+    return Annotated[str, StringConstraints(**cast("Any", constraints))]
+
+
+@pytest.mark.spec("CON-16", "CON-17")
+@pytest.mark.parametrize(
+    ("annotation", "config"),
+    [
+        pytest.param(
+            _strings(to_upper=True, pattern="^[a-z]+$"), {}, id="upper and pattern"
+        ),
+        pytest.param(
+            _strings(to_upper=True, max_length=1), {}, id="upper and max length"
+        ),
+        pytest.param(
+            _strings(to_lower=True, min_length=2), {}, id="lower and min length"
+        ),
+        pytest.param(
+            dict.__class_getitem__((_strings(to_upper=True, min_length=1), int)),
+            {},
+            id="map key",
+        ),
+        pytest.param(
+            _strings(pattern="^[a-z]+$"), {"str_to_upper": True}, id="upper setting"
+        ),
+        pytest.param(
+            _strings(max_length=3), {"str_to_lower": True}, id="lower setting"
+        ),
+    ],
+)
+def test_case_conversion_with_a_stated_constraint_is_refused(
+    annotation: object, config: dict[str, object]
+) -> None:
+    record = create_model(
+        "Cased", __config__=cast("ConfigDict", config), s=(cast("Any", annotation), ...)
+    )
+    with pytest.raises(ContractDefinitionError, match="converts case after checking"):
+        declare_with_field(record)
+
+
+@pytest.mark.spec("CON-16")
+@pytest.mark.parametrize(
+    ("annotation", "config"),
+    [
+        pytest.param(
+            _strings(strip_whitespace=True, pattern="^[a-z]+$"),
+            {},
+            id="strip and pattern",
+        ),
+        pytest.param(_strings(to_upper=True), {}, id="upper alone"),
+        pytest.param(str, {"str_to_lower": True}, id="lower setting, no constraint"),
+        pytest.param(
+            _strings(min_length=1), {"str_strip_whitespace": True}, id="strip setting"
+        ),
+    ],
+)
+def test_conversions_that_commute_with_the_description_are_accepted(
+    annotation: object, config: dict[str, object]
+) -> None:
+    record = create_model(
+        "Cased", __config__=cast("ConfigDict", config), s=(cast("Any", annotation), ...)
+    )
+    declare_with_field(record)
+
+
+@pytest.mark.spec("CON-16", "CON-17")
+@pytest.mark.parametrize(
+    ("config", "field", "becomes"),
+    [
+        pytest.param(
+            {"str_to_lower": True}, (str, "ABC"), "turn into 'abc'", id="lower"
+        ),
+        pytest.param(
+            {"str_to_upper": True}, (str, "abc"), "turn into 'ABC'", id="upper"
+        ),
+        pytest.param(
+            {"str_strip_whitespace": True}, (str, " a "), "turn into 'a'", id="strip"
+        ),
+        pytest.param(
+            {"str_strip_whitespace": True},
+            (str, Field(" a ", min_length=2)),
+            "is not a value of its type",
+            id="strip below min length",
+        ),
+    ],
+)
+def test_defaults_are_checked_under_the_record_settings(
+    config: dict[str, object], field: tuple[object, object], becomes: str
+) -> None:
+    record = create_model(
+        "Set", __config__=cast("ConfigDict", config), s=cast("Any", field)
+    )
+    with pytest.raises(ContractDefinitionError, match=re.escape(becomes)):
+        declare_with_field(record)
+
+
+@pytest.mark.spec("CON-16")
+def test_default_already_in_the_record_settings_form_is_accepted() -> None:
+    record = create_model(
+        "Set", __config__=ConfigDict(str_to_lower=True), s=(str, "abc")
+    )
+    described = Contract.of(declare_with_field(record)).describe()
+    assert described["$defs"]["Set"]["properties"]["s"]["default"] == "abc"
+
+
+class WithPrivate(BaseModel):
+    x: int
+    _cache: int = PrivateAttr(0)
+
+
+class WithPlainPrivate(BaseModel):
+    x: int
+    _seen: dict[str, int] = {}
+
+
+class InheritsPrivate(WithPrivate):
+    y: int = 0
+
+
+class OwnPostInit(BaseModel):
+    x: int
+    _cache: int = PrivateAttr(0)
+
+    def model_post_init(self, context: object, /) -> None:
+        self.x = 2
+
+
+@pytest.mark.spec("CON-13", "CON-16")
+@pytest.mark.parametrize("record", [WithPrivate, WithPlainPrivate, InheritsPrivate])
+def test_private_attributes_are_accepted(record: type[BaseModel]) -> None:
+    described = Contract.of(declare_with_field(record)).describe()
+    assert "_cache" not in described["$defs"][record.__name__]["properties"]
+
+
+@pytest.mark.spec("CON-13", "CON-17")
+def test_own_model_post_init_is_refused() -> None:
+    with pytest.raises(ContractDefinitionError, match="defines model_post_init"):
+        declare_with_field(OwnPostInit)
 
 
 # Unknown fields

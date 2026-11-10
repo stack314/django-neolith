@@ -24,6 +24,7 @@ from collections.abc import Mapping
 from typing import Any, Literal
 
 from pydantic import BaseModel
+from pydantic._internal._model_construction import init_private_attributes
 from pydantic.errors import PydanticUndefinedAnnotation, PydanticUserError
 from pydantic_core import (
     SchemaSerializer,
@@ -142,6 +143,10 @@ class Portable:
         self.named: dict[str, type[Any]] = {}
         self.defs: dict[str, dict[str, Any]] = {}
         self.definitions: dict[str, Mapping[str, Any]] = {}
+        # The core config of the record being walked. pydantic-core applies a
+        # record's settings to every node of its fields, so a node is judged
+        # together with it, not by its own keys alone.
+        self.config: Mapping[str, Any] = {}
 
     def fail(self, message: str) -> Exception:
         return self.error(f"{self.where}: {message}")
@@ -274,11 +279,12 @@ class Portable:
         """Admit a record and describe it once under ``$defs``."""
         cls = node["cls"]
         subject = f"record {path}"
-        self.keys(
-            node,
-            frozenset({"cls", "schema", "config", "custom_init", "root_model"}),
-            subject,
-        )
+        admitted = {"cls", "schema", "config", "custom_init", "root_model"}
+        if _only_initialises_private_attributes(cls):
+            # Private attributes never travel; Pydantic sets post_init to
+            # initialise them when the record has any.
+            admitted.add("post_init")
+        self.keys(node, frozenset(admitted), subject)
         if node.get("root_model"):
             raise self.fail(f"{subject} is a root model; a record has named fields")
         for key, value in node.get("config", {}).items():
@@ -296,6 +302,21 @@ class Portable:
         if not self.register(cls, "record", path):
             return reference
         self.defs[cls.__name__] = {}
+        outer, self.config = self.config, node.get("config", {})
+        try:
+            return self.fields(node, cls, path, subject, reference)
+        finally:
+            self.config = outer
+
+    def fields(
+        self,
+        node: Mapping[str, Any],
+        cls: type[Any],
+        path: str,
+        subject: str,
+        reference: Ref,
+    ) -> Ref:
+        """Describe a record's fields, under the record's own settings."""
         fields_node = node["schema"]
         while fields_node.get("type") in _VALIDATORS:
             self.keys(fields_node, _VALIDATOR_KEYS, subject)
@@ -372,8 +393,27 @@ class Portable:
                 schema,
                 list(self.definitions.values()),
             )
-        serializer = SchemaSerializer(schema)
-        validator = SchemaValidator(schema)
+        # The record's settings apply to the default too, as they do when
+        # Pydantic sends and reads the record.
+        config: Any = dict(self.config) or None
+        serializer = SchemaSerializer(schema, config)
+        validator = SchemaValidator(schema, config)
+        # Pydantic keeps a default as written in the record it builds, and may
+        # revalidate that record strictly later (revalidate_instances), so the
+        # default must already be a value of its type, unchanged by validation.
+        # An int is a value of a float field in strict mode too.
+        try:
+            held = validator.validate_python(value, strict=True)
+        except (ValueError, TypeError) as error:
+            raise self.fail(
+                f"field {path} has the default {value!r}, which is not a value of "
+                "its type; Pydantic keeps a default as written, so write one"
+            ) from error
+        if not _unchanged(held, value):
+            raise self.fail(
+                f"field {path} has the default {value!r}, which its validators "
+                f"turn into {held!r}; write the default as {held!r}"
+            )
         try:
             # Pydantic serialises a default it was given as written, with the
             # field's own serializer; warnings off, since an off-type value
@@ -439,6 +479,8 @@ class Portable:
         if kind in _SCALARS:
             base, bounds, other = _SCALARS[kind]
             self.keys(node, frozenset(bounds) | other, subject)
+            if kind == "str":
+                self.case(node, subject)
             if kind == "datetime" and node.get("tz_constraint") != "aware":
                 raise self.fail(
                     f"{subject} is a timestamp, which carries an offset from UTC "
@@ -505,6 +547,29 @@ class Portable:
             )
         raise self.fail(f"{subject} has type {kind}, which is not a portable form")
 
+    def case(self, node: Mapping[str, Any], subject: str) -> None:
+        """Refuse a case conversion on a string the description constrains.
+
+        pydantic-core checks a string's pattern and lengths before it converts
+        the case, and strips whitespace before both. So a converted value can
+        break the constraints the description states ("abc" passes
+        ``^[a-z]+$`` and travels as "ABC"; "ß" passes a maximum length of 1
+        and travels as "SS"). The conversion may come from the field or from
+        the record's settings.
+        """
+        converts = any(node.get(key) for key in ("to_lower", "to_upper")) or any(
+            self.config.get(key) for key in ("str_to_lower", "str_to_upper")
+        )
+        constrained = [
+            key for key in ("pattern", "min_length", "max_length") if key in node
+        ]
+        if converts and constrained:
+            raise self.fail(
+                f"{subject} converts case after checking its {constrained[0]}, so "
+                "a value it accepts can travel in a form it refuses; drop the "
+                "case conversion or the constraint"
+            )
+
     def bounds(
         self, node: Mapping[str, Any], path: str, keywords: Mapping[str, str]
     ) -> dict[str, Any]:
@@ -542,6 +607,65 @@ class Portable:
                 "enum": [m.value for m in members],
             }
         return {"$ref": f"#/$defs/{cls.__name__}"}
+
+
+def portable_scalars() -> Mapping[
+    str, tuple[Mapping[str, str], Mapping[str, str], frozenset[str]]
+]:
+    """The admitted scalars and their keys, for the property test's generator."""
+    return _SCALARS
+
+
+def portable_settings() -> frozenset[str]:
+    """The admitted record settings, for the property test's generator."""
+    return _SETTINGS
+
+
+def _unchanged(held: object, written: object) -> bool:
+    """True if validation left a written default as it was, at every depth.
+
+    Equality alone is not enough: ``1 == True`` and ``Decimal(3) == 3``. So
+    lists and maps are compared item by item, and scalars by type as well. An
+    int may stand for a float, as it does in strict mode. A record compares as
+    a whole, by equality.
+    """
+    if type(written) is list and type(held) is list:
+        return len(held) == len(written) and all(
+            _unchanged(h, w) for h, w in zip(held, written, strict=True)
+        )
+    if type(written) is dict and type(held) is dict:
+        return held.keys() == written.keys() and all(
+            _unchanged(held[key], written[key]) for key in written
+        )
+    if isinstance(written, BaseModel):
+        return held == written
+    if type(written) is int and type(held) is float:
+        return held == written
+    return type(held) is type(written) and held == written
+
+
+def _only_initialises_private_attributes(cls: type[Any]) -> bool:
+    """True if the record's model_post_init is Pydantic's own, for private attributes.
+
+    Pydantic sets ``model_post_init`` to ``init_private_attributes`` when a
+    record has private attributes, and wraps it, keeping ``__wrapped__``, when
+    a model_post_init already exists, such as one inherited from a record that
+    has private attributes too (pydantic/_internal/_model_construction.py,
+    ``ModelMetaclass.__new__``, at 2.12 and 2.14). Following ``__wrapped__``
+    must end at ``init_private_attributes``; anything an author wrote ends
+    elsewhere.
+    """
+    function = getattr(cls, "model_post_init", None)
+    for _ in range(64):
+        if function is init_private_attributes:
+            return True
+        wrapped = getattr(function, "__wrapped__", None)
+        # functools.wraps copies the name, so the wrapper is known by its code.
+        code = getattr(function, "__code__", None)
+        if wrapped is None or getattr(code, "co_name", "") != "wrapped_model_post_init":
+            return False
+        function = wrapped
+    return False
 
 
 def _bounds(node: Mapping[str, Any], keywords: Mapping[str, str]) -> dict[str, Any]:

@@ -16,7 +16,7 @@ import enum
 import itertools
 import json
 import types
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Annotated, Any, Literal, Protocol, cast
 
@@ -25,14 +25,24 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 from hypothesis_jsonschema import from_schema
 from jsonschema import Draft202012Validator
-from pydantic import AwareDatetime, BaseModel, Field, TypeAdapter, create_model
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    Strict,
+    StringConstraints,
+    TypeAdapter,
+    create_model,
+)
 
-from neolith import Contract, action, contract
+from neolith import Contract, ContractDefinitionError, action, contract
+from neolith._portable import portable_scalars, portable_settings
 
-_SETTINGS = settings(
+_HYPOTHESIS = settings(
     derandomize=True,
     database=None,
-    max_examples=40,
+    max_examples=80,
     deadline=None,
     suppress_health_check=[HealthCheck.too_slow, HealthCheck.data_too_large],
 )
@@ -56,23 +66,115 @@ def _name(prefix: str) -> str:
     return f"{prefix}{next(_names)}"
 
 
-_SCALARS: list[object] = [
-    bool,
-    int,
-    float,
-    str,
-    bytes,
-    Decimal,
-    AwareDatetime,
-    date,
-    timedelta,
-    Annotated[int, Field(ge=0, le=1000)],
-    Annotated[str, Field(min_length=1, max_length=8)],
-]
+# The generator draws from the same allowlist the checker admits
+# (src/neolith/_portable.py): every constraint key, every validation-only key
+# and every record setting, in combination, with defaults written in and out
+# of form. test_generator_covers_the_allowlist fails if the checker admits a
+# key this table does not draw.
+_BOUNDS = {
+    "gt": st.integers(-5, 0),
+    "ge": st.integers(-5, 0),
+    "lt": st.integers(6, 20),
+    "le": st.integers(6, 20),
+    "multiple_of": st.sampled_from([1, 2, 3]),
+}
+_KEYS: dict[str, dict[str, st.SearchStrategy[object]]] = {
+    "bool": {},
+    "int": dict(_BOUNDS),
+    "float": {**_BOUNDS, "allow_inf_nan": st.booleans()},
+    "str": {
+        "min_length": st.integers(0, 2),
+        "max_length": st.integers(3, 8),
+        "pattern": st.sampled_from([r"^[a-z]*$", r"^[A-Za-z ]*$"]),
+        "strip_whitespace": st.booleans(),
+        "to_lower": st.booleans(),
+        "to_upper": st.booleans(),
+    },
+    "bytes": {},
+    "decimal": {},
+    "date": {},
+    # Set by Pydantic on every timestamp and duration, not by authors.
+    "timedelta": {"microseconds_precision": st.just("truncate")},
+    "datetime": {
+        "tz_constraint": st.just("aware"),
+        "microseconds_precision": st.just("truncate"),
+    },
+}
+_TYPES_BY_KEY: dict[str, object] = {
+    "bool": bool,
+    "int": int,
+    "float": float,
+    "str": str,
+    "bytes": bytes,
+    "decimal": Decimal,
+    "date": date,
+    "timedelta": timedelta,
+    "datetime": AwareDatetime,
+}
+_STRING_KEYS = {
+    "strip_whitespace",
+    "to_lower",
+    "to_upper",
+    "pattern",
+    "min_length",
+    "max_length",
+}
+_SETTING_VALUES: dict[str, st.SearchStrategy[object]] = {
+    "title": st.just("Titled"),
+    "strict": st.booleans(),
+    "revalidate_instances": st.sampled_from(["never", "always", "subclass-instances"]),
+    "validate_default": st.booleans(),
+    "from_attributes": st.booleans(),
+    "loc_by_alias": st.booleans(),
+    "hide_input_in_errors": st.booleans(),
+    "validation_error_cause": st.booleans(),
+    "str_strip_whitespace": st.booleans(),
+    "str_to_lower": st.booleans(),
+    "str_to_upper": st.booleans(),
+}
+# Defaults authors write, in form and out of it. The checker must refuse a
+# default that does not read back as itself, so every pick is fair game.
+_DEFAULTS: dict[str, list[object]] = {
+    "bool": [False, True, 0],
+    "int": [0, 3, True, 3.0, None, "3"],
+    "float": [0.0, 1, 1.5, True],
+    "str": ["", "abc", "ABC", " a ", "\u00df"],
+    "bytes": [b"", b"ok", b"\xff"],
+    "decimal": [Decimal("1.50"), 0, "2"],
+    "date": [date(2026, 1, 1), "2026-01-01"],
+    "timedelta": [timedelta(seconds=90), 1.5],
+    "datetime": [datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 1, 1)],
+}
 
 
 @st.composite
-def _enums(draw: st.DrawFn) -> object:
+def _scalars(draw: st.DrawFn) -> tuple[object, list[object]]:
+    """A scalar annotation with a random set of its admitted keys, and defaults."""
+    kind = draw(st.sampled_from(sorted(_KEYS)))
+    chosen = (
+        draw(st.sets(st.sampled_from(sorted(_KEYS[kind])))) if _KEYS[kind] else set()
+    )
+    values = {key: draw(_KEYS[kind][key]) for key in chosen}
+    values = {
+        k: v
+        for k, v in values.items()
+        if k not in ("tz_constraint", "microseconds_precision")
+    }
+    markers: list[object] = []
+    if draw(st.booleans()):
+        markers.append(Strict())
+    if kind == "str":
+        markers.append(StringConstraints(**cast("Any", values)))
+    elif values:
+        markers.append(Field(**cast("Any", values)))
+    annotation = _TYPES_BY_KEY[kind]
+    if markers:
+        annotation = Annotated[(annotation, *markers)]
+    return annotation, _DEFAULTS[kind]
+
+
+@st.composite
+def _enums(draw: st.DrawFn) -> tuple[object, list[object]]:
     values = draw(
         st.lists(
             st.text("abcdef", min_size=1, max_size=4),
@@ -81,42 +183,76 @@ def _enums(draw: st.DrawFn) -> object:
             unique=True,
         )
     )
-    return enum.StrEnum(_name("E"), {f"M{i}": v for i, v in enumerate(values)})
+    made = cast("Any", enum.StrEnum)(
+        _name("E"), {f"M{i}": v for i, v in enumerate(values)}
+    )
+    return made, [next(iter(made)), values[0]]
 
 
 @st.composite
-def _literals(draw: st.DrawFn) -> object:
+def _literals(draw: st.DrawFn) -> tuple[object, list[object]]:
     values = draw(
         st.lists(
             st.text("xyz", min_size=1, max_size=3), min_size=1, max_size=3, unique=True
         )
     )
-    return Literal[tuple(values)]
+    return Literal[tuple(values)], [values[0], "nope"]
 
 
-def _records(children: st.SearchStrategy[object]) -> st.SearchStrategy[object]:
+def _records(
+    children: st.SearchStrategy[tuple[object, list[object]]],
+) -> st.SearchStrategy[tuple[object, list[object]]]:
     @st.composite
-    def build(draw: st.DrawFn) -> object:
+    def build(draw: st.DrawFn) -> tuple[object, list[object]]:
         fields = draw(st.lists(children, min_size=1, max_size=4))
-        definitions = {
-            f"f{i}": (cast("Any", annotation), ...)
-            for i, annotation in enumerate(fields)
-        }
-        return create_model(_name("R"), **definitions)  # type: ignore[call-overload]
+        definitions: dict[str, Any] = {}
+        for i, (annotation, defaults) in enumerate(fields):
+            use_default: bool = draw(st.booleans())
+            default: object = ...
+            if defaults and use_default:
+                default = draw(st.sampled_from(defaults))
+            definitions[f"f{i}"] = (cast("Any", annotation), default)
+        chosen = draw(st.sets(st.sampled_from(sorted(_SETTING_VALUES))))
+        config: dict[str, object] = {k: draw(_SETTING_VALUES[k]) for k in chosen}
+        config["extra"] = "ignore"
+        record = create_model(
+            _name("R"), __config__=cast("ConfigDict", config), **definitions
+        )
+        return record, []
 
     return build()
 
 
-_TYPES: st.SearchStrategy[object] = st.recursive(
-    st.sampled_from(_SCALARS) | _enums() | _literals(),
+def _list_of(item: tuple[object, list[object]]) -> tuple[object, list[object]]:
+    return list.__class_getitem__(item[0]), [[]]
+
+
+def _map_of(item: tuple[object, list[object]]) -> tuple[object, list[object]]:
+    return dict.__class_getitem__((str, item[0])), [{}]
+
+
+def _optional(item: tuple[object, list[object]]) -> tuple[object, list[object]]:
+    return cast("Any", item[0]) | None, [None, *item[1]]
+
+
+_TYPES: st.SearchStrategy[tuple[object, list[object]]] = st.recursive(
+    _scalars() | _enums() | _literals(),
     lambda children: (
-        children.map(lambda t: list[t])  # type: ignore[valid-type]
-        | children.map(lambda t: dict[str, t])  # type: ignore[valid-type]
-        | children.map(lambda t: t | None)
+        children.map(_list_of)
+        | children.map(_map_of)
+        | children.map(_optional)
         | _records(children)
     ),
     max_leaves=8,
 )
+
+
+def test_generator_covers_the_allowlist() -> None:
+    """Every key and setting the checker admits is one the generator draws."""
+    for kind, (_, bounds, other) in portable_scalars().items():
+        assert set(bounds) | set(other) <= set(_KEYS[kind]), kind
+    assert set(portable_settings()) <= set(_SETTING_VALUES)
+    assert set(_KEYS) == set(portable_scalars())
 
 
 def _declare(record: type[BaseModel]) -> dict[str, Any]:
@@ -138,16 +274,30 @@ def _round_trip(record: type[BaseModel], schema: dict[str, Any], value: object) 
     assert record.model_validate_json(sent) == instance
 
 
+def _round_trip_with_defaults(
+    record: type[BaseModel], schema: dict[str, Any], value: object
+) -> None:
+    """The value, and the value with every defaulted field left to its default."""
+    _round_trip(record, schema, value)
+    assert isinstance(value, dict)
+    required = schema["$defs"][record.__name__].get("required", [])
+    _round_trip(record, schema, {k: v for k, v in value.items() if k in required})
+
+
 @pytest.mark.spec("CON-16")
-@_SETTINGS
+@_HYPOTHESIS
 @given(st.data())
 def test_generated_contracts_round_trip_through_their_description(
     data: st.DataObject,
 ) -> None:
-    record = cast("type[BaseModel]", data.draw(_records(_TYPES)))
-    schema = _declare(record)
+    record = cast("type[BaseModel]", data.draw(_records(_TYPES))[0])
+    try:
+        schema = _declare(record)
+    except ContractDefinitionError:
+        # Refused: the property is about contracts that are accepted.
+        return
     value = data.draw(from_schema(schema, custom_formats=_FORMATS))
-    _round_trip(record, schema, value)
+    _round_trip_with_defaults(record, schema, value)
 
 
 class RefColour(enum.StrEnum):
@@ -180,14 +330,14 @@ class Reference(BaseModel):
 
 
 @pytest.mark.spec("CON-16")
-@_SETTINGS
+@_HYPOTHESIS
 @given(st.data())
 def test_reference_contract_round_trips_through_its_description(
     data: st.DataObject,
 ) -> None:
     schema = _declare(Reference)
     value = data.draw(from_schema(schema, custom_formats=_FORMATS))
-    _round_trip(Reference, schema, value)
+    _round_trip_with_defaults(Reference, schema, value)
 
 
 class Tree(BaseModel):
