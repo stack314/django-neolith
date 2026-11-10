@@ -12,7 +12,7 @@ import json
 import types
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Annotated, Any, Protocol, cast
+from typing import Annotated, Any, NamedTuple, Optional, Protocol, TypeAliasType, cast
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -25,8 +25,11 @@ from pydantic import (
     ConfigDict,
     Field,
     GetPydanticSchema,
+    Strict,
     StringConstraints,
+    ValidationError,
     create_model,
+    field_validator,
     model_validator,
 )
 from pydantic_core import core_schema
@@ -497,3 +500,204 @@ def test_public_types_on_an_implementation_are_accepted() -> None:
         {"get": _get, "Meta": Meta, "NotFound": KeyError, "Kind": Repeated},
     )
     assert implements(Inventory)(impl) is impl
+
+
+# Kind x container matrix (#17 review at e20ae1c). A rule about whether a kind
+# of node can be reached from a place must hold however deep the node sits, so
+# each refused kind is wrapped in every container the allowlist admits. Where
+# the kind lets a value escape, a wire probe shows the escape on the same shape
+# with neolith out of the way, so each refusal is shown to be needed.
+
+
+class Inner(BaseModel):
+    n: Annotated[int, Field(ge=0)]
+
+
+class Rank(enum.IntEnum):
+    LOW = 1
+
+
+_aliases = iter(range(1_000_000))
+
+
+def _alias(value: object) -> object:
+    return TypeAliasType(f"Alias{next(_aliases)}", value)
+
+
+def _unvalidated(value: object) -> object:
+    """Turn every {"n": ...} into an Inner built without validation."""
+    if isinstance(value, list):
+        return [_unvalidated(item) for item in value]
+    if isinstance(value, dict):
+        if set(value) == {"n"}:
+            return Inner.model_construct(**value)
+        return {key: _unvalidated(item) for key, item in value.items()}
+    return value
+
+
+class _Container(NamedTuple):
+    wrap: Any  # the type, wrapped in this container
+    default: bool  # whether the field has a default
+    wire: Any  # one wire value of the type, wrapped in this container
+    unwrap: Any  # the value of the type, taken out of a value read back
+    plain: Any  # the same shape with no validator, for the twin's description
+
+
+# Type expressions built from a type held in a variable, which mypy cannot read.
+def _list(t: object) -> object:
+    return list[t]  # type: ignore[valid-type]
+
+
+def _map(t: object) -> object:
+    return dict[str, t]  # type: ignore[valid-type]
+
+
+def _nullable(t: object) -> object:
+    return Optional[t]  # noqa: UP045
+
+
+def _validated(t: object) -> object:
+    return Annotated[t, BeforeValidator(_identity)]
+
+
+def _first(v: Any) -> Any:  # noqa: ANN401
+    return v[0]
+
+
+_CONTAINERS: dict[str, _Container] = {
+    "bare": _Container(_identity, False, _identity, _identity, None),
+    "list item": _Container(_list, False, lambda v: [v], _first, None),
+    "map value": _Container(_map, False, lambda v: {"a": v}, lambda v: v["a"], None),
+    "nullable": _Container(_nullable, False, _identity, _identity, None),
+    "default": _Container(_list, True, lambda v: [v], _first, None),
+    "type alias": _Container(
+        lambda t: _alias(_list(t)), False, lambda v: [v], _first, None
+    ),
+    "second validator": _Container(
+        lambda t: _validated(_list(t)), False, lambda v: [v], _first, _list
+    ),
+}
+
+
+def _twin(container: _Container, t: object) -> dict[str, Any]:
+    """The description of the same shape without any validator."""
+    return _declare(_holder((container.plain or container.wrap)(t), container.default))
+
+
+def _holder(
+    annotation: object, default: bool, *, lower: bool = False
+) -> type[BaseModel]:
+    field = (annotation, Field(default_factory=list)) if default else (annotation, ...)
+    return create_model(
+        "Holder",
+        __config__=ConfigDict(str_to_lower=True) if lower else None,
+        v=cast("Any", field),
+    )
+
+
+def _refused(record: type[BaseModel], message: str) -> None:
+    with pytest.raises(
+        ContractDefinitionError, match=rf"^probe\.v1, action 'send': .*{message}"
+    ):
+        _declare(record)
+
+
+def _record_validated_by_field_validator(
+    annotation: object, default: bool
+) -> type[BaseModel]:
+    field = (annotation, Field(default_factory=list)) if default else (annotation, ...)
+    return create_model(
+        "Holder",
+        __validators__={
+            "construct": field_validator("v", mode="before")(
+                lambda cls, value: _unvalidated(value)
+            )
+        },
+        v=cast("Any", field),
+    )
+
+
+@pytest.mark.spec("CON-16", "CON-17")
+@pytest.mark.parametrize("form", ["BeforeValidator", "field_validator"])
+@pytest.mark.parametrize("container", list(_CONTAINERS))
+def test_validator_on_a_type_containing_a_record_is_refused(
+    container: str, form: str
+) -> None:
+    shape = _CONTAINERS[container]
+    inner = shape.wrap(Inner)
+    if form == "BeforeValidator":
+        record = _holder(Annotated[inner, BeforeValidator(_unvalidated)], shape.default)
+    else:
+        record = _record_validated_by_field_validator(inner, shape.default)
+    _refused(record, "has a validator on a record or on a type that contains one")
+
+    # Wire probe: the same shape, read from JSON and written back, sends a
+    # value its validator-free twin's description refuses.
+    sent = record.model_validate_json(json.dumps({"v": shape.wire({"n": -5})}))
+    twin = _twin(shape, Inner)
+    assert not Draft202012Validator(twin).is_valid(json.loads(sent.model_dump_json()))
+
+
+_LOWER = Annotated[str, StringConstraints(to_lower=True)]
+
+_KEY_WRAPPERS: dict[str, Any] = {
+    "bare": _identity,
+    "type alias": _alias,
+    "validator": _validated,
+    "alias behind a validator": lambda k: _validated(_alias(k)),
+    "validator behind an alias": lambda k: _alias(_validated(k)),
+    "two validators": lambda k: _validated(_validated(k)),
+}
+
+
+@pytest.mark.spec("CON-16", "CON-17")
+@pytest.mark.parametrize("source", ["field", "record config"])
+@pytest.mark.parametrize("key_wrapper", list(_KEY_WRAPPERS))
+@pytest.mark.parametrize("container", list(_CONTAINERS))
+def test_converted_key_is_refused_wherever_it_sits(
+    container: str, key_wrapper: str, source: str
+) -> None:
+    shape = _CONTAINERS[container]
+    key = _KEY_WRAPPERS[key_wrapper](_LOWER if source == "field" else str)
+    record = _holder(
+        shape.wrap(dict[key, int]),  # type: ignore[valid-type]
+        shape.default,
+        lower=source == "record config",
+    )
+    _refused(record, "converts its keys")
+
+    # Wire probe: two keys a reader of the description keeps apart become one.
+    value = {"v": shape.wire({"A": 1, "a": 2})}
+    read = record.model_validate_json(json.dumps(value))
+    assert shape.unwrap(getattr(read, "v")) == {"a": 2}  # noqa: B009
+
+
+@pytest.mark.spec("CON-13", "CON-17")
+@pytest.mark.parametrize("container", list(_CONTAINERS))
+def test_enum_of_other_values_is_refused_wherever_it_sits(container: str) -> None:
+    shape = _CONTAINERS[container]
+    for rank in (Rank, _validated(Rank)):
+        _refused(_holder(shape.wrap(rank), shape.default), "must have string values")
+
+
+@pytest.mark.spec("CON-16", "CON-17")
+@pytest.mark.parametrize("container", list(_CONTAINERS))
+def test_strict_mode_is_refused_wherever_it_sits(container: str) -> None:
+    shape = _CONTAINERS[container]
+    record = _holder(shape.wrap(Annotated[int, Strict()]), shape.default)
+    _refused(record, "reads in strict mode")
+
+    # Wire probe: a value the description of the same shape without strict
+    # mode admits is refused when read.
+    value = {"v": shape.wire(1.0)}
+    twin = _twin(shape, int)
+    assert Draft202012Validator(twin).is_valid(value)
+    with pytest.raises(ValidationError):
+        record.model_validate_json(json.dumps(value))
+
+
+@pytest.mark.spec("CON-16")
+def test_int_bound_beyond_the_float_range_is_stated() -> None:
+    record = _holder(Annotated[int, Field(lt=10**400)], False)
+    described = _declare(record)["$defs"]["Holder"]["properties"]["v"]
+    assert described == {"type": "integer", "exclusiveMaximum": 10**400}

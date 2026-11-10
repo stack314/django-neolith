@@ -20,7 +20,7 @@ written out where they are used.
 import json
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from typing import Any, Literal
 
 from pydantic import BaseModel
@@ -101,19 +101,22 @@ _SCALARS: dict[str, tuple[dict[str, str], Mapping[str, str], frozenset[str]]] = 
 # checking it again (revalidate_instances defaults to "never"), so a before
 # validator that returns one, for example from model_construct, passes it
 # through unchecked. Before validators are therefore admitted on fields whose
-# type is not a record, and refused on records and record-typed fields. A
-# record instance that a provider builds itself, such as a subclass with
-# looser fields, still travels unchecked; only a send-side check against the
-# description can catch that (step 3, #10). An after or wrap validator returns
-# a value after the check, which nothing checks again, and a plain validator
-# replaces the schema; both are refused. A before validator must also be
-# idempotent: the value it returns travels, and is passed through it again
-# when read back.
+# type contains no record, and refused on records and on fields whose type
+# contains a record at any depth: a list item, a map value, an optional value
+# or an alias. A record instance that a provider builds itself, such as a
+# subclass with looser fields, still travels unchecked; only a send-side
+# check against the description can catch that (step 3, #10). An after or
+# wrap validator returns a value after the check, which nothing checks again,
+# and a plain validator replaces the schema; both are refused. A before
+# validator must also be idempotent: the value it returns travels, and is
+# passed through it again when read back.
 _VALIDATORS = frozenset({"function-before"})
 _UNCHECKED_VALIDATORS = frozenset({"function-after", "function-wrap"})
 # json_schema_input_schema only changes what Pydantic's JSON Schema generator
 # writes in validation mode, which the description never reads.
 _VALIDATOR_KEYS = frozenset({"function", "schema", "json_schema_input_schema"})
+# The keys under which a node holds the nodes that check parts of its value.
+_CHILDREN = ("schema", "items_schema", "keys_schema", "values_schema")
 
 # Model settings that change validation only. Anything else that reaches the
 # core config, such as ser_json_timedelta or val_json_bytes, changes the wire.
@@ -528,8 +531,6 @@ class Portable:
             return self.describe(target, path, (*aliases, reference))
         if kind in _VALIDATORS | _UNCHECKED_VALIDATORS:
             inner = node.get("schema", {})
-            if self.underlying(inner, path).get("type") == "enum":
-                self.enum(self.underlying(inner, path), path)
             self.validator(node, subject, path)
             return self.describe(inner, path, aliases)
         if kind == "model":
@@ -591,8 +592,10 @@ class Portable:
                     f"{subject} is a map without key and value types, "
                     "which is not a portable form"
                 )
-            key_node = self.underlying(node["keys_schema"], path)
-            if key_node.get("type") == "str" and self.converts(key_node):
+            if any(
+                reached.get("type") == "str" and self.converts(reached)
+                for reached in self.reachable(node["keys_schema"], path)
+            ):
                 raise self.fail(
                     f"{subject} converts its keys, so two keys can become one; "
                     "map keys are not converted in this version"
@@ -674,27 +677,45 @@ class Portable:
                 "the length"
             )
 
-    def underlying(self, node: Mapping[str, Any], path: str) -> Mapping[str, Any]:
-        """The node a value is finally checked by, through every wrapper.
+    def reachable(
+        self, node: Mapping[str, Any], path: str
+    ) -> Iterator[Mapping[str, Any]]:
+        """Every node a value placed here can be checked by, at any depth.
 
-        Steps through ``definitions`` wrappers, references and validators, so
-        that a check about a node's kind is not bypassed by wrapping it, for
-        example a map key behind a before validator.
+        Walks through ``definitions`` wrappers, references, validators, list
+        items, map keys and values, nullable and default nodes, keeping a
+        seen-set so that a recursive type ends. A rule about whether a kind of
+        node can be reached from here asks this walk, never the nearest node,
+        so that wrapping the node in a container, an alias or another
+        validator does not get around the rule.
         """
-        while True:
-            node = self.resolve(node, path)
-            if node.get("type") not in _VALIDATORS | _UNCHECKED_VALIDATORS:
-                return node
-            node = node.get("schema", {})
+        seen: set[int] = set()
+        pending = [node]
+        while pending:
+            current = self.resolve(pending.pop(), path)
+            if id(current) in seen:
+                continue
+            seen.add(id(current))
+            yield current
+            if current.get("type") in ("model", "model-fields"):
+                # A record's own fields are judged when the record is.
+                continue
+            for key in _CHILDREN:
+                child = current.get(key)
+                if isinstance(child, dict):
+                    pending.append(child)
 
     def validator(self, node: Mapping[str, Any], subject: str, path: str = "") -> None:
-        """Admit a before validator on a non-record; refuse the rest."""
-        inner = self.underlying(node.get("schema", {}), path)
-        if inner.get("type") in ("model", "model-fields"):
+        """Admit a before validator on a type without records; refuse the rest."""
+        if any(
+            reached.get("type") in ("model", "model-fields")
+            for reached in self.reachable(node.get("schema", {}), path)
+        ):
             raise self.fail(
-                f"{subject} has a validator on a record, which can return a record "
-                "instance that Pydantic keeps without checking it; validate the "
-                "record's fields instead"
+                f"{subject} has a validator on a record or on a type that "
+                "contains one, so it can return a record instance that "
+                "Pydantic keeps without checking it; validate the record's "
+                "fields instead"
             )
         if node.get("type") in _UNCHECKED_VALIDATORS:
             raise self.fail(
@@ -828,7 +849,11 @@ def _bounds(node: Mapping[str, Any], keywords: Mapping[str, str]) -> dict[str, A
         if key not in node:
             continue
         value = node[key]
-        if type(value) not in (int, float) or not math.isfinite(value):
+        # An int is always finite and JSON Schema states it exactly, however
+        # large; math.isfinite would raise OverflowError past the float range.
+        if type(value) not in (int, float) or (
+            type(value) is float and not math.isfinite(value)
+        ):
             raise _Unstatable(key, value)
         mapped[keyword] = value
     return mapped
