@@ -102,6 +102,11 @@ class Below(BaseModel):
     value: int
 
 
+# Refers to a name that only the checker's own locals would supply.
+class Sneaky(BaseModel):
+    x: "path"  # type: ignore[name-defined]  # noqa: F821
+
+
 class Point(TypedDict):
     x: int
 
@@ -1039,8 +1044,10 @@ def test_record_type_defined_after_the_contract_is_named(defer_build: bool) -> N
         later: "Later"  # type: ignore[name-defined]  # noqa: F821
 
     expected = (
-        "field Early.later refers to 'Later', which is not defined when the "
-        "contract is declared; define Later before the contract"
+        "field Early.later refers to 'Later', which the module of the record that "
+        "uses it does not define when the contract is declared; define Later at "
+        "module level there, before the contract, or call that record's "
+        "model_rebuild() once Later is defined"
     )
     with pytest.raises(ContractDefinitionError, match=re.escape(expected)):
         contract("early.v1")(
@@ -1059,13 +1066,44 @@ def test_records_written_top_down_are_resolved() -> None:
 
 
 @pytest.mark.spec("CON-17")
-def test_default_that_cannot_be_written_as_json_is_named() -> None:
-    record = create_model("Raw", data=(bytes, b"\xff"))
+@pytest.mark.parametrize(
+    ("annotation", "default"),
+    [
+        pytest.param(bytes, b"\xff", id="bytes not UTF-8"),
+        pytest.param(str, "\ud800", id="lone surrogate"),
+        pytest.param(list[bytes], [b"\xff"], id="in a list"),
+        pytest.param(dict[str, str], {"a": "\ud800"}, id="in a dict"),
+    ],
+)
+def test_default_that_cannot_be_written_as_json_is_named(
+    annotation: object, default: object
+) -> None:
+    record = create_model("Raw", data=(cast("Any", annotation), default))
     with pytest.raises(
         ContractDefinitionError,
-        match=re.escape("field Shape.value.data has the default b'\\xff', which "),
+        match=r"field Shape\.value\.data has the default .*cannot be written as JSON",
     ):
         declare_with_field(record)
+
+
+@pytest.mark.spec("CON-17")
+def test_forward_reference_does_not_resolve_to_checker_locals() -> None:
+    expected = "field Shape.value.x refers to 'path', which the module"
+    with pytest.raises(ContractDefinitionError, match=re.escape(expected)):
+        declare_with_field(Sneaky)
+
+
+@pytest.mark.spec("CON-13", "CON-16")
+def test_local_records_rebuilt_by_their_author_are_accepted() -> None:
+    class Outer(BaseModel):
+        inner: "Inner"
+
+    class Inner(BaseModel):
+        value: int
+
+    Outer.model_rebuild()
+    defs = Contract.of(declare_with_field(Outer)).describe()["$defs"]
+    assert {"Outer", "Inner"} <= set(defs)
 
 
 @pytest.mark.spec("CON-13", "CON-16")

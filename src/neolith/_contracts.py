@@ -15,6 +15,7 @@ implementation fails when its module is imported (CONTRIBUTING K2), with a
 
 import enum
 import inspect
+import json
 import re
 import types
 import typing
@@ -41,7 +42,7 @@ from pydantic.json_schema import JsonSchemaMode, models_json_schema
 from pydantic_core import (
     PydanticSerializationError,
     PydanticUndefined,
-    to_jsonable_python,
+    to_json,
 )
 
 __all__ = [
@@ -433,7 +434,9 @@ class _TypeChecker:
         if not model.__pydantic_complete__:
             # Records written top-down refer to ones defined below them; those
             # are defined by now. A name still unresolved stays a ForwardRef.
-            model.model_rebuild(raise_errors=False)
+            # An empty types namespace keeps resolution to the record's module,
+            # as for action annotations, rather than this function's locals.
+            model.model_rebuild(raise_errors=False, _types_namespace={})
         extra = model.model_config.get("extra")
         if extra not in (None, "ignore"):
             raise ContractDefinitionError(
@@ -496,13 +499,13 @@ class _TypeChecker:
                 "which is not a value of its type"
             ) from error
         try:
-            sent = to_jsonable_python(field.default)
+            sent = json.loads(to_json(field.default))
         except (PydanticSerializationError, ValueError) as error:
             raise ContractDefinitionError(
                 f"{self.where}: field {path} has the default {field.default!r}, "
-                "which cannot be written as JSON in this version; bytes that are "
-                "not UTF-8 need the base64 encoding that the in-process "
-                "transport settles"
+                "which cannot be written as JSON: a string with a lone surrogate "
+                "never can, and bytes that are not UTF-8 need the base64 encoding "
+                "that the in-process transport settles"
             ) from error
         # Pydantic sends a default as written, without validating it, and the
         # description shows it the same way. A validator that would change it,
@@ -535,9 +538,11 @@ class _TypeChecker:
                 else annotation.__forward_arg__
             )
             raise ContractDefinitionError(
-                f"{self.where}: field {path} refers to {name!r}, which is not "
-                f"defined when the contract is declared; define {name} before "
-                "the contract"
+                f"{self.where}: field {path} refers to {name!r}, which the module "
+                "of the record that uses it does not define when the contract is "
+                f"declared; define {name} at module level there, before the "
+                f"contract, or call that record's model_rebuild() once {name} is "
+                "defined"
             )
         if any(annotation is scalar for scalar in _SCALARS):
             return
@@ -589,7 +594,7 @@ def _model_schema(model: type[BaseModel], where: str) -> dict[str, Any]:
     """Find the model's own node in its Pydantic core schema."""
     if not isinstance(model.__pydantic_core_schema__, dict):
         # A record with defer_build=True has a placeholder until it is built.
-        model.model_rebuild(force=True)
+        model.model_rebuild(force=True, _types_namespace={})
     pending: list[object] = [model.__pydantic_core_schema__]
     while pending:
         node = pending.pop()
