@@ -18,8 +18,9 @@ list is a requirement with its own ID, and the lead-in carries none. A list
 that CommonMark starts right after a governed list (a changed bullet or
 delimiter, or a split by an HTML block) is governed by the same lead-in. So
 is a list introduced right after it by a paragraph that ends in ":" and has no
-normative word or ID, such as "And also:" (ending that paragraph in "." makes
-its list description instead), and an ordered list that resumes its numbering
+normative word or ID, such as "And also:" (a paragraph that ends any other
+way, such as in ".", makes its list description, unless it is an ordered list
+that resumes the numbering), and an ordered list that resumes its numbering
 before the next heading.
 
 It always reports a problem, and exits 1, when:
