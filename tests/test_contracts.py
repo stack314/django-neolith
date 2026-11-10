@@ -902,6 +902,28 @@ def _split_commas(value: object) -> object:
         pytest.param(
             Annotated[str, AfterValidator(str.lower)], "ABC", "'abc'", id="lower"
         ),
+        pytest.param(
+            Annotated[Decimal, BeforeValidator(Decimal)],
+            0,
+            "Decimal('0')",
+            id="Decimal = 0",
+        ),
+        pytest.param(
+            Annotated[Decimal, BeforeValidator(Decimal)],
+            3,
+            "Decimal('3')",
+            id="Decimal = 3",
+        ),
+        pytest.param(
+            list[Annotated[Decimal, BeforeValidator(Decimal)]],
+            [3],
+            "[Decimal('3')]",
+            id="list[Decimal] = [3]",
+        ),
+        pytest.param(Annotated[int, BeforeValidator(int)], True, "1", id="int = True"),
+        pytest.param(
+            Annotated[float, BeforeValidator(float)], True, "1.0", id="float = True"
+        ),
     ],
 )
 def test_default_that_validators_change_is_rejected(
@@ -985,6 +1007,23 @@ def test_alias_generator_is_rejected() -> None:
     )
     with pytest.raises(ContractDefinitionError, match=r"Shape\.value\.item_id"):
         declare_with_field(camel)
+
+
+@pytest.mark.spec("CON-17")
+@pytest.mark.parametrize("defer_build", [False, True])
+def test_record_type_defined_after_the_contract_is_named(defer_build: bool) -> None:
+    class Early(BaseModel):
+        model_config = ConfigDict(defer_build=defer_build)
+        later: "Later"  # type: ignore[name-defined]  # noqa: F821
+
+    expected = (
+        "field Early.later refers to 'Later', which is not defined when the "
+        "contract is declared; define Later before the contract"
+    )
+    with pytest.raises(ContractDefinitionError, match=re.escape(expected)):
+        contract("early.v1")(
+            declaration("EarlyContract", {"send": action(_sender(Early))})
+        )
 
 
 @pytest.mark.spec("CON-13", "CON-16")

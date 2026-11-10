@@ -38,7 +38,11 @@ from pydantic import (
 )
 from pydantic.fields import FieldInfo
 from pydantic.json_schema import JsonSchemaMode, models_json_schema
-from pydantic_core import PydanticUndefined
+from pydantic_core import (
+    PydanticSerializationError,
+    PydanticUndefined,
+    to_jsonable_python,
+)
 
 __all__ = [
     "Action",
@@ -479,18 +483,20 @@ class _TypeChecker:
         """
         if field.default is PydanticUndefined or field.default_factory is not None:
             return
+        adapter: TypeAdapter[Any] = TypeAdapter(field.rebuild_annotation())
         try:
-            validated = TypeAdapter(field.rebuild_annotation()).validate_python(
-                field.default, strict=True
-            )
-        except ValidationError as error:
+            validated = adapter.validate_python(field.default, strict=True)
+            sent = to_jsonable_python(field.default)
+        except (ValidationError, PydanticSerializationError) as error:
             raise ContractDefinitionError(
                 f"{self.where}: field {path} has the default {field.default!r}, "
                 "which is not a value of its type"
             ) from error
-        # Pydantic sends a default as written, without validating it, so a
-        # validator that would change it must not have anything to change.
-        if validated != field.default:
+        # Pydantic sends a default as written, without validating it, and the
+        # description shows it the same way. A validator that would change it,
+        # even into an equal value of another type such as Decimal(0) for 0,
+        # must have nothing to change.
+        if not _same_json(sent, adapter.dump_python(validated, mode="json")):
             raise ContractDefinitionError(
                 f"{self.where}: field {path} has the default {field.default!r}, "
                 f"which its validators turn into {validated!r}; a default travels "
@@ -510,6 +516,17 @@ class _TypeChecker:
 
     def check(self, annotation: object, path: str) -> None:
         annotation = self.unwrap(annotation, path)
+        if isinstance(annotation, str | typing.ForwardRef):
+            name = (
+                annotation
+                if isinstance(annotation, str)
+                else annotation.__forward_arg__
+            )
+            raise ContractDefinitionError(
+                f"{self.where}: field {path} refers to {name!r}, which is not "
+                f"defined when the contract is declared; define {name} before "
+                "the contract"
+            )
         if any(annotation is scalar for scalar in _SCALARS):
             return
         if annotation is datetime:
@@ -612,6 +629,23 @@ def _wire_or_description_changes(
     elif isinstance(node, list):
         for value in node:
             yield from _wire_or_description_changes(value, field, root=False)
+
+
+def _same_json(left: object, right: object) -> bool:
+    """Compare two JSON values, keeping booleans apart from numbers."""
+    if isinstance(left, bool) or isinstance(right, bool):
+        return type(left) is type(right) and left == right
+    if isinstance(left, int | float) and isinstance(right, int | float):
+        return left == right
+    if isinstance(left, list) and isinstance(right, list):
+        return len(left) == len(right) and all(
+            _same_json(a, b) for a, b in zip(left, right, strict=True)
+        )
+    if isinstance(left, dict) and isinstance(right, dict):
+        return left.keys() == right.keys() and all(
+            _same_json(left[key], right[key]) for key in left
+        )
+    return type(left) is type(right) and left == right
 
 
 def _record_changes(
