@@ -13,37 +13,18 @@ implementation fails when its module is imported (CONTRIBUTING K2), with a
 ``ContractDefinitionError`` naming the contract, the action and the field.
 """
 
-import enum
+import copy
 import inspect
-import json
 import re
 import types
 import typing
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
-from decimal import Decimal
-from typing import Annotated, Any, Literal, Protocol, overload
+from typing import Annotated, Any, Protocol, overload
 
-from pydantic import (
-    AfterValidator,
-    AwareDatetime,
-    BaseModel,
-    BeforeValidator,
-    PlainSerializer,
-    RootModel,
-    TypeAdapter,
-    ValidationError,
-    WrapSerializer,
-    WrapValidator,
-)
-from pydantic.fields import FieldInfo
-from pydantic.json_schema import JsonSchemaMode, models_json_schema
-from pydantic_core import (
-    PydanticSerializationError,
-    PydanticUndefined,
-    to_json,
-)
+from pydantic import BaseModel
+
+from neolith._portable import Portable
 
 __all__ = [
     "Action",
@@ -65,36 +46,8 @@ _ACTION_NAME = re.compile(_SEGMENT)
 
 _CONTRACT_ATTR = "__neolith_contract__"
 _ACTION_ATTR = "__neolith_action__"
-
-# The portable scalars. A timestamp is AwareDatetime: RFC 3339 requires an
-# offset, which a plain datetime may lack.
-_SCALARS: tuple[object, ...] = (
-    bool,
-    int,
-    float,
-    str,
-    bytes,
-    Decimal,
-    AwareDatetime,
-    date,
-    timedelta,
-)
 _UNIONS: tuple[object, ...] = (typing.Union, types.UnionType)
-# Pydantic hooks that let a class or an Annotated marker build its own core
-# schema or JSON Schema, so that it travels or is described other than as its
-# declared type.
-_SCHEMA_HOOKS = ("__get_pydantic_core_schema__", "__get_pydantic_json_schema__")
-_SCHEMA_KEEPING_MARKERS = (
-    AfterValidator,
-    BeforeValidator,
-    WrapValidator,
-    PlainSerializer,
-    WrapSerializer,
-)
 _DIALECT = "https://json-schema.org/draft/2020-12/schema"
-# Every type is described as it travels: the shape a caller sends and a
-# provider returns.
-_MODE: JsonSchemaMode = "serialization"
 
 
 class ContractDefinitionError(TypeError):
@@ -124,18 +77,20 @@ class Contract:
     Read it with ``Contract.of(Declaration)``.
     """
 
-    __slots__ = ("_actions", "declaration", "identity", "major", "name")
+    __slots__ = ("_actions", "_description", "declaration", "identity", "major", "name")
 
     def __init__(
         self,
         identity: str,
         declaration: type[Any],
         actions: Mapping[str, Action],
+        description: Mapping[str, Any],
     ) -> None:
         self.identity = identity
         self.name, self.major = _parse_identity(identity)
         self.declaration = declaration
         self._actions = types.MappingProxyType(dict(actions))
+        self._description = description
 
     @property
     def actions(self) -> Mapping[str, Action]:
@@ -161,30 +116,13 @@ class Contract:
         """Return the neutral description of the contract (spec 01, Publication).
 
         Each action gives its idempotency and a reference to the JSON Schema of
-        its request and reply, or ``None`` for an empty reply. Each record is
-        described once under ``$defs``, by name. The result is JSON-compatible.
+        its request and reply, or ``None`` for an empty reply. Each record and
+        enum is described once under ``$defs``, by its class name. The
+        description is written from the same walk of Pydantic's core schema
+        that admits the types, so it states what travels. The result is
+        JSON-compatible, and a new copy each time.
         """
-        models: dict[type[BaseModel], None] = {}
-        for item in self._actions.values():
-            models[item.request] = None
-            if item.reply is not None:
-                models[item.reply] = None
-        refs, schema = models_json_schema(
-            [(model, _MODE) for model in models], ref_template="#/$defs/{model}"
-        )
-        return {
-            "contract": self.identity,
-            "jsonSchemaDialect": _DIALECT,
-            "actions": {
-                name: {
-                    "idempotent": item.idempotent,
-                    "request": refs[(item.request, _MODE)],
-                    "reply": None if item.reply is None else refs[(item.reply, _MODE)],
-                }
-                for name, item in self._actions.items()
-            },
-            "$defs": schema.get("$defs", {}),
-        }
+        return copy.deepcopy(dict(self._description))
 
     def _check_implementation(self, impl: type[Any]) -> None:
         where = f"{self.identity}, implementation {impl.__qualname__}"
@@ -256,8 +194,9 @@ def contract[T](identity: str, /) -> Callable[[type[T]], type[T]]:
                 f"{identity}: declare the contract as "
                 f"class {declaration.__name__}(Protocol), with no other base"
             )
-        checker = _TypeChecker()
+        portable = Portable(ContractDefinitionError)
         actions: dict[str, Action] = {}
+        described: dict[str, Any] = {}
         for attr, value in vars(declaration).items():
             idempotent = (
                 vars(value).get(_ACTION_ATTR) if inspect.isfunction(value) else None
@@ -275,16 +214,29 @@ def contract[T](identity: str, /) -> Callable[[type[T]], type[T]]:
                     "ASCII letter, followed by lowercase ASCII letters, digits or "
                     "underscores"
                 )
-            where = f"{identity}, action {attr!r}"
-            request, reply = _signature(where, value)
-            checker.where = where
-            actions[attr] = Action(
-                attr,
-                idempotent,
-                checker.message(request, "request"),
-                None if reply is None else checker.message(reply, "reply"),
+            portable.where = f"{identity}, action {attr!r}"
+            request, reply = _signature(portable.where, value)
+            request_type, request_ref = portable.root(request, "request")
+            reply_type, reply_ref = (
+                (None, None) if reply is None else portable.root(reply, "reply")
             )
-        setattr(declaration, _CONTRACT_ATTR, Contract(identity, declaration, actions))
+            actions[attr] = Action(attr, idempotent, request_type, reply_type)
+            described[attr] = {
+                "idempotent": idempotent,
+                "request": request_ref,
+                "reply": reply_ref,
+            }
+        description = {
+            "contract": identity,
+            "jsonSchemaDialect": _DIALECT,
+            "actions": described,
+            "$defs": portable.defs,
+        }
+        setattr(
+            declaration,
+            _CONTRACT_ATTR,
+            Contract(identity, declaration, actions, description),
+        )
         return declaration
 
     return decorate
@@ -385,356 +337,6 @@ def _signature(where: str, function: Callable[..., Any]) -> tuple[object, object
         )
     reply = hints["return"]
     return request, (None if reply is type(None) else reply)
-
-
-class _TypeChecker:
-    """Check request and reply types against the portable forms (spec 01).
-
-    One checker serves one contract, so that the names of records and enums
-    are checked across all its actions.
-    """
-
-    def __init__(self) -> None:
-        self.where = ""
-        self.named: dict[str, type[Any] | typing.TypeAliasType] = {}
-
-    def message(
-        self, annotation: object, role: Literal["request", "reply"]
-    ) -> type[BaseModel]:
-        if (
-            inspect.isclass(annotation)
-            and issubclass(annotation, BaseModel)
-            and not issubclass(annotation, RootModel)
-        ):
-            self.record(annotation, annotation.__name__)
-            return annotation
-        empty = "" if role == "request" else ", or None for an empty reply"
-        raise ContractDefinitionError(
-            f"{self.where}: the {role} type must be a record (a pydantic "
-            f"model with named fields){empty}, not {_name(annotation)}"
-        )
-
-    def register(self, named: type[Any] | typing.TypeAliasType) -> bool:
-        """Record the name of a record, enum or type alias.
-
-        Each is described under its name, so two with one name would collide.
-        Returns False if this one was seen already.
-        """
-        known = self.named.get(named.__name__)
-        if known is named:
-            return False
-        if known is not None:
-            raise ContractDefinitionError(
-                f"{self.where}: two different records, enums or type aliases are "
-                f"named {named.__name__!r}: {_where_defined(known)} and "
-                f"{_where_defined(named)}"
-            )
-        self.named[named.__name__] = named
-        return True
-
-    def record(self, model: type[BaseModel], path: str) -> None:
-        if model.__pydantic_generic_metadata__["args"]:
-            raise ContractDefinitionError(
-                f"{self.where}: record {model.__name__} at {path} is a parametrised "
-                "generic, which is described under another name; declare a record "
-                "for each use"
-            )
-        if not self.register(model):
-            return
-        if not model.__pydantic_complete__:
-            # Records written top-down refer to ones defined below them; those
-            # are defined by now. A name still unresolved stays a ForwardRef.
-            # An empty types namespace keeps resolution to the record's module,
-            # as for action annotations, rather than this function's locals.
-            model.model_rebuild(raise_errors=False, _types_namespace={})
-        extra = model.model_config.get("extra")
-        if extra not in (None, "ignore"):
-            raise ContractDefinitionError(
-                f"{self.where}: record {model.__name__} at {path} sets "
-                f"extra={extra!r}; a record must ignore unknown fields so that "
-                "adding a field stays compatible"
-            )
-        for field_name, field in model.model_fields.items():
-            if (field.alias, field.validation_alias, field.serialization_alias) != (
-                None,
-                None,
-                None,
-            ):
-                raise ContractDefinitionError(
-                    f"{self.where}: field {path}.{field_name} has an alias; a field "
-                    "travels under its own name in this version, so that the "
-                    "description and the wire agree"
-                )
-            self.markers(field.metadata, f"{path}.{field_name}")
-            self.check(field.annotation, f"{path}.{field_name}")
-            self.default(field, f"{path}.{field_name}")
-        for changed, kind in _record_changes(model, self.where):
-            at = f"field {path}.{changed}" if changed else f"record {path}"
-            raise ContractDefinitionError(
-                f"{self.where}: {at} has {kind}; a record travels as its declared "
-                "fields, each in its portable form, and is described from them, so "
-                "custom serialization and JSON Schema overrides are not supported"
-            )
-
-    def markers(self, metadata: typing.Iterable[object], path: str) -> None:
-        """Reject ``Annotated`` markers that build their own core schema.
-
-        Validators are allowed: they check values without changing the wire
-        form. Serializers are left to the core-schema walk, which names them.
-        """
-        for marker in metadata:
-            if hasattr(marker, "__get_pydantic_core_schema__") and not isinstance(
-                marker, _SCHEMA_KEEPING_MARKERS
-            ):
-                raise ContractDefinitionError(
-                    f"{self.where}: field {path} uses {type(marker).__name__}, which "
-                    "builds its own schema; a field travels and is described as its "
-                    "declared type"
-                )
-
-    def default(self, field: FieldInfo, path: str) -> None:
-        """Reject a default that is not a value of the field's type.
-
-        The default goes out on the wire and into the description, so a peer
-        generated from the description must accept it.
-        """
-        if field.default is PydanticUndefined or field.default_factory is not None:
-            return
-        adapter: TypeAdapter[Any] = TypeAdapter(field.rebuild_annotation())
-        try:
-            validated = adapter.validate_python(field.default, strict=True)
-        except ValidationError as error:
-            raise ContractDefinitionError(
-                f"{self.where}: field {path} has the default {field.default!r}, "
-                "which is not a value of its type"
-            ) from error
-        try:
-            sent = json.loads(to_json(field.default))
-        except (PydanticSerializationError, ValueError) as error:
-            raise ContractDefinitionError(
-                f"{self.where}: field {path} has the default {field.default!r}, "
-                "which cannot be written as JSON: a string with a lone surrogate "
-                "never can, and bytes that are not UTF-8 need the base64 encoding "
-                "that the in-process transport settles"
-            ) from error
-        # Pydantic sends a default as written, without validating it, and the
-        # description shows it the same way. A validator that would change it,
-        # even into an equal value of another type such as Decimal(0) for 0,
-        # must have nothing to change.
-        if not _same_json(sent, adapter.dump_python(validated, mode="json")):
-            raise ContractDefinitionError(
-                f"{self.where}: field {path} has the default {field.default!r}, "
-                f"which its validators turn into {validated!r}; a default travels "
-                f"as written, so write it as {validated!r}"
-            )
-
-    def unwrap(
-        self, annotation: object, path: str, aliases: tuple[Any, ...]
-    ) -> tuple[object, tuple[Any, ...]]:
-        """Strip ``Annotated``, checking its markers, and expand ``type`` aliases.
-
-        Returns the annotation and the aliases expanded on the way to it, so
-        that a recursive alias is caught instead of expanded for ever.
-        """
-        while True:
-            if typing.get_origin(annotation) is Annotated:
-                annotation, *metadata = typing.get_args(annotation)
-                self.markers(metadata, path)
-            elif isinstance(annotation, typing.TypeAliasType):
-                if annotation in aliases:
-                    raise ContractDefinitionError(
-                        f"{self.where}: field {path} uses type alias "
-                        f"{annotation.__name__}, which refers to itself; a "
-                        "recursive shape must be a record"
-                    )
-                self.register(annotation)
-                aliases = (*aliases, annotation)
-                annotation = annotation.__value__
-            else:
-                return annotation, aliases
-
-    def check(
-        self, annotation: object, path: str, aliases: tuple[Any, ...] = ()
-    ) -> None:
-        annotation, aliases = self.unwrap(annotation, path, aliases)
-        if isinstance(annotation, str | typing.ForwardRef):
-            name = (
-                annotation
-                if isinstance(annotation, str)
-                else annotation.__forward_arg__
-            )
-            if aliases:
-                raise ContractDefinitionError(
-                    f"{self.where}: field {path} refers to {name!r} by a string "
-                    f"inside type alias {aliases[-1].__name__}, which is not "
-                    f"resolved; write {name} unquoted, since a type statement is "
-                    "evaluated when it is used"
-                )
-            raise ContractDefinitionError(
-                f"{self.where}: field {path} refers to {name!r}, which the module "
-                "of the record that uses it does not define when the contract is "
-                f"declared; define {name} at module level there, before the "
-                f"contract, or call that record's model_rebuild() once {name} is "
-                "defined"
-            )
-        if any(annotation is scalar for scalar in _SCALARS):
-            return
-        if annotation is datetime:
-            raise ContractDefinitionError(
-                f"{self.where}: field {path} is a timestamp, which carries an "
-                "offset from UTC (RFC 3339); annotate it as pydantic.AwareDatetime"
-            )
-        origin, arguments = typing.get_origin(annotation), typing.get_args(annotation)
-        if inspect.isclass(annotation) and not arguments:
-            if issubclass(annotation, BaseModel) and not issubclass(
-                annotation, RootModel
-            ):
-                self.record(annotation, path)
-                return
-            if issubclass(annotation, enum.Enum) and all(
-                isinstance(member.value, str) for member in annotation
-            ):
-                hooks = [hook for hook in _SCHEMA_HOOKS if hasattr(annotation, hook)]
-                if hooks:
-                    raise ContractDefinitionError(
-                        f"{self.where}: enum {annotation.__name__} at {path} defines "
-                        f"{hooks[0]}; an enum travels and is described as its names"
-                    )
-                self.register(annotation)
-                return
-        elif origin is list and len(arguments) == 1:
-            self.check(arguments[0], f"{path}[*]", aliases)
-            return
-        elif (
-            origin is dict
-            and len(arguments) == 2
-            and self.unwrap(arguments[0], f"{path} key", aliases)[0] is str
-        ):
-            self.check(arguments[1], f"{path}{{*}}", aliases)
-            return
-        elif origin in _UNIONS and len(arguments) == 2 and type(None) in arguments:
-            self.check(next(a for a in arguments if a is not type(None)), path, aliases)
-            return
-        elif origin is Literal and all(type(value) is str for value in arguments):
-            return
-        raise ContractDefinitionError(
-            f"{self.where}: field {path} has type {_name(annotation)}, which is not "
-            "a portable form"
-        )
-
-
-def _model_schema(model: type[BaseModel], where: str) -> dict[str, Any]:
-    """Find the model's own node in its Pydantic core schema."""
-    if not isinstance(model.__pydantic_core_schema__, dict):
-        # A record with defer_build=True has a placeholder until it is built.
-        model.model_rebuild(force=True, _types_namespace={})
-    pending: list[object] = [model.__pydantic_core_schema__]
-    while pending:
-        node = pending.pop()
-        if isinstance(node, dict):
-            if node.get("type") == "model" and node.get("cls") is model:
-                return node
-            pending.extend(node.values())
-        elif isinstance(node, list):
-            pending.extend(node)
-    # Pydantic builds a model node for every model; this guards its internals.
-    raise ContractDefinitionError(
-        f"{where}: cannot read the core schema of record {model.__qualname__}"
-    )
-
-
-def _wire_or_description_changes(
-    node: object, field: str | None, *, root: bool = True
-) -> Iterator[tuple[str | None, str]]:
-    """Yield what makes a record travel or be described other than as declared.
-
-    Walks the record's own core schema, which is what Pydantic serialises and
-    describes from. On the wire: serializers on the record or a field
-    (``model_serializer``, ``field_serializer``, ``PlainSerializer`` and
-    ``WrapSerializer``, at any depth), computed fields, and fields excluded
-    from serialization. In the description: ``WithJsonSchema`` at any depth and
-    ``json_schema_extra`` on a field. Nested records are checked on their own.
-    """
-    if isinstance(node, dict):
-        if node.get("type") == "model" and not root:
-            return
-        if "serialization" in node:
-            yield field, "a custom serializer"
-        if node.get("computed_fields"):
-            yield field, "computed fields"
-        if node.get("serialization_exclude") or node.get("serialization_exclude_if"):
-            yield field, "an exclusion from serialization"
-        metadata = node.get("metadata")
-        if isinstance(metadata, dict) and (
-            metadata.get("pydantic_js_annotation_functions")
-            or metadata.get("pydantic_js_extra")
-        ):
-            yield field, "a JSON Schema override"
-        if node.get("type") == "model-fields":
-            for name, sub in node.get("fields", {}).items():
-                yield from _wire_or_description_changes(sub, name, root=False)
-            return
-        for value in node.values():
-            yield from _wire_or_description_changes(value, field, root=False)
-    elif isinstance(node, list):
-        for value in node:
-            yield from _wire_or_description_changes(value, field, root=False)
-
-
-def _same_json(left: object, right: object) -> bool:
-    """Compare two JSON values, keeping booleans apart from numbers."""
-    if isinstance(left, bool) or isinstance(right, bool):
-        return type(left) is type(right) and left == right
-    # An int default on a number field is sent as an int and read as a number;
-    # a float default on an integer field is sent as a float, which a strict
-    # reader of an integer refuses.
-    if isinstance(left, float) and isinstance(right, int):
-        return False
-    if isinstance(left, int | float) and isinstance(right, int | float):
-        return left == right
-    if isinstance(left, list) and isinstance(right, list):
-        return len(left) == len(right) and all(
-            _same_json(a, b) for a, b in zip(left, right, strict=True)
-        )
-    if isinstance(left, dict) and isinstance(right, dict):
-        return left.keys() == right.keys() and all(
-            _same_json(left[key], right[key]) for key in left
-        )
-    return type(left) is type(right) and left == right
-
-
-def _where_defined(named: type[Any] | typing.TypeAliasType) -> str:
-    """Name a class or type alias with its module, for a clash message."""
-    return f"{named.__module__}.{getattr(named, '__qualname__', named.__name__)}"
-
-
-def _record_changes(
-    model: type[BaseModel], where: str
-) -> Iterator[tuple[str | None, str]]:
-    """Yield what makes a record travel or be described other than as declared.
-
-    Settings and schema hooks come first: a record with a core-schema hook may
-    have no model node to walk.
-    """
-    for key in model.model_config:
-        if key.startswith(("ser_json_", "val_json_")) or key in (
-            "json_schema_extra",
-            "json_schema_mode_override",
-        ):
-            yield None, f"{key} set"
-    for hook in _own_hooks(model):
-        yield None, f"{hook} defined"
-    yield from _wire_or_description_changes(_model_schema(model, where), None)
-
-
-def _own_hooks(model: type[BaseModel]) -> list[str]:
-    """The schema hooks a record defines itself, rather than inherits from Pydantic."""
-    return [
-        hook
-        for hook in _SCHEMA_HOOKS
-        for klass in model.__mro__
-        if klass not in BaseModel.__mro__ and hook in vars(klass)
-    ]
 
 
 def _name(annotation: object) -> str:

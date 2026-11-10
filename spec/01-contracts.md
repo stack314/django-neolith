@@ -52,7 +52,9 @@ The portable forms are the types that every transport can represent, JSON Schema
 
 **CON-14.** A reply type MUST be either a record built only from the portable forms, or empty. An empty reply carries no value.
 
-Records are nominal within a contract and structural across the wire. **CON-15.** Two different types that the description names, such as records and enums, MUST NOT have the same name within one contract. Generated code for other languages names each of them once, so two with one name would collide.
+Records are nominal within a contract and structural across the wire. **CON-15.** Two different records or enums used by one contract MUST NOT have the same name. Generated code for other languages names each record and enum once, so two with one name would collide.
+
+**CON-20.** The name of a record or an enum MUST start with an ASCII letter, followed by ASCII letters, digits or underscores, so that generated code in any language can use it unchanged.
 
 **CON-6.** Unknown fields in a request MUST be ignored by providers. **CON-7.** Unknown fields in a reply MUST be ignored by callers. This is what makes additive changes compatible.
 
@@ -78,11 +80,11 @@ Decision record: [0008](../docs/adr/0008-typed-contract-errors-in-both-modes.md)
 
 **CON-9.** A contract MUST be publishable as a neutral description of its actions, types and errors. For the HTTP transport this is OpenAPI 3.1 ([03](03-http-transport.md)). Other transports define their own projection. The projection is derived from the contract, never hand-written.
 
-**CON-16.** The neutral description MUST give, for each action, its name, whether it is idempotent, the JSON Schema (draft 2020-12) of its request type, and the JSON Schema of its reply type unless the reply is empty. Each record is described once and referenced by name.
+**CON-16.** The neutral description MUST give, for each action, its name, whether it is idempotent, the JSON Schema (draft 2020-12) of its request type, and the JSON Schema of its reply type unless the reply is empty. Each record and enum is described once and referenced by name, and a value that travels validates against the description.
 
 ## Checking a contract
 
-**CON-17.** An implementation MUST reject a contract that does not meet CON-10, CON-11, CON-12, CON-13, CON-14 or CON-15, or whose records cannot ignore unknown fields as CON-6 and CON-7 require, before it serves the contract or calls any of its actions. The rejection names the contract, the action and, for a type, the field.
+**CON-17.** An implementation MUST reject a contract that does not meet CON-10, CON-11, CON-12, CON-13, CON-14, CON-15 or CON-20, or whose records cannot ignore unknown fields as CON-6 and CON-7 require, before it serves the contract or calls any of its actions. The rejection names the contract, the action and, for a type, the field.
 
 **CON-18.** A provider MUST implement every action of its contract, taking the action's request type and returning its reply type.
 

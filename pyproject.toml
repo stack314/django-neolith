@@ -40,8 +40,18 @@ Changelog = "https://github.com/vignzpie/django-neolith/blob/main/CHANGELOG.md"
 [dependency-groups]
 # markdown-it-py: the spec trace parses spec/ as CommonMark (ADR 0018). Development
 # and CI only, never a runtime dependency; pinned so the parse cannot drift.
-test = ["pytest>=8.4", "pytest-django>=4.11", "packaging>=25", "markdown-it-py==4.2.0"]
-lint = ["ruff>=0.14", "mypy>=1.18", "django-stubs>=5.2"]
+# hypothesis, hypothesis-jsonschema and jsonschema: the contract round-trip
+# property test (spec 01, CON-16). Test only.
+test = [
+    "pytest>=8.4",
+    "pytest-django>=4.11",
+    "packaging>=25",
+    "markdown-it-py==4.2.0",
+    "hypothesis>=6.170",
+    "hypothesis-jsonschema>=0.23.2",
+    "jsonschema>=4.26",
+]
+lint = ["ruff>=0.14", "mypy>=1.18", "django-stubs>=5.2", "types-jsonschema>=4.26"]
 dev = [{ include-group = "test" }, { include-group = "lint" }]
 
 [tool.hatch.version]

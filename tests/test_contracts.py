@@ -37,9 +37,11 @@ from pydantic import (
     GetCoreSchemaHandler,
     GetJsonSchemaHandler,
     GetPydanticSchema,
+    ModelWrapValidatorHandler,
     PlainSerializer,
     PlainValidator,
     RootModel,
+    SerializeAsAny,
     Strict,
     StringConstraints,
     WithJsonSchema,
@@ -462,7 +464,7 @@ def test_portable_forms_are_accepted(annotation: object) -> None:
     ids=repr,
 )
 def test_other_types_are_rejected(annotation: object) -> None:
-    with pytest.raises(ContractDefinitionError, match="not a portable form"):
+    with pytest.raises(ContractDefinitionError, match=r"Shape\.value"):
         declare_with_field(annotation)
 
 
@@ -475,7 +477,7 @@ def test_timestamp_carries_an_offset() -> None:
 @pytest.mark.spec("CON-13", "CON-17")
 def test_enum_values_are_strings() -> None:
     Mixed = enum.Enum("Mixed", {"A": "a", "B": 2})
-    with pytest.raises(ContractDefinitionError, match="not a portable form"):
+    with pytest.raises(ContractDefinitionError, match="must have string values"):
         declare_with_field(Mixed)
 
 
@@ -622,7 +624,7 @@ _SERIALIZING = [
     ),
     pytest.param(
         _nested_annotated_serializer,
-        "field Deep.values has a custom serializer",
+        "field Deep.values[*] has a custom serializer",
         id="nested PlainSerializer",
     ),
     pytest.param(
@@ -716,9 +718,15 @@ def _custom_json_schema() -> type[BaseModel]:
     return Custom
 
 
-@pytest.mark.spec("CON-16", "CON-17")
+def _field_description(record: type[BaseModel], name: str) -> object:
+    """The description of one field of a request record."""
+    defs = Contract.of(declare_with_field(record)).describe()["$defs"]
+    return defs[record.__name__]["properties"][name]
+
+
+@pytest.mark.spec("CON-16")
 @pytest.mark.parametrize(
-    ("make", "message"),
+    ("make", "field", "expected"),
     [
         pytest.param(
             lambda: create_model(
@@ -728,7 +736,8 @@ def _custom_json_schema() -> type[BaseModel]:
                     ...,
                 ),
             ),
-            "field Shown.n has a JSON Schema override",
+            "n",
+            {"type": "integer"},
             id="WithJsonSchema",
         ),
         pytest.param(
@@ -741,14 +750,16 @@ def _custom_json_schema() -> type[BaseModel]:
                     ...,
                 ),
             ),
-            "field Shown.n has a JSON Schema override",
+            "n",
+            {"type": "array", "items": {"type": "integer"}},
             id="nested WithJsonSchema",
         ),
         pytest.param(
             lambda: create_model(
                 "Shown", n=(int, Field(json_schema_extra={"type": "string"}))
             ),
-            "field Shown.n has a JSON Schema override",
+            "n",
+            {"type": "integer"},
             id="field json_schema_extra",
         ),
         pytest.param(
@@ -759,25 +770,40 @@ def _custom_json_schema() -> type[BaseModel]:
                 ),
                 a=(int, ...),
             ),
-            "record Shown has json_schema_extra set",
+            "a",
+            {"type": "integer"},
             id="config json_schema_extra",
         ),
         pytest.param(
+            lambda: create_model(
+                "Shown",
+                __config__=ConfigDict(json_schema_mode_override="validation"),
+                n=(
+                    cast(
+                        "Any",
+                        Annotated[
+                            int, BeforeValidator(int, json_schema_input_type=str)
+                        ],
+                    ),
+                    ...,
+                ),
+            ),
+            "n",
+            {"type": "integer"},
+            id="json_schema_mode_override",
+        ),
+        pytest.param(
             _custom_json_schema,
-            "record Custom has __get_pydantic_json_schema__ defined",
+            "value",
+            {"type": "integer"},
             id="__get_pydantic_json_schema__",
         ),
     ],
 )
-def test_record_whose_description_is_rewritten_is_rejected(
-    make: Callable[[], type[BaseModel]], message: str
+def test_json_schema_customisation_does_not_change_the_description(
+    make: Callable[[], type[BaseModel]], field: str, expected: object
 ) -> None:
-    record = make()
-
-    def send(self: object, request: record) -> None: ...  # type: ignore[valid-type]
-
-    with pytest.raises(ContractDefinitionError, match=re.escape(message)):
-        contract("echo.v1")(declaration("Echo", {"send": action(send)}))
+    assert _field_description(make(), field) == expected
 
 
 class _OwnSchema:
@@ -818,59 +844,68 @@ def _hooked_enum(hook: str) -> type[enum.Enum]:
     )
 
 
-@pytest.mark.spec("CON-16", "CON-17")
+@pytest.mark.spec("CON-13", "CON-16")
 @pytest.mark.parametrize(
-    ("annotation", "message"),
+    ("annotation", "expected"),
     [
         pytest.param(
             Annotated[int, GetPydanticSchema(lambda t, h: core_schema.str_schema())],
-            "field Shape.value uses GetPydanticSchema",
+            {"type": "string"},
             id="GetPydanticSchema",
         ),
         pytest.param(
             list[
                 Annotated[int, GetPydanticSchema(lambda t, h: core_schema.str_schema())]
             ],
-            "field Shape.value[*] uses GetPydanticSchema",
+            {"type": "array", "items": {"type": "string"}},
             id="nested GetPydanticSchema",
         ),
         pytest.param(
             Annotated[int, _OwnSchema()],
-            "field Shape.value uses _OwnSchema",
+            {"type": "string"},
             id="marker with its own schema",
         ),
         pytest.param(
-            Annotated[int, PlainValidator(int)],
-            "field Shape.value uses PlainValidator",
-            id="PlainValidator",
-        ),
-        pytest.param(
             _hooked_enum("__get_pydantic_json_schema__"),
-            "enum Color at Shape.value defines __get_pydantic_json_schema__",
+            {"$ref": "#/$defs/Color"},
             id="enum json schema hook",
         ),
         pytest.param(
             _hooked_enum("__get_pydantic_core_schema__"),
-            "enum Color at Shape.value defines __get_pydantic_core_schema__",
+            {"type": "integer"},
             id="enum core schema hook",
         ),
         pytest.param(
             _record_hook("__get_pydantic_core_schema__", classmethod),
-            "record Shape.value has __get_pydantic_core_schema__ defined",
+            {"type": "string"},
             id="record core schema hook",
         ),
         pytest.param(
             _record_hook("__get_pydantic_json_schema__", staticmethod),
-            "record Shape.value has __get_pydantic_json_schema__ defined",
+            {"$ref": "#/$defs/Hooked"},
             id="record json schema staticmethod",
         ),
     ],
 )
-def test_type_that_builds_its_own_schema_is_rejected(
-    annotation: object, message: str
+def test_type_is_described_as_pydantic_builds_it(
+    annotation: object, expected: object
 ) -> None:
-    with pytest.raises(ContractDefinitionError, match=re.escape(message)):
-        declare_with_field(annotation)
+    contract_class = declare_with_field(annotation)
+    description = Contract.of(contract_class).describe()
+    assert description["$defs"]["Shape"]["properties"]["value"] == expected
+    if expected == {"$ref": "#/$defs/Color"}:
+        assert description["$defs"]["Color"] == {"type": "string", "enum": ["red"]}
+
+
+@pytest.mark.spec("CON-13", "CON-17")
+def test_plain_validator_is_rejected() -> None:
+    with pytest.raises(
+        ContractDefinitionError,
+        match=re.escape(
+            "field Shape.value has type function-plain, which is not a portable form"
+        ),
+    ):
+        declare_with_field(Annotated[int, PlainValidator(int)])
 
 
 @pytest.mark.spec("CON-16", "CON-17")
@@ -878,10 +913,7 @@ def test_type_that_builds_its_own_schema_is_rejected(
     "config",
     [
         pytest.param(ConfigDict(val_json_bytes="base64"), id="val_json_bytes"),
-        pytest.param(
-            ConfigDict(json_schema_mode_override="validation"),
-            id="json_schema_mode_override",
-        ),
+        pytest.param(ConfigDict(str_max_length=3), id="str_max_length"),
     ],
 )
 def test_config_that_splits_description_and_wire_is_rejected(
@@ -901,8 +933,8 @@ def test_config_that_splits_description_and_wire_is_rejected(
     [
         pytest.param(int, None, id="int = None"),
         pytest.param(int, "abc", id="int = 'abc'"),
-        pytest.param(int, True, id="int = True"),
         pytest.param(str, 3, id="str = 3"),
+        pytest.param(AwareDatetime, "2026-01-01", id="timestamp = date text"),
         pytest.param(Annotated[int, Field(ge=0)], -1, id="ge=0 = -1"),
     ],
 )
@@ -910,7 +942,9 @@ def test_default_outside_the_field_type_is_rejected(
     annotation: object, default: object
 ) -> None:
     record = create_model("Defaulted", n=(cast("Any", annotation), default))
-    with pytest.raises(ContractDefinitionError, match="is not a value of its type"):
+    with pytest.raises(
+        ContractDefinitionError, match="does not read back as a value of its type"
+    ):
         declare_with_field(record)
 
 
@@ -925,62 +959,71 @@ def _split_commas(value: object) -> object:
         pytest.param(
             Annotated[int, BeforeValidator(lambda v: 0 if v is None else v)],
             None,
-            "0",
+            "null but reads back as 0",
             id="BeforeValidator None",
         ),
         pytest.param(
             Annotated[int, WrapValidator(lambda v, h: h(0 if v is None else v))],
             None,
-            "0",
+            "null but reads back as 0",
             id="WrapValidator None",
         ),
-        pytest.param(Annotated[int, BeforeValidator(int)], "3", "3", id="int('3')"),
+        pytest.param(
+            Annotated[int, BeforeValidator(int)],
+            "3",
+            '"3" but reads back as 3',
+            id="int('3')",
+        ),
         pytest.param(
             Annotated[list[str], BeforeValidator(_split_commas)],
             "a,b",
-            "['a', 'b']",
+            '"a,b" but reads back as ["a","b"]',
             id="split commas",
         ),
         pytest.param(
-            Annotated[str, AfterValidator(str.lower)], "ABC", "'abc'", id="lower"
+            Annotated[str, AfterValidator(str.lower)],
+            "ABC",
+            '"ABC" but reads back as "abc"',
+            id="lower",
         ),
         pytest.param(
             Annotated[Decimal, BeforeValidator(Decimal)],
             0,
-            "Decimal('0')",
+            '0 but reads back as "0"',
             id="Decimal = 0",
         ),
         pytest.param(
             Annotated[Decimal, BeforeValidator(Decimal)],
             3,
-            "Decimal('3')",
+            '3 but reads back as "3"',
             id="Decimal = 3",
         ),
         pytest.param(
             list[Annotated[Decimal, BeforeValidator(Decimal)]],
             [3],
-            "[Decimal('3')]",
+            '[3] but reads back as ["3"]',
             id="list[Decimal] = [3]",
         ),
-        pytest.param(Annotated[int, BeforeValidator(int)], True, "1", id="int = True"),
         pytest.param(
-            Annotated[float, BeforeValidator(float)], True, "1.0", id="float = True"
+            Annotated[int, BeforeValidator(int)],
+            3.0,
+            "3.0 but reads back as 3",
+            id="int = 3.0",
         ),
-        pytest.param(Annotated[int, BeforeValidator(int)], 3.0, "3", id="int = 3.0"),
         pytest.param(
             list[Annotated[int, BeforeValidator(int)]],
             [3.0],
-            "[3]",
+            "[3.0] but reads back as [3]",
             id="list[int] = [3.0]",
         ),
     ],
 )
-def test_default_that_validators_change_is_rejected(
+def test_default_that_does_not_read_back_as_itself_is_rejected(
     annotation: object, default: object, becomes: str
 ) -> None:
     record = create_model("Defaulted", n=(cast("Any", annotation), default))
     with pytest.raises(
-        ContractDefinitionError, match=re.escape(f"validators turn into {becomes}")
+        ContractDefinitionError, match=re.escape(f"which travels as {becomes}")
     ):
         declare_with_field(record)
 
@@ -1009,6 +1052,27 @@ def test_defaults_of_the_field_type_are_allowed() -> None:
         weights: dict[str, float] = {"a": 1}
 
     declare_with_field(Defaults)
+
+
+@pytest.mark.spec("CON-16")
+@pytest.mark.parametrize(
+    ("annotation", "default", "described"),
+    [
+        pytest.param(int, True, 1, id="int = True"),
+        pytest.param(float, True, 1.0, id="float = True"),
+        pytest.param(float, 1, 1.0, id="float = 1"),
+        pytest.param(
+            Annotated[int, BeforeValidator(int)], True, 1, id="coerced int = True"
+        ),
+    ],
+)
+def test_default_is_described_as_it_travels(
+    annotation: object, default: object, described: object
+) -> None:
+    record = create_model("Defaulted", n=(cast("Any", annotation), default))
+    sent = json.loads(record().model_dump_json())["n"]
+    assert _field_description(record, "n")["default"] == sent == described  # type: ignore[index]
+    assert type(sent) is type(described)
 
 
 @pytest.mark.spec("CON-16")
@@ -1069,9 +1133,9 @@ def test_record_type_defined_after_the_contract_is_named(defer_build: bool) -> N
         later: "Later"  # type: ignore[name-defined]  # noqa: F821
 
     expected = (
-        "field Early.later refers to 'Later', which the module of the record that "
-        "uses it does not define when the contract is declared; define Later at "
-        "module level there, before the contract, or call that record's "
+        "record Early, or a record it uses, refers to 'Later', which the module of "
+        "that record does not define when the contract is declared; define Later "
+        "at module level there, before the contract, or call that record's "
         "model_rebuild() once Later is defined"
     )
     with pytest.raises(ContractDefinitionError, match=re.escape(expected)):
@@ -1113,7 +1177,7 @@ def test_default_that_cannot_be_written_as_json_is_named(
 
 @pytest.mark.spec("CON-17")
 def test_forward_reference_does_not_resolve_to_checker_locals() -> None:
-    expected = "field Shape.value.x refers to 'path', which the module"
+    expected = "record Shape, or a record it uses, refers to 'path', which the module"
     with pytest.raises(ContractDefinitionError, match=re.escape(expected)):
         declare_with_field(Sneaky)
 
@@ -1222,7 +1286,7 @@ def test_two_enums_with_one_name_are_rejected() -> None:
     first, second = _enum_named("Kind"), _enum_named("Kind")
     record = create_model("Pair", first=(first, ...), second=(second, ...))
     with pytest.raises(
-        ContractDefinitionError, match="records, enums or type aliases are named 'Kind'"
+        ContractDefinitionError, match="records or enums are named 'Kind'"
     ):
         declare_with_field(record)
 
@@ -1254,22 +1318,38 @@ def _alias(name: str, value: object) -> Any:  # noqa: ANN401
     return TypeAliasType(name, value)
 
 
-@pytest.mark.spec("CON-15", "CON-17")
-def test_two_type_aliases_with_one_name_are_rejected() -> None:
+@pytest.mark.spec("CON-15", "CON-16")
+def test_type_aliases_are_written_out_and_never_named() -> None:
     first, second = _alias("Item", list[int]), _alias("Item", list[str])
-    record = create_model("Pair", a=(first, ...), b=(second, ...))
-    with pytest.raises(
-        ContractDefinitionError, match="records, enums or type aliases are named 'Item'"
-    ):
-        declare_with_field(record)
+    item = _record_named("Item")
+    record = create_model("Pair", a=(first, ...), b=(second, ...), item=(item, ...))
+    description = Contract.of(declare_with_field(record)).describe()
+    assert set(description["$defs"]) == {"Shape", "Pair", "Item"}
+    properties = description["$defs"]["Pair"]["properties"]
+    assert properties["a"] == {"type": "array", "items": {"type": "integer"}}
+    assert properties["b"] == {"type": "array", "items": {"type": "string"}}
+    assert properties["item"] == {"$ref": "#/$defs/Item"}
 
 
-@pytest.mark.spec("CON-15", "CON-17")
-def test_type_alias_and_record_with_one_name_are_rejected() -> None:
-    alias = _alias("Item", list[int])
-    record = create_model("Order", tags=(alias, ...), item=(_record_named("Item"), ...))
-    with pytest.raises(ContractDefinitionError, match="named 'Item'"):
-        declare_with_field(record)
+@pytest.mark.spec("CON-15", "CON-16")
+@pytest.mark.parametrize(
+    ("alias", "named"),
+    [
+        pytest.param(_alias("InnerRef", Below), "Below", id="record"),
+        pytest.param(_alias("Chain", _alias("InnerRef", Below)), "Below", id="chain"),
+        pytest.param(_alias("Col", Colour), "Colour", id="enum"),
+        pytest.param(
+            _alias("Cols", list.__class_getitem__(_alias("Col", Colour))),
+            "Colour",
+            id="list of enum",
+        ),
+    ],
+)
+def test_alias_of_a_record_or_enum_describes_it_under_its_own_name(
+    alias: object, named: str
+) -> None:
+    description = Contract.of(declare_with_field(alias)).describe()
+    assert set(description["$defs"]) == {"Shape", named}
 
 
 @pytest.mark.spec("CON-15", "CON-16")
@@ -1277,8 +1357,13 @@ def test_one_type_alias_may_be_used_many_times() -> None:
     record = create_model(
         "Counts", a=(Ints, ...), b=(Ints, ...), c=(list[Ints], ...), d=(IntPairs, ...)
     )
-    defs = Contract.of(declare_with_field(record)).describe()["$defs"]
-    assert {"Ints", "IntPairs"} <= set(defs)
+    description = Contract.of(declare_with_field(record)).describe()
+    assert set(description["$defs"]) == {"Shape", "Counts"}
+    ints = {"type": "array", "items": {"type": "integer"}}
+    assert description["$defs"]["Counts"]["properties"]["d"] == {
+        "type": "object",
+        "additionalProperties": ints,
+    }
 
 
 @pytest.mark.spec("CON-17")
@@ -1291,19 +1376,18 @@ def test_one_type_alias_may_be_used_many_times() -> None:
     ],
 )
 def test_recursive_type_alias_is_rejected(alias: object, at: str, name: str) -> None:
-    expected = f"field {at} uses type alias {name}, which refers to itself"
+    expected = f"field {at} has a recursive type that is not a record"
     with pytest.raises(ContractDefinitionError, match=re.escape(expected)):
         declare_with_field(alias)
 
 
-@pytest.mark.spec("CON-17")
-def test_quoted_name_in_a_type_alias_is_named() -> None:
-    expected = (
-        "field Shape.value[*] refers to 'Below' by a string inside type alias "
-        "QuotedBelow, which is not resolved; write Below unquoted"
-    )
-    with pytest.raises(ContractDefinitionError, match=re.escape(expected)):
-        declare_with_field(QuotedBelow)
+@pytest.mark.spec("CON-13", "CON-16")
+def test_quoted_name_in_a_type_alias_is_resolved_by_pydantic() -> None:
+    description = Contract.of(declare_with_field(QuotedBelow)).describe()
+    assert description["$defs"]["Shape"]["properties"]["value"] == {
+        "type": "array",
+        "items": {"$ref": "#/$defs/Below"},
+    }
 
 
 @pytest.mark.spec("CON-13", "CON-16")
@@ -1316,6 +1400,170 @@ def test_type_alias_of_a_record_defined_later_is_accepted() -> None:
 def test_parametrised_generic_record_is_rejected() -> None:
     with pytest.raises(ContractDefinitionError, match="is a parametrised generic"):
         declare_with_field(Page[int])
+
+
+@pytest.mark.spec("CON-20", "CON-17")
+@pytest.mark.parametrize(
+    ("named", "kind"),
+    [
+        pytest.param(
+            create_model("Gr\u00f6\u00dfe", value=(int, ...)), "record", id="record"
+        ),
+        pytest.param(enum.StrEnum("Gr\u00f6\u00dfe", {"A": "a"}), "enum", id="enum"),
+        pytest.param(
+            create_model("_Hidden", value=(int, ...)), "record", id="underscore"
+        ),
+    ],
+)
+def test_record_and_enum_names_are_ascii_identifiers(named: object, kind: str) -> None:
+    with pytest.raises(
+        ContractDefinitionError, match=f"{kind} name .* must start with an ASCII letter"
+    ):
+        declare_with_field(named)
+
+
+@pytest.mark.spec("CON-20")
+def test_record_and_enum_names_may_hold_digits_and_underscores() -> None:
+    record = create_model(
+        "Line_2", value=(cast("Any", enum.StrEnum("Kind_3", {"A": "a"})), ...)
+    )
+    names = set(Contract.of(declare_with_field(record)).describe()["$defs"])
+    assert {"Line_2", "Kind_3"} <= names
+
+
+class _Base(BaseModel):
+    qty: int
+
+
+class _WrapValidated(BaseModel):
+    qty: int
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def passthrough(
+        cls, data: object, handler: ModelWrapValidatorHandler["_WrapValidated"]
+    ) -> "_WrapValidated":
+        return handler(data)
+
+
+@pytest.mark.spec("CON-13", "CON-17")
+@pytest.mark.parametrize(
+    ("annotation", "message"),
+    [
+        pytest.param(
+            SerializeAsAny[_Base],
+            "field Shape.value has a custom serializer",
+            id="SerializeAsAny on a reference",
+        ),
+        pytest.param(
+            Annotated[float, Field(ge=Decimal("0.5"))],
+            "field Shape.value sets ge=Decimal('0.5'), which the description "
+            "cannot state",
+            id="Decimal bound",
+        ),
+        pytest.param(
+            Annotated[float, Field(lt=float("inf"))],
+            "field Shape.value sets lt=inf",
+            id="infinite bound",
+        ),
+        pytest.param(
+            Literal["a", None],
+            "field Shape.value is a literal of values other than strings",
+            id="literal with None",
+        ),
+        pytest.param(
+            Annotated[Decimal, Field(max_digits=5)],
+            "field Shape.value sets 'max_digits', which is outside the portable forms",
+            id="constraint the description cannot state",
+        ),
+        pytest.param(
+            Annotated[date, Field(gt=date(2026, 1, 1))],
+            "field Shape.value sets 'gt'",
+            id="date bound",
+        ),
+    ],
+)
+def test_every_core_schema_key_is_admitted_or_named(
+    annotation: object, message: str
+) -> None:
+    with pytest.raises(ContractDefinitionError, match=re.escape(message)):
+        declare_with_field(annotation)
+
+
+@pytest.mark.spec("CON-13", "CON-16")
+@pytest.mark.parametrize(
+    ("annotation", "expected"),
+    [
+        pytest.param(_Base, {"$ref": "#/$defs/_Base"}, id="plain reference"),
+        pytest.param(
+            Annotated[float, Field(ge=0.5)],
+            {"type": "number", "minimum": 0.5},
+            id="float bound",
+        ),
+        pytest.param(Literal["a"] | None, None, id="literal or None"),
+        pytest.param(
+            Annotated[str, StringConstraints(strip_whitespace=True, to_lower=True)],
+            {"type": "string"},
+            id="string transforms",
+        ),
+        pytest.param(
+            _WrapValidated,
+            {"$ref": "#/$defs/_WrapValidated"},
+            id="wrap model validator",
+        ),
+    ],
+)
+def test_nearest_legitimate_shapes_are_accepted(
+    annotation: object, expected: object
+) -> None:
+    if annotation is _Base or annotation is _WrapValidated:
+        # A leading underscore breaks CON-20; give the record a usable name.
+        renamed = create_model("Named", __base__=cast("type[BaseModel]", annotation))
+        described = Contract.of(declare_with_field(renamed)).describe()
+        assert described["$defs"]["Shape"]["properties"]["value"] == {
+            "$ref": "#/$defs/Named"
+        }
+        return
+    described = Contract.of(declare_with_field(annotation)).describe()
+    if expected is not None:
+        assert described["$defs"]["Shape"]["properties"]["value"] == expected
+
+
+class Lenient(enum.StrEnum):
+    A = "a"
+
+    @classmethod
+    def _missing_(cls, value: object) -> "Lenient":
+        return cls.A
+
+
+@pytest.mark.spec("CON-13", "CON-16")
+def test_enum_that_maps_unknown_input_is_accepted() -> None:
+    # Pydantic 2.12 records _missing_ in the core schema and 2.14 does not;
+    # either way it only maps input, so the enum is accepted on both.
+    description = Contract.of(declare_with_field(Lenient)).describe()
+    assert description["$defs"]["Lenient"] == {"type": "string", "enum": ["a"]}
+
+
+@pytest.mark.spec("CON-17")
+def test_default_factory_that_raises_is_named() -> None:
+    record = create_model("Made", n=(int, Field(default_factory=lambda: 1 // 0)))
+    with pytest.raises(
+        ContractDefinitionError,
+        match=re.escape(
+            "field Shape.value.n has a default factory that raised ZeroDivisionError"
+        ),
+    ):
+        declare_with_field(record)
+
+
+@pytest.mark.spec("CON-17")
+def test_wrap_model_validator_on_a_request_is_accepted() -> None:
+    renamed = create_model("Wrapped", __base__=_WrapValidated)
+
+    def send(self: object, request: renamed) -> None: ...  # type: ignore[valid-type]
+
+    contract("wrap.v1")(declaration("Wrap", {"send": action(send)}))
 
 
 # Unknown fields
