@@ -41,7 +41,7 @@ Each action is either idempotent or non-idempotent.
 
 The portable forms are the types that every transport can represent, JSON Schema and protobuf at least. They are:
 
-- scalars: boolean, integer (64-bit), number (IEEE 754 double), string, bytes, decimal (as string), timestamp (RFC 3339, so with an offset from UTC), date, duration;
+- scalars: boolean, integer (64-bit), number (IEEE 754 double), string, bytes, decimal, timestamp (RFC 3339, so with an offset from UTC), date, duration;
 - `list<T>`;
 - `map<string, T>`;
 - `record`: named, ordered fields, each with a type and required/optional;
@@ -51,6 +51,8 @@ The portable forms are the types that every transport can represent, JSON Schema
 **CON-13.** A request type MUST be a record built only from the portable forms.
 
 **CON-14.** A reply type MUST be either a record built only from the portable forms, or empty. An empty reply carries no value.
+
+The encoding of decimal is settled by the in-process transport (step 3 of the [roadmap](../docs/roadmap.md), issue #10). **CON-21.** Until that encoding is settled, an implementation MUST reject a contract whose request or reply type uses decimal, before it serves the contract or calls any of its actions. The rejection names the contract, the action and the field.
 
 Records are nominal within a contract and structural across the wire. **CON-15.** Two different records or enums used by one contract MUST NOT have the same name. Generated code for other languages names each record and enum once, so two with one name would collide.
 

@@ -441,7 +441,6 @@ def test_portable_forms_are_accepted(annotation: object) -> None:
         Any,
         object,
         complex,
-        Decimal,
         UUID,
         type(None),
         tuple[int, ...],
@@ -467,6 +466,43 @@ def test_portable_forms_are_accepted(annotation: object) -> None:
 def test_other_types_are_rejected(annotation: object) -> None:
     with pytest.raises(ContractDefinitionError, match=r"Shape\.value"):
         declare_with_field(annotation)
+
+
+@pytest.mark.spec("CON-21")
+@pytest.mark.parametrize(
+    "annotation",
+    [
+        Decimal,
+        Decimal | None,
+        list[Decimal],
+        dict[str, Decimal],
+        Annotated[Decimal, Field(max_digits=5, decimal_places=2)],
+    ],
+    ids=repr,
+)
+def test_decimal_is_refused_until_its_encoding_is_settled(annotation: object) -> None:
+    with pytest.raises(
+        ContractDefinitionError,
+        match=r"^shapes\.v1, action 'send': field Shape\.value\S* is a decimal",
+    ):
+        declare_with_field(annotation)
+
+
+@pytest.mark.spec("CON-21")
+def test_decimal_in_a_reply_is_refused() -> None:
+    Total = create_model("Total", amount=(Decimal, ...))
+    Empty = create_model("Empty")
+
+    with pytest.raises(
+        ContractDefinitionError,
+        match=r"^totals\.v1, action 'total': field Total\.amount is a decimal",
+    ):
+
+        @contract("totals.v1")
+        class Totals(Protocol):
+            @action
+            def total(self, request: Empty) -> Total:  # type: ignore[valid-type]
+                ...
 
 
 @pytest.mark.spec("CON-13", "CON-17")
