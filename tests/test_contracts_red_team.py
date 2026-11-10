@@ -6,6 +6,7 @@ shapes are kept here as they were found, next to the nearest shape that must
 still be accepted.
 """
 
+import enum
 import functools
 import json
 import types
@@ -20,12 +21,15 @@ from pydantic import (
     AfterValidator,
     AwareDatetime,
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
+    GetPydanticSchema,
     StringConstraints,
     create_model,
     model_validator,
 )
+from pydantic_core import core_schema
 
 from neolith import Contract, ContractDefinitionError, action, contract, implements
 
@@ -143,7 +147,7 @@ class Hidden(BaseModel):
         pytest.param(Bound, "has an after or wrap validator", id="p1 after validator"),
         pytest.param(Digits, "has an after or wrap validator", id="p1 decimal"),
         pytest.param(Initialised, "defines __init__", id="p1 custom init"),
-        pytest.param(Bumped, "has an after or wrap validator", id="p7 model validator"),
+        pytest.param(Bumped, "has a validator on a record", id="p7 model validator"),
         pytest.param(Collapsing, "converts its keys", id="p2 collapsing keys"),
         pytest.param(Stripped, "converts its value", id="p2 strip then length"),
         pytest.param(Anchored, "sets a pattern", id="p8 anchor"),
@@ -161,9 +165,13 @@ def test_red_team_shapes_are_refused(record: type[BaseModel], message: str) -> N
 
 
 class Tree(BaseModel):
-    """p2: a recursive record with a before model_validator is still accepted."""
+    """p2: a recursive record round-trips; with a before validator it is refused."""
 
     children: list["Tree"] = []
+
+
+class GuardedTree(BaseModel):
+    children: list["GuardedTree"] = []
 
     @model_validator(mode="before")
     @classmethod
@@ -172,10 +180,16 @@ class Tree(BaseModel):
 
 
 @pytest.mark.spec("CON-16")
-def test_recursive_record_with_a_before_validator_round_trips() -> None:
+def test_recursive_record_round_trips() -> None:
     schema = _declare(Tree)
     sent = Tree.model_validate_json('{"children":[{"children":[]}]}').model_dump_json()
     Draft202012Validator(schema).validate(json.loads(sent))
+
+
+@pytest.mark.spec("CON-16", "CON-17")
+def test_recursive_record_with_a_before_validator_is_refused() -> None:
+    with pytest.raises(ContractDefinitionError, match="has a validator on a record"):
+        _declare(GuardedTree)
 
 
 # p4: a timestamp whose offset has seconds, which RFC 3339 cannot write.
@@ -292,5 +306,194 @@ def test_public_method_like_attribute_is_refused(member: object) -> None:
 def test_public_property_and_constant_are_accepted() -> None:
     impl = type(
         "Impl", (), {"get": _get, "limit": 3, "name": property(lambda self: "x")}
+    )
+    assert implements(Inventory)(impl) is impl
+
+
+# Second pass (at 32c9e1b).
+
+
+def _same(value: object) -> object:
+    return value
+
+
+class Positive(BaseModel):
+    n: Annotated[int, Field(gt=0)]
+
+
+def _constructed(value: object) -> object:
+    return Positive.model_construct(n=-5)
+
+
+def _assigned(value: object) -> object:
+    made = Positive(n=1)
+    made.n = -7
+    return made
+
+
+class ConstructedField(BaseModel):
+    """p01 P2a: a before validator returning model_construct on a record field."""
+
+    inner: Annotated[Positive, BeforeValidator(_constructed)]
+
+
+class AssignedField(BaseModel):
+    """p01 P2c: a before validator returning a record changed after validation."""
+
+    inner: Annotated[Positive, BeforeValidator(_assigned)]
+
+
+class ConstructedSelf(BaseModel):
+    """p01 P2b: a before model_validator returning model_construct."""
+
+    n: Annotated[int, Field(gt=0)]
+
+    @model_validator(mode="before")
+    @classmethod
+    def build(cls, data: object) -> object:
+        return cls.model_construct(n=-5)
+
+
+type QuietKey = Annotated[str, BeforeValidator(_same)]
+
+
+class KeyBehindValidator(BaseModel):
+    """p01 P1b: a converted key behind a before validator."""
+
+    model_config = ConfigDict(str_to_lower=True)
+    m: Annotated[dict[Annotated[str, BeforeValidator(_same)], int], Field(min_length=2)]
+
+
+class KeyStrippedBehindValidator(BaseModel):
+    """p01 P1d: a stripped key behind a before validator."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+    m: dict[Annotated[str, BeforeValidator(_same)], int]
+
+
+class KeyThroughAlias(BaseModel):
+    """p10 U2: a converted key behind a before validator in a type alias."""
+
+    model_config = ConfigDict(str_to_lower=True)
+    m: dict[QuietKey, int]
+
+
+class FloatPast53(BaseModel):
+    """p03: a float bound a float cannot hold."""
+
+    x: Annotated[float, Field(lt=2**53 + 1)]
+
+
+class FloatInt64(BaseModel):
+    """p13: the int64 maximum as a float bound."""
+
+    value: Annotated[float, Field(le=2**63 - 1)]
+
+
+class Price(BaseModel):
+    """p04: a decimal, whose accepted forms no pattern states exactly."""
+
+    amount: Decimal
+
+
+class Precise(BaseModel):
+    """p08: microseconds_precision="error" refuses what RFC 3339 allows."""
+
+    t: Annotated[
+        AwareDatetime,
+        GetPydanticSchema(
+            lambda t, h: core_schema.datetime_schema(
+                tz_constraint="aware", microseconds_precision="error"
+            )
+        ),
+    ]
+
+
+class Empty(enum.StrEnum):
+    pass
+
+
+class Nothing(BaseModel):
+    """p07: an enum with no members."""
+
+    c: Empty | None = None
+
+
+@pytest.mark.spec("CON-16", "CON-17")
+@pytest.mark.parametrize(
+    ("record", "message"),
+    [
+        pytest.param(
+            ConstructedField, "has a validator on a record", id="p01 construct"
+        ),
+        pytest.param(AssignedField, "has a validator on a record", id="p01 assigned"),
+        pytest.param(ConstructedSelf, "has a validator on a record", id="p01 model"),
+        pytest.param(KeyBehindValidator, "converts its keys", id="p01 key lower"),
+        pytest.param(
+            KeyStrippedBehindValidator, "converts its keys", id="p01 key strip"
+        ),
+        pytest.param(KeyThroughAlias, "converts its keys", id="p10 key alias"),
+        pytest.param(
+            FloatPast53, "which a float cannot hold exactly", id="p03 2**53+1"
+        ),
+        pytest.param(FloatInt64, "which a float cannot hold exactly", id="p13 int64"),
+        pytest.param(Price, "is a decimal", id="p04 decimal"),
+        pytest.param(Precise, "beyond microseconds", id="p08 precision"),
+        pytest.param(Nothing, "has type is-instance", id="p07 empty enum"),
+    ],
+)
+def test_second_pass_shapes_are_refused(record: type[BaseModel], message: str) -> None:
+    with pytest.raises(ContractDefinitionError, match=message):
+        _declare(record)
+
+
+class OwnLengthKey(BaseModel):
+    """p01 P1c: a key with its own length behind a before validator, no conversion."""
+
+    m: dict[Annotated[str, Field(max_length=5), BeforeValidator(_same)], int]
+
+
+class ExactFloatBounds(BaseModel):
+    """p03: float bounds a float holds exactly, and a large integer bound."""
+
+    x: Annotated[float, Field(gt=0.1, lt=2**53)]
+    n: Annotated[int, Field(le=2**63)]
+
+
+class Repeated(enum.StrEnum):
+    """p07, p08: an alias member repeats a value."""
+
+    A = "a"
+    B = "a"
+
+
+class WithRepeated(BaseModel):
+    c: Repeated
+
+
+@pytest.mark.spec("CON-16")
+def test_second_pass_nearest_shapes_are_accepted() -> None:
+    _declare(OwnLengthKey)
+    bounds = _declare(ExactFloatBounds)["$defs"]["ExactFloatBounds"]["properties"]
+    assert bounds["x"] == {
+        "type": "number",
+        "exclusiveMinimum": 0.1,
+        "exclusiveMaximum": 2**53,
+    }
+    assert _declare(WithRepeated)["$defs"]["Repeated"] == {
+        "type": "string",
+        "enum": ["a"],
+    }
+
+
+@pytest.mark.spec("CON-19")
+def test_public_types_on_an_implementation_are_accepted() -> None:
+    class Meta:
+        pass
+
+    impl = type(
+        "Impl",
+        (),
+        {"get": _get, "Meta": Meta, "NotFound": KeyError, "Kind": Repeated},
     )
     assert implements(Inventory)(impl) is impl

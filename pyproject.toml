@@ -50,6 +50,9 @@ test = [
     "hypothesis>=6.170",
     "hypothesis-jsonschema>=0.23.2",
     "jsonschema>=4.26",
+    # The property test checks "date" and "date-time" formats; jsonschema needs
+    # this to check "date-time" and otherwise skips it silently.
+    "rfc3339-validator>=0.1.4",
 ]
 lint = ["ruff>=0.14", "mypy>=1.18", "django-stubs>=5.2", "types-jsonschema>=4.26"]
 dev = [{ include-group = "test" }, { include-group = "lint" }]

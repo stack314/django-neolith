@@ -81,7 +81,6 @@ _SCALARS: dict[str, tuple[dict[str, str], Mapping[str, str], frozenset[str]]] = 
         frozenset({"strip_whitespace", "to_lower", "to_upper"}),
     ),
     "bytes": ({"type": "string", "format": "binary"}, {}, frozenset()),
-    "decimal": ({"type": "string", "format": "decimal"}, {}, frozenset()),
     "date": ({"type": "string", "format": "date"}, {}, frozenset()),
     "timedelta": (
         {"type": "string", "format": "duration"},
@@ -97,9 +96,19 @@ _SCALARS: dict[str, tuple[dict[str, str], Mapping[str, str], frozenset[str]]] = 
 
 # A before validator runs on the input, and the schema it wraps then checks
 # what it returns, so the value that travels is still one the description
-# states. An after or wrap validator returns a value after that check, which
-# nothing checks again; a plain validator replaces the schema. Only before
-# validators are admitted, on fields and on records.
+# states, with one exception: a record instance. pydantic-core keeps an
+# instance of the record's class, or of a subclass, as it is, without
+# checking it again (revalidate_instances defaults to "never"), so a before
+# validator that returns one, for example from model_construct, passes it
+# through unchecked. Before validators are therefore admitted on fields whose
+# type is not a record, and refused on records and record-typed fields. A
+# record instance that a provider builds itself, such as a subclass with
+# looser fields, still travels unchecked; only a send-side check against the
+# description can catch that (step 3, #10). An after or wrap validator returns
+# a value after the check, which nothing checks again, and a plain validator
+# replaces the schema; both are refused. A before validator must also be
+# idempotent: the value it returns travels, and is passed through it again
+# when read back.
 _VALIDATORS = frozenset({"function-before"})
 _UNCHECKED_VALIDATORS = frozenset({"function-after", "function-wrap"})
 # json_schema_input_schema only changes what Pydantic's JSON Schema generator
@@ -519,9 +528,9 @@ class Portable:
             return self.describe(target, path, (*aliases, reference))
         if kind in _VALIDATORS | _UNCHECKED_VALIDATORS:
             inner = node.get("schema", {})
-            if inner.get("type") == "enum":
-                self.enum(inner, path)
-            self.validator(node, subject)
+            if self.underlying(inner, path).get("type") == "enum":
+                self.enum(self.underlying(inner, path), path)
+            self.validator(node, subject, path)
             return self.describe(inner, path, aliases)
         if kind == "model":
             return self.record(node, path)
@@ -534,6 +543,22 @@ class Portable:
                 self.transforms(node, subject)
             if kind == "float" and "multiple_of" in node:
                 raise self.fail(f"{subject} {_KEY_MEANINGS['multiple_of']}")
+            if node.get("microseconds_precision", "truncate") != "truncate":
+                # "error" refuses more than six fractional digits, which RFC
+                # 3339 and the description allow.
+                raise self.fail(
+                    f"{subject} refuses fractional seconds beyond microseconds, "
+                    "which the description admits"
+                )
+            if kind == "float":
+                for name in _RANGE_BOUNDS:
+                    bound = node.get(name)
+                    if type(bound) is int and float(bound) != bound:
+                        raise self.fail(
+                            f"{subject} sets {name}={bound}, which a float cannot "
+                            "hold exactly, so a reader of the description compares "
+                            "against another number; use a bound a float holds"
+                        )
             if kind == "datetime" and node.get("tz_constraint") != "aware":
                 raise self.fail(
                     f"{subject} is a timestamp, which carries an offset from UTC "
@@ -566,7 +591,7 @@ class Portable:
                     f"{subject} is a map without key and value types, "
                     "which is not a portable form"
                 )
-            key_node = self.resolve(node["keys_schema"], path)
+            key_node = self.underlying(node["keys_schema"], path)
             if key_node.get("type") == "str" and self.converts(key_node):
                 raise self.fail(
                     f"{subject} converts its keys, so two keys can become one; "
@@ -604,6 +629,18 @@ class Portable:
                 f"{subject} is a literal of values other than strings, "
                 "which is not a portable form"
             )
+        if kind == "decimal":
+            # Pydantic writes a decimal as str(Decimal) and reads one through
+            # Python's Decimal, which refuses an exponent whose limit depends
+            # on the coefficient's length, so no pattern states the accepted
+            # forms exactly, and "format": "decimal" is not one that readers
+            # in other languages know.
+            raise self.fail(
+                f"{subject} is a decimal, which this version does not admit: no "
+                "JSON Schema rule states exactly the forms Pydantic writes and "
+                "reads; the decimal encoding is settled with the in-process "
+                "transport"
+            )
         raise self.fail(f"{subject} has type {kind}, which is not a portable form")
 
     def converts(self, node: Mapping[str, Any]) -> list[str]:
@@ -637,8 +674,28 @@ class Portable:
                 "the length"
             )
 
-    def validator(self, node: Mapping[str, Any], subject: str) -> None:
-        """Admit a before validator; refuse an after or wrap one."""
+    def underlying(self, node: Mapping[str, Any], path: str) -> Mapping[str, Any]:
+        """The node a value is finally checked by, through every wrapper.
+
+        Steps through ``definitions`` wrappers, references and validators, so
+        that a check about a node's kind is not bypassed by wrapping it, for
+        example a map key behind a before validator.
+        """
+        while True:
+            node = self.resolve(node, path)
+            if node.get("type") not in _VALIDATORS | _UNCHECKED_VALIDATORS:
+                return node
+            node = node.get("schema", {})
+
+    def validator(self, node: Mapping[str, Any], subject: str, path: str = "") -> None:
+        """Admit a before validator on a non-record; refuse the rest."""
+        inner = self.underlying(node.get("schema", {}), path)
+        if inner.get("type") in ("model", "model-fields"):
+            raise self.fail(
+                f"{subject} has a validator on a record, which can return a record "
+                "instance that Pydantic keeps without checking it; validate the "
+                "record's fields instead"
+            )
         if node.get("type") in _UNCHECKED_VALIDATORS:
             raise self.fail(
                 f"{subject} has an after or wrap validator, which returns its "
@@ -678,10 +735,15 @@ class Portable:
             frozenset({"cls", "members", "sub_type", "missing"}),
             f"enum {cls.__name__} at {path}",
         )
+        if not members:
+            raise self.fail(
+                f"enum {cls.__name__} at {path} has no members, so no value fits it"
+            )
         if self.register(cls, "enum", path):
             self.defs[cls.__name__] = {
                 "type": "string",
-                "enum": [m.value for m in members],
+                # An alias member repeats a value; JSON Schema lists it once.
+                "enum": list(dict.fromkeys(m.value for m in members)),
             }
         return {"$ref": f"#/$defs/{cls.__name__}"}
 

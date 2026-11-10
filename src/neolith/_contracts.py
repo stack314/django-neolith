@@ -158,8 +158,10 @@ class Contract:
                 if attr.startswith("_") or attr in self._actions:
                     continue
                 # Anything callable from the class counts, so a partialmethod
-                # or a singledispatchmethod is a public method too.
-                if callable(getattr(impl, attr, None)) or isinstance(
+                # or a singledispatchmethod is a public method too; a class,
+                # such as a nested Meta or an exception alias, is not a method.
+                member = getattr(impl, attr, None)
+                if (callable(member) and not isinstance(member, type)) or isinstance(
                     value, staticmethod | classmethod
                 ):
                     raise ContractDefinitionError(

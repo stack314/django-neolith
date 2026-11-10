@@ -412,7 +412,6 @@ def test_action_is_synchronous() -> None:
         float,
         str,
         bytes,
-        Decimal,
         AwareDatetime,
         date,
         timedelta,
@@ -442,6 +441,7 @@ def test_portable_forms_are_accepted(annotation: object) -> None:
         Any,
         object,
         complex,
+        Decimal,
         UUID,
         type(None),
         tuple[int, ...],
@@ -703,11 +703,6 @@ def test_before_validators_are_accepted() -> None:
         def positive(cls, value: int) -> int:
             return abs(value)
 
-        @model_validator(mode="before")
-        @classmethod
-        def accept(cls, data: object) -> object:
-            return data
-
     declare_with_field(Checked)
 
 
@@ -782,10 +777,10 @@ def _identity(value: object) -> object:
             AfterField, "has an after or wrap validator", id="field_validator"
         ),
         pytest.param(
-            AfterModel, "has an after or wrap validator", id="after model_validator"
+            AfterModel, "has a validator on a record", id="after model_validator"
         ),
         pytest.param(
-            WrapModel, "has an after or wrap validator", id="wrap model_validator"
+            WrapModel, "has a validator on a record", id="wrap model_validator"
         ),
         pytest.param(OwnInit, "defines __init__", id="custom __init__"),
     ],
@@ -1029,7 +1024,6 @@ def test_config_that_splits_description_and_wire_is_rejected(
         pytest.param(AwareDatetime, "2026-01-01", id="timestamp = date text"),
         pytest.param(int, True, id="int = True"),
         pytest.param(float, True, id="float = True"),
-        pytest.param(Decimal, "2", id="Decimal = '2'"),
         pytest.param(date, "2026-01-01", id="date = text"),
         pytest.param(list[int], [True], id="list[int] = [True]"),
         pytest.param(dict[str, int], {"a": True}, id="dict[str, int] = {'a': True}"),
@@ -1086,24 +1080,6 @@ def _split_commas(value: object) -> object:
             id="lower",
         ),
         pytest.param(
-            Annotated[Decimal, BeforeValidator(Decimal)],
-            0,
-            "turn into Decimal('0')",
-            id="Decimal = 0",
-        ),
-        pytest.param(
-            Annotated[Decimal, BeforeValidator(Decimal)],
-            3,
-            "turn into Decimal('3')",
-            id="Decimal = 3",
-        ),
-        pytest.param(
-            list[Annotated[Decimal, BeforeValidator(Decimal)]],
-            [3],
-            "turn into [Decimal('3')]",
-            id="list[Decimal] = [3]",
-        ),
-        pytest.param(
             Annotated[int, BeforeValidator(int)],
             3.0,
             "turn into 3",
@@ -1131,7 +1107,6 @@ def test_defaults_of_the_field_type_are_allowed() -> None:
         maybe: int | None = None
         colour: Colour = Colour.RED
         size: Literal["s", "m"] = "s"
-        price: Decimal = Decimal("1.50")
         span: timedelta = timedelta(seconds=90)
         raw: bytes = b""
         ratio: float = 1
@@ -1181,11 +1156,6 @@ def test_documentation_and_constraints_are_allowed() -> None:
         tags: Annotated[list[str], annotated_types.Len(0, 5)]
         lower: Annotated[str, BeforeValidator(str.lower)]
         trimmed: Annotated[str, StringConstraints(strip_whitespace=True)]
-
-        @model_validator(mode="before")
-        @classmethod
-        def accept(cls, data: object) -> object:
-            return data
 
     class Derived(Documented):
         extra: bool = False
@@ -1563,8 +1533,8 @@ class _WrapValidated(BaseModel):
             id="literal with None",
         ),
         pytest.param(
-            Annotated[Decimal, Field(max_digits=5)],
-            "field Shape.value sets 'max_digits', which is outside the portable forms",
+            Annotated[bytes, Field(max_length=5)],
+            "field Shape.value sets 'max_length', which is outside the portable forms",
             id="constraint the description cannot state",
         ),
         pytest.param(
@@ -1597,17 +1567,12 @@ def test_every_core_schema_key_is_admitted_or_named(
             {"type": "string"},
             id="string transforms",
         ),
-        pytest.param(
-            _WrapValidated,
-            {"$ref": "#/$defs/_WrapValidated"},
-            id="before model validator",
-        ),
     ],
 )
 def test_nearest_legitimate_shapes_are_accepted(
     annotation: object, expected: object
 ) -> None:
-    if annotation is _Base or annotation is _WrapValidated:
+    if annotation is _Base:
         # A leading underscore breaks CON-20; give the record a usable name.
         renamed = create_model("Named", __base__=cast("type[BaseModel]", annotation))
         described = Contract.of(declare_with_field(renamed)).describe()
@@ -1648,13 +1613,14 @@ def test_default_factory_that_raises_is_named() -> None:
         declare_with_field(record)
 
 
-@pytest.mark.spec("CON-17")
-def test_before_model_validator_on_a_request_is_accepted() -> None:
+@pytest.mark.spec("CON-16", "CON-17")
+def test_before_model_validator_on_a_request_is_refused() -> None:
     renamed = create_model("Wrapped", __base__=_WrapValidated)
 
     def send(self: object, request: renamed) -> None: ...  # type: ignore[valid-type]
 
-    contract("wrap.v1")(declaration("Wrap", {"send": action(send)}))
+    with pytest.raises(ContractDefinitionError, match="has a validator on a record"):
+        contract("wrap.v1")(declaration("Wrap", {"send": action(send)}))
 
 
 # A node is judged with the record's settings and pydantic-core's order of
@@ -1973,7 +1939,6 @@ def test_description_names_each_record_once() -> None:
     class Order(BaseModel):
         lines: list[Line]
         placed: AwareDatetime
-        total: Decimal
 
     @contract("orders.v1")
     class Orders(Protocol):
@@ -1985,7 +1950,6 @@ def test_description_names_each_record_once() -> None:
     properties = defs["Order"]["properties"]
     assert properties["lines"]["items"] == {"$ref": "#/$defs/Line"}
     assert properties["placed"]["format"] == "date-time"
-    assert properties["total"]["type"] == "string"
 
 
 # Implementations

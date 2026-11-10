@@ -25,7 +25,7 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 from hypothesis_jsonschema import from_schema
-from jsonschema import Draft202012Validator
+from jsonschema import Draft202012Validator, FormatChecker
 from pydantic import (
     AfterValidator,
     AwareDatetime,
@@ -59,12 +59,15 @@ _DURATION = TypeAdapter(timedelta)
 # does not know; it generates "date" and "date-time" (RFC 3339, always with an
 # offset) itself. Durations are Pydantic's ISO 8601 text.
 _FORMATS: dict[str, st.SearchStrategy[str]] = {
-    "decimal": st.decimals(allow_nan=False, allow_infinity=False).map(str),
     "binary": st.text(),
     "duration": st.timedeltas(
         min_value=timedelta(days=-9999), max_value=timedelta(days=9999)
     ).map(lambda value: _DURATION.dump_python(value, mode="json")),
 }
+
+# The formats the description uses that a JSON Schema validator checks. The
+# duration encoding is settled in step 3 (#10), so "duration" is left out.
+_FORMAT_CHECKER = FormatChecker(formats=("date", "date-time"))
 
 _names = itertools.count()
 
@@ -309,12 +312,26 @@ _TYPES: st.SearchStrategy[tuple[object, list[object]]] = st.recursive(
 )
 
 
+def test_format_checker_checks_dates_and_timestamps() -> None:
+    """Guard against jsonschema skipping a format whose checker is missing."""
+    validator = Draft202012Validator(
+        {"type": "string", "format": "date-time"}, format_checker=_FORMAT_CHECKER
+    )
+    assert not validator.is_valid("yesterday")
+    assert validator.is_valid("2026-01-01T00:00:00Z")
+    dates = Draft202012Validator(
+        {"type": "string", "format": "date"}, format_checker=_FORMAT_CHECKER
+    )
+    assert not dates.is_valid("soon")
+
+
 def test_generator_covers_the_allowlist() -> None:
     """Every key and setting the checker admits is one the generator draws."""
     for kind, (_, bounds, other) in portable_scalars().items():
         assert set(bounds) | set(other) <= set(_KEYS[kind]), kind
     assert set(portable_settings()) <= set(_SETTING_VALUES)
-    assert set(_KEYS) == set(portable_scalars())
+    # The generator also draws decimals, which the checker refuses.
+    assert set(portable_scalars()) <= set(_KEYS)
     drawn = {
         "list": set(_LENGTHS),
         "dict": set(_LENGTHS),
@@ -340,7 +357,9 @@ def _declare(record: type[BaseModel]) -> dict[str, Any]:
 def _round_trip(record: type[BaseModel], schema: dict[str, Any], value: object) -> None:
     instance = record.model_validate_json(json.dumps(value))
     sent = instance.model_dump_json()
-    Draft202012Validator(schema).validate(json.loads(sent))
+    Draft202012Validator(schema, format_checker=_FORMAT_CHECKER).validate(
+        json.loads(sent)
+    )
     assert record.model_validate_json(sent) == instance
 
 
@@ -388,7 +407,6 @@ class Reference(BaseModel):
     ratio: float = 1.0
     name: str = ""
     raw: bytes = b""
-    price: Decimal = Decimal("1.50")
     when: AwareDatetime
     day: date
     span: timedelta = timedelta(seconds=90)
