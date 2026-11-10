@@ -16,7 +16,7 @@ major       = %x31-39 *DIGIT        ; a positive integer with no leading zero
 lower       = %x61-7A               ; "a" to "z"
 ```
 
-Identities use lowercase ASCII letters, digits and underscores only, so that one identity can be written unchanged in every transport: an HTTP path, a protobuf package, an environment variable.
+Identities use lowercase ASCII letters, digits and underscores only, so that one identity can be written unchanged in an HTTP path and a protobuf package.
 
 - **CON-1.** Within one major version, changes MUST be backward compatible for existing callers: adding an action, adding an optional request field, adding a reply field, adding an error kind to an action.
 - Anything else is a breaking change and requires a new major version. **CON-2.** Old versions SHOULD remain served until no caller uses them.
@@ -52,7 +52,7 @@ The portable forms are the types that every transport can represent, JSON Schema
 
 **CON-14.** A reply type MUST be either a record built only from the portable forms, or empty. An empty reply carries no value.
 
-Records are nominal within a contract and structural across the wire. **CON-15.** Two different records used by one contract MUST NOT have the same name. Generated code for other languages names each record once, so two records with one name would collide.
+Records are nominal within a contract and structural across the wire. **CON-15.** Two different records or enums used by one contract MUST NOT have the same name. Generated code for other languages names each record and enum once, so two with one name would collide.
 
 **CON-6.** Unknown fields in a request MUST be ignored by providers. **CON-7.** Unknown fields in a reply MUST be ignored by callers. This is what makes additive changes compatible.
 

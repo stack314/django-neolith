@@ -18,13 +18,21 @@ from uuid import UUID
 
 import pytest
 from pydantic import (
+    AfterValidator,
     AwareDatetime,
     BaseModel,
     ConfigDict,
     Field,
+    PlainSerializer,
     RootModel,
+    WrapSerializer,
+    computed_field,
     create_model,
+    field_serializer,
+    field_validator,
+    model_serializer,
 )
+from pydantic.alias_generators import to_camel
 
 from neolith import (
     Action,
@@ -474,6 +482,155 @@ def test_reply_fields_are_checked_too() -> None:
         contract("echo.v1")(declaration("Echo", {"ping": action(ping)}))
 
 
+# Serialization: a record travels as its declared fields
+
+
+def _computed() -> type[BaseModel]:
+    class Tagged(BaseModel):
+        name: str
+
+        @computed_field  # type: ignore[prop-decorator]
+        @property
+        def tags(self) -> set[complex]:
+            return set()
+
+    return Tagged
+
+
+def _field_serializer() -> type[BaseModel]:
+    class Priced(BaseModel):
+        cents: int
+
+        @field_serializer("cents")
+        def as_text(self, value: int) -> str:
+            return str(value)
+
+    return Priced
+
+
+def _model_serializer() -> type[BaseModel]:
+    class Packed(BaseModel):
+        value: int
+
+        @model_serializer
+        def as_list(self) -> list[int]:
+            return [self.value]
+
+    return Packed
+
+
+def _annotated_serializer(serializer: object) -> type[BaseModel]:
+    return create_model("Wrapped", value=(Annotated[int, serializer], ...))
+
+
+def _nested_annotated_serializer() -> type[BaseModel]:
+    pairs = PlainSerializer(lambda v: {"v": [(v, v)]}, return_type=dict[str, Any])
+    return create_model("Deep", values=(list[Annotated[int, pairs]], ...))
+
+
+def _nested_record_serializer() -> type[BaseModel]:
+    return create_model("Holder", inner=(_field_serializer(), ...))
+
+
+_SERIALIZING = [
+    pytest.param(_computed, "record Tagged has computed fields", id="computed_field"),
+    pytest.param(
+        _field_serializer,
+        "field Priced.cents has a custom serializer",
+        id="field_serializer",
+    ),
+    pytest.param(
+        _model_serializer,
+        "record Packed has a custom serializer",
+        id="model_serializer",
+    ),
+    pytest.param(
+        lambda: _annotated_serializer(PlainSerializer(str, return_type=str)),
+        "field Wrapped.value has a custom serializer",
+        id="PlainSerializer",
+    ),
+    pytest.param(
+        lambda: _annotated_serializer(WrapSerializer(lambda v, h: h(v))),
+        "field Wrapped.value has a custom serializer",
+        id="WrapSerializer",
+    ),
+    pytest.param(
+        _nested_annotated_serializer,
+        "field Deep.values has a custom serializer",
+        id="nested PlainSerializer",
+    ),
+    pytest.param(
+        _nested_record_serializer,
+        "field Holder.inner.cents has a custom serializer",
+        id="nested record",
+    ),
+]
+
+
+@pytest.mark.spec("CON-13", "CON-17")
+@pytest.mark.parametrize(("make", "message"), _SERIALIZING)
+def test_request_record_with_custom_serialization_is_rejected(
+    make: Callable[[], type[BaseModel]], message: str
+) -> None:
+    record = make()
+
+    def send(self: object, request: record) -> None: ...  # type: ignore[valid-type]
+
+    with pytest.raises(ContractDefinitionError, match=re.escape(message)):
+        contract("echo.v1")(declaration("Echo", {"send": action(send)}))
+
+
+@pytest.mark.spec("CON-14", "CON-17")
+@pytest.mark.parametrize(("make", "message"), _SERIALIZING)
+def test_reply_record_with_custom_serialization_is_rejected(
+    make: Callable[[], type[BaseModel]], message: str
+) -> None:
+    record = make()
+
+    def send(self: object, request: Ping) -> record:  # type: ignore[valid-type]
+        ...
+
+    with pytest.raises(ContractDefinitionError, match=re.escape(message)):
+        contract("echo.v1")(declaration("Echo", {"send": action(send)}))
+
+
+@pytest.mark.spec("CON-13")
+def test_validators_do_not_change_the_wire_form() -> None:
+    class Checked(BaseModel):
+        code: Annotated[str, AfterValidator(str.upper)]
+        count: int
+
+        @field_validator("count")
+        @classmethod
+        def positive(cls, value: int) -> int:
+            return abs(value)
+
+    declare_with_field(Checked)
+
+
+@pytest.mark.spec("CON-16")
+@pytest.mark.parametrize(
+    "field",
+    [
+        pytest.param(Field(alias="itemId"), id="alias"),
+        pytest.param(Field(serialization_alias="itemId"), id="serialization_alias"),
+        pytest.param(Field(validation_alias="itemId"), id="validation_alias"),
+    ],
+)
+def test_field_alias_is_rejected(field: object) -> None:
+    with pytest.raises(ContractDefinitionError, match="has an alias"):
+        declare_with_field(Annotated[int, field])
+
+
+@pytest.mark.spec("CON-16")
+def test_alias_generator_is_rejected() -> None:
+    camel = create_model(
+        "Camel", __config__=ConfigDict(alias_generator=to_camel), item_id=(int, ...)
+    )
+    with pytest.raises(ContractDefinitionError, match=r"Shape\.value\.item_id"):
+        declare_with_field(camel)
+
+
 # Record names
 
 
@@ -520,6 +677,42 @@ def test_one_record_may_be_used_many_times() -> None:
         def remove(self, request: Line) -> Line: ...
 
     assert set(Contract.of(Cart).actions) == {"add", "remove"}
+
+
+def _enum_named(name: str) -> type[enum.Enum]:
+    return cast("type[enum.Enum]", enum.StrEnum(name, {"A": "a"}))
+
+
+@pytest.mark.spec("CON-15", "CON-17")
+def test_two_enums_with_one_name_are_rejected() -> None:
+    first, second = _enum_named("Kind"), _enum_named("Kind")
+    record = create_model("Pair", first=(first, ...), second=(second, ...))
+    with pytest.raises(
+        ContractDefinitionError, match="records or enums are named 'Kind'"
+    ):
+        declare_with_field(record)
+
+
+@pytest.mark.spec("CON-15", "CON-17")
+def test_record_and_enum_with_one_name_are_rejected() -> None:
+    status = _enum_named("Status")
+    record = create_model("Status", value=(int, ...))
+
+    def check(self: object, request: record) -> None: ...  # type: ignore[valid-type]
+
+    holder = create_model("Holder", status=(status, ...))
+
+    def report(self: object, request: holder) -> None: ...  # type: ignore[valid-type]
+
+    namespace = {"check": action(check), "report": action(report)}
+    with pytest.raises(ContractDefinitionError, match="'Status'"):
+        contract("audit.v1")(declaration("Audit", namespace))
+
+
+@pytest.mark.spec("CON-15")
+def test_one_enum_may_be_used_many_times() -> None:
+    record = create_model("Pair", first=(Colour, ...), second=(list[Colour], ...))
+    declare_with_field(record)
 
 
 # Unknown fields

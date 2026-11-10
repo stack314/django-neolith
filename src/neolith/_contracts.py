@@ -18,7 +18,7 @@ import inspect
 import re
 import types
 import typing
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -361,13 +361,13 @@ def _signature(where: str, function: Callable[..., Any]) -> tuple[object, object
 class _TypeChecker:
     """Check request and reply types against the portable forms (spec 01).
 
-    One checker serves one contract, so that record names are checked across
-    all its actions.
+    One checker serves one contract, so that the names of records and enums
+    are checked across all its actions.
     """
 
     def __init__(self) -> None:
         self.where = ""
-        self.records: dict[str, type[BaseModel]] = {}
+        self.named: dict[str, type[Any]] = {}
 
     def message(
         self, annotation: object, role: Literal["request", "reply"]
@@ -385,17 +385,23 @@ class _TypeChecker:
             f"model with named fields){empty}, not {_name(annotation)}"
         )
 
-    def record(self, model: type[BaseModel], path: str) -> None:
-        known = self.records.get(model.__name__)
-        if known is model:
-            return
+    def register(self, named: type[Any]) -> bool:
+        """Record the name of a record or enum; False if it was seen already."""
+        known = self.named.get(named.__name__)
+        if known is named:
+            return False
         if known is not None:
             raise ContractDefinitionError(
-                f"{self.where}: two different records are named {model.__name__!r}: "
-                f"{known.__module__}.{known.__qualname__} and "
-                f"{model.__module__}.{model.__qualname__}"
+                f"{self.where}: two different records or enums are named "
+                f"{named.__name__!r}: {known.__module__}.{known.__qualname__} and "
+                f"{named.__module__}.{named.__qualname__}"
             )
-        self.records[model.__name__] = model
+        self.named[named.__name__] = named
+        return True
+
+    def record(self, model: type[BaseModel], path: str) -> None:
+        if not self.register(model):
+            return
         extra = model.model_config.get("extra")
         if extra not in (None, "ignore"):
             raise ContractDefinitionError(
@@ -404,7 +410,24 @@ class _TypeChecker:
                 "adding a field stays compatible"
             )
         for field_name, field in model.model_fields.items():
+            if (field.alias, field.validation_alias, field.serialization_alias) != (
+                None,
+                None,
+                None,
+            ):
+                raise ContractDefinitionError(
+                    f"{self.where}: field {path}.{field_name} has an alias; a field "
+                    "travels under its own name in this version, so that the "
+                    "description and the wire agree"
+                )
             self.check(field.annotation, f"{path}.{field_name}")
+        for changed, kind in _serialization_changes(_model_schema(model), None):
+            at = f"field {path}.{changed}" if changed else f"record {path}"
+            raise ContractDefinitionError(
+                f"{self.where}: {at} has {kind}; a record travels as its declared "
+                "fields, each in its portable form, so custom serialization is not "
+                "supported"
+            )
 
     def check(self, annotation: object, path: str) -> None:
         annotation = _unwrap(annotation)
@@ -425,6 +448,7 @@ class _TypeChecker:
             if issubclass(annotation, enum.Enum) and all(
                 isinstance(member.value, str) for member in annotation
             ):
+                self.register(annotation)
                 return
         elif origin is list and len(arguments) == 1:
             self.check(arguments[0], f"{path}[*]")
@@ -441,6 +465,51 @@ class _TypeChecker:
             f"{self.where}: field {path} has type {_name(annotation)}, which is not "
             "a portable form"
         )
+
+
+def _model_schema(model: type[BaseModel]) -> dict[str, Any]:
+    """Find the model's own node in its Pydantic core schema."""
+    pending: list[object] = [model.__pydantic_core_schema__]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, dict):
+            if node.get("type") == "model" and node.get("cls") is model:
+                return node
+            pending.extend(node.values())
+        elif isinstance(node, list):
+            pending.extend(node)
+    # Pydantic builds a model node for every model; this guards its internals.
+    raise ContractDefinitionError(
+        f"cannot read the core schema of {model.__qualname__}"
+    )
+
+
+def _serialization_changes(
+    node: object, field: str | None, *, root: bool = True
+) -> Iterator[tuple[str | None, str]]:
+    """Yield what makes a record serialise other than as its declared fields.
+
+    Walks the record's own core schema, which is what Pydantic serialises:
+    serializers on the record or a field (``model_serializer``,
+    ``field_serializer``, ``PlainSerializer`` and ``WrapSerializer``, at any
+    depth) and computed fields. Nested records are checked on their own.
+    """
+    if isinstance(node, dict):
+        if node.get("type") == "model" and not root:
+            return
+        if "serialization" in node:
+            yield field, "a custom serializer"
+        if node.get("computed_fields"):
+            yield field, "computed fields"
+        if node.get("type") == "model-fields":
+            for name, sub in node.get("fields", {}).items():
+                yield from _serialization_changes(sub, name, root=False)
+            return
+        for value in node.values():
+            yield from _serialization_changes(value, field, root=False)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _serialization_changes(value, field, root=False)
 
 
 def _unwrap(annotation: object) -> object:
