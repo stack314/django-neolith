@@ -52,7 +52,7 @@ The portable forms are the types that every transport can represent, JSON Schema
 
 **CON-14.** A reply type MUST be either a record built only from the portable forms, or empty. An empty reply carries no value.
 
-Records are nominal within a contract and structural across the wire. **CON-15.** Two different records or enums used by one contract MUST NOT have the same name. Generated code for other languages names each record and enum once, so two with one name would collide.
+Records are nominal within a contract and structural across the wire. **CON-15.** Two different types that the description names, such as records and enums, MUST NOT have the same name within one contract. Generated code for other languages names each of them once, so two with one name would collide.
 
 **CON-6.** Unknown fields in a request MUST be ignored by providers. **CON-7.** Unknown fields in a reply MUST be ignored by callers. This is what makes additive changes compatible.
 

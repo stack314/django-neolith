@@ -13,7 +13,16 @@ import types
 from collections.abc import Callable, Mapping
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Annotated, Any, Literal, Optional, Protocol, TypedDict, cast
+from typing import (
+    Annotated,
+    Any,
+    Literal,
+    Optional,
+    Protocol,
+    TypeAliasType,
+    TypedDict,
+    cast,
+)
 from uuid import UUID
 
 import annotated_types
@@ -105,6 +114,22 @@ class Below(BaseModel):
 # Refers to a name that only the checker's own locals would supply.
 class Sneaky(BaseModel):
     x: "path"  # type: ignore[name-defined]  # noqa: F821
+
+
+# Type aliases. Recursive ones are accepted by Pydantic but have no end when
+# expanded; a quoted name inside one is never resolved.
+type Nested = list[Nested]
+type Tree = dict[str, Tree]
+type Ping1 = list[Pong1]
+type Pong1 = list[Ping1]
+type QuotedBelow = list["Below"]
+type BelowList = list[Below]
+type Ints = list[int]
+type IntPairs = dict[str, Ints]
+
+
+class Page[T](BaseModel):
+    items: list[T]
 
 
 class Point(TypedDict):
@@ -1197,7 +1222,7 @@ def test_two_enums_with_one_name_are_rejected() -> None:
     first, second = _enum_named("Kind"), _enum_named("Kind")
     record = create_model("Pair", first=(first, ...), second=(second, ...))
     with pytest.raises(
-        ContractDefinitionError, match="records or enums are named 'Kind'"
+        ContractDefinitionError, match="records, enums or type aliases are named 'Kind'"
     ):
         declare_with_field(record)
 
@@ -1222,6 +1247,75 @@ def test_record_and_enum_with_one_name_are_rejected() -> None:
 def test_one_enum_may_be_used_many_times() -> None:
     record = create_model("Pair", first=(Colour, ...), second=(list[Colour], ...))
     declare_with_field(record)
+
+
+def _alias(name: str, value: object) -> Any:  # noqa: ANN401
+    """Build a type alias at run time; to a type checker it is any type form."""
+    return TypeAliasType(name, value)
+
+
+@pytest.mark.spec("CON-15", "CON-17")
+def test_two_type_aliases_with_one_name_are_rejected() -> None:
+    first, second = _alias("Item", list[int]), _alias("Item", list[str])
+    record = create_model("Pair", a=(first, ...), b=(second, ...))
+    with pytest.raises(
+        ContractDefinitionError, match="records, enums or type aliases are named 'Item'"
+    ):
+        declare_with_field(record)
+
+
+@pytest.mark.spec("CON-15", "CON-17")
+def test_type_alias_and_record_with_one_name_are_rejected() -> None:
+    alias = _alias("Item", list[int])
+    record = create_model("Order", tags=(alias, ...), item=(_record_named("Item"), ...))
+    with pytest.raises(ContractDefinitionError, match="named 'Item'"):
+        declare_with_field(record)
+
+
+@pytest.mark.spec("CON-15", "CON-16")
+def test_one_type_alias_may_be_used_many_times() -> None:
+    record = create_model(
+        "Counts", a=(Ints, ...), b=(Ints, ...), c=(list[Ints], ...), d=(IntPairs, ...)
+    )
+    defs = Contract.of(declare_with_field(record)).describe()["$defs"]
+    assert {"Ints", "IntPairs"} <= set(defs)
+
+
+@pytest.mark.spec("CON-17")
+@pytest.mark.parametrize(
+    ("alias", "at", "name"),
+    [
+        pytest.param(Nested, "Shape.value[*]", "Nested", id="list"),
+        pytest.param(Tree, "Shape.value{*}", "Tree", id="map"),
+        pytest.param(Ping1, "Shape.value[*][*]", "Ping1", id="pair"),
+    ],
+)
+def test_recursive_type_alias_is_rejected(alias: object, at: str, name: str) -> None:
+    expected = f"field {at} uses type alias {name}, which refers to itself"
+    with pytest.raises(ContractDefinitionError, match=re.escape(expected)):
+        declare_with_field(alias)
+
+
+@pytest.mark.spec("CON-17")
+def test_quoted_name_in_a_type_alias_is_named() -> None:
+    expected = (
+        "field Shape.value[*] refers to 'Below' by a string inside type alias "
+        "QuotedBelow, which is not resolved; write Below unquoted"
+    )
+    with pytest.raises(ContractDefinitionError, match=re.escape(expected)):
+        declare_with_field(QuotedBelow)
+
+
+@pytest.mark.spec("CON-13", "CON-16")
+def test_type_alias_of_a_record_defined_later_is_accepted() -> None:
+    defs = Contract.of(declare_with_field(BelowList)).describe()["$defs"]
+    assert "Below" in defs
+
+
+@pytest.mark.spec("CON-15", "CON-17")
+def test_parametrised_generic_record_is_rejected() -> None:
+    with pytest.raises(ContractDefinitionError, match="is a parametrised generic"):
+        declare_with_field(Page[int])
 
 
 # Unknown fields

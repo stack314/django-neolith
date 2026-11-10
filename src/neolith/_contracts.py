@@ -396,7 +396,7 @@ class _TypeChecker:
 
     def __init__(self) -> None:
         self.where = ""
-        self.named: dict[str, type[Any]] = {}
+        self.named: dict[str, type[Any] | typing.TypeAliasType] = {}
 
     def message(
         self, annotation: object, role: Literal["request", "reply"]
@@ -414,21 +414,31 @@ class _TypeChecker:
             f"model with named fields){empty}, not {_name(annotation)}"
         )
 
-    def register(self, named: type[Any]) -> bool:
-        """Record the name of a record or enum; False if it was seen already."""
+    def register(self, named: type[Any] | typing.TypeAliasType) -> bool:
+        """Record the name of a record, enum or type alias.
+
+        Each is described under its name, so two with one name would collide.
+        Returns False if this one was seen already.
+        """
         known = self.named.get(named.__name__)
         if known is named:
             return False
         if known is not None:
             raise ContractDefinitionError(
-                f"{self.where}: two different records or enums are named "
-                f"{named.__name__!r}: {known.__module__}.{known.__qualname__} and "
-                f"{named.__module__}.{named.__qualname__}"
+                f"{self.where}: two different records, enums or type aliases are "
+                f"named {named.__name__!r}: {_where_defined(known)} and "
+                f"{_where_defined(named)}"
             )
         self.named[named.__name__] = named
         return True
 
     def record(self, model: type[BaseModel], path: str) -> None:
+        if model.__pydantic_generic_metadata__["args"]:
+            raise ContractDefinitionError(
+                f"{self.where}: record {model.__name__} at {path} is a parametrised "
+                "generic, which is described under another name; declare a record "
+                "for each use"
+            )
         if not self.register(model):
             return
         if not model.__pydantic_complete__:
@@ -518,25 +528,48 @@ class _TypeChecker:
                 f"as written, so write it as {validated!r}"
             )
 
-    def unwrap(self, annotation: object, path: str) -> object:
-        """Strip ``Annotated``, checking its markers, and resolve ``type`` aliases."""
+    def unwrap(
+        self, annotation: object, path: str, aliases: tuple[Any, ...]
+    ) -> tuple[object, tuple[Any, ...]]:
+        """Strip ``Annotated``, checking its markers, and expand ``type`` aliases.
+
+        Returns the annotation and the aliases expanded on the way to it, so
+        that a recursive alias is caught instead of expanded for ever.
+        """
         while True:
             if typing.get_origin(annotation) is Annotated:
                 annotation, *metadata = typing.get_args(annotation)
                 self.markers(metadata, path)
             elif isinstance(annotation, typing.TypeAliasType):
+                if annotation in aliases:
+                    raise ContractDefinitionError(
+                        f"{self.where}: field {path} uses type alias "
+                        f"{annotation.__name__}, which refers to itself; a "
+                        "recursive shape must be a record"
+                    )
+                self.register(annotation)
+                aliases = (*aliases, annotation)
                 annotation = annotation.__value__
             else:
-                return annotation
+                return annotation, aliases
 
-    def check(self, annotation: object, path: str) -> None:
-        annotation = self.unwrap(annotation, path)
+    def check(
+        self, annotation: object, path: str, aliases: tuple[Any, ...] = ()
+    ) -> None:
+        annotation, aliases = self.unwrap(annotation, path, aliases)
         if isinstance(annotation, str | typing.ForwardRef):
             name = (
                 annotation
                 if isinstance(annotation, str)
                 else annotation.__forward_arg__
             )
+            if aliases:
+                raise ContractDefinitionError(
+                    f"{self.where}: field {path} refers to {name!r} by a string "
+                    f"inside type alias {aliases[-1].__name__}, which is not "
+                    f"resolved; write {name} unquoted, since a type statement is "
+                    "evaluated when it is used"
+                )
             raise ContractDefinitionError(
                 f"{self.where}: field {path} refers to {name!r}, which the module "
                 "of the record that uses it does not define when the contract is "
@@ -570,17 +603,17 @@ class _TypeChecker:
                 self.register(annotation)
                 return
         elif origin is list and len(arguments) == 1:
-            self.check(arguments[0], f"{path}[*]")
+            self.check(arguments[0], f"{path}[*]", aliases)
             return
         elif (
             origin is dict
             and len(arguments) == 2
-            and self.unwrap(arguments[0], f"{path} key") is str
+            and self.unwrap(arguments[0], f"{path} key", aliases)[0] is str
         ):
-            self.check(arguments[1], f"{path}{{*}}")
+            self.check(arguments[1], f"{path}{{*}}", aliases)
             return
         elif origin in _UNIONS and len(arguments) == 2 and type(None) in arguments:
-            self.check(next(a for a in arguments if a is not type(None)), path)
+            self.check(next(a for a in arguments if a is not type(None)), path, aliases)
             return
         elif origin is Literal and all(type(value) is str for value in arguments):
             return
@@ -668,6 +701,11 @@ def _same_json(left: object, right: object) -> bool:
             _same_json(left[key], right[key]) for key in left
         )
     return type(left) is type(right) and left == right
+
+
+def _where_defined(named: type[Any] | typing.TypeAliasType) -> str:
+    """Name a class or type alias with its module, for a clash message."""
+    return f"{named.__module__}.{getattr(named, '__qualname__', named.__name__)}"
 
 
 def _record_changes(
