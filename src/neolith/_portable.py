@@ -37,35 +37,44 @@ from pydantic_core import (
 _TYPE_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_]*")
 
 # Keys any node may carry without changing what travels: Pydantic's id for the
-# node, metadata (read only by Pydantic's JSON Schema generator), and strict
-# mode (validation only).
-_ANY_NODE = frozenset({"type", "ref", "metadata", "strict"})
+# node, and metadata (read only by Pydantic's JSON Schema generator). Strict
+# mode is not admitted: it refuses JSON 1.0 for an integer, which the
+# description admits, and behind a before validator it reads the JSON value by
+# Python rules, which refuse text for bytes, dates and timestamps.
+_ANY_NODE = frozenset({"type", "ref", "metadata"})
 
-_NUMBER_BOUNDS = {
+# A constraint is admitted only where pydantic-core and JSON Schema give it the
+# same meaning. A float's multiple_of is not: pydantic-core allows a tolerance
+# (1e-9) and JSON Schema divides exactly, so 1.0000000001 passes one and fails
+# the other. A pattern is not either: pydantic-core matches it with Rust regex,
+# JSON Schema with ECMA-262 and many validators with Python re, which differ on
+# anchors (Python's "$" matches before a final newline), classes ("\d" is
+# Unicode in Rust and ASCII in ECMA-262), Unicode properties and inline flags.
+_RANGE_BOUNDS = {
     "gt": "exclusiveMinimum",
     "ge": "minimum",
     "lt": "exclusiveMaximum",
     "le": "maximum",
-    "multiple_of": "multipleOf",
 }
-_STRING_BOUNDS = {
-    "min_length": "minLength",
-    "max_length": "maxLength",
-    "pattern": "pattern",
-}
+_INTEGER_BOUNDS = {**_RANGE_BOUNDS, "multiple_of": "multipleOf"}
+_STRING_BOUNDS = {"min_length": "minLength", "max_length": "maxLength"}
 _ITEM_BOUNDS = {"min_length": "minItems", "max_length": "maxItems"}
 _ENTRY_BOUNDS = {"min_length": "minProperties", "max_length": "maxProperties"}
 
 # The portable scalars: core schema type -> (description, constraint keys and
-# the JSON Schema keyword each becomes, other keys admitted). A constraint
-# without a JSON Schema keyword on the wire form, such as a decimal's
-# max_digits, is not admitted, so that the description states every rule the
-# provider enforces.
+# the JSON Schema keyword each becomes, other keys admitted). A constraint is
+# admitted only where it sits on the node it constrains: a constraint written
+# after a validator becomes an after validator of its own
+# (pydantic/_internal/_known_annotated_metadata.py), which is refused below. A
+# constraint without a JSON Schema keyword of the same meaning, such as a
+# decimal's max_digits, is not admitted, so that the description states every
+# rule the provider enforces.
 _SCALARS: dict[str, tuple[dict[str, str], Mapping[str, str], frozenset[str]]] = {
     "bool": ({"type": "boolean"}, {}, frozenset()),
-    "int": ({"type": "integer"}, _NUMBER_BOUNDS, frozenset()),
-    "float": ({"type": "number"}, _NUMBER_BOUNDS, frozenset({"allow_inf_nan"})),
-    # strip_whitespace, to_lower and to_upper convert values on the way in.
+    "int": ({"type": "integer"}, _INTEGER_BOUNDS, frozenset()),
+    "float": ({"type": "number"}, _RANGE_BOUNDS, frozenset({"allow_inf_nan"})),
+    # strip_whitespace, to_lower and to_upper convert values on the way in;
+    # they are refused next to a length (see Portable.transforms).
     "str": (
         {"type": "string"},
         _STRING_BOUNDS,
@@ -86,10 +95,13 @@ _SCALARS: dict[str, tuple[dict[str, str], Mapping[str, str], frozenset[str]]] = 
     ),
 }
 
-# Validators check or convert values on the way in and leave the wire form to
-# the schema they wrap. A plain validator replaces that schema, so it is not
-# admitted.
-_VALIDATORS = frozenset({"function-after", "function-before", "function-wrap"})
+# A before validator runs on the input, and the schema it wraps then checks
+# what it returns, so the value that travels is still one the description
+# states. An after or wrap validator returns a value after that check, which
+# nothing checks again; a plain validator replaces the schema. Only before
+# validators are admitted, on fields and on records.
+_VALIDATORS = frozenset({"function-before"})
+_UNCHECKED_VALIDATORS = frozenset({"function-after", "function-wrap"})
 # json_schema_input_schema only changes what Pydantic's JSON Schema generator
 # writes in validation mode, which the description never reads.
 _VALIDATOR_KEYS = frozenset({"function", "schema", "json_schema_input_schema"})
@@ -99,7 +111,6 @@ _VALIDATOR_KEYS = frozenset({"function", "schema", "json_schema_input_schema"})
 _SETTINGS = frozenset(
     {
         "title",
-        "strict",
         "revalidate_instances",
         "validate_default",
         "from_attributes",
@@ -124,6 +135,19 @@ _KEY_MEANINGS = {
     "serialization_alias": "has an alias",
     "post_init": "defines model_post_init, which can change values after validation",
     "generic_origin": "is a parametrised generic; declare a record for each use",
+    "pattern": (
+        "sets a pattern, which is not admitted: pydantic-core matches it with "
+        "Rust regex and JSON Schema with ECMA-262, and the two differ"
+    ),
+    "strict": (
+        "reads in strict mode, which refuses JSON values the description "
+        "admits: 1.0 for an integer, and, behind a before validator, text for "
+        "bytes, dates and timestamps"
+    ),
+    "multiple_of": (
+        "sets multiple_of on a float, which pydantic-core checks with a "
+        "tolerance and JSON Schema checks exactly"
+    ),
 }
 
 
@@ -159,13 +183,16 @@ class Portable:
             model: type[BaseModel] = annotation
             try:
                 node = self.resolve(self.build(model), model.__name__)
-                # A wrap model_validator wraps the model node itself.
-                while node.get("type") in _VALIDATORS:
-                    self.keys(node, _VALIDATOR_KEYS, f"record {model.__name__}")
+                # A record's before or wrap model_validator wraps the model
+                # node itself.
+                while node.get("type") in _VALIDATORS | _UNCHECKED_VALIDATORS:
+                    self.validator(node, f"record {model.__name__}")
                     node = self.resolve(node["schema"], model.__name__)
                 if node.get("type") == "model" and node.get("cls") is model:
                     return model, self.record(node, model.__name__)
             except (KeyError, AttributeError, TypeError) as error:
+                # Only this walk's own lookups raise these; an author's code
+                # runs inside round_trip, which names its errors itself.
                 if isinstance(error, self.error):
                     raise
                 # Fail closed: a core schema shape this walk does not read is
@@ -287,6 +314,14 @@ class Portable:
         self.keys(node, frozenset(admitted), subject)
         if node.get("root_model"):
             raise self.fail(f"{subject} is a root model; a record has named fields")
+        if node.get("custom_init"):
+            # pydantic-core calls a custom __init__ instead of building the
+            # record itself, so whatever it sets after validation travels
+            # unchecked.
+            raise self.fail(
+                f"{subject} defines __init__, which can change values after "
+                "validation; use a before model_validator instead"
+            )
         for key, value in node.get("config", {}).items():
             if key == "extra_fields_behavior":
                 if value != "ignore":
@@ -294,6 +329,8 @@ class Portable:
                         f"{subject} sets extra={value!r}; a record must ignore "
                         "unknown fields so that adding a field stays compatible"
                     )
+            elif key in _KEY_MEANINGS:
+                raise self.fail(f"{subject} {_KEY_MEANINGS[key]}")
             elif key not in _SETTINGS:
                 raise self.fail(
                     f"{subject} has {key} set, which changes how it travels"
@@ -318,8 +355,8 @@ class Portable:
     ) -> Ref:
         """Describe a record's fields, under the record's own settings."""
         fields_node = node["schema"]
-        while fields_node.get("type") in _VALIDATORS:
-            self.keys(fields_node, _VALIDATOR_KEYS, subject)
+        while fields_node.get("type") in _VALIDATORS | _UNCHECKED_VALIDATORS:
+            self.validator(fields_node, subject)
             fields_node = fields_node["schema"]
         if fields_node.get("type") != "model-fields":
             raise self.fail(f"{subject} is not built from named fields")
@@ -409,6 +446,11 @@ class Portable:
                 f"field {path} has the default {value!r}, which is not a value of "
                 "its type; Pydantic keeps a default as written, so write one"
             ) from error
+        except Exception as error:  # an author's validator may raise anything
+            raise self.fail(
+                f"field {path} has the default {value!r}, on which its validators "
+                f"raised {type(error).__name__}: {error}"
+            ) from error
         if not _unchanged(held, value):
             raise self.fail(
                 f"field {path} has the default {value!r}, which its validators "
@@ -427,12 +469,21 @@ class Portable:
                 "transport settles"
             ) from error
         try:
-            read = serializer.to_json(validator.validate_json(sent), warnings=False)
-        except (ValueError, TypeError) as error:
+            read_value = validator.validate_json(sent)
+            read = serializer.to_json(read_value, warnings=False)
+        except Exception as error:  # ValidationError, or an author's validator
             raise self.fail(
                 f"field {path} has the default {value!r}, which travels as "
                 f"{sent.decode()} and does not read back as a value of its type"
             ) from error
+        if not _unchanged(read_value, held):
+            # The wire lost something the value holds, such as the seconds of
+            # a timestamp's offset, which RFC 3339 cannot write.
+            raise self.fail(
+                f"field {path} has the default {value!r}, which travels as "
+                f"{sent.decode()} and reads back as {read_value!r}, so the wire "
+                "loses part of it"
+            )
         if sent != read:
             raise self.fail(
                 f"field {path} has the default {value!r}, which travels as "
@@ -466,11 +517,11 @@ class Portable:
                     "recursive shape must be a record"
                 )
             return self.describe(target, path, (*aliases, reference))
-        if kind in _VALIDATORS:
+        if kind in _VALIDATORS | _UNCHECKED_VALIDATORS:
             inner = node.get("schema", {})
             if inner.get("type") == "enum":
                 self.enum(inner, path)
-            self.keys(node, _VALIDATOR_KEYS, subject)
+            self.validator(node, subject)
             return self.describe(inner, path, aliases)
         if kind == "model":
             return self.record(node, path)
@@ -480,7 +531,9 @@ class Portable:
             base, bounds, other = _SCALARS[kind]
             self.keys(node, frozenset(bounds) | other, subject)
             if kind == "str":
-                self.case(node, subject)
+                self.transforms(node, subject)
+            if kind == "float" and "multiple_of" in node:
+                raise self.fail(f"{subject} {_KEY_MEANINGS['multiple_of']}")
             if kind == "datetime" and node.get("tz_constraint") != "aware":
                 raise self.fail(
                     f"{subject} is a timestamp, which carries an offset from UTC "
@@ -512,6 +565,12 @@ class Portable:
                 raise self.fail(
                     f"{subject} is a map without key and value types, "
                     "which is not a portable form"
+                )
+            key_node = self.resolve(node["keys_schema"], path)
+            if key_node.get("type") == "str" and self.converts(key_node):
+                raise self.fail(
+                    f"{subject} converts its keys, so two keys can become one; "
+                    "map keys are not converted in this version"
                 )
             key = self.describe(node["keys_schema"], f"{path} key", aliases)
             if key.get("type") != "string" or "format" in key:
@@ -547,28 +606,47 @@ class Portable:
             )
         raise self.fail(f"{subject} has type {kind}, which is not a portable form")
 
-    def case(self, node: Mapping[str, Any], subject: str) -> None:
-        """Refuse a case conversion on a string the description constrains.
-
-        pydantic-core checks a string's pattern and lengths before it converts
-        the case, and strips whitespace before both. So a converted value can
-        break the constraints the description states ("abc" passes
-        ``^[a-z]+$`` and travels as "ABC"; "ß" passes a maximum length of 1
-        and travels as "SS"). The conversion may come from the field or from
-        the record's settings.
-        """
-        converts = any(node.get(key) for key in ("to_lower", "to_upper")) or any(
-            self.config.get(key) for key in ("str_to_lower", "str_to_upper")
-        )
-        constrained = [
-            key for key in ("pattern", "min_length", "max_length") if key in node
+    def converts(self, node: Mapping[str, Any]) -> list[str]:
+        """The conversions pydantic-core applies to a string node, with settings."""
+        own = [
+            key for key in ("strip_whitespace", "to_lower", "to_upper") if node.get(key)
         ]
+        inherited = [
+            key
+            for key in ("str_strip_whitespace", "str_to_lower", "str_to_upper")
+            if self.config.get(key)
+        ]
+        return own + inherited
+
+    def transforms(self, node: Mapping[str, Any], subject: str) -> None:
+        """Refuse a conversion on a string whose length the description states.
+
+        pydantic-core strips whitespace, then checks the lengths, then converts
+        the case. Neither order commutes with a length the description states:
+        "a " has length 2 and is refused after stripping, and "ß" passes a
+        maximum length of 1 and travels as "SS". The conversion may come from
+        the field or from the record's settings.
+        """
+        converts = self.converts(node)
+        constrained = [key for key in ("min_length", "max_length") if key in node]
         if converts and constrained:
             raise self.fail(
-                f"{subject} converts case after checking its {constrained[0]}, so "
-                "a value it accepts can travel in a form it refuses; drop the "
-                "case conversion or the constraint"
+                f"{subject} converts its value ({converts[0]}) next to its "
+                f"{constrained[0]}, so a value the description admits can be "
+                "refused, or travel in a form it refuses; drop the conversion or "
+                "the length"
             )
+
+    def validator(self, node: Mapping[str, Any], subject: str) -> None:
+        """Admit a before validator; refuse an after or wrap one."""
+        if node.get("type") in _UNCHECKED_VALIDATORS:
+            raise self.fail(
+                f"{subject} has an after or wrap validator, which returns its "
+                "value after the type and constraints are checked, so that value "
+                "travels unchecked against the description; check the input in a "
+                "before validator (mode='before') instead"
+            )
+        self.keys(node, _VALIDATOR_KEYS, subject)
 
     def bounds(
         self, node: Mapping[str, Any], path: str, keywords: Mapping[str, str]
@@ -579,8 +657,7 @@ class Portable:
         except _Unstatable as error:
             raise self.fail(
                 f"field {path} sets {error.key}={error.value!r}, which the "
-                "description cannot state; use a finite int or float bound, or a "
-                "string pattern"
+                "description cannot state; use a finite int or float bound"
             ) from error
 
     def enum(self, node: Mapping[str, Any], path: str) -> Ref:
@@ -614,6 +691,16 @@ def portable_scalars() -> Mapping[
 ]:
     """The admitted scalars and their keys, for the property test's generator."""
     return _SCALARS
+
+
+def portable_constructs() -> Mapping[str, frozenset[str]]:
+    """The other admitted keys and node kinds, for the property test's generator."""
+    return {
+        "list": frozenset(_ITEM_BOUNDS),
+        "dict": frozenset(_ENTRY_BOUNDS),
+        "model-field": frozenset({"frozen"}),
+        "validators": _VALIDATORS,
+    }
 
 
 def portable_settings() -> frozenset[str]:
@@ -671,19 +758,15 @@ def _only_initialises_private_attributes(cls: type[Any]) -> bool:
 def _bounds(node: Mapping[str, Any], keywords: Mapping[str, str]) -> dict[str, Any]:
     """Map a node's constraints to JSON Schema keywords.
 
-    Returns None for a constraint whose value the keyword cannot state: a
-    pattern that is not a string, or a bound that is not a finite int or float
-    (a Decimal, a bool or infinity), which the caller rejects.
+    Raises _Unstatable for a constraint whose value the keyword cannot state:
+    a bound that is not a finite int or float (a Decimal, a bool or infinity).
     """
     mapped: dict[str, Any] = {}
     for key, keyword in keywords.items():
         if key not in node:
             continue
         value = node[key]
-        if keyword == "pattern":
-            if not isinstance(value, str):
-                raise _Unstatable(key, value)
-        elif type(value) not in (int, float) or not math.isfinite(value):
+        if type(value) not in (int, float) or not math.isfinite(value):
             raise _Unstatable(key, value)
         mapped[keyword] = value
     return mapped

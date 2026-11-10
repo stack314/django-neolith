@@ -157,7 +157,9 @@ class Contract:
             for attr, value in vars(klass).items():
                 if attr.startswith("_") or attr in self._actions:
                     continue
-                if inspect.isfunction(value) or isinstance(
+                # Anything callable from the class counts, so a partialmethod
+                # or a singledispatchmethod is a public method too.
+                if callable(getattr(impl, attr, None)) or isinstance(
                     value, staticmethod | classmethod
                 ):
                     raise ContractDefinitionError(
@@ -327,6 +329,10 @@ def _signature(where: str, function: Callable[..., Any]) -> tuple[object, object
         raise ContractDefinitionError(
             f"{where}: cannot resolve the annotation {error.name!r}; define the "
             "request and reply types before the class that uses them"
+        ) from error
+    except Exception as error:  # a malformed string annotation, such as "R["
+        raise ContractDefinitionError(
+            f"{where}: cannot read its annotations ({type(error).__name__}: {error})"
         ) from error
     request = hints.get(parameters[1].name)
     if request is None:

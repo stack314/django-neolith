@@ -693,17 +693,108 @@ def test_reply_record_with_custom_serialization_is_rejected(
 
 
 @pytest.mark.spec("CON-13")
-def test_validators_do_not_change_the_wire_form() -> None:
+def test_before_validators_are_accepted() -> None:
     class Checked(BaseModel):
-        code: Annotated[str, AfterValidator(str.upper)]
+        code: Annotated[str, BeforeValidator(str.upper)]
         count: int
 
-        @field_validator("count")
+        @field_validator("count", mode="before")
         @classmethod
         def positive(cls, value: int) -> int:
             return abs(value)
 
+        @model_validator(mode="before")
+        @classmethod
+        def accept(cls, data: object) -> object:
+            return data
+
     declare_with_field(Checked)
+
+
+class AfterModel(BaseModel):
+    x: Annotated[int, Field(le=10)]
+
+    @model_validator(mode="after")
+    def bump(self) -> "AfterModel":
+        self.x = 99
+        return self
+
+
+class WrapModel(BaseModel):
+    x: Annotated[int, Field(le=10)]
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def bump(
+        cls, data: object, handler: ModelWrapValidatorHandler["WrapModel"]
+    ) -> "WrapModel":
+        made = handler(data)
+        made.x = 99
+        return made
+
+
+class AfterField(BaseModel):
+    x: int
+
+    @field_validator("x")
+    @classmethod
+    def as_text(cls, value: int) -> str:
+        return str(value)
+
+
+class OwnInit(BaseModel):
+    x: Annotated[int, Field(ge=0, le=10)]
+
+    def __init__(self, **data: object) -> None:
+        super().__init__(**data)
+        self.x = 100
+
+
+def _identity(value: object) -> object:
+    return value
+
+
+@pytest.mark.spec("CON-16", "CON-17")
+@pytest.mark.parametrize(
+    ("annotation", "message"),
+    [
+        pytest.param(
+            Annotated[int, Field(ge=0, le=10), AfterValidator(lambda v: v * 100)],
+            "has an after or wrap validator",
+            id="after validator past a bound",
+        ),
+        pytest.param(
+            Annotated[int, WrapValidator(lambda v, h: h(v) * 100)],
+            "has an after or wrap validator",
+            id="wrap validator",
+        ),
+        pytest.param(
+            Annotated[int, AfterValidator(_identity), Field(ge=0)],
+            "has an after or wrap validator",
+            id="constraint written after a validator",
+        ),
+        pytest.param(
+            Annotated[Decimal, AfterValidator(_identity), Field(max_digits=3)],
+            "has an after or wrap validator",
+            id="decimal constraint after a validator",
+        ),
+        pytest.param(
+            AfterField, "has an after or wrap validator", id="field_validator"
+        ),
+        pytest.param(
+            AfterModel, "has an after or wrap validator", id="after model_validator"
+        ),
+        pytest.param(
+            WrapModel, "has an after or wrap validator", id="wrap model_validator"
+        ),
+        pytest.param(OwnInit, "defines __init__", id="custom __init__"),
+    ],
+)
+def test_values_changed_after_the_check_are_refused(
+    annotation: object, message: str
+) -> None:
+    with pytest.raises(ContractDefinitionError, match=re.escape(message)):
+        declare_with_field(annotation)
 
 
 def _custom_json_schema() -> type[BaseModel]:
@@ -971,10 +1062,10 @@ def _split_commas(value: object) -> object:
             id="BeforeValidator None",
         ),
         pytest.param(
-            Annotated[int, WrapValidator(lambda v, h: h(0 if v is None else v))],
+            Annotated[list[int], BeforeValidator(lambda v: [] if v is None else v)],
             None,
-            "turn into 0",
-            id="WrapValidator None",
+            "turn into []",
+            id="BeforeValidator list None",
         ),
         pytest.param(
             Annotated[int, BeforeValidator(int)],
@@ -989,7 +1080,7 @@ def _split_commas(value: object) -> object:
             id="split commas",
         ),
         pytest.param(
-            Annotated[str, AfterValidator(str.lower)],
+            Annotated[str, BeforeValidator(str.lower)],
             "ABC",
             "turn into 'abc'",
             id="lower",
@@ -1050,7 +1141,7 @@ def test_defaults_of_the_field_type_are_allowed() -> None:
         day: date = date(2026, 1, 1)
         when: AwareDatetime = datetime(2026, 1, 1, tzinfo=UTC)
         positive: int | None = Field(None, gt=0)
-        upper: Annotated[str, AfterValidator(str.upper)] = "ABC"
+        upper: Annotated[str, BeforeValidator(str.upper)] = "ABC"
         parsed: Annotated[int, BeforeValidator(int)] = 3
         made: list[int] = Field(default_factory=list)
         half: float = 1.5
@@ -1085,17 +1176,16 @@ def test_documentation_and_constraints_are_allowed() -> None:
             ge=0, description="How many.", title="Count", examples=[1], deprecated=True
         )
         name: Annotated[str, Field(min_length=1, max_length=20)]
-        code: Annotated[str, StringConstraints(pattern=r"^[A-Z]+$")]
+        code: Annotated[str, StringConstraints(min_length=1, max_length=4)]
         level: Annotated[int, annotated_types.Ge(0), annotated_types.Lt(10)]
         tags: Annotated[list[str], annotated_types.Len(0, 5)]
-        exact: Annotated[int, Strict()]
         lower: Annotated[str, BeforeValidator(str.lower)]
-        upper: Annotated[str, AfterValidator(str.upper)]
-        trimmed: Annotated[str, WrapValidator(lambda v, h: h(v))]
+        trimmed: Annotated[str, StringConstraints(strip_whitespace=True)]
 
-        @model_validator(mode="after")
-        def accept(self) -> "Documented":
-            return self
+        @model_validator(mode="before")
+        @classmethod
+        def accept(cls, data: object) -> object:
+            return data
 
     class Derived(Documented):
         extra: bool = False
@@ -1441,12 +1531,10 @@ class _Base(BaseModel):
 class _WrapValidated(BaseModel):
     qty: int
 
-    @model_validator(mode="wrap")
+    @model_validator(mode="before")
     @classmethod
-    def passthrough(
-        cls, data: object, handler: ModelWrapValidatorHandler["_WrapValidated"]
-    ) -> "_WrapValidated":
-        return handler(data)
+    def passthrough(cls, data: object) -> object:
+        return data
 
 
 @pytest.mark.spec("CON-13", "CON-17")
@@ -1512,7 +1600,7 @@ def test_every_core_schema_key_is_admitted_or_named(
         pytest.param(
             _WrapValidated,
             {"$ref": "#/$defs/_WrapValidated"},
-            id="wrap model validator",
+            id="before model validator",
         ),
     ],
 )
@@ -1561,7 +1649,7 @@ def test_default_factory_that_raises_is_named() -> None:
 
 
 @pytest.mark.spec("CON-17")
-def test_wrap_model_validator_on_a_request_is_accepted() -> None:
+def test_before_model_validator_on_a_request_is_accepted() -> None:
     renamed = create_model("Wrapped", __base__=_WrapValidated)
 
     def send(self: object, request: renamed) -> None: ...  # type: ignore[valid-type]
@@ -1583,34 +1671,116 @@ def _strings(**constraints: object) -> object:
     ("annotation", "config"),
     [
         pytest.param(
-            _strings(to_upper=True, pattern="^[a-z]+$"), {}, id="upper and pattern"
-        ),
-        pytest.param(
             _strings(to_upper=True, max_length=1), {}, id="upper and max length"
         ),
         pytest.param(
             _strings(to_lower=True, min_length=2), {}, id="lower and min length"
         ),
         pytest.param(
-            dict.__class_getitem__((_strings(to_upper=True, min_length=1), int)),
-            {},
-            id="map key",
+            _strings(strip_whitespace=True, min_length=2), {}, id="strip and min length"
         ),
         pytest.param(
-            _strings(pattern="^[a-z]+$"), {"str_to_upper": True}, id="upper setting"
+            _strings(max_length=1), {"str_to_upper": True}, id="upper setting"
         ),
         pytest.param(
             _strings(max_length=3), {"str_to_lower": True}, id="lower setting"
         ),
+        pytest.param(
+            _strings(min_length=2), {"str_strip_whitespace": True}, id="strip setting"
+        ),
     ],
 )
-def test_case_conversion_with_a_stated_constraint_is_refused(
+def test_conversion_next_to_a_stated_length_is_refused(
     annotation: object, config: dict[str, object]
 ) -> None:
     record = create_model(
         "Cased", __config__=cast("ConfigDict", config), s=(cast("Any", annotation), ...)
     )
-    with pytest.raises(ContractDefinitionError, match="converts case after checking"):
+    with pytest.raises(ContractDefinitionError, match="converts its value"):
+        declare_with_field(record)
+
+
+@pytest.mark.spec("CON-16", "CON-17")
+@pytest.mark.parametrize(
+    ("annotation", "config"),
+    [
+        pytest.param(
+            dict.__class_getitem__((_strings(to_upper=True), int)), {}, id="field"
+        ),
+        pytest.param(dict[str, int], {"str_to_lower": True}, id="lower setting"),
+        pytest.param(
+            dict[str, int], {"str_strip_whitespace": True}, id="strip setting"
+        ),
+    ],
+)
+def test_converted_map_keys_are_refused(
+    annotation: object, config: dict[str, object]
+) -> None:
+    record = create_model(
+        "Keyed", __config__=cast("ConfigDict", config), m=(cast("Any", annotation), ...)
+    )
+    with pytest.raises(ContractDefinitionError, match="converts its keys"):
+        declare_with_field(record)
+
+
+@pytest.mark.spec("CON-16", "CON-17")
+@pytest.mark.parametrize(
+    "annotation",
+    [
+        pytest.param(_strings(pattern="^[a-z]+$"), id="field"),
+        pytest.param(Annotated[str, Field(pattern=r"^\p{L}+$")], id="unicode property"),
+        pytest.param(Annotated[str, Field(pattern="(?i)^abc$")], id="inline flag"),
+        pytest.param(Annotated[str, Field(pattern=r"^\d+$")], id="digit class"),
+        pytest.param(
+            dict.__class_getitem__((_strings(pattern="^[a-z]+$"), int)), id="map key"
+        ),
+    ],
+)
+def test_patterns_are_refused(annotation: object) -> None:
+    with pytest.raises(ContractDefinitionError, match="sets a pattern"):
+        declare_with_field(annotation)
+
+
+@pytest.mark.spec("CON-16", "CON-17")
+@pytest.mark.parametrize("step", [0.1, 1, 0.5])
+def test_float_multiple_of_is_refused(step: float) -> None:
+    with pytest.raises(ContractDefinitionError, match="multiple_of on a float"):
+        declare_with_field(Annotated[float, Field(multiple_of=step)])
+
+
+@pytest.mark.spec("CON-16")
+def test_integer_multiple_of_is_accepted() -> None:
+    described = Contract.of(
+        declare_with_field(Annotated[int, Field(multiple_of=3)])
+    ).describe()
+    assert described["$defs"]["Shape"]["properties"]["value"] == {
+        "type": "integer",
+        "multipleOf": 3,
+    }
+
+
+@pytest.mark.spec("CON-16", "CON-17")
+@pytest.mark.parametrize(
+    ("annotation", "config"),
+    [
+        pytest.param(Annotated[int, Strict()], {}, id="strict integer"),
+        pytest.param(Annotated[str, Strict()], {}, id="strict string"),
+        pytest.param(int, {"strict": True}, id="strict record"),
+        pytest.param(str, {"strict": True}, id="strict record without integers"),
+        pytest.param(
+            Annotated[bytes, Strict(), BeforeValidator(_identity)],
+            {},
+            id="strict bytes behind a before validator",
+        ),
+    ],
+)
+def test_strict_mode_is_refused(annotation: object, config: dict[str, object]) -> None:
+    record = create_model(
+        "Strictly",
+        __config__=cast("ConfigDict", config),
+        n=(cast("Any", annotation), ...),
+    )
+    with pytest.raises(ContractDefinitionError, match="strict"):
         declare_with_field(record)
 
 
@@ -1618,19 +1788,13 @@ def test_case_conversion_with_a_stated_constraint_is_refused(
 @pytest.mark.parametrize(
     ("annotation", "config"),
     [
-        pytest.param(
-            _strings(strip_whitespace=True, pattern="^[a-z]+$"),
-            {},
-            id="strip and pattern",
-        ),
+        pytest.param(_strings(strip_whitespace=True), {}, id="strip alone"),
         pytest.param(_strings(to_upper=True), {}, id="upper alone"),
-        pytest.param(str, {"str_to_lower": True}, id="lower setting, no constraint"),
-        pytest.param(
-            _strings(min_length=1), {"str_strip_whitespace": True}, id="strip setting"
-        ),
+        pytest.param(str, {"str_to_lower": True}, id="lower setting, no length"),
+        pytest.param(_strings(min_length=1), {}, id="length without conversion"),
     ],
 )
-def test_conversions_that_commute_with_the_description_are_accepted(
+def test_conversions_without_a_stated_length_are_accepted(
     annotation: object, config: dict[str, object]
 ) -> None:
     record = create_model(
@@ -1655,7 +1819,7 @@ def test_conversions_that_commute_with_the_description_are_accepted(
         pytest.param(
             {"str_strip_whitespace": True},
             (str, Field(" a ", min_length=2)),
-            "is not a value of its type",
+            "converts its value",
             id="strip below min length",
         ),
     ],

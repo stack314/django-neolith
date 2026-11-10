@@ -16,6 +16,7 @@ import enum
 import itertools
 import json
 import types
+from collections.abc import Callable, Mapping
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Annotated, Any, Literal, Protocol, cast
@@ -26,8 +27,10 @@ from hypothesis import strategies as st
 from hypothesis_jsonschema import from_schema
 from jsonschema import Draft202012Validator
 from pydantic import (
+    AfterValidator,
     AwareDatetime,
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
     Strict,
@@ -37,7 +40,11 @@ from pydantic import (
 )
 
 from neolith import Contract, ContractDefinitionError, action, contract
-from neolith._portable import portable_scalars, portable_settings
+from neolith._portable import (
+    portable_constructs,
+    portable_scalars,
+    portable_settings,
+)
 
 _HYPOTHESIS = settings(
     derandomize=True,
@@ -121,7 +128,6 @@ _STRING_KEYS = {
 }
 _SETTING_VALUES: dict[str, st.SearchStrategy[object]] = {
     "title": st.just("Titled"),
-    "strict": st.booleans(),
     "revalidate_instances": st.sampled_from(["never", "always", "subclass-instances"]),
     "validate_default": st.booleans(),
     "from_attributes": st.booleans(),
@@ -161,7 +167,9 @@ def _scalars(draw: st.DrawFn) -> tuple[object, list[object]]:
         if k not in ("tz_constraint", "microseconds_precision")
     }
     markers: list[object] = []
-    if draw(st.booleans()):
+    # Strict mode is refused, so it is drawn rarely. Hypothesis favours small
+    # integers, so the rare value is one from the middle of the range.
+    if draw(st.integers(0, 19)) == 13:
         markers.append(Strict())
     if kind == "str":
         markers.append(StringConstraints(**cast("Any", values)))
@@ -206,7 +214,15 @@ def _records(
     def build(draw: st.DrawFn) -> tuple[object, list[object]]:
         fields = draw(st.lists(children, min_size=1, max_size=4))
         definitions: dict[str, Any] = {}
-        for i, (annotation, defaults) in enumerate(fields):
+        for i, (drawn, defaults) in enumerate(fields):
+            annotation = drawn
+            # An after validator is refused wherever it appears, so it is drawn
+            # rarely, to leave most contracts for the round trip.
+            wrappers = draw(st.sets(st.sampled_from(["frozen", "function-before"])))
+            if draw(st.integers(0, 39)) == 27:
+                wrappers = {*wrappers, "function-after"}
+            for wrapper in sorted(wrappers):
+                annotation = _WRAPPERS[wrapper](annotation)
             use_default: bool = draw(st.booleans())
             default: object = ...
             if defaults and use_default:
@@ -214,6 +230,8 @@ def _records(
             definitions[f"f{i}"] = (cast("Any", annotation), default)
         chosen = draw(st.sets(st.sampled_from(sorted(_SETTING_VALUES))))
         config: dict[str, object] = {k: draw(_SETTING_VALUES[k]) for k in chosen}
+        if draw(st.integers(0, 19)) == 13:
+            config["strict"] = True  # refused; drawn rarely
         config["extra"] = "ignore"
         record = create_model(
             _name("R"), __config__=cast("ConfigDict", config), **definitions
@@ -223,12 +241,56 @@ def _records(
     return build()
 
 
-def _list_of(item: tuple[object, list[object]]) -> tuple[object, list[object]]:
-    return list.__class_getitem__(item[0]), [[]]
+_LENGTHS = {"min_length": st.integers(0, 1), "max_length": st.integers(2, 4)}
+# Map keys: plain, with lengths, or converted (which the checker refuses).
+_KEY_TYPES: list[object] = [
+    str,
+    Annotated[str, StringConstraints(min_length=1, max_length=6)],
+    Annotated[str, StringConstraints(to_lower=True)],
+]
 
 
-def _map_of(item: tuple[object, list[object]]) -> tuple[object, list[object]]:
-    return dict.__class_getitem__((str, item[0])), [{}]
+def _with_lengths(annotation: object, lengths: Mapping[str, object]) -> object:
+    return (
+        Annotated[annotation, Field(**cast("Any", lengths))] if lengths else annotation
+    )
+
+
+def _lists(
+    children: st.SearchStrategy[tuple[object, list[object]]],
+) -> st.SearchStrategy[tuple[object, list[object]]]:
+    @st.composite
+    def build(draw: st.DrawFn) -> tuple[object, list[object]]:
+        item = draw(children)
+        lengths = draw(st.fixed_dictionaries({}, optional=_LENGTHS))
+        return _with_lengths(list.__class_getitem__(item[0]), lengths), [[]]
+
+    return build()
+
+
+def _maps(
+    children: st.SearchStrategy[tuple[object, list[object]]],
+) -> st.SearchStrategy[tuple[object, list[object]]]:
+    @st.composite
+    def build(draw: st.DrawFn) -> tuple[object, list[object]]:
+        item = draw(children)
+        key = draw(st.sampled_from(_KEY_TYPES))
+        lengths = draw(st.fixed_dictionaries({}, optional=_LENGTHS))
+        return _with_lengths(dict.__class_getitem__((key, item[0])), lengths), [{}]
+
+    return build()
+
+
+# Field wrappers: frozen, and validators of each kind; after ones are refused.
+_WRAPPERS: dict[str, Callable[[object], object]] = {
+    "frozen": lambda t: Annotated[t, Field(frozen=True)],
+    "function-before": lambda t: Annotated[t, BeforeValidator(_same)],
+    "function-after": lambda t: Annotated[t, AfterValidator(_same)],
+}
+
+
+def _same(value: object) -> object:
+    return value
 
 
 def _optional(item: tuple[object, list[object]]) -> tuple[object, list[object]]:
@@ -238,8 +300,8 @@ def _optional(item: tuple[object, list[object]]) -> tuple[object, list[object]]:
 _TYPES: st.SearchStrategy[tuple[object, list[object]]] = st.recursive(
     _scalars() | _enums() | _literals(),
     lambda children: (
-        children.map(_list_of)
-        | children.map(_map_of)
+        _lists(children)
+        | _maps(children)
         | children.map(_optional)
         | _records(children)
     ),
@@ -253,6 +315,14 @@ def test_generator_covers_the_allowlist() -> None:
         assert set(bounds) | set(other) <= set(_KEYS[kind]), kind
     assert set(portable_settings()) <= set(_SETTING_VALUES)
     assert set(_KEYS) == set(portable_scalars())
+    drawn = {
+        "list": set(_LENGTHS),
+        "dict": set(_LENGTHS),
+        "model-field": {"frozen"},
+        "validators": set(_WRAPPERS) - {"frozen"},
+    }
+    for construct, keys in portable_constructs().items():
+        assert set(keys) <= drawn[construct], construct
 
 
 def _declare(record: type[BaseModel]) -> dict[str, Any]:
