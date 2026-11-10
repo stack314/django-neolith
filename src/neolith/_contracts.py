@@ -24,8 +24,21 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Annotated, Any, Literal, Protocol, overload
 
-from pydantic import AwareDatetime, BaseModel, RootModel
+from pydantic import (
+    AfterValidator,
+    AwareDatetime,
+    BaseModel,
+    BeforeValidator,
+    PlainSerializer,
+    RootModel,
+    TypeAdapter,
+    ValidationError,
+    WrapSerializer,
+    WrapValidator,
+)
+from pydantic.fields import FieldInfo
 from pydantic.json_schema import JsonSchemaMode, models_json_schema
+from pydantic_core import PydanticUndefined
 
 __all__ = [
     "Action",
@@ -62,6 +75,17 @@ _SCALARS: tuple[object, ...] = (
     timedelta,
 )
 _UNIONS: tuple[object, ...] = (typing.Union, types.UnionType)
+# Pydantic hooks that let a class or an Annotated marker build its own core
+# schema or JSON Schema, so that it travels or is described other than as its
+# declared type.
+_SCHEMA_HOOKS = ("__get_pydantic_core_schema__", "__get_pydantic_json_schema__")
+_SCHEMA_KEEPING_MARKERS = (
+    AfterValidator,
+    BeforeValidator,
+    WrapValidator,
+    PlainSerializer,
+    WrapSerializer,
+)
 _DIALECT = "https://json-schema.org/draft/2020-12/schema"
 # Every type is described as it travels: the shape a caller sends and a
 # provider returns.
@@ -420,20 +444,10 @@ class _TypeChecker:
                     "travels under its own name in this version, so that the "
                     "description and the wire agree"
                 )
+            self.markers(field.metadata, f"{path}.{field_name}")
             self.check(field.annotation, f"{path}.{field_name}")
-        overrides = [key for key in model.model_config if key.startswith("ser_json_")]
-        if "json_schema_extra" in model.model_config:
-            overrides.append("json_schema_extra")
-        if (
-            model.__get_pydantic_json_schema__.__func__  # type: ignore[attr-defined]
-            is not BaseModel.__get_pydantic_json_schema__.__func__  # type: ignore[attr-defined]
-        ):
-            overrides.append("__get_pydantic_json_schema__")
-        changes: list[tuple[str | None, str]] = [
-            (None, f"{key} set") for key in overrides
-        ]
-        changes += _wire_or_description_changes(_model_schema(model), None)
-        for changed, kind in changes:
+            self.default(field, f"{path}.{field_name}")
+        for changed, kind in _record_changes(model):
             at = f"field {path}.{changed}" if changed else f"record {path}"
             raise ContractDefinitionError(
                 f"{self.where}: {at} has {kind}; a record travels as its declared "
@@ -441,8 +455,53 @@ class _TypeChecker:
                 "custom serialization and JSON Schema overrides are not supported"
             )
 
+    def markers(self, metadata: typing.Iterable[object], path: str) -> None:
+        """Reject ``Annotated`` markers that build their own core schema.
+
+        Validators are allowed: they check values without changing the wire
+        form. Serializers are left to the core-schema walk, which names them.
+        """
+        for marker in metadata:
+            if hasattr(marker, "__get_pydantic_core_schema__") and not isinstance(
+                marker, _SCHEMA_KEEPING_MARKERS
+            ):
+                raise ContractDefinitionError(
+                    f"{self.where}: field {path} uses {type(marker).__name__}, which "
+                    "builds its own schema; a field travels and is described as its "
+                    "declared type"
+                )
+
+    def default(self, field: FieldInfo, path: str) -> None:
+        """Reject a default that is not a value of the field's type.
+
+        The default goes out on the wire and into the description, so a peer
+        generated from the description must accept it.
+        """
+        if field.default is PydanticUndefined or field.default_factory is not None:
+            return
+        try:
+            TypeAdapter(field.rebuild_annotation()).validate_python(
+                field.default, strict=True
+            )
+        except ValidationError as error:
+            raise ContractDefinitionError(
+                f"{self.where}: field {path} has the default {field.default!r}, "
+                "which is not a value of its type"
+            ) from error
+
+    def unwrap(self, annotation: object, path: str) -> object:
+        """Strip ``Annotated``, checking its markers, and resolve ``type`` aliases."""
+        while True:
+            if typing.get_origin(annotation) is Annotated:
+                annotation, *metadata = typing.get_args(annotation)
+                self.markers(metadata, path)
+            elif isinstance(annotation, typing.TypeAliasType):
+                annotation = annotation.__value__
+            else:
+                return annotation
+
     def check(self, annotation: object, path: str) -> None:
-        annotation = _unwrap(annotation)
+        annotation = self.unwrap(annotation, path)
         if any(annotation is scalar for scalar in _SCALARS):
             return
         if annotation is datetime:
@@ -460,12 +519,22 @@ class _TypeChecker:
             if issubclass(annotation, enum.Enum) and all(
                 isinstance(member.value, str) for member in annotation
             ):
+                hooks = [hook for hook in _SCHEMA_HOOKS if hasattr(annotation, hook)]
+                if hooks:
+                    raise ContractDefinitionError(
+                        f"{self.where}: enum {annotation.__name__} at {path} defines "
+                        f"{hooks[0]}; an enum travels and is described as its names"
+                    )
                 self.register(annotation)
                 return
         elif origin is list and len(arguments) == 1:
             self.check(arguments[0], f"{path}[*]")
             return
-        elif origin is dict and len(arguments) == 2 and _unwrap(arguments[0]) is str:
+        elif (
+            origin is dict
+            and len(arguments) == 2
+            and self.unwrap(arguments[0], f"{path} key") is str
+        ):
             self.check(arguments[1], f"{path}{{*}}")
             return
         elif origin in _UNIONS and len(arguments) == 2 and type(None) in arguments:
@@ -534,15 +603,31 @@ def _wire_or_description_changes(
             yield from _wire_or_description_changes(value, field, root=False)
 
 
-def _unwrap(annotation: object) -> object:
-    """Strip ``Annotated`` metadata and resolve ``type`` aliases."""
-    while True:
-        if typing.get_origin(annotation) is Annotated:
-            annotation = typing.get_args(annotation)[0]
-        elif isinstance(annotation, typing.TypeAliasType):
-            annotation = annotation.__value__
-        else:
-            return annotation
+def _record_changes(model: type[BaseModel]) -> Iterator[tuple[str | None, str]]:
+    """Yield what makes a record travel or be described other than as declared.
+
+    Settings and schema hooks come first: a record with a core-schema hook may
+    have no model node to walk.
+    """
+    for key in model.model_config:
+        if key.startswith(("ser_json_", "val_json_")) or key in (
+            "json_schema_extra",
+            "json_schema_mode_override",
+        ):
+            yield None, f"{key} set"
+    for hook in _own_hooks(model):
+        yield None, f"{hook} defined"
+    yield from _wire_or_description_changes(_model_schema(model), None)
+
+
+def _own_hooks(model: type[BaseModel]) -> list[str]:
+    """The schema hooks a record defines itself, rather than inherits from Pydantic."""
+    return [
+        hook
+        for hook in _SCHEMA_HOOKS
+        for klass in model.__mro__
+        if klass not in BaseModel.__mro__ and hook in vars(klass)
+    ]
 
 
 def _name(annotation: object) -> str:

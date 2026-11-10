@@ -16,27 +16,36 @@ from decimal import Decimal
 from typing import Annotated, Any, Literal, Optional, Protocol, TypedDict, cast
 from uuid import UUID
 
+import annotated_types
 import pytest
 from pydantic import (
     AfterValidator,
     AwareDatetime,
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
+    GetCoreSchemaHandler,
     GetJsonSchemaHandler,
+    GetPydanticSchema,
     PlainSerializer,
+    PlainValidator,
     RootModel,
+    Strict,
+    StringConstraints,
     WithJsonSchema,
     WrapSerializer,
+    WrapValidator,
     computed_field,
     create_model,
     field_serializer,
     field_validator,
     model_serializer,
+    model_validator,
 )
 from pydantic.alias_generators import to_camel
 from pydantic.json_schema import JsonSchemaValue
-from pydantic_core import CoreSchema
+from pydantic_core import CoreSchema, core_schema
 
 from neolith import (
     Action,
@@ -713,7 +722,7 @@ def _custom_json_schema() -> type[BaseModel]:
         ),
         pytest.param(
             _custom_json_schema,
-            "record Custom has __get_pydantic_json_schema__ set",
+            "record Custom has __get_pydantic_json_schema__ defined",
             id="__get_pydantic_json_schema__",
         ),
     ],
@@ -729,6 +738,156 @@ def test_record_whose_description_is_rewritten_is_rejected(
         contract("echo.v1")(declaration("Echo", {"send": action(send)}))
 
 
+class _OwnSchema:
+    """An Annotated marker that builds its own core schema."""
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls, source: object, handler: GetCoreSchemaHandler
+    ) -> CoreSchema:
+        return core_schema.str_schema()
+
+
+def _record_hook(hook: str, wrapper: Callable[[Any], Any]) -> type[BaseModel]:
+    def build(*args: object) -> object:
+        return core_schema.str_schema()
+
+    namespace = {"__annotations__": {"value": int}, hook: wrapper(build)}
+    return cast(
+        "type[BaseModel]",
+        types.new_class(
+            "Hooked", (BaseModel,), exec_body=lambda ns: ns.update(namespace)
+        ),
+    )
+
+
+def _hooked_enum(hook: str) -> type[enum.Enum]:
+    def build(*args: object) -> object:
+        if hook == "__get_pydantic_core_schema__":
+            return core_schema.int_schema()
+        return {"type": "integer"}
+
+    namespace = {"RED": "red", hook: classmethod(build)}
+    return cast(
+        "type[enum.Enum]",
+        types.new_class(
+            "Color", (enum.StrEnum,), exec_body=lambda ns: ns.update(namespace)
+        ),
+    )
+
+
+@pytest.mark.spec("CON-16", "CON-17")
+@pytest.mark.parametrize(
+    ("annotation", "message"),
+    [
+        pytest.param(
+            Annotated[int, GetPydanticSchema(lambda t, h: core_schema.str_schema())],
+            "field Shape.value uses GetPydanticSchema",
+            id="GetPydanticSchema",
+        ),
+        pytest.param(
+            list[
+                Annotated[int, GetPydanticSchema(lambda t, h: core_schema.str_schema())]
+            ],
+            "field Shape.value[*] uses GetPydanticSchema",
+            id="nested GetPydanticSchema",
+        ),
+        pytest.param(
+            Annotated[int, _OwnSchema()],
+            "field Shape.value uses _OwnSchema",
+            id="marker with its own schema",
+        ),
+        pytest.param(
+            Annotated[int, PlainValidator(int)],
+            "field Shape.value uses PlainValidator",
+            id="PlainValidator",
+        ),
+        pytest.param(
+            _hooked_enum("__get_pydantic_json_schema__"),
+            "enum Color at Shape.value defines __get_pydantic_json_schema__",
+            id="enum json schema hook",
+        ),
+        pytest.param(
+            _hooked_enum("__get_pydantic_core_schema__"),
+            "enum Color at Shape.value defines __get_pydantic_core_schema__",
+            id="enum core schema hook",
+        ),
+        pytest.param(
+            _record_hook("__get_pydantic_core_schema__", classmethod),
+            "record Shape.value has __get_pydantic_core_schema__ defined",
+            id="record core schema hook",
+        ),
+        pytest.param(
+            _record_hook("__get_pydantic_json_schema__", staticmethod),
+            "record Shape.value has __get_pydantic_json_schema__ defined",
+            id="record json schema staticmethod",
+        ),
+    ],
+)
+def test_type_that_builds_its_own_schema_is_rejected(
+    annotation: object, message: str
+) -> None:
+    with pytest.raises(ContractDefinitionError, match=re.escape(message)):
+        declare_with_field(annotation)
+
+
+@pytest.mark.spec("CON-16", "CON-17")
+@pytest.mark.parametrize(
+    "config",
+    [
+        pytest.param(ConfigDict(val_json_bytes="base64"), id="val_json_bytes"),
+        pytest.param(
+            ConfigDict(json_schema_mode_override="validation"),
+            id="json_schema_mode_override",
+        ),
+    ],
+)
+def test_config_that_splits_description_and_wire_is_rejected(
+    config: ConfigDict,
+) -> None:
+    record = create_model("Configured", __config__=config, b=(bytes, ...))
+    key = next(iter(config))
+    with pytest.raises(
+        ContractDefinitionError, match=f"record Shape.value has {key} set"
+    ):
+        declare_with_field(record)
+
+
+@pytest.mark.spec("CON-13", "CON-16", "CON-17")
+@pytest.mark.parametrize(
+    ("annotation", "default"),
+    [
+        pytest.param(int, None, id="int = None"),
+        pytest.param(int, "abc", id="int = 'abc'"),
+        pytest.param(int, True, id="int = True"),
+        pytest.param(str, 3, id="str = 3"),
+        pytest.param(Annotated[int, Field(ge=0)], -1, id="ge=0 = -1"),
+    ],
+)
+def test_default_outside_the_field_type_is_rejected(
+    annotation: object, default: object
+) -> None:
+    record = create_model("Defaulted", n=(cast("Any", annotation), default))
+    with pytest.raises(ContractDefinitionError, match="is not a value of its type"):
+        declare_with_field(record)
+
+
+@pytest.mark.spec("CON-13", "CON-16")
+def test_defaults_of_the_field_type_are_allowed() -> None:
+    class Defaults(BaseModel):
+        maybe: int | None = None
+        colour: Colour = Colour.RED
+        size: Literal["s", "m"] = "s"
+        price: Decimal = Decimal("1.50")
+        span: timedelta = timedelta(seconds=90)
+        raw: bytes = b""
+        ratio: float = 1
+        lines: list[Line] = []
+        made: list[int] = Field(default_factory=list)
+
+    declare_with_field(Defaults)
+
+
 @pytest.mark.spec("CON-16")
 def test_documentation_and_constraints_are_allowed() -> None:
     class Documented(BaseModel):
@@ -736,6 +895,17 @@ def test_documentation_and_constraints_are_allowed() -> None:
             ge=0, description="How many.", title="Count", examples=[1], deprecated=True
         )
         name: Annotated[str, Field(min_length=1, max_length=20)]
+        code: Annotated[str, StringConstraints(pattern=r"^[A-Z]+$")]
+        level: Annotated[int, annotated_types.Ge(0), annotated_types.Lt(10)]
+        tags: Annotated[list[str], annotated_types.Len(0, 5)]
+        exact: Annotated[int, Strict()]
+        lower: Annotated[str, BeforeValidator(str.lower)]
+        upper: Annotated[str, AfterValidator(str.upper)]
+        trimmed: Annotated[str, WrapValidator(lambda v, h: h(v))]
+
+        @model_validator(mode="after")
+        def accept(self) -> "Documented":
+            return self
 
     class Derived(Documented):
         extra: bool = False
