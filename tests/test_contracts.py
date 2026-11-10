@@ -1,0 +1,826 @@
+"""Contracts, actions, the portable types and implementation checks (spec 01).
+
+Everything here happens when a module defining a contract or an
+implementation is loaded, before any transport exists, so these tests run
+without one (T2 does not apply yet).
+"""
+
+import dataclasses
+import enum
+import json
+import re
+import types
+from collections.abc import Callable, Mapping
+from datetime import date, datetime, timedelta
+from decimal import Decimal
+from typing import Annotated, Any, Literal, Optional, Protocol, TypedDict, cast
+from uuid import UUID
+
+import pytest
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    RootModel,
+    create_model,
+)
+
+from neolith import (
+    Action,
+    Contract,
+    ContractDefinitionError,
+    action,
+    contract,
+    implements,
+)
+
+
+class Ping(BaseModel):
+    text: str
+
+
+class Pong(BaseModel):
+    text: str
+    count: int = 0
+
+
+class Colour(enum.StrEnum):
+    RED = "red"
+    GREEN = "green"
+
+
+class Level(enum.IntEnum):
+    LOW = 1
+
+
+class Line(BaseModel):
+    sku: str
+    quantity: int
+
+
+class Node(BaseModel):
+    name: str
+    children: list["Node"] = []
+
+
+def declaration(name: str, namespace: Mapping[str, object]) -> type[Any]:
+    """Build a contract declaration class from a namespace."""
+    return types.new_class(name, (Protocol,), exec_body=lambda ns: ns.update(namespace))
+
+
+class Point(TypedDict):
+    x: int
+
+
+type Quantity = Annotated[int, Field(ge=0)]
+
+
+def declare(identity: str = "echo.v1") -> type[Any]:
+    @contract(identity)
+    class Echo(Protocol):
+        @action
+        def ping(self, request: Ping) -> Pong: ...
+
+    return Echo
+
+
+def declare_with_field(annotation: object, identity: str = "shapes.v1") -> type[Any]:
+    """Declare a contract whose request has one field of the given type."""
+    request = create_model("Shape", value=(cast("Any", annotation), ...))
+
+    @contract(identity)
+    class Shapes(Protocol):
+        @action
+        def send(self, request: request) -> None:  # type: ignore[valid-type]
+            ...
+
+    return Shapes
+
+
+# Identity
+
+
+@pytest.mark.spec("CON-10")
+@pytest.mark.parametrize(
+    "identity",
+    ["inventory.v1", "billing.invoices.v2", "a1_b.c2.v10", "x.v123", "x_.v1"],
+)
+def test_identity_in_the_grammar_is_accepted(identity: str) -> None:
+    assert Contract.of(declare(identity)).identity == identity
+
+
+@pytest.mark.spec("CON-10", "CON-17")
+@pytest.mark.parametrize(
+    "identity",
+    [
+        "",
+        "inventory",
+        "inventory.v0",
+        "inventory.v01",
+        "inventory.V1",
+        "Inventory.v1",
+        "inventory.v1 ",
+        "inventory.v1\n",
+        ".v1",
+        "inventory..stock.v1",
+        "inventory-stock.v1",
+        "1inventory.v1",
+        "_inventory.v1",
+        "inventory.v-1",
+        "inventory.vone",
+        "invent\u00f6ry.v1",
+        "inventory.v\u0661",
+    ],
+)
+def test_identity_outside_the_grammar_is_rejected(identity: str) -> None:
+    with pytest.raises(ContractDefinitionError, match="contract identity"):
+        contract(identity)
+
+
+@pytest.mark.spec("CON-10")
+def test_identity_is_split_into_name_and_major() -> None:
+    spec = Contract.of(declare("billing.invoices.v12"))
+    assert (spec.name, spec.major) == ("billing.invoices", 12)
+    assert repr(spec) == "<Contract billing.invoices.v12>"
+
+
+@pytest.mark.spec("CON-3")
+def test_several_major_versions_of_one_name_load_side_by_side() -> None:
+    first, second = Contract.of(declare("echo.v1")), Contract.of(declare("echo.v2"))
+    assert (first.name, first.major) == ("echo", 1)
+    assert (second.name, second.major) == ("echo", 2)
+
+
+def test_decorated_class_is_returned_unchanged() -> None:
+    class Echo(Protocol):
+        @action
+        def ping(self, request: Ping) -> Pong: ...
+
+    # mypy treats a Protocol class as abstract when it is passed as an argument
+    # (python/mypy#4717); as a decorator, @contract is not flagged.
+    assert contract("echo.v1")(Echo) is Echo  # type: ignore[type-abstract]
+
+
+def test_declaration_cannot_be_instantiated() -> None:
+    with pytest.raises(TypeError):
+        declare()()
+
+
+# Actions
+
+
+def test_actions_are_read_in_declaration_order() -> None:
+    @contract("orders.v1")
+    class Orders(Protocol):
+        @action(idempotent=True)
+        def place(self, request: Ping) -> Pong: ...
+
+        @action
+        def cancel(self, request: Ping) -> None: ...
+
+    actions = Contract.of(Orders).actions
+    assert list(actions) == ["place", "cancel"]
+    assert actions["place"] == Action("place", True, Ping, Pong)
+    assert actions["cancel"] == Action("cancel", False, Ping, None)
+
+
+def test_actions_are_non_idempotent_unless_declared() -> None:
+    @contract("flags.v1")
+    class Flags(Protocol):
+        @action
+        def bare(self, request: Ping) -> None: ...
+
+        @action()
+        def called(self, request: Ping) -> None: ...
+
+        @action(idempotent=False)
+        def explicit(self, request: Ping) -> None: ...
+
+        @action(idempotent=True)
+        def idempotent(self, request: Ping) -> None: ...
+
+    flags = {n: a.idempotent for n, a in Contract.of(Flags).actions.items()}
+    assert flags == {
+        "bare": False,
+        "called": False,
+        "explicit": False,
+        "idempotent": True,
+    }
+
+
+def test_idempotent_takes_a_bool_only() -> None:
+    with pytest.raises(ContractDefinitionError, match="idempotent"):
+        action(idempotent=1)  # type: ignore[call-overload]
+
+
+def test_action_marks_functions_only() -> None:
+    with pytest.raises(ContractDefinitionError, match="marks a function"):
+        action(staticmethod(lambda request: None))
+
+
+@pytest.mark.spec("CON-11", "CON-17")
+@pytest.mark.parametrize("name", ["Ping", "pingPong", "_ping", "ping_\u00e9"])
+def test_action_name_outside_the_grammar_is_rejected(name: str) -> None:
+    def ping(self: object, request: Ping) -> Pong: ...
+
+    namespace = {name: action(ping)}
+    with pytest.raises(ContractDefinitionError, match=f"action name {name!r}"):
+        contract("echo.v1")(declaration("Echo", namespace))
+
+
+@pytest.mark.spec("CON-11")
+def test_action_name_may_hold_digits_and_underscores() -> None:
+    @contract("echo.v1")
+    class Echo(Protocol):
+        @action
+        def ping_2(self, request: Ping) -> Pong: ...
+
+    assert list(Contract.of(Echo).actions) == ["ping_2"]
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
+        pytest.param(lambda self, request: None, id="undecorated function"),
+        pytest.param(staticmethod(lambda request: None), id="staticmethod"),
+        pytest.param(property(lambda self: None), id="property"),
+        pytest.param(3, id="constant"),
+    ],
+)
+def test_declaration_holds_actions_only(member: object) -> None:
+    with pytest.raises(ContractDefinitionError, match="is not an action"):
+        contract("echo.v1")(declaration("Echo", {"helper": member}))
+
+
+def test_declaration_is_a_protocol() -> None:
+    class Echo:
+        @action
+        def ping(self, request: Ping) -> Pong:
+            return Pong(text=request.text)
+
+    with pytest.raises(ContractDefinitionError, match=r"class Echo\(Protocol\)"):
+        contract("echo.v1")(Echo)
+
+
+def test_declaration_extends_protocol_only() -> None:
+    class Base(Protocol):
+        pass
+
+    class Echo(Base, Protocol):
+        @action
+        def ping(self, request: Ping) -> Pong: ...
+
+    with pytest.raises(ContractDefinitionError, match=r"class Echo\(Protocol\)"):
+        contract("echo.v1")(Echo)  # type: ignore[type-abstract]
+
+
+def test_declaration_is_a_class() -> None:
+    with pytest.raises(ContractDefinitionError, match="decorates a class"):
+        contract("echo.v1")(lambda: None)  # type: ignore[arg-type]
+
+
+def test_declaration_is_marked_once() -> None:
+    with pytest.raises(ContractDefinitionError, match="already"):
+        contract("echo.v2")(declare("echo.v1"))
+
+
+def _ping_signatures() -> list[Callable[..., object]]:
+    def no_request(self: object) -> Pong: ...
+
+    def extra(self: object, request: Ping, more: Ping) -> Pong: ...
+
+    def star(self: object, *requests: Ping) -> Pong: ...
+
+    def keyword(self: object, *, request: Ping) -> Pong: ...
+
+    def default(self: object, request: Ping = Ping(text="")) -> Pong: ...  # noqa: B008
+
+    return [no_request, extra, star, keyword, default]
+
+
+@pytest.mark.parametrize("function", _ping_signatures(), ids=lambda f: f.__name__)
+def test_action_takes_self_and_request(function: Callable[..., object]) -> None:
+    with pytest.raises(ContractDefinitionError, match=r"\(self, request\)"):
+        contract("echo.v1")(declaration("Echo", {"ping": action(function)}))
+
+
+def test_action_annotates_its_request() -> None:
+    def ping(self, request) -> Pong: ...  # type: ignore[no-untyped-def]  # noqa: ANN001
+
+    with pytest.raises(ContractDefinitionError, match="annotate its request"):
+        contract("echo.v1")(declaration("Echo", {"ping": action(ping)}))
+
+
+def test_action_annotates_its_reply() -> None:
+    def ping(self: object, request: Ping):  # type: ignore[no-untyped-def]  # noqa: ANN202
+        ...
+
+    with pytest.raises(ContractDefinitionError, match="annotate its reply"):
+        contract("echo.v1")(declaration("Echo", {"ping": action(ping)}))
+
+
+def test_action_types_are_defined_before_the_contract() -> None:
+    def ping(self: object, request: "Later") -> Pong: ...  # type: ignore[name-defined]  # noqa: F821
+
+    with pytest.raises(ContractDefinitionError, match="'Later'"):
+        contract("echo.v1")(declaration("Echo", {"ping": action(ping)}))
+
+
+def test_action_is_synchronous() -> None:
+    async def ping(self: object, request: Ping) -> Pong: ...
+
+    with pytest.raises(ContractDefinitionError, match="synchronous"):
+        contract("echo.v1")(declaration("Echo", {"ping": action(ping)}))
+
+
+# Request and reply types
+
+
+@pytest.mark.spec("CON-13")
+@pytest.mark.parametrize(
+    "annotation",
+    [
+        bool,
+        int,
+        float,
+        str,
+        bytes,
+        Decimal,
+        AwareDatetime,
+        date,
+        timedelta,
+        list[int],
+        dict[str, int],
+        Line,
+        Colour,
+        Literal["red", "green"],
+        int | None,
+        Optional[int],  # noqa: UP045
+        Annotated[int, Field(gt=0)],
+        list[Annotated[str, Field(min_length=1)]],
+        dict[Annotated[str, Field(min_length=1)], list[Line | None]],
+        Node,
+        Quantity,
+    ],
+    ids=repr,
+)
+def test_portable_forms_are_accepted(annotation: object) -> None:
+    declare_with_field(annotation)
+
+
+@pytest.mark.spec("CON-13", "CON-17")
+@pytest.mark.parametrize(
+    "annotation",
+    [
+        Any,
+        object,
+        complex,
+        UUID,
+        type(None),
+        tuple[int, ...],
+        set[int],
+        frozenset[int],
+        list,
+        dict,
+        dict[int, str],
+        int | str,
+        int | str | None,
+        Level,
+        Literal[1, 2],
+        Literal["red", 2],
+        RootModel[int],
+        Point,
+        dataclasses.make_dataclass("Point", [("x", int)]),
+        list[complex],
+        dict[str, set[int]],
+        list[int | str] | None,
+    ],
+    ids=repr,
+)
+def test_other_types_are_rejected(annotation: object) -> None:
+    with pytest.raises(ContractDefinitionError, match="not a portable form"):
+        declare_with_field(annotation)
+
+
+@pytest.mark.spec("CON-13", "CON-17")
+def test_timestamp_carries_an_offset() -> None:
+    with pytest.raises(ContractDefinitionError, match="AwareDatetime"):
+        declare_with_field(datetime)
+
+
+@pytest.mark.spec("CON-13", "CON-17")
+def test_enum_values_are_strings() -> None:
+    Mixed = enum.Enum("Mixed", {"A": "a", "B": 2})
+    with pytest.raises(ContractDefinitionError, match="not a portable form"):
+        declare_with_field(Mixed)
+
+
+@pytest.mark.spec("CON-17")
+def test_rejection_names_contract_action_and_field() -> None:
+    class Inner(BaseModel):
+        when: complex
+
+    class Outer(BaseModel):
+        items: dict[str, list[Inner]]
+
+    def place(self: object, request: Outer) -> None: ...
+
+    expected = (
+        "orders.v1, action 'place': field Outer.items{*}[*].when has type "
+        "complex, which is not a portable form"
+    )
+    with pytest.raises(ContractDefinitionError, match=re.escape(expected)):
+        contract("orders.v1")(declaration("Orders", {"place": action(place)}))
+
+
+@pytest.mark.spec("CON-13", "CON-17")
+@pytest.mark.parametrize("request_type", [int, str, dict[str, int], Colour])
+def test_request_type_is_a_record(request_type: object) -> None:
+    def send(self: object, request: request_type) -> None: ...  # type: ignore[valid-type]
+
+    with pytest.raises(ContractDefinitionError, match="request type must be a record"):
+        contract("echo.v1")(declaration("Echo", {"send": action(send)}))
+
+
+@pytest.mark.spec("CON-14", "CON-17")
+@pytest.mark.parametrize("reply_type", [int, str, list[Pong], Pong | None])
+def test_reply_type_is_a_record_or_empty(reply_type: object) -> None:
+    def send(self: object, request: Ping) -> reply_type:  # type: ignore[valid-type]
+        ...
+
+    with pytest.raises(ContractDefinitionError, match="reply type must be a record"):
+        contract("echo.v1")(declaration("Echo", {"send": action(send)}))
+
+
+@pytest.mark.spec("CON-14")
+def test_reply_may_be_empty() -> None:
+    @contract("echo.v1")
+    class Echo(Protocol):
+        @action
+        def ping(self, request: Ping) -> None: ...
+
+    assert Contract.of(Echo).actions["ping"].reply is None
+
+
+@pytest.mark.spec("CON-14", "CON-17")
+def test_reply_fields_are_checked_too() -> None:
+    class Odd(BaseModel):
+        value: complex
+
+    def ping(self: object, request: Ping) -> Odd: ...
+
+    with pytest.raises(ContractDefinitionError, match=r"field Odd\.value"):
+        contract("echo.v1")(declaration("Echo", {"ping": action(ping)}))
+
+
+# Record names
+
+
+def _record_named(name: str) -> type[BaseModel]:
+    return create_model(name, value=(int, ...))
+
+
+@pytest.mark.spec("CON-15", "CON-17")
+def test_two_records_with_one_name_are_rejected() -> None:
+    first, second = _record_named("Item"), _record_named("Item")
+
+    def add(self: object, request: first) -> second:  # type: ignore[valid-type]
+        ...
+
+    with pytest.raises(ContractDefinitionError, match="two different records"):
+        contract("cart.v1")(declaration("Cart", {"add": action(add)}))
+
+
+@pytest.mark.spec("CON-15", "CON-17")
+def test_record_names_are_unique_across_actions() -> None:
+    first, second = _record_named("Item"), _record_named("Item")
+
+    def add(self: object, request: first) -> None: ...  # type: ignore[valid-type]
+
+    def remove(self: object, request: second) -> None: ...  # type: ignore[valid-type]
+
+    namespace = {"add": action(add), "remove": action(remove)}
+    with pytest.raises(ContractDefinitionError, match="'Item'"):
+        contract("cart.v1")(declaration("Cart", namespace))
+
+
+@pytest.mark.spec("CON-15")
+def test_one_record_may_be_used_many_times() -> None:
+    class Twice(BaseModel):
+        first: Line
+        second: list[Line]
+
+    @contract("cart.v1")
+    class Cart(Protocol):
+        @action
+        def add(self, request: Twice) -> Twice: ...
+
+        @action
+        def remove(self, request: Line) -> Line: ...
+
+    assert set(Contract.of(Cart).actions) == {"add", "remove"}
+
+
+# Unknown fields
+
+
+@pytest.mark.spec("CON-6")
+def test_unknown_request_fields_are_ignored() -> None:
+    request = Contract.of(declare()).actions["ping"].request
+    value = request.model_validate({"text": "hi", "added_later": 1})
+    assert value.model_dump() == {"text": "hi"}
+
+
+@pytest.mark.spec("CON-7")
+def test_unknown_reply_fields_are_ignored() -> None:
+    reply = Contract.of(declare()).actions["ping"].reply
+    assert reply is not None
+    value = reply.model_validate_json('{"text": "hi", "count": 2, "added_later": 1}')
+    assert value.model_dump() == {"text": "hi", "count": 2}
+
+
+def _refusing(extra: Literal["forbid", "allow"]) -> type[BaseModel]:
+    return create_model("Strict", __config__=ConfigDict(extra=extra), text=(str, ...))
+
+
+@pytest.mark.spec("CON-6", "CON-17")
+@pytest.mark.parametrize("extra", ["forbid", "allow"])
+def test_request_record_that_keeps_or_refuses_unknown_fields_is_rejected(
+    extra: Literal["forbid", "allow"],
+) -> None:
+    strict = _refusing(extra)
+
+    def ping(self: object, request: strict) -> None: ...  # type: ignore[valid-type]
+
+    with pytest.raises(ContractDefinitionError, match="unknown fields"):
+        contract("echo.v1")(declaration("Echo", {"ping": action(ping)}))
+
+
+@pytest.mark.spec("CON-7", "CON-17")
+@pytest.mark.parametrize("extra", ["forbid", "allow"])
+def test_reply_record_that_keeps_or_refuses_unknown_fields_is_rejected(
+    extra: Literal["forbid", "allow"],
+) -> None:
+    strict = _refusing(extra)
+
+    def ping(self: object, request: Ping) -> strict:  # type: ignore[valid-type]
+        ...
+
+    with pytest.raises(ContractDefinitionError, match="unknown fields"):
+        contract("echo.v1")(declaration("Echo", {"ping": action(ping)}))
+
+
+@pytest.mark.spec("CON-6", "CON-17")
+def test_nested_record_that_refuses_unknown_fields_is_rejected() -> None:
+    with pytest.raises(ContractDefinitionError, match="unknown fields"):
+        declare_with_field(list[_refusing("forbid")])  # type: ignore[misc]
+
+
+# Description
+
+
+@pytest.mark.spec("CON-16")
+def test_description_gives_each_action_and_its_types() -> None:
+    @contract("orders.v1")
+    class Orders(Protocol):
+        @action(idempotent=True)
+        def place(self, request: Ping) -> Pong: ...
+
+        @action
+        def cancel(self, request: Ping) -> None: ...
+
+    description = Contract.of(Orders).describe()
+    assert description["contract"] == "orders.v1"
+    assert description["jsonSchemaDialect"] == (
+        "https://json-schema.org/draft/2020-12/schema"
+    )
+    assert description["actions"] == {
+        "place": {
+            "idempotent": True,
+            "request": {"$ref": "#/$defs/Ping"},
+            "reply": {"$ref": "#/$defs/Pong"},
+        },
+        "cancel": {
+            "idempotent": False,
+            "request": {"$ref": "#/$defs/Ping"},
+            "reply": None,
+        },
+    }
+    assert set(description["$defs"]) == {"Ping", "Pong"}
+    assert description["$defs"]["Ping"]["properties"]["text"]["type"] == "string"
+    json.dumps(description)
+
+
+@pytest.mark.spec("CON-16")
+def test_description_names_each_record_once() -> None:
+    class Order(BaseModel):
+        lines: list[Line]
+        placed: AwareDatetime
+        total: Decimal
+
+    @contract("orders.v1")
+    class Orders(Protocol):
+        @action
+        def place(self, request: Order) -> Line: ...
+
+    defs = Contract.of(Orders).describe()["$defs"]
+    assert set(defs) == {"Order", "Line"}
+    properties = defs["Order"]["properties"]
+    assert properties["lines"]["items"] == {"$ref": "#/$defs/Line"}
+    assert properties["placed"]["format"] == "date-time"
+    assert properties["total"]["type"] == "string"
+
+
+# Implementations
+
+
+@contract("greeter.v1")
+class Greeter(Protocol):
+    @action(idempotent=True)
+    def greet(self, request: Ping) -> Pong: ...
+
+    @action
+    def forget(self, request: Ping) -> None: ...
+
+
+@pytest.mark.spec("CON-18", "CON-19")
+def test_implementation_with_every_action_is_accepted() -> None:
+    class Impl:
+        def greet(self, request: Ping) -> Pong:
+            return Pong(text=request.text)
+
+        def forget(self, request: Ping) -> None:
+            return None
+
+        def _helper(self) -> None:
+            return None
+
+    assert implements(Greeter)(Impl) is Impl
+
+
+@pytest.mark.spec("CON-18", "CON-19")
+def test_implementation_may_subclass_the_declaration() -> None:
+    @implements(Greeter)
+    class Impl(Greeter):
+        def greet(self, request: Ping) -> Pong:
+            return Pong(text=request.text)
+
+        def forget(self, request: Ping) -> None:
+            return None
+
+    assert Impl().greet(Ping(text="hi")) == Pong(text="hi")
+
+
+@pytest.mark.spec("CON-18", "CON-19")
+def test_missing_action_is_rejected() -> None:
+    class Impl:
+        def greet(self, request: Ping) -> Pong:
+            return Pong(text=request.text)
+
+    with pytest.raises(ContractDefinitionError, match="action 'forget' is missing"):
+        implements(Greeter)(Impl)
+
+
+@pytest.mark.spec("CON-18", "CON-19")
+def test_action_left_as_the_declaration_is_missing() -> None:
+    class Impl(Greeter):
+        def greet(self, request: Ping) -> Pong:
+            return Pong(text=request.text)
+
+    with pytest.raises(ContractDefinitionError, match="action 'forget' is missing"):
+        implements(Greeter)(Impl)  # type: ignore[type-abstract]
+
+
+@pytest.mark.spec("CON-18", "CON-19")
+@pytest.mark.parametrize(
+    ("request_type", "reply_type", "message"),
+    [
+        (Pong, Pong, "takes Pong, but greeter.v1 declares Ping"),
+        (Ping, Ping, "returns Ping, but greeter.v1 declares Pong"),
+        (Ping, None, "returns None, but greeter.v1 declares Pong"),
+        (Ping, Pong | None, "but greeter.v1 declares Pong"),
+    ],
+)
+def test_mismatched_types_are_rejected(
+    request_type: object, reply_type: object, message: str
+) -> None:
+    def greet(self: object, request: request_type) -> reply_type:  # type: ignore[valid-type]
+        ...
+
+    def forget(self: object, request: Ping) -> None: ...
+
+    impl = type("Impl", (), {"greet": greet, "forget": forget})
+    with pytest.raises(ContractDefinitionError, match=re.escape(message)):
+        implements(Greeter)(impl)
+
+
+@pytest.mark.spec("CON-18", "CON-19")
+def test_empty_reply_is_implemented_as_none() -> None:
+    def greet(self: object, request: Ping) -> Pong: ...
+
+    def forget(self: object, request: Ping) -> Pong: ...
+
+    impl = type("Impl", (), {"greet": greet, "forget": forget})
+    with pytest.raises(ContractDefinitionError, match="declares an empty reply"):
+        implements(Greeter)(impl)
+
+
+@pytest.mark.spec("CON-19")
+def test_implementation_annotates_its_types() -> None:
+    def greet(self, request):  # type: ignore[no-untyped-def]  # noqa: ANN001, ANN202
+        ...
+
+    def forget(self: object, request: Ping) -> None: ...
+
+    impl = type("Impl", (), {"greet": greet, "forget": forget})
+    with pytest.raises(ContractDefinitionError, match="annotate its request"):
+        implements(Greeter)(impl)
+
+
+@pytest.mark.spec("CON-19")
+@pytest.mark.parametrize("function", _ping_signatures(), ids=lambda f: f.__name__)
+def test_implementation_takes_self_and_request(function: Callable[..., object]) -> None:
+    def forget(self: object, request: Ping) -> None: ...
+
+    impl = type("Impl", (), {"greet": function, "forget": forget})
+    with pytest.raises(ContractDefinitionError, match=r"\(self, request\)"):
+        implements(Greeter)(impl)
+
+
+@pytest.mark.spec("CON-19")
+@pytest.mark.parametrize("wrapper", [staticmethod, classmethod])
+def test_action_is_an_instance_method(wrapper: Callable[[Any], object]) -> None:
+    def greet(request: Ping) -> Pong: ...
+
+    def forget(self: object, request: Ping) -> None: ...
+
+    impl = type("Impl", (), {"greet": wrapper(greet), "forget": forget})
+    with pytest.raises(ContractDefinitionError, match="instance method"):
+        implements(Greeter)(impl)
+
+
+@pytest.mark.spec("CON-19")
+def test_implementation_is_synchronous() -> None:
+    async def greet(self: object, request: Ping) -> Pong: ...
+
+    def forget(self: object, request: Ping) -> None: ...
+
+    impl = type("Impl", (), {"greet": greet, "forget": forget})
+    with pytest.raises(ContractDefinitionError, match="synchronous"):
+        implements(Greeter)(impl)
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
+        pytest.param(lambda self: None, id="method"),
+        pytest.param(staticmethod(lambda: None), id="staticmethod"),
+        pytest.param(classmethod(lambda cls: None), id="classmethod"),
+    ],
+)
+def test_extra_public_method_is_rejected(member: object) -> None:
+    def greet(self: object, request: Ping) -> Pong: ...
+
+    def forget(self: object, request: Ping) -> None: ...
+
+    impl = type("Impl", (), {"greet": greet, "forget": forget, "extra": member})
+    with pytest.raises(ContractDefinitionError, match="'extra' is not an action"):
+        implements(Greeter)(impl)
+
+
+def test_extra_public_method_in_a_base_class_is_rejected() -> None:
+    class Base:
+        def extra(self) -> None:
+            return None
+
+    class Impl(Base):
+        def greet(self, request: Ping) -> Pong:
+            return Pong(text=request.text)
+
+        def forget(self, request: Ping) -> None:
+            return None
+
+    with pytest.raises(ContractDefinitionError, match="'extra' is not an action"):
+        implements(Greeter)(Impl)
+
+
+def test_implements_takes_a_contract() -> None:
+    class Plain:
+        pass
+
+    with pytest.raises(ContractDefinitionError, match="is not a contract"):
+        implements(Plain)
+
+
+def test_subclass_of_a_contract_is_not_a_contract() -> None:
+    class Sub(Greeter):
+        pass
+
+    with pytest.raises(ContractDefinitionError, match="is not a contract"):
+        Contract.of(Sub)
+
+
+def test_implements_decorates_a_class() -> None:
+    with pytest.raises(ContractDefinitionError, match="decorates a class"):
+        implements(Greeter)(lambda: None)  # type: ignore[arg-type]

@@ -61,8 +61,10 @@ def problems(
 
 
 def test_repository_spec_and_settings_are_consistent() -> None:
+    # Coverage of the enforced documents needs the report of a full run, which
+    # CI checks after pytest; here only its absence is reported.
     trace = spec_trace.check(spec_trace.ROOT)
-    assert trace.problems == []
+    assert [p for p in trace.problems if not p.startswith("enforce: coverage")] == []
     assert trace.requirements
 
 
