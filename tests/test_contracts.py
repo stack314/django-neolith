@@ -90,6 +90,18 @@ def declaration(name: str, namespace: Mapping[str, object]) -> type[Any]:
     return types.new_class(name, (Protocol,), exec_body=lambda ns: ns.update(namespace))
 
 
+# Records written top-down, as with quoted annotations or
+# "from __future__ import annotations": TopDown refers to Below, defined after
+# it, so Pydantic leaves TopDown incomplete until it is rebuilt.
+class TopDown(BaseModel):
+    below: "Below"
+    many: list["Below"] = []
+
+
+class Below(BaseModel):
+    value: int
+
+
 class Point(TypedDict):
     x: int
 
@@ -924,6 +936,13 @@ def _split_commas(value: object) -> object:
         pytest.param(
             Annotated[float, BeforeValidator(float)], True, "1.0", id="float = True"
         ),
+        pytest.param(Annotated[int, BeforeValidator(int)], 3.0, "3", id="int = 3.0"),
+        pytest.param(
+            list[Annotated[int, BeforeValidator(int)]],
+            [3.0],
+            "[3]",
+            id="list[int] = [3.0]",
+        ),
     ],
 )
 def test_default_that_validators_change_is_rejected(
@@ -955,6 +974,9 @@ def test_defaults_of_the_field_type_are_allowed() -> None:
         upper: Annotated[str, AfterValidator(str.upper)] = "ABC"
         parsed: Annotated[int, BeforeValidator(int)] = 3
         made: list[int] = Field(default_factory=list)
+        half: float = 1.5
+        widened: Annotated[float, BeforeValidator(float)] = 1
+        weights: dict[str, float] = {"a": 1}
 
     declare_with_field(Defaults)
 
@@ -1024,6 +1046,26 @@ def test_record_type_defined_after_the_contract_is_named(defer_build: bool) -> N
         contract("early.v1")(
             declaration("EarlyContract", {"send": action(_sender(Early))})
         )
+
+
+@pytest.mark.spec("CON-13", "CON-16")
+def test_records_written_top_down_are_resolved() -> None:
+    @contract("layout.v1")
+    class Layout(Protocol):
+        @action
+        def send(self, request: TopDown) -> None: ...
+
+    assert set(Contract.of(Layout).describe()["$defs"]) == {"TopDown", "Below"}
+
+
+@pytest.mark.spec("CON-17")
+def test_default_that_cannot_be_written_as_json_is_named() -> None:
+    record = create_model("Raw", data=(bytes, b"\xff"))
+    with pytest.raises(
+        ContractDefinitionError,
+        match=re.escape("field Shape.value.data has the default b'\\xff', which "),
+    ):
+        declare_with_field(record)
 
 
 @pytest.mark.spec("CON-13", "CON-16")

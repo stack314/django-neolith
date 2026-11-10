@@ -430,6 +430,10 @@ class _TypeChecker:
     def record(self, model: type[BaseModel], path: str) -> None:
         if not self.register(model):
             return
+        if not model.__pydantic_complete__:
+            # Records written top-down refer to ones defined below them; those
+            # are defined by now. A name still unresolved stays a ForwardRef.
+            model.model_rebuild(raise_errors=False)
         extra = model.model_config.get("extra")
         if extra not in (None, "ignore"):
             raise ContractDefinitionError(
@@ -486,11 +490,19 @@ class _TypeChecker:
         adapter: TypeAdapter[Any] = TypeAdapter(field.rebuild_annotation())
         try:
             validated = adapter.validate_python(field.default, strict=True)
-            sent = to_jsonable_python(field.default)
-        except (ValidationError, PydanticSerializationError) as error:
+        except ValidationError as error:
             raise ContractDefinitionError(
                 f"{self.where}: field {path} has the default {field.default!r}, "
                 "which is not a value of its type"
+            ) from error
+        try:
+            sent = to_jsonable_python(field.default)
+        except (PydanticSerializationError, ValueError) as error:
+            raise ContractDefinitionError(
+                f"{self.where}: field {path} has the default {field.default!r}, "
+                "which cannot be written as JSON in this version; bytes that are "
+                "not UTF-8 need the base64 encoding that the in-process "
+                "transport settles"
             ) from error
         # Pydantic sends a default as written, without validating it, and the
         # description shows it the same way. A validator that would change it,
@@ -635,6 +647,11 @@ def _same_json(left: object, right: object) -> bool:
     """Compare two JSON values, keeping booleans apart from numbers."""
     if isinstance(left, bool) or isinstance(right, bool):
         return type(left) is type(right) and left == right
+    # An int default on a number field is sent as an int and read as a number;
+    # a float default on an integer field is sent as a float, which a strict
+    # reader of an integer refuses.
+    if isinstance(left, float) and isinstance(right, int):
+        return False
     if isinstance(left, int | float) and isinstance(right, int | float):
         return left == right
     if isinstance(left, list) and isinstance(right, list):
