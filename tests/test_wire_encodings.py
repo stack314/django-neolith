@@ -25,6 +25,7 @@ from hypothesis import strategies as st
 from hypothesis_jsonschema import from_schema
 from jsonschema import Draft202012Validator, FormatChecker
 from pydantic import (
+    AfterValidator,
     AwareDatetime,
     BaseModel,
     BeforeValidator,
@@ -33,6 +34,7 @@ from pydantic import (
     PlainSerializer,
     PlainValidator,
     ValidationError,
+    WrapValidator,
     create_model,
 )
 from pydantic_core import CoreSchema, PydanticSerializationError, core_schema
@@ -76,6 +78,16 @@ _HYPOTHESIS = settings(
     deadline=None,
     suppress_health_check=[HealthCheck.too_slow],
 )
+
+
+# The TypeAliasType spelling is what the "type" statement builds; both are
+# tested, as authors write either.
+Span = TypeAliasType("Span", Duration)  # noqa: UP040
+Money = TypeAliasType("Money", Decimal128)  # noqa: UP040
+Blob = TypeAliasType("Blob", Binary)  # noqa: UP040
+type SpanAlias = Duration
+type MoneyAlias = Decimal128
+type BlobAlias = Binary
 
 
 class Carrier(BaseModel):
@@ -380,21 +392,6 @@ _LOOK_ALIKE = Annotated[
     ("annotation", "message"),
     [
         pytest.param(_LOOK_ALIKE, "has type function-plain", id="own plain validator"),
-        pytest.param(
-            Annotated[Duration, PlainSerializer(str, when_used="json")],
-            "has type function-plain",
-            id="neolith form with another serializer",
-        ),
-        pytest.param(
-            Annotated[Binary, Field(max_length=4)],
-            "has an after or wrap validator",
-            id="constraint on a neolith form",
-        ),
-        pytest.param(
-            Annotated[Decimal128, Field(ge=Decimal(0))],
-            "has an after or wrap validator",
-            id="bound on a neolith form",
-        ),
     ],
 )
 def test_only_neolith_forms_own_schema_is_admitted(
@@ -402,6 +399,77 @@ def test_only_neolith_forms_own_schema_is_admitted(
 ) -> None:
     with pytest.raises(ContractDefinitionError, match=re.escape(message)):
         _field(annotation)
+
+
+def _same(value: object) -> object:
+    return value
+
+
+_ADDED: dict[str, Callable[[object], object]] = {
+    "constraint": lambda t: Annotated[t, Field(min_length=1)],
+    "bound": lambda t: Annotated[t, Field(ge=0)],
+    "pattern": lambda t: Annotated[t, Field(pattern="^a")],
+    "after validator": lambda t: Annotated[t, AfterValidator(_same)],
+    "plain validator": lambda t: Annotated[t, PlainValidator(_same)],
+    "wrap validator": lambda t: Annotated[t, WrapValidator(lambda v, h: h(v))],
+    "serializer": lambda t: Annotated[t, PlainSerializer(str, when_used="json")],
+    "serializer behind a before validator": lambda t: Annotated[
+        t, BeforeValidator(_same), PlainSerializer(str, when_used="json")
+    ],
+}
+
+
+_NAMED_FORMS = {
+    "Duration": (Duration, "Duration"),
+    "Decimal128": (Decimal128, "Decimal128"),
+    "Binary": (Binary, "Binary"),
+    "type Duration": (SpanAlias, "Duration"),
+    "TypeAliasType Binary": (Blob, "Binary"),
+}
+
+
+@pytest.mark.spec("CON-13", "CON-17")
+@pytest.mark.parametrize(
+    ("form", "name", "added"),
+    [
+        pytest.param(form, name, added, id=f"{shown}-{added}")
+        for shown, (form, name) in _NAMED_FORMS.items()
+        for added in _ADDED
+        # Pydantic has no ge on bytes.
+        if not (added == "bound" and name == "Binary")
+    ],
+)
+def test_anything_added_to_a_neolith_form_is_refused_naming_it(
+    form: object, name: str, added: str
+) -> None:
+    # Pydantic applies a constraint in an after validator around the form, so
+    # the message names the type, not a validator the author never wrote.
+    annotation = _ADDED[added](form)
+    with pytest.raises(
+        ContractDefinitionError,
+        match=re.escape(
+            f"adds a constraint, a validator or a serializer to neolith.{name}; "
+            "only a before validator is admitted there"
+        ),
+    ):
+        _field(list[annotation])  # type: ignore[valid-type]
+
+
+@pytest.mark.spec("CON-34")
+@pytest.mark.parametrize(
+    ("form", "described"),
+    [
+        pytest.param(Duration, DURATION, id="Duration"),
+        pytest.param(Decimal128, DECIMAL, id="Decimal128"),
+        pytest.param(Binary, BYTES, id="Binary"),
+    ],
+)
+def test_a_before_validator_on_a_neolith_form_is_admitted(
+    form: object, described: dict[str, Any]
+) -> None:
+    # The nearest legitimate shape: the form's own reader still checks the
+    # value a before validator returns.
+    assert _field(Annotated[form, BeforeValidator(_same)]) == described
 
 
 @pytest.mark.spec("CON-13", "CON-17")
@@ -784,9 +852,38 @@ def test_a_neolith_form_as_a_map_key_is_refused() -> None:
 def test_binary_refuses_a_python_str(text: str) -> None:
     # A plain bytes field reads a str as its UTF-8 bytes, so reading the same
     # call's str as base64url would change what it holds; it is refused.
-    with pytest.raises(ValidationError, match="pass bytes"):
+    with pytest.raises(ValidationError) as raised:
         _record(Binary)(v=text)
+    # The message names both ways to get here: text meant as data, and
+    # base64url from a JSON body parsed before validation.
+    assert raised.value.errors()[0]["msg"] == (
+        "Value error, binary data from Python is bytes, such as text.encode() "
+        "for text; to read base64url from JSON, validate the JSON text itself "
+        "(model_validate_json), not a value parsed from it"
+    )
     assert _read(Binary, "_w==") == b"\xff"
+
+
+@pytest.mark.spec("CON-34")
+def test_binary_is_read_from_json_text_only() -> None:
+    # ADR 0020: a receiver validates the body's text (validate_json). Text
+    # parsed into Python values first holds base64url as a str, refused above.
+    record = _record(Binary)
+    body = '{"v": "_w=="}'
+    sent = record(v=b"\xff")
+    assert record.model_validate_json(body) == record(v=b"\xff")
+    assert record.model_validate_json(sent.model_dump_json()) == sent
+    assert record.model_validate(sent.model_dump()) == sent
+    with pytest.raises(ValidationError, match="validate the JSON text itself"):
+        record.model_validate(json.loads(body))
+    with pytest.raises(ValidationError, match="validate the JSON text itself"):
+        record.model_validate(sent.model_dump(mode="json"))
+    # Strings mode is not JSON text either: a plain bytes field holds "_w==" as
+    # its UTF-8 bytes there.
+    plain = _record(bytes).model_validate_strings({"v": "_w=="})
+    assert plain.model_dump() == {"v": b"_w=="}
+    with pytest.raises(ValidationError, match="validate the JSON text itself"):
+        record.model_validate_strings({"v": "_w=="})
 
 
 @pytest.mark.spec("CON-34")
@@ -799,16 +896,6 @@ def test_a_zero_decimal_with_a_huge_exponent_is_refused_without_writing_it(
         _record(Decimal128)(v=value)
     with pytest.raises(PydanticSerializationError):
         _record(Decimal128).model_construct(v=value).model_dump_json()
-
-
-# The TypeAliasType spelling is what the "type" statement builds; both are
-# tested, as authors write either.
-Span = TypeAliasType("Span", Duration)  # noqa: UP040
-Money = TypeAliasType("Money", Decimal128)  # noqa: UP040
-Blob = TypeAliasType("Blob", Binary)  # noqa: UP040
-type SpanAlias = Duration
-type MoneyAlias = Decimal128
-type BlobAlias = Binary
 
 
 def _optional(described: dict[str, Any]) -> dict[str, Any]:

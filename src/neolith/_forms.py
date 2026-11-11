@@ -143,11 +143,16 @@ def _write_decimal(value: Decimal) -> str:
 
 def _read_binary(value: object, info: core_schema.ValidationInfo) -> bytes:
     if type(value) is str:
-        if info.mode == "python":
-            # bytes would read a str as its UTF-8 bytes; reading it as base64url
-            # here would change what the same call holds, so it is refused.
+        if info.mode != "json":
+            # Outside JSON text (Python input, or model_validate_strings), bytes
+            # would read a str as its UTF-8 bytes; reading it as base64url here
+            # would change what the same call holds, so it is refused. The str
+            # is either text meant as data or base64url from a parsed JSON body,
+            # and the message names both, since the remedies differ.
             raise ValueError(
-                "binary data is bytes; pass bytes, such as text.encode(), not a str"
+                "binary data from Python is bytes, such as text.encode() for "
+                "text; to read base64url from JSON, validate the JSON text "
+                "itself (model_validate_json), not a value parsed from it"
             )
         if not _fullmatch(BYTES_PATTERN, value):
             raise ValueError(
@@ -243,7 +248,8 @@ _BINARY = _Form(
 Duration = Annotated[timedelta, _DURATION]
 # A decimal (spec 01): a finite Decimal of at most 34 digits, written "-12.50".
 Decimal128 = Annotated[Decimal, _DECIMAL]
-# Bytes (spec 01): written in base64url with padding, such as "_w==".
+# Bytes (spec 01): written in base64url with padding, such as "_w==", and read
+# as base64url from JSON text only (ADR 0020); from anything else, bytes only.
 Binary = Annotated[bytes, _BINARY]
 
 FORMS = (_DURATION, _DECIMAL, _BINARY)
@@ -263,5 +269,26 @@ def form_of(node: Mapping[str, Any]) -> _Form | None:
         return None
     for form in FORMS:
         if node == form.core_schema():
+            return form
+    return None
+
+
+def form_in(node: Mapping[str, Any]) -> _Form | None:
+    """The form whose reader or writer this node calls, whatever else it holds.
+
+    A constraint, validator or serializer added to a neolith type changes its
+    node, so ``form_of`` no longer matches; this names the type in the refusal.
+    A plain validator replaces the reader and keeps the writer, and a
+    serializer the converse.
+    """
+    if node.get("type") != "function-plain":
+        return None
+    calls = [
+        part.get("function")
+        for part in (node.get("function"), node.get("serialization"))
+        if isinstance(part, Mapping)
+    ]
+    for form in FORMS:
+        if any(call is form.read or call is form.write for call in calls):
             return form
     return None

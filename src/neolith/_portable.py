@@ -36,7 +36,7 @@ from pydantic_core import (
     core_schema,
 )
 
-from neolith._forms import FORM_FOR_KIND, form_of
+from neolith._forms import FORM_FOR_KIND, form_in, form_of
 
 # A record or enum name, as other languages' generated code will use it
 # (CON-20).
@@ -154,6 +154,11 @@ _UNCHECKED_VALIDATORS = frozenset({"function-after", "function-wrap"})
 _VALIDATOR_KEYS = frozenset({"function", "schema", "json_schema_input_schema"})
 # The keys under which a node holds the nodes that check parts of its value.
 _CHILDREN = ("schema", "items_schema", "keys_schema", "values_schema")
+# The keys of the nodes that only step to another node.
+_WRAPPER_KEYS = {
+    "definitions": frozenset({"schema", "definitions"}),
+    "definition-ref": frozenset({"schema_ref"}),
+}
 
 # Model settings that change validation only. Anything else that reaches the
 # core config, such as ser_json_timedelta or val_json_bytes, changes the wire.
@@ -591,6 +596,7 @@ class Portable:
         """
         kind = node.get("type")
         subject = f"field {path}"
+        self.decorated(node, subject, path)
         if kind == "definitions":
             self.keys(node, frozenset({"schema", "definitions"}), subject)
             return self.describe(node["schema"], path, aliases)
@@ -785,6 +791,71 @@ class Portable:
                 child = current.get(key)
                 if isinstance(child, dict):
                     pending.append(child)
+
+    def decorated(self, node: Mapping[str, Any], subject: str, path: str) -> None:
+        """Refuse a neolith type with anything added to it, naming the type.
+
+        Pydantic applies a constraint such as ``max_length`` in an after
+        validator around the type's node, or a chain after it, and a plain
+        validator or a serializer replaces part of the node. Only type aliases
+        and before validators in front of the type's own node are admitted;
+        anything else is refused here, so the message names the type instead
+        of a validator or node kind the author never wrote.
+        """
+        changed = False
+        seen: set[int] = set()
+        current = node
+        steps = _VALIDATORS | _UNCHECKED_VALIDATORS | set(_WRAPPER_KEYS) | {"chain"}
+        while current.get("type") in steps and id(current) not in seen:
+            seen.add(id(current))
+            kind = current.get("type")
+            # A serializer behind a type alias sits on the reference itself.
+            admitted = _WRAPPER_KEYS.get(str(kind), _VALIDATOR_KEYS) | _ANY_NODE
+            changed = (
+                changed
+                or kind in _UNCHECKED_VALIDATORS | {"chain"}
+                or not set(current) <= admitted
+            )
+            if kind == "definition-ref":
+                current = self.definitions.get(str(current.get("schema_ref")), {})
+            elif kind == "chain":
+                # Pydantic chains a constraint it cannot apply in place, such
+                # as a pattern, after the type's own node.
+                chained = current.get("steps") or [{}]
+                current = chained[0] if isinstance(chained[0], Mapping) else {}
+            else:
+                current = current.get("schema", {})
+        form = form_in(current)
+        serialization = current.get("serialization")
+        if form is None and isinstance(serialization, Mapping):
+            # A plain validator over a type alias keeps the alias's serializer
+            # by wrapping a reference to it.
+            form, changed = form_in(self.unwrapped(serialization.get("schema"))), True
+        if form is None:
+            return
+        bare = {key: value for key, value in current.items() if key not in _ANY_NODE}
+        if changed or form_of(bare | {"type": "function-plain"}) is None:
+            raise self.fail(
+                f"{subject} adds a constraint, a validator or a serializer to "
+                f"neolith.{form.name}; only a before validator is admitted there, "
+                "since the type's own reader and writer fix its form"
+            )
+
+    def unwrapped(self, node: object) -> Mapping[str, Any]:
+        """The node behind any ``definitions`` wrappers and references, or {}."""
+        seen: set[int] = set()
+        while (
+            isinstance(node, Mapping)
+            and node.get("type") in _WRAPPER_KEYS
+            and id(node) not in seen
+        ):
+            seen.add(id(node))
+            node = (
+                self.definitions.get(str(node.get("schema_ref")), {})
+                if node.get("type") == "definition-ref"
+                else node.get("schema", {})
+            )
+        return node if isinstance(node, Mapping) else {}
 
     def validator(self, node: Mapping[str, Any], subject: str, path: str = "") -> None:
         """Admit a before validator on a type without records; refuse the rest."""
