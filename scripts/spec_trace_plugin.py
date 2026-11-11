@@ -11,7 +11,9 @@ it does not know yet makes its value look like one: an existing ``report.json``
 in ``--spec-report report.json`` was taken for a test path. pytest finds its
 configuration file the same way, before it loads any plugin, so write
 ``--spec-report=PATH``. With a space, an existing report outside the project is
-still taken for a path.
+still taken for a path. As for ``--junitxml``, the plugin expands ``~`` and
+environment variables in PATH itself, since a shell does not expand ``~``
+after ``=``.
 
 Outcomes:
 
@@ -29,6 +31,7 @@ on the test, its class, the module's ``pytestmark`` or a parameter set.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -49,9 +52,21 @@ def pytest_configure(config: pytest.Config) -> None:
     config.pluginmanager.register(_Recorder(config), "spec-trace-recorder")
 
 
+def _report_path(value: str | None) -> Path | None:
+    """The report's path, read as pytest reads ``--junitxml`` (junitxml.py)."""
+    if value is None:
+        return None
+    path = Path(os.path.abspath(os.path.expanduser(os.path.expandvars(value))))
+    if path.is_dir():
+        raise pytest.UsageError(
+            f"--spec-report needs a file path, not the directory {path}"
+        )
+    return path
+
+
 class _Recorder:
     def __init__(self, config: pytest.Config) -> None:
-        self.config = config
+        self.path = _report_path(config.getoption("--spec-report"))
         self.tests: dict[str, dict[str, object]] = {}
 
     def record(self, item: pytest.Item) -> None:
@@ -100,8 +115,8 @@ class _Recorder:
             entry["outcome"] = "xfailed" if expected_to_fail else "skipped"
 
     def pytest_sessionfinish(self, session: pytest.Session) -> None:
-        path = self.config.getoption("--spec-report")
-        if path is None:
+        if self.path is None:
             return
         report = {"format": FORMAT, "tests": self.tests}
-        Path(path).write_text(json.dumps(report, indent=1, sort_keys=True) + "\n")
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(report, indent=1, sort_keys=True) + "\n")
