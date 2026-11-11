@@ -8,8 +8,10 @@ the provider's side reaches the caller as ``internal``.
 """
 
 import contextvars
+import copy
 import json
 import logging
+import pickle
 import threading
 import types
 from collections.abc import Callable
@@ -126,6 +128,25 @@ def test_a_request_can_be_passed_by_keyword() -> None:
     assert _connect(Recording()).reserve(request=_reserve()).ok is True
 
 
+@contract("keyword.v1")
+class Named(Protocol):
+    @action
+    def go(self, order: Release) -> None: ...
+
+
+class NamedImpl:
+    def go(self, order: Release) -> None:
+        pass
+
+
+@pytest.mark.spec("TRN-15", "CON-29")
+def test_a_request_is_passed_by_the_name_its_declaration_gives_it() -> None:
+    connector: Any = Connector(Named, InProcess(Named, NamedImpl()))
+    assert connector.go(order=Release(order=1)) is None
+    with pytest.raises(TypeError, match="by position or as order="):
+        connector.go(request=Release(order=1))
+
+
 @pytest.mark.spec("TRN-15")
 def test_an_action_with_an_empty_reply_returns_none() -> None:
     provider = Recording()
@@ -148,7 +169,7 @@ def test_changes_after_the_call_do_not_reach_the_other_side() -> None:
 def test_the_connector_lists_its_actions() -> None:
     connector = _connect(Recording())
     assert {"reserve", "release"} <= set(dir(connector))
-    assert repr(connector) == "<Connector connector.v1>"
+    assert repr(connector) == "<connector to connector.v1>"
 
 
 @pytest.mark.spec("TRN-15", "CON-29")
@@ -248,6 +269,7 @@ class Counting:
     def __init__(self, outcome: Callable[[Action, bytes], bytes | None]) -> None:
         self.calls: list[tuple[str, bytes]] = []
         self._outcome = outcome
+        self.contract = Contract.of(Inventory)
 
     def call(self, action: Action, request: bytes) -> bytes | None:
         self.calls.append((action.name, request))
@@ -523,3 +545,109 @@ def test_generated_values_cross_to_the_provider_and_back_unchanged(
     assert reply == sent
     assert _shared(sent, received[0]) == set()
     assert _shared(received[0], reply) == set()
+
+
+# Nothing of the provider reaches the caller through the error it gets.
+
+
+def _frames_hold(error: BaseException, held: list[object]) -> list[str]:
+    """Names of traceback frame locals that are, or hold, one of ``held``."""
+    found = []
+    # The first frame is the test's own, which holds them on purpose.
+    traceback = error.__traceback__.tb_next if error.__traceback__ else None
+    while traceback is not None:
+        for name, value in traceback.tb_frame.f_locals.items():
+            if any(value is item for item in held) or _shared(value, held) != set():
+                found.append(f"{traceback.tb_frame.f_code.co_name}.{name}")
+        traceback = traceback.tb_next
+    return found
+
+
+@pytest.mark.spec("TRN-3", "TRN-17")
+@pytest.mark.parametrize(
+    "reply",
+    [_raises(Secret("x")), lambda r: {"ok": True, "pw": "hunter2"}],
+    ids=["raises", "wrong reply"],
+)
+def test_no_frame_of_the_error_holds_the_providers_values(
+    reply: Callable[[Reserve], object],
+) -> None:
+    provider = Recording(reply)
+    with pytest.raises(ContractError) as raised:
+        _connect(provider).reserve(_reserve())
+    _assert_internal(raised)
+    held: list[object] = [provider, *provider.received]
+    assert _frames_hold(raised.value, held) == []
+
+
+class Raising(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        raise RuntimeError("the log failed")
+
+
+@pytest.mark.spec("TRN-3")
+@pytest.mark.parametrize("side", ["provider", "reply"])
+def test_a_failing_log_does_not_carry_the_failure_to_the_caller(side: str) -> None:
+    logger = logging.getLogger("neolith")
+    raising = Raising()
+    logger.addFilter(raising)
+    try:
+        connector = (
+            _connect(Recording(_raises(Secret("x"))))
+            if side == "provider"
+            else Connector(Inventory, Counting(lambda a, r: b"{"))
+        )
+        with pytest.raises(ContractError) as raised:
+            connector.reserve(_reserve())
+    finally:
+        logger.removeFilter(raising)
+    _assert_internal(raised)
+
+
+@pytest.mark.spec("TRN-3")
+def test_a_transport_error_with_a_detail_fails_closed_until_errors_are_delivered() -> (
+    None
+):
+    def out_of_stock(action: Action, request: bytes) -> bytes | None:
+        raise ContractError("out_of_stock", "none left", OutOfStock(sku="a"))
+
+    with pytest.raises(ContractError) as raised:
+        Connector(Inventory, Counting(out_of_stock)).reserve(_reserve())
+    _assert_internal(raised)
+
+
+@pytest.mark.spec("TRN-3")
+def test_a_transport_error_reaches_the_caller_as_a_new_error() -> None:
+    sent = ContractError("unavailable", "no provider could be reached")
+    sent.add_note("transport detail")
+
+    def unavailable(action: Action, request: bytes) -> bytes | None:
+        raise sent
+
+    with pytest.raises(ContractError) as raised:
+        Connector(Inventory, Counting(unavailable)).reserve(_reserve())
+    assert raised.value is not sent
+    assert (raised.value.kind, raised.value.message) == (sent.kind, sent.message)
+    assert raised.value.__context__ is None
+    assert getattr(raised.value, "__notes__", []) == []
+
+
+def test_a_transport_of_another_contract_is_refused() -> None:
+    with pytest.raises(TypeError, match=r"carries calls of keyword\.v1, not of"):
+        Connector(Inventory, InProcess(Named, NamedImpl()))
+
+
+def test_a_connector_copies_as_itself_and_does_not_pickle() -> None:
+    connector = _connect(Recording())
+    assert copy.copy(connector) is connector
+    assert copy.deepcopy({"c": connector})["c"] is connector
+    with pytest.raises(TypeError, match="cannot be pickled"):
+        pickle.dumps(connector)
+
+
+def test_an_unbuilt_connector_still_describes_itself() -> None:
+    unbuilt = Connector.__new__(Connector)
+    assert repr(unbuilt) == "<connector>"
+    assert "reserve" not in dir(unbuilt)
+    with pytest.raises(AttributeError, match="connector has no action 'reserve'"):
+        unbuilt.reserve  # noqa: B018
