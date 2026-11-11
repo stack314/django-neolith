@@ -342,16 +342,32 @@ def test_generator_covers_the_allowlist() -> None:
         assert set(keys) <= drawn[construct], construct
 
 
-def _declare(record: type[BaseModel]) -> dict[str, Any]:
-    def send(self: object, request: record) -> None: ...  # type: ignore[valid-type]
+class Carrier(BaseModel):
+    """The request of a contract whose generated record is a detail record."""
 
-    namespace = {"send": action(send)}
+
+def _declare(
+    record: type[BaseModel], role: Literal["request", "detail"] = "request"
+) -> dict[str, Any]:
+    if role == "request":
+
+        def send(self: object, request: record) -> None: ...  # type: ignore[valid-type]
+
+        namespace = {"send": action(send)}
+    else:
+
+        def fail(self: object, request: Carrier) -> None: ...
+
+        namespace = {"send": action(errors={"failed": record})(fail)}
     declared = types.new_class(
         _name("C"), (Protocol,), exec_body=lambda ns: ns.update(namespace)
     )
     contract(f"{_name('generated')}.v1")(declared)
     description = Contract.of(declared).describe()
-    return {"$defs": description["$defs"], "$ref": f"#/$defs/{record.__name__}"}
+    ref = {"$ref": f"#/$defs/{record.__name__}"}
+    sent = description["actions"]["send"]
+    assert (sent["request"] if role == "request" else sent["errors"]["failed"]) == ref
+    return {"$defs": description["$defs"], **ref}
 
 
 def _round_trip(record: type[BaseModel], schema: dict[str, Any], value: object) -> None:
@@ -384,6 +400,23 @@ def test_generated_contracts_round_trip_through_their_description(
         schema = _declare(record)
     except ContractDefinitionError:
         # Refused: the property is about contracts that are accepted.
+        return
+    value = data.draw(from_schema(schema, custom_formats=_FORMATS))
+    _round_trip_with_defaults(record, schema, value)
+
+
+@pytest.mark.spec("CON-16", "CON-24")
+@_HYPOTHESIS
+@given(st.data())
+def test_generated_detail_records_round_trip_through_their_description(
+    data: st.DataObject,
+) -> None:
+    # A detail record travels as a request record does, so the same
+    # properties hold for the records an action declares for its error kinds.
+    record = cast("type[BaseModel]", data.draw(_records(_TYPES))[0])
+    try:
+        schema = _declare(record, role="detail")
+    except ContractDefinitionError:
         return
     value = data.draw(from_schema(schema, custom_formats=_FORMATS))
     _round_trip_with_defaults(record, schema, value)
