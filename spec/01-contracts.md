@@ -52,7 +52,7 @@ The portable forms are the types that every transport can represent, JSON Schema
 
 **CON-14.** A reply type MUST be either a record built only from the portable forms, or empty. An empty reply carries no value.
 
-[ADR 0019](../docs/adr/0019-wire-encodings-of-the-portable-forms.md) fixes the JSON encoding of each form. Its encodings take effect with roadmap step 3 (#10 task 1), which turns them into requirements here. From then on, in outline: every encoded form will have a pattern or a range in the description, and the record names the two rules a description does not state; integers will be limited to ±(2^53 − 1); bytes will be padded base64url; numbers will be finite, with `-0` written as `0`; decimals will be admitted, as strings with no exponent that keep trailing zeros; durations will be written as ProtoJSON writes them, like `-1.500s`, one spelling per value; timestamps and dates will follow RFC 3339 with years 0001 to 9999 and no leap second.
+[ADR 0019](../docs/adr/0019-wire-encodings-of-the-portable-forms.md) fixes the JSON encoding of each form. Its encodings take effect with roadmap step 3 (#10 task 1), which turns them into requirements here. From then on, in outline: every encoded form will have a pattern or a range in the description, and the record names the rules a description does not state; integers will be limited to ±(2^53 − 1); bytes will be padded base64url; numbers will be finite, with `-0` written as `0`; decimals will be admitted, as strings with no exponent that keep trailing zeros; durations will be written as ProtoJSON writes them, like `-1.500s`, one spelling per value; timestamps and dates will follow RFC 3339 with years 0001 to 9999 and no leap second.
 
 **CON-21.** Until the encodings of ADR 0019 are implemented (#10 task 1), an implementation MUST reject a contract whose request type, reply type or detail record (CON-8) uses decimal, before it serves the contract or calls any of its actions. The rejection names the contract, the action and the field.
 
@@ -99,7 +99,7 @@ An action's *error set* is the standard kinds below, which every action has whet
 
 **CON-31.** The value of a detail record, as it travels, MUST meet the bounds of an untyped map (CON-30), so that a caller that does not know its kind can hold it (CON-28). CON-24 makes the depth bound hold for every value of a detail record; the other bounds depend on the value, so the provider's host checks them as it sends the error.
 
-**CON-32.** Until the encoding of bytes is settled with the in-process transport (step 3 of the [roadmap](../docs/roadmap.md), issue #10), an implementation MUST reject a contract whose detail record uses bytes, before it serves the contract or calls any of its actions, since whether such a detail travels within CON-30 depends on that encoding. The rejection names the contract, the action and the error kind.
+**CON-32.** Until the encodings of ADR 0019 are implemented (#10 task 1), an implementation MUST reject a contract whose detail record uses bytes, before it serves the contract or calls any of its actions, since whether such a detail travels within CON-30 depends on the encoding of bytes. The rejection names the contract, the action and the error kind.
 
 **CON-29.** A mistake in the calling code, such as a call to an action the contract does not have, MUST NOT be reported as a contract error. It reports a bug in the calling code, not the outcome of a call, so code that handles contract errors does not swallow it.
 
