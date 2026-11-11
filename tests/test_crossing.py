@@ -10,7 +10,7 @@ import json
 import re
 import sys
 import types
-from collections.abc import Generator, Iterator
+from collections.abc import Callable, Generator, Iterator
 from typing import Annotated, Any, Protocol, cast
 
 import pydantic.plugin._loader
@@ -873,6 +873,9 @@ class Frozen(BaseModel):
     n: int = 0
 
 
+_FROZEN = Frozen(n=1)
+
+
 class FrozenWithList(BaseModel):
     model_config = ConfigDict(frozen=True)
     ns: list[int] = []
@@ -909,6 +912,81 @@ def test_a_record_default_each_read_gets_its_own_of_is_admitted(
     first, second = reader.read(b"{}"), reader.read(b"{}")
     assert first.value == second.value  # type: ignore[attr-defined]
     assert first.value is not second.value  # type: ignore[attr-defined]
+
+
+_SHARED_PLAIN = Plain()
+_SHARED_PLAINS = [Plain()]
+_SHARED_LIST: list[int] = []
+
+
+@pytest.mark.spec("TRN-12", "CON-17")
+@pytest.mark.parametrize(
+    ("annotation", "factory", "shared"),
+    [
+        (Plain, lambda: _SHARED_PLAIN, "Plain"),
+        (list[Plain], lambda: _SHARED_PLAINS, "list"),
+        (list[Plain], lambda: [_SHARED_PLAIN], "Plain"),
+        (dict[str, list[int]], lambda: {"a": _SHARED_LIST}, "list"),
+        (Plain, lambda: Plain.model_construct(ns=_SHARED_LIST), "list"),
+        (Frozen, lambda: _FROZEN, "Frozen"),
+    ],
+    ids=[
+        "record",
+        "list",
+        "record-in-a-list",
+        "list-in-a-map",
+        "list-in-a-new-record",
+        "frozen-record",
+    ],
+)
+def test_a_default_factory_that_returns_the_same_object_is_refused(
+    annotation: Any,  # noqa: ANN401
+    factory: Callable[[], object],
+    shared: str,
+) -> None:
+    # pydantic-core calls the factory for each value read without the field,
+    # so a factory that hands back one object makes every such value share it.
+    record = create_model(
+        _name("Factory"), value=(annotation, Field(default_factory=factory))
+    )
+    with pytest.raises(
+        ContractDefinitionError,
+        match=f"default factory that returns the same {shared} on every call",
+    ):
+        _declare(record)
+
+
+@pytest.mark.spec("TRN-12")
+@pytest.mark.parametrize(
+    ("annotation", "factory"),
+    [
+        (Plain, Plain),
+        (list[Plain], lambda: [Plain(), Plain()]),
+        (dict[str, list[int]], lambda: {"a": []}),
+        (int, lambda: 5),
+        (str, lambda: "same text"),
+    ],
+    ids=["record", "list", "map", "integer", "text"],
+)
+def test_a_default_factory_that_builds_new_objects_is_admitted(
+    annotation: Any,  # noqa: ANN401
+    factory: Callable[[], object],
+) -> None:
+    record = create_model(
+        _name("Factory"), value=(annotation, Field(default_factory=factory))
+    )
+    reader = codec(_declare(record), record)
+    first, second = reader.read(b"{}"), reader.read(b"{}")
+    assert first == second
+    assert not any(
+        part is other
+        for part in _mutable(first.value)  # type: ignore[attr-defined]
+        for other in _mutable(second.value)  # type: ignore[attr-defined]
+    )
+
+
+def _mutable(value: object) -> list[object]:
+    return [c for c in _containers(value)]
 
 
 class Tree(BaseModel):

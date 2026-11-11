@@ -499,12 +499,22 @@ class Portable:
                     f"field {path} has a default factory that takes the other fields"
                 )
             try:
+                # Called twice: pydantic-core calls it once for each value read
+                # without the field, so each call must make new objects.
                 made = node["default_factory"]()
+                again = node["default_factory"]()
             except Exception as error:  # the author's factory may raise anything
                 raise self.fail(
                     f"field {path} has a default factory that raised "
                     f"{type(error).__name__}: {error}"
                 ) from error
+            shared = _shared_between(made, again)
+            if shared is not None:
+                raise self.fail(
+                    f"field {path} has a default factory that returns the same "
+                    f"{shared} on every call, which every value read without the "
+                    "field would share; make it build a new one"
+                )
             self.round_trip(node["schema"], made, path, description)
             return description, True
         return {
@@ -1212,6 +1222,43 @@ def _default_record_problem(default: object) -> str | None:
             pending.extend(cast("list[object]", item))
         elif kind is dict:
             pending.extend(cast("dict[object, object]", item).values())
+    return None
+
+
+def _mutable_parts(value: object) -> Iterator[object]:
+    """Every list, dict, set and record in a value, each once.
+
+    Tuples and frozensets are walked through, and a record through its
+    instance dict, as ``_default_record_problem`` reads it.
+    """
+    pending = [value]
+    seen: set[int] = set()
+    instance_dict = type.__dict__["__dict__"].__get__(BaseModel)["__dict__"]
+    while pending:
+        item = pending.pop()
+        kind = type(item)
+        if id(item) in seen:
+            continue
+        seen.add(id(item))
+        if issubclass(kind, BaseModel):
+            yield item
+            pending.extend(instance_dict.__get__(item).values())
+        elif kind in (list, set):
+            yield item
+            pending.extend(cast("list[object]", item))
+        elif kind is dict:
+            yield item
+            pending.extend(cast("dict[object, object]", item).values())
+        elif kind in (tuple, frozenset):
+            pending.extend(cast("tuple[object, ...]", item))
+
+
+def _shared_between(first: object, second: object) -> str | None:
+    """Name a mutable object two values both hold, or None."""
+    held = {id(part): part for part in _mutable_parts(first)}
+    for part in _mutable_parts(second):
+        if held.get(id(part)) is part:
+            return type(part).__qualname__
     return None
 
 
