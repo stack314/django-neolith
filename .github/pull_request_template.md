@@ -1,5 +1,13 @@
 <!-- Reviewed against CONTRIBUTING.md. The title becomes the squash commit subject, so it follows Conventional Commits (G2, G5). -->
 
+## Summary
+
+<!-- Three or four bullets a reader can take in at a glance: what changed, why, and anything a reviewer should look at first (G4). -->
+
+- 
+- 
+- 
+
 ## What changed and why
 
 <!-- G4 -->

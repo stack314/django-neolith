@@ -93,7 +93,7 @@ These rules apply to documentation, docstrings, error messages, commit messages 
 - **G1.** Work on a branch named `<type>/<short-name>`, for example `fix/connector-timeout`. Never push to `main`.
 - **G2.** Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/). Types: `feat`, `fix`, `docs`, `spec`, `test`, `refactor`, `perf`, `build`, `ci`, `chore`. The subject is imperative, starts in lower case after the type, and is at most 72 characters. The body says why.
 - **G3.** One logical change per pull request. Unrelated clean-up goes in its own pull request.
-- **G4.** The pull request description says what changed and why, links the issue or decision record, names every specification document and decision record it touches, and says how the change was verified.
+- **G4.** The pull request description opens with a summary of three or four bullets. It then says what changed and why, links the issue or decision record, names every specification document and decision record it touches, and says how the change was verified.
 - **G5.** Pull requests are squash-merged. The pull request title becomes the commit subject, so it follows **G2**.
 - **G6.** A breaking change uses `!` after the type, for example `feat!:`, and has a *Breaking changes* section in the description. Before 1.0, breaking changes are allowed but never silent.
 - **G7.** Merging needs the maintainer's approval, and every review comment answered or resolved.
