@@ -388,7 +388,7 @@ def _round_trip_with_defaults(
     _round_trip(record, schema, {k: v for k, v in value.items() if k in required})
 
 
-@pytest.mark.spec("CON-16")
+@pytest.mark.spec("CON-16", "CON-34")
 @_HYPOTHESIS
 @given(st.data())
 def test_generated_contracts_round_trip_through_their_description(
@@ -404,7 +404,7 @@ def test_generated_contracts_round_trip_through_their_description(
     _round_trip_with_defaults(record, schema, value)
 
 
-@pytest.mark.spec("CON-16", "CON-24")
+@pytest.mark.spec("CON-16", "CON-24", "CON-34")
 @_HYPOTHESIS
 @given(st.data())
 def test_generated_detail_records_round_trip_through_their_description(
@@ -451,7 +451,7 @@ class Reference(BaseModel):
     note: str | None = None
 
 
-@pytest.mark.spec("CON-16")
+@pytest.mark.spec("CON-16", "CON-34", "CON-42")
 @_HYPOTHESIS
 @given(st.data())
 def test_reference_contract_round_trips_through_its_description(

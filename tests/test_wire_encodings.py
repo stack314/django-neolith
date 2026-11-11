@@ -18,6 +18,7 @@ from typing import Annotated, Any, Protocol, cast
 import pytest
 from hypothesis import HealthCheck, assume, given, settings
 from hypothesis import strategies as st
+from hypothesis_jsonschema import from_schema
 from jsonschema import Draft202012Validator, FormatChecker
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, create_model
 
@@ -570,3 +571,34 @@ def test_finite_numbers_travel_in_the_range_the_description_states(
     sent = json.loads(record(x=number).model_dump_json())["x"]
     assert _is_valid(NUMBER, sent)
     assert sent == number
+
+
+@pytest.mark.spec("CON-16", "CON-34", "CON-42")
+@pytest.mark.parametrize(
+    ("annotation", "described"),
+    [
+        pytest.param(int, INTEGER, id="integer"),
+        pytest.param(float, NUMBER, id="number"),
+        pytest.param(bytes, BYTES, id="bytes"),
+        pytest.param(Decimal, DECIMAL, id="decimal"),
+        pytest.param(AwareDatetime, TIMESTAMP, id="timestamp"),
+        pytest.param(date, DATE, id="date"),
+    ],
+)
+@settings(_HYPOTHESIS, max_examples=100)
+@given(data=st.data())
+def test_each_form_round_trips_from_its_description(
+    annotation: object, described: dict[str, Any], data: st.DataObject
+) -> None:
+    value = data.draw(from_schema(described))
+    # python-jsonschema and hypothesis read "$" as Python does, so a final
+    # newline can be drawn; spec 01 refuses it (see above).
+    assume(not (isinstance(value, str) and value.endswith("\n")))
+    record = create_model("One", __config__=BASE64, v=(cast("Any", annotation), ...))
+    read = record.model_validate_json(json.dumps({"v": value}))
+    sent = json.loads(read.model_dump_json())["v"]
+    assert _is_valid(described, sent)
+    assert record.model_validate_json(json.dumps({"v": sent})) == read
+    if annotation is Decimal:
+        # A decimal keeps its digits, trailing zeros too.
+        assert sent == value
