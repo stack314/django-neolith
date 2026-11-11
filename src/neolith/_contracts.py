@@ -11,16 +11,22 @@ unchanged and records a ``Contract`` on it, read back with ``Contract.of``.
 Every check runs when the decorator runs, so a broken contract or
 implementation fails when its module is imported (CONTRIBUTING K2), with a
 ``ContractDefinitionError`` naming the contract, the action and the field.
+
+``ContractError`` is the one error type that crosses a contract (ADR 0008).
+An action declares its own error kinds with
+``@action(errors={"<kind>": DetailRecord})``; the standard kinds need no
+declaration.
 """
 
 import copy
 import inspect
+import math
 import re
 import types
 import typing
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
-from typing import Annotated, Any, Protocol, overload
+from dataclasses import dataclass, field
+from typing import Annotated, Any, Protocol, final, overload
 
 from pydantic import BaseModel
 
@@ -30,6 +36,7 @@ __all__ = [
     "Action",
     "Contract",
     "ContractDefinitionError",
+    "ContractError",
     "action",
     "contract",
     "implements",
@@ -43,6 +50,23 @@ _IDENTITY = re.compile(
     rf"(?P<name>{_SEGMENT}(?:\.{_SEGMENT})*)\.v(?P<major>[1-9][0-9]*)"
 )
 _ACTION_NAME = re.compile(_SEGMENT)
+# Spec 01, Errors: every error kind, standard or declared, is a segment.
+_KIND = re.compile(_SEGMENT)
+_STANDARD_KINDS = frozenset(
+    {
+        "invalid_argument",
+        "not_found",
+        "unauthenticated",
+        "permission_denied",
+        "conflict",
+        "unavailable",
+        "timeout",
+        "internal",
+    }
+)
+# JSON's scalars, as the json module reads them. bool is a subclass of int,
+# so each is matched by exact type, never with isinstance.
+_JSON_SCALARS = frozenset({str, int, float, bool, type(None)})
 
 _CONTRACT_ATTR = "__neolith_contract__"
 _ACTION_ATTR = "__neolith_action__"
@@ -58,17 +82,110 @@ class ContractDefinitionError(TypeError):
     """
 
 
+@final
+class ContractError(Exception):
+    """An error that crosses a contract (spec 01, Errors; ADR 0008).
+
+    Every such error is a ``ContractError``, told apart by ``kind``: a
+    standard kind, such as ``"not_found"`` or ``"conflict"``, or a kind the
+    action declares. ``message`` is text for people. ``data`` is the detail:
+    ``None`` for a standard kind; the kind's detail record for a declared
+    kind; and, for a kind the receiver's version of the contract does not
+    declare, the detail's fields as they arrived, a ``dict`` of JSON values.
+
+    The fields are read-only, and the class cannot be subclassed: a subclass
+    would not survive a transport, so callers could tell the modes apart.
+    Building one wrongly raises ``TypeError`` or ``ValueError``, never a
+    ``ContractError``, so that code handling contract errors does not swallow
+    a bug.
+    """
+
+    __slots__ = ("_data", "_kind", "_message")
+
+    def __init__(
+        self, kind: str, message: str, data: BaseModel | dict[str, Any] | None = None
+    ) -> None:
+        if type(kind) is not str:
+            raise TypeError(f"a contract error's kind is a str, not {kind!r}")
+        if not _KIND.fullmatch(kind):
+            raise ValueError(
+                f"{kind!r} is not an error kind: a kind starts with a lowercase "
+                "ASCII letter, followed by lowercase ASCII letters, digits or "
+                "underscores"
+            )
+        if type(message) is not str:
+            raise TypeError(
+                f"a contract error's message is a str, not {type(message).__name__}"
+            )
+        if kind in _STANDARD_KINDS:
+            if data is not None:
+                raise TypeError(
+                    f"a {kind!r} error is of a standard kind, which carries no detail"
+                )
+        elif not isinstance(data, BaseModel | dict):
+            raise TypeError(
+                f"a {kind!r} error carries a detail: its detail record, or, for a "
+                "kind the contract does not declare, an untyped dict of the "
+                f"detail's fields; not {_name(type(data))}"
+            )
+        elif not isinstance(data, BaseModel):
+            problem = _untyped_problem(data)
+            if problem is not None:
+                raise TypeError(
+                    f"the untyped detail of a {kind!r} error is a dict of JSON "
+                    f"values, but {problem}"
+                )
+        super().__init__(kind, message)
+        self._kind = kind
+        self._message = message
+        self._data = data
+
+    @property
+    def kind(self) -> str:
+        """The error's kind."""
+        return self._kind
+
+    @property
+    def message(self) -> str:
+        """Text for people. Callers branch on ``kind``, never on this."""
+        return self._message
+
+    @property
+    def data(self) -> BaseModel | dict[str, Any] | None:
+        """The detail; ``None`` for a standard kind."""
+        return self._data
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        raise TypeError(
+            "ContractError cannot be subclassed: every error that crosses a "
+            "contract is a ContractError, told apart by its kind"
+        )
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        return (ContractError, (self._kind, self._message, self._data), self.__dict__)
+
+    def __str__(self) -> str:
+        return f"{self._kind}: {self._message}"
+
+    def __repr__(self) -> str:
+        data = "" if self._data is None else f", data={self._data!r}"
+        return f"ContractError({self._kind!r}, {self._message!r}{data})"
+
+
 @dataclass(frozen=True, slots=True)
 class Action:
-    """One action of a contract: its name, idempotency and types.
+    """One action of a contract: its name, idempotency, types and error kinds.
 
-    ``reply`` is ``None`` when the reply is empty.
+    ``reply`` is ``None`` when the reply is empty. ``errors`` maps each kind
+    the action declares to its detail record, in declaration order; the
+    standard kinds are not listed, since every action has them.
     """
 
     name: str
     idempotent: bool
     request: type[BaseModel]
     reply: type[BaseModel] | None
+    errors: Mapping[str, type[BaseModel]] = field(hash=False)
 
 
 class Contract:
@@ -202,10 +319,10 @@ def contract[T](identity: str, /) -> Callable[[type[T]], type[T]]:
         actions: dict[str, Action] = {}
         described: dict[str, Any] = {}
         for attr, value in vars(declaration).items():
-            idempotent = (
+            marked = (
                 vars(value).get(_ACTION_ATTR) if inspect.isfunction(value) else None
             )
-            if idempotent is None:
+            if marked is None:
                 if attr.startswith("_"):
                     continue
                 raise ContractDefinitionError(
@@ -224,11 +341,25 @@ def contract[T](identity: str, /) -> Callable[[type[T]], type[T]]:
             reply_type, reply_ref = (
                 (None, None) if reply is None else portable.root(reply, "reply")
             )
-            actions[attr] = Action(attr, idempotent, request_type, reply_type)
+            idempotent, declared = marked
+            where = f"{identity}, action {attr!r}"
+            errors: dict[str, type[BaseModel]] = {}
+            error_refs: dict[str, dict[str, str]] = {}
+            for kind, detail in _declared_kinds(where, declared):
+                portable.where = f"{where}, error {kind!r}"
+                errors[kind], error_refs[kind] = portable.root(detail, "detail")
+            actions[attr] = Action(
+                attr,
+                idempotent,
+                request_type,
+                reply_type,
+                types.MappingProxyType(errors),
+            )
             described[attr] = {
                 "idempotent": idempotent,
                 "request": request_ref,
                 "reply": reply_ref,
+                "errors": error_refs,
             }
         description = {
             "contract": identity,
@@ -251,14 +382,31 @@ def action[F: Callable[..., Any]](function: F, /) -> F: ...
 
 
 @overload
-def action[F: Callable[..., Any]](*, idempotent: bool = False) -> Callable[[F], F]: ...
+def action[F: Callable[..., Any]](
+    *,
+    idempotent: bool = False,
+    errors: dict[str, type[BaseModel]] | None = None,
+) -> Callable[[F], F]: ...
 
 
-def action(function: object = None, /, *, idempotent: bool = False) -> Any:
+def action(
+    function: object = None,
+    /,
+    *,
+    idempotent: bool = False,
+    errors: dict[str, type[BaseModel]] | None = None,
+) -> Any:
     """Mark a method of a contract declaration as an action.
 
     Use ``@action`` or ``@action(idempotent=True)``. An action is
     non-idempotent unless declared idempotent.
+
+    ``errors`` declares the action's own error kinds, each with its detail
+    record, for example ``errors={"out_of_stock": OutOfStock}``. A kind is
+    lowercase ASCII letters, digits and underscores, starting with a letter,
+    and is not a standard kind. A detail record follows the rules of a request
+    record. ``@contract`` checks them, naming the contract, the action and the
+    kind.
     """
     if type(idempotent) is not bool:
         raise ContractDefinitionError(
@@ -270,7 +418,7 @@ def action(function: object = None, /, *, idempotent: bool = False) -> Any:
             raise ContractDefinitionError(
                 f"@action marks a function defined in a contract, not {_name(method)}"
             )
-        vars(method)[_ACTION_ATTR] = idempotent
+        vars(method)[_ACTION_ATTR] = (idempotent, errors)
         return method
 
     return mark if function is None else mark(function)
@@ -295,6 +443,67 @@ def implements[T](declaration: type[Any], /) -> Callable[[type[T]], type[T]]:
         return impl
 
     return decorate
+
+
+def _declared_kinds(where: str, errors: object) -> list[tuple[str, object]]:
+    """Check the kinds given to ``@action(errors=...)``; return them in order.
+
+    The detail records are checked by the caller, with the portable types.
+    """
+    if errors is None:
+        return []
+    if type(errors) is not dict:
+        raise ContractDefinitionError(
+            f"{where}: errors= takes a dict from each error kind to its detail "
+            f"record, not {_name(type(errors))}"
+        )
+    for kind in errors:
+        if type(kind) is not str or not _KIND.fullmatch(kind):
+            raise ContractDefinitionError(
+                f"{where}: error kind {kind!r} must be a str that starts with a "
+                "lowercase ASCII letter, followed by lowercase ASCII letters, "
+                "digits or underscores"
+            )
+        if kind in _STANDARD_KINDS:
+            raise ContractDefinitionError(
+                f"{where}: error kind {kind!r} is a standard kind, which every "
+                "action has; declare only kinds of the action's own"
+            )
+    return list(errors.items())
+
+
+def _untyped_problem(data: dict[Any, Any]) -> str | None:
+    """Say why ``data`` is not a JSON object as the json module reads one.
+
+    Walks without recursion, so that a deep value cannot exhaust the stack,
+    and refuses a value that contains itself.
+    """
+    pending: list[tuple[object, bool]] = [(data, False)]
+    open_containers: set[int] = set()
+    while pending:
+        value, leaving = pending.pop()
+        if leaving:
+            open_containers.discard(id(value))
+            continue
+        kind = type(value)
+        if kind in _JSON_SCALARS:
+            if kind is float and not math.isfinite(typing.cast(float, value)):
+                return f"{value!r} is not a JSON number"
+            continue
+        if kind is not dict and kind is not list:
+            return f"it holds a {_name(kind)}"
+        if id(value) in open_containers:
+            return "it contains itself"
+        open_containers.add(id(value))
+        pending.append((value, True))
+        if kind is list:
+            pending.extend((item, False) for item in typing.cast(list[Any], value))
+            continue
+        for key, item in typing.cast(dict[Any, Any], value).items():
+            if type(key) is not str:
+                return f"its key {key!r} is not a str"
+            pending.append((item, False))
+    return None
 
 
 def _parse_identity(identity: object) -> tuple[str, int]:

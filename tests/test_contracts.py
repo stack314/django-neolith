@@ -247,8 +247,8 @@ def test_actions_are_read_in_declaration_order() -> None:
 
     actions = Contract.of(Orders).actions
     assert list(actions) == ["place", "cancel"]
-    assert actions["place"] == Action("place", True, Ping, Pong)
-    assert actions["cancel"] == Action("cancel", False, Ping, None)
+    assert actions["place"] == Action("place", True, Ping, Pong, {})
+    assert actions["cancel"] == Action("cancel", False, Ping, None, {})
 
 
 def test_actions_are_non_idempotent_unless_declared() -> None:
@@ -1958,11 +1958,13 @@ def test_description_gives_each_action_and_its_types() -> None:
             "idempotent": True,
             "request": {"$ref": "#/$defs/Ping"},
             "reply": {"$ref": "#/$defs/Pong"},
+            "errors": {},
         },
         "cancel": {
             "idempotent": False,
             "request": {"$ref": "#/$defs/Ping"},
             "reply": None,
+            "errors": {},
         },
     }
     assert set(description["$defs"]) == {"Ping", "Pong"}

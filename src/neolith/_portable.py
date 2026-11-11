@@ -188,9 +188,9 @@ class Portable:
         return self.error(f"{self.where}: {message}")
 
     def root(
-        self, annotation: object, role: Literal["request", "reply"]
+        self, annotation: object, role: Literal["request", "reply", "detail"]
     ) -> tuple[type[BaseModel], Ref]:
-        """Admit a request or reply type; return it and its reference."""
+        """Admit a request, reply or detail type; return it and its reference."""
         if isinstance(annotation, type) and issubclass(annotation, BaseModel):
             model: type[BaseModel] = annotation
             try:
@@ -213,7 +213,7 @@ class Portable:
                     f"record {model.__name__} has a core schema shape that "
                     f"neolith does not read ({type(error).__name__}: {error})"
                 ) from error
-        empty = "" if role == "request" else ", or None for an empty reply"
+        empty = ", or None for an empty reply" if role == "reply" else ""
         raise self.fail(
             f"the {role} type must be a record (a pydantic model with named "
             f"fields){empty}, not {getattr(annotation, '__qualname__', annotation)}"

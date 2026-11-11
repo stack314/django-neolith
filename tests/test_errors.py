@@ -12,13 +12,14 @@ import json
 import pickle
 import re
 import types
+from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Protocol, TypedDict
 from uuid import UUID
 
 import pytest
-from pydantic import BaseModel, ConfigDict, RootModel
+from pydantic import AwareDatetime, BaseModel, ConfigDict, RootModel
 
 from neolith import (
     Contract,
@@ -50,8 +51,8 @@ BAD_KINDS = [
     "1st",
     "_hidden",
     "out.of_stock",
-    "café",
-    "n١",
+    "caf\u00e9",
+    "n\u0661",
     "out_of_stock\n",
 ]
 
@@ -68,7 +69,7 @@ class OutOfStock(BaseModel):
 
 
 class Expired(BaseModel):
-    at: datetime
+    at: AwareDatetime
 
 
 class Nothing(BaseModel):
@@ -284,20 +285,26 @@ def test_error_type_cannot_be_subclassed() -> None:
 
 
 @pytest.mark.parametrize(
-    "error",
+    "build",
     [
-        ContractError("conflict", "text"),
-        ContractError("out_of_stock", "text", OutOfStock(sku="A1", available=0)),
-        ContractError("added_later", "text", {"sku": "A1", "n": [1, None]}),
+        lambda: ContractError("conflict", "text"),
+        lambda: ContractError(
+            "out_of_stock", "text", OutOfStock(sku="A1", available=0)
+        ),
+        lambda: ContractError("added_later", "text", {"sku": "A1", "n": [1, None]}),
     ],
     ids=["standard", "record", "map"],
 )
 @pytest.mark.parametrize(
     "duplicate",
-    [copy.copy, copy.deepcopy, lambda error: pickle.loads(pickle.dumps(error))],
+    # Pickles a value the test built itself, never untrusted data.
+    [copy.copy, copy.deepcopy, lambda error: pickle.loads(pickle.dumps(error))],  # noqa: S301
     ids=["copy", "deepcopy", "pickle"],
 )
-def test_error_survives_copy_and_pickle(error: ContractError, duplicate: Any) -> None:
+def test_error_survives_copy_and_pickle(
+    build: Callable[[], ContractError], duplicate: Callable[[Any], Any]
+) -> None:
+    error = build()
     error.add_note("logged with trace 4bf92f")
     again = duplicate(error)
     assert type(again) is ContractError
@@ -322,18 +329,22 @@ def test_usage_errors_and_contract_errors_are_disjoint() -> None:
 
 @pytest.mark.spec("CON-29")
 def test_handling_contract_errors_does_not_swallow_a_usage_error() -> None:
-    with pytest.raises(ValueError, match="kind"):
-        try:
-            ContractError("Out Of Stock", "text", {})
-        except ContractError:  # pragma: no cover - the point of the test
-            pytest.fail("a usage error was caught as a contract error")
+    caught: Exception | None = None
+    try:
+        ContractError("Out Of Stock", "text", {})
+    except ContractError:  # pragma: no cover - the point of the test
+        pytest.fail("a usage error was caught as a contract error")
+    except ValueError as error:
+        caught = error
+    assert caught is not None
+    assert "kind" in str(caught)
 
 
 @pytest.mark.spec("CON-29")
 def test_definition_errors_are_not_contract_errors() -> None:
     with pytest.raises(ContractDefinitionError) as caught:
         contract("Not An Identity")
-    assert not isinstance(caught.value, ContractError)
+    assert type(caught.value) is ContractDefinitionError
 
 
 # Declared error kinds
@@ -524,7 +535,7 @@ def test_detail_record_shares_the_contracts_names() -> None:
 
 @pytest.mark.spec("CON-24", "CON-17")
 def test_detail_record_name_is_portable() -> None:
-    odd = type("Goneé", (BaseModel,), {"__annotations__": {"code": int}})
+    odd = type("Gone\u00e9", (BaseModel,), {"__annotations__": {"code": int}})
     with pytest.raises(ContractDefinitionError, match="must start with an ASCII"):
         _declare({"gone": odd})
 
