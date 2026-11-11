@@ -140,7 +140,7 @@ An action's *error set* is the standard kinds below, which every action has whet
 
 The provider's host and the connectors deliver errors as [ADR 0008](../docs/adr/0008-typed-contract-errors-in-both-modes.md) decides. Only hosts and transports produce `unavailable` and `timeout`.
 
-**CON-43.** A provider's host MUST deliver an error that the action produced itself, of a kind in the action's error set other than `unavailable` and `timeout`, with its kind, its message and, for a declared kind, its detail record.
+**CON-43.** A provider's host MUST deliver an error that the action produced itself, of a kind in the action's error set other than `unavailable` and `timeout`, with its kind, its message and, for a declared kind, its detail record, which passes the description check of TRN-15 as it is sent.
 
 **CON-44.** A provider's host MUST deliver as `internal` every other failure that ends an action, and a failure of the host itself. That includes an error of a kind outside the action's error set, an `unavailable` or `timeout` the action produced, an error of a declared kind without a detail record of that kind, and a detail whose value as it travels breaks CON-31.
 

@@ -241,7 +241,7 @@ class InProcess:
                     "reply is empty"
                 )
             return None
-        return codec(self._contract, action.reply).write(reply, "the reply")
+        return codec(self._contract, action.reply).send(reply, "the reply")
 
     def _deliver(
         self, action: Action, error: ContractError
@@ -255,7 +255,7 @@ class InProcess:
         record = action.errors.get(error.kind)
         if record is None or type(error.data) is not record:
             return None
-        text = codec(self._contract, record).write(error.data, "the error's detail")
+        text = codec(self._contract, record).send(error.data, "the error's detail")
         # A caller that does not know the kind holds the detail as an untyped
         # map, so its value as it travels must fit one.
         problem = untyped_problem(json.loads(text))

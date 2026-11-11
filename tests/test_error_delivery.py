@@ -171,6 +171,10 @@ _INTERNAL_CASES: dict[str, Callable[[], BaseException]] = {
     "declared kind with a broken record": lambda: ContractError(
         "out_of_stock", "none", OutOfStock.model_construct(sku=1)
     ),
+    # A boolean in an integer list would travel as 1: the send check refuses.
+    "declared kind with a value its type does not hold": lambda: ContractError(
+        "out_of_stock", "none", OutOfStock.model_construct(sku="a", left=[True])
+    ),
     # 10,002 values with the sku and the list: an untyped map holds 10,000.
     "detail beyond an untyped map": lambda: ContractError(
         "out_of_stock", "none", _many_values()
@@ -179,7 +183,7 @@ _INTERNAL_CASES: dict[str, Callable[[], BaseException]] = {
 }
 
 
-@pytest.mark.spec("CON-44", "CON-46", "CON-31", "TRN-3")
+@pytest.mark.spec("CON-44", "CON-46", "CON-31", "TRN-3", "TRN-15")
 @pytest.mark.parametrize("case", list(_INTERNAL_CASES), ids=list(_INTERNAL_CASES))
 def test_any_other_failure_reaches_the_caller_as_internal(case: str) -> None:
     _assert_internal(_call(_INTERNAL_CASES[case]))
@@ -474,7 +478,7 @@ def test_generated_details_cross_equal_and_unshared(data: st.DataObject) -> None
     raised[:] = [ContractError("failed", "it failed", detail)]
     with pytest.raises(ContractError) as caught:
         connector.send(Order(order=1))
-    sent = json.loads(codec(connector._contract, record).write(detail, "the detail"))
+    sent = json.loads(codec(connector._contract, record).send(detail, "the detail"))
     if untyped_problem(sent) is not None:
         # Only a detail an untyped map cannot hold is refused.
         assert caught.value.kind == "internal"
