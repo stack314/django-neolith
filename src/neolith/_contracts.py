@@ -421,8 +421,8 @@ class Contract:
         self._actions = types.MappingProxyType(dict(actions))
         self._description = description
         # The serializer and validator of each request, reply and detail
-        # record, captured from the build the description was written from
-        # (spec 02, Values across a call).
+        # record, built from the core schema the description was written
+        # from (spec 02, Values across a call).
         self._codecs = types.MappingProxyType(dict(codecs))
 
     @property
@@ -550,7 +550,7 @@ def contract[T](identity: str, /) -> Callable[[type[T]], type[T]]:
         def capture(record: type[BaseModel]) -> None:
             if record not in codecs:
                 try:
-                    codecs[record] = Codec(record)
+                    codecs[record] = Codec(record, *portable.built[record])
                 except TypeError as error:
                     raise portable.fail(str(error)) from error
 

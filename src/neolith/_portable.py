@@ -228,6 +228,13 @@ class Portable:
         # record's settings to every node of its fields, so a node is judged
         # together with it, not by its own keys alone.
         self.config: Mapping[str, Any] = {}
+        # Each request, reply and detail record, with the core schema the
+        # walk read for it and the config of its model node, which Pydantic
+        # also passes when it builds the record's serializer and validator
+        # (pydantic/_internal/_model_construction.py, complete_model_class).
+        self.built: dict[
+            type[BaseModel], tuple[Mapping[str, Any], Mapping[str, Any] | None]
+        ] = {}
 
     def fail(self, message: str) -> Exception:
         return self.error(f"{self.where}: {message}")
@@ -239,14 +246,17 @@ class Portable:
         if isinstance(annotation, type) and issubclass(annotation, BaseModel):
             model: type[BaseModel] = annotation
             try:
-                node = self.resolve(self.build(model), model.__name__)
+                schema = self.build(model)
+                node = self.resolve(schema, model.__name__)
                 # A record's before or wrap model_validator wraps the model
                 # node itself.
                 while node.get("type") in _VALIDATORS | _UNCHECKED_VALIDATORS:
                     self.validator(node, f"record {model.__name__}")
                     node = self.resolve(node["schema"], model.__name__)
                 if node.get("type") == "model" and node.get("cls") is model:
-                    return model, self.record(node, model.__name__)
+                    reference = self.record(node, model.__name__)
+                    self.built[model] = (schema, node.get("config"))
+                    return model, reference
             except (KeyError, AttributeError, TypeError) as error:
                 # Only this walk's own lookups raise these; an author's code
                 # runs inside round_trip, which names its errors itself.
@@ -363,6 +373,12 @@ class Portable:
         """Admit a record and describe it once under ``$defs``."""
         cls = node["cls"]
         subject = f"record {path}"
+        hook = _class_hook(cls)
+        if hook is not None:
+            raise self.fail(
+                f"{subject} {hook}, which can change what is read from a value "
+                "of it or built as one; a record keeps Pydantic's own"
+            )
         admitted = {"cls", "schema", "config", "custom_init", "root_model"}
         if "post_init" in node and not (
             type(node["post_init"]) is str and node["post_init"] == "model_post_init"
@@ -461,6 +477,18 @@ class Portable:
             f"field {path}",
         )
         description = self.describe(node["schema"], path, ())
+        if issubclass(type(node.get("default")), BaseModel) and _hashable(
+            node["default"]
+        ):
+            # pydantic-core copies a default only when it cannot be hashed
+            # (src/validators/with_default.rs), so it hands a hashable record,
+            # such as a frozen one, to every value read without the field as
+            # the same object.
+            raise self.fail(
+                f"field {path} has a hashable record as its default, which "
+                "every value read without the field would share; give it a "
+                "default_factory"
+            )
         if "default_factory" in node:
             if node.get("default_factory_takes_data"):
                 raise self.fail(
@@ -1104,6 +1132,54 @@ def _unchanged(held: object, written: object) -> bool:
     if type(written) is int and type(held) is float:
         return held == written
     return type(held) is type(written) and held == written
+
+
+# What pydantic-core reads from a record instance, or calls to build one, that a
+# record class could otherwise replace: attribute lookup, instance creation,
+# and the instance slots BaseModel declares.
+_RECORD_HOOKS = frozenset(
+    {
+        "__getattribute__",
+        "__getattr__",
+        "__new__",
+        "__dict__",
+        "__class__",
+        "__pydantic_extra__",
+        "__pydantic_fields_set__",
+        "__pydantic_private__",
+    }
+)
+
+
+def _class_hook(cls: type[Any]) -> str | None:
+    """Say how a record class replaces what Pydantic reads, or None.
+
+    Every class in its method resolution order but ``BaseModel`` and
+    ``object`` is read, so a mixin listed after ``BaseModel`` counts too. Each
+    namespace is read through ``type``'s own descriptors, as in
+    ``_from_classes``, so a metaclass cannot run code here.
+    """
+    if type(cls) is not type(BaseModel):
+        return f"has the metaclass {type(cls).__qualname__}, not Pydantic's"
+    for klass in type.__dict__["__mro__"].__get__(cls):
+        if klass is BaseModel or klass is object:
+            continue
+        for key in type.__dict__["__dict__"].__get__(klass):
+            if type(key) is not str:
+                return f"has a namespace key that is not text in {klass.__qualname__}"
+            if key in _RECORD_HOOKS:
+                where = "" if klass is cls else f" in {klass.__qualname__}"
+                return f"defines {key}{where}"
+    return None
+
+
+def _hashable(value: object) -> bool:
+    """Whether ``hash`` takes a value, as pydantic-core asks of a default."""
+    try:
+        hash(value)
+    except Exception:  # an author's __hash__ may raise anything
+        return False
+    return True
 
 
 def _from_classes(cls: type[Any], name: str) -> object:
