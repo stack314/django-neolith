@@ -79,7 +79,10 @@ def description_checker(defs: Mapping[str, Any], name: str) -> SchemaValidator:
         return SchemaValidator(
             core_schema.definitions_schema(
                 core_schema.definition_reference_schema(name), list(compiled.values())
-            )
+            ),
+            # A value refused at send time may be a secret, so an error of
+            # this check names the place and the rule, never the value.
+            {"hide_input_in_errors": True},
         )
     except Exception as error:
         # Fail closed: whatever the compiler or pydantic-core could not read
@@ -287,7 +290,7 @@ def _existing_day(text: str) -> str:
         _TIMES[1].fromisoformat(text)
     except ValueError:
         raise PydanticCustomError(
-            "day_exists", "{text} names a day that does not exist", {"text": text}
+            "day_exists", "the text names a day that does not exist"
         ) from None
     return text
 
@@ -299,12 +302,10 @@ def _instant(text: str) -> str:
         _TIMES[0].fromisoformat(text).astimezone(UTC)
     except OverflowError:
         raise PydanticCustomError(
-            "instant_in_range",
-            "{text} is outside years 0001 to 9999 in UTC",
-            {"text": text},
+            "instant_in_range", "the text is outside years 0001 to 9999 in UTC"
         ) from None
     except ValueError:
         raise PydanticCustomError(
-            "day_exists", "{text} names a day that does not exist", {"text": text}
+            "day_exists", "the text names a day that does not exist"
         ) from None
     return text

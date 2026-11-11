@@ -25,13 +25,13 @@ core schema.
 import math
 import typing
 from collections.abc import Iterator, Mapping
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
 from enum import Enum
 from typing import Any, final
 
 from pydantic import BaseModel
-from pydantic_core import SchemaSerializer, SchemaValidator
+from pydantic_core import SchemaSerializer, SchemaValidator, ValidationError
 
 from neolith._checker import description_checker
 from neolith._forms import FORM_FOR_KIND
@@ -90,8 +90,9 @@ class Codec[R: BaseModel]:
         1. the value is exactly of the record's type;
         2. the serializer reads it, once, into a copy of the sender's own,
            where a ``-0`` and a timestamp offset with seconds are converted
-           (CON-35, CON-36) and a number that is not finite is refused, and
-           then writes the copy;
+           (CON-35, CON-36), each timestamp's offset is asked for once and
+           fixed, and a number that is not finite is refused, and then
+           writes the copy;
         3. the text passes the description check;
         4. the validator reads the text back, and each part it reads is the
            part of the copy it was written from: equal, and of the same kind
@@ -100,7 +101,9 @@ class Codec[R: BaseModel]:
         A value of another type is a ``TypeError``. Every other failure is a
         ``ValueError``, whose cause is the exception behind it where there is
         one. What is sent is the value as it was when the serializer read it;
-        a change made to it meanwhile does not reach the text.
+        a change made to it meanwhile does not reach the text. A message
+        names the place and the types of what is refused and never shows a
+        value, which may be a secret.
         """
         if type(value) is not self.record:
             raise TypeError(
@@ -127,9 +130,16 @@ class Codec[R: BaseModel]:
         try:
             self._checker.validate_json(text)
         except Exception as error:
+            # The serializer wrote the text, so text that is not JSON to the
+            # reader is past a limit of the reader's, which the description
+            # does not state.
+            reason = (
+                "is nested too deeply to be read as JSON text"
+                if _is_unread_json(error)
+                else f"does not fit the contract's description of {name}"
+            )
             raise ValueError(
-                f"{subject} does not fit the contract's description of {name} "
-                f"({type(error).__name__}; see the cause)"
+                f"{subject} {reason} ({type(error).__name__}; see the cause)"
             ) from error
         try:
             received = self._validator.validate_json(text)
@@ -207,13 +217,16 @@ _TIMES = (datetime, date)
 def _converted(dumped: object) -> tuple[object, str | None]:
     """Make a value dumped in Python mode the sender's copy, converted.
 
-    Returns the copy, with each dict as ``_Fields``, and what it holds that
-    cannot be sent, if anything. A number's ``-0`` becomes ``0`` (CON-35),
-    and a timestamp whose offset is not a whole number of minutes becomes the
-    same instant in UTC (CON-36). Walks without recursion, so a deep value
-    cannot exhaust the stack.
+    Returns the copy and what it holds that cannot be sent, if anything. In
+    the copy each dict is a ``_Fields``, and each date and timestamp is of
+    exactly its class, with a fixed offset: the offset its ``tzinfo`` gave
+    when asked here, once, or UTC where that offset is not a whole number of
+    minutes (CON-36). So nothing the copy holds runs a caller's code later,
+    and a zone with two offsets has given one. A number's ``-0`` becomes
+    ``0`` (CON-35). Walks without recursion, so a deep value cannot exhaust
+    the stack.
     """
-    timestamp = _TIMES[0]
+    timestamp, day = _TIMES
     root: list[object] = [dumped]
     pending: list[tuple[Any, Any]] = [(root, 0)]
     while pending:
@@ -235,23 +248,37 @@ def _converted(dumped: object) -> tuple[object, str | None]:
             # Read through datetime's own methods, so that a subclass, which
             # Pydantic keeps as it is given, runs no code of its own here.
             offset = timestamp.utcoffset(item)
-            if offset is not None and offset % _MINUTE:
-                local = timestamp.combine(timestamp.date(item), timestamp.time(item))
+            local = timestamp.combine(
+                timestamp.date(item), timestamp.time(item).replace(fold=0)
+            )
+            if offset is None:
+                holder[at] = local
+            elif offset % _MINUTE:
                 try:
                     holder[at] = (local - offset).replace(tzinfo=UTC)
                 except OverflowError:
-                    return root[0], (
-                        f"{shown(item)}, a timestamp outside years 0001 to 9999 in UTC"
-                    )
+                    return root[0], "a timestamp outside years 0001 to 9999 in UTC"
+            else:
+                holder[at] = local.replace(tzinfo=timezone(offset))
+        elif isinstance(item, day) and kind is not day:
+            holder[at] = day.fromordinal(day.toordinal(item))
     return root[0], None
+
+
+def _is_unread_json(error: Exception) -> bool:
+    """Whether a check refused its text as not being JSON at all."""
+    return isinstance(error, ValidationError) and any(
+        problem["type"] == "json_invalid"
+        for problem in error.errors(include_url=False, include_input=False)
+    )
 
 
 # Read from the instance, never through its class's attribute lookup.
 _FIELDS_OF = type.__dict__["__dict__"].__get__(BaseModel)["__dict__"]
-# Kinds held by exact type and equality. A date and a timestamp are not among
-# them, since Pydantic keeps a value of a subclass as it is given, nor is a
-# decimal, whose digits equality does not compare.
-_EXACT = frozenset({str, int, bool, bytes, timedelta})
+# Kinds held by exact type and equality. A timestamp is not among them, since
+# equality is not a comparison of instants, nor is a decimal, whose digits
+# equality does not compare.
+_EXACT = frozenset({str, int, bool, bytes, timedelta, date})
 # A decimal as its own writer spells it: a positive exponent written out and
 # a zero without its sign (CON-37).
 _AS_WRITTEN = FORM_FOR_KIND["decimal"].read
@@ -302,8 +329,8 @@ def _difference(sent: object, received: object, name: str) -> str | None:
                 # Before any key is looked up, so that no key's own code runs.
                 if type(key) is not str:
                     return (
-                        f"holds the key {shown(key)} ({type(key).__qualname__}) at "
-                        f"{_path(trail)}, which reads back as a str"
+                        f"holds a key of type {type(key).__qualname__} at "
+                        f"{_path(trail)}, which reads back as one of type str"
                     )
             if len(held) != len(entries) or not all(key in held for key in entries):
                 return _reshaped(mine, theirs, trail)
@@ -314,41 +341,37 @@ def _difference(sent: object, received: object, name: str) -> str | None:
         elif _same(mine, theirs):
             continue
         else:
-            return (
-                f"holds {shown(mine)} ({type(mine).__qualname__}) at {_path(trail)}, "
-                f"which reads back as {shown(theirs)} ({kind.__qualname__})"
-            )
+            return _reshaped(mine, theirs, trail)
         pending.extend(reversed(parts))
     return None
 
 
 def _same(mine: object, theirs: object) -> bool:
-    """Whether a part read back is the part the sender holds.
+    """Whether a part read back is the part the sender's copy holds.
 
     Each scalar is held by exact type and equality, so that no code of a
-    subclass runs here and a boolean never stands for an integer. Three kinds
+    subclass runs here and a boolean never stands for an integer. Two kinds
     are wider. An integer is held for a number when the double read back
-    equals it exactly. A date or a timestamp may be of a subclass, compared
-    through the base class's own methods, since Pydantic keeps one as it is
-    given; a timestamp is an instant, so its offset is not compared (spec
-    01). An enum member is the very member. One kind is narrower: a decimal
-    keeps its digits, so ``1.50`` is not held where ``1.5`` is read.
+    equals it exactly. A timestamp is an instant, so its offset is not
+    compared (spec 01); the instants are compared by subtraction, since
+    ``==`` is False across zones for a time that comes twice in one of them
+    (PEP 495), which the reader's own validators may hand back. An enum
+    member is the very member. One kind is narrower: a decimal keeps its
+    digits, so ``1.50`` is not held where ``1.5`` is read.
     """
     kind = type(theirs)
-    timestamp, day = _TIMES
+    timestamp = _TIMES[0]
     if theirs is None or isinstance(theirs, Enum):
         return mine is theirs
     if kind is float:
         return type(mine) in (float, int) and mine == theirs
     if kind is timestamp:
-        moment = typing.cast("datetime", theirs)
-        return isinstance(mine, timestamp) and timestamp.__eq__(moment, mine) is True
-    if kind is day:
-        # A timestamp is a date too, but never equal to one.
-        return (
-            isinstance(mine, day)
-            and day.__eq__(typing.cast("date", theirs), mine) is True
-        )
+        if type(mine) is not timestamp:
+            return False
+        read = typing.cast("datetime", theirs)
+        if (mine.utcoffset() is None) is not (read.utcoffset() is None):
+            return False
+        return not mine - read
     if kind is Decimal:
         digits = typing.cast(Decimal, theirs).as_tuple()
         return type(mine) is Decimal and _AS_WRITTEN(mine).as_tuple() == digits
@@ -356,7 +379,18 @@ def _same(mine: object, theirs: object) -> bool:
 
 
 def _reshaped(mine: object, theirs: object, trail: object) -> str:
-    return f"holds {shown(mine)} at {_path(trail)}, which reads back as {shown(theirs)}"
+    """Say that a part differs, by its place and the two types, without
+    showing either value."""
+    held, read = _type_name(mine), _type_name(theirs)
+    other = f"one of type {read}" if held != read else f"another value of type {read}"
+    return (
+        f"holds a value of type {held} at {_path(trail)}, which reads back as {other}"
+    )
+
+
+def _type_name(value: object) -> str:
+    kind = type(value)
+    return "dict" if kind is _Fields else kind.__qualname__
 
 
 def _path(trail: object) -> str:
