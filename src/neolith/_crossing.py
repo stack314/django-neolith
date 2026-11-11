@@ -25,7 +25,7 @@ core schema.
 import math
 import typing
 from collections.abc import Iterator, Mapping
-from datetime import UTC, date, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from enum import Enum
 from typing import Any, final
@@ -33,7 +33,7 @@ from typing import Any, final
 from pydantic import BaseModel
 from pydantic_core import SchemaSerializer, SchemaValidator, ValidationError
 
-from neolith._checker import description_checker
+from neolith._checker import TIMES, description_checker
 from neolith._forms import FORM_FOR_KIND
 from neolith._portable import shown
 
@@ -47,7 +47,7 @@ __all__ = ["Codec", "check_request", "codec"]
 class Codec[R: BaseModel]:
     """The serializer, validator and description check of one record."""
 
-    __slots__ = ("_checker", "_serializer", "_validator", "record")
+    __slots__ = ("_checker", "_hides", "_serializer", "_validator", "record")
 
     def __init__(
         self,
@@ -80,6 +80,7 @@ class Codec[R: BaseModel]:
         self._serializer = serializer
         self._validator = validator
         self._checker = description_checker(defs, record.__name__)
+        self._hides = bool(config and config.get("hide_input_in_errors"))
 
     def send(self, value: object, subject: str) -> bytes:
         """Check a value for sending and return its JSON text.
@@ -101,9 +102,17 @@ class Codec[R: BaseModel]:
         A value of another type is a ``TypeError``. Every other failure is a
         ``ValueError``, whose cause is the exception behind it where there is
         one. What is sent is the value as it was when the serializer read it;
-        a change made to it meanwhile does not reach the text. A message
-        names the place and the types of what is refused and never shows a
-        value, which may be a secret.
+        a change made to it meanwhile does not reach the text.
+
+        A value held at send time may be a secret, and an exception's text is
+        logged. A message written here names the place and the types of what
+        is refused and shows no value, apart from a number that is not
+        finite. It names a place in a map by its key, and keeps the exception
+        behind it as its cause, as Pydantic's own errors do, unless the
+        record's config hides inputs in errors (``hide_input_in_errors``).
+        Then a place in a map is named by its position, and no cause is
+        kept, since the serializer's error shows the value whatever the
+        config, and any other may name a key.
         """
         if type(value) is not self.record:
             raise TypeError(
@@ -111,6 +120,7 @@ class Codec[R: BaseModel]:
             )
         name = self.record.__name__
         problem: str | None = None
+        failed: Exception | None = None
         text = b""
         try:
             copy = self._serializer.to_python(value, warnings="error")
@@ -118,10 +128,11 @@ class Codec[R: BaseModel]:
             if problem is None:
                 text = self._serializer.to_json(copy, warnings="error")
         except Exception as error:
-            raise ValueError(
-                f"{subject} cannot be written as JSON by its type, {name} "
-                f"({type(error).__name__}; see the cause)"
-            ) from error
+            failed = error
+        if failed is not None:
+            raise self._refusal(
+                f"{subject} cannot be written as JSON by its type, {name}", failed
+            )
         if problem is not None:
             raise ValueError(
                 f"{subject} cannot be written as JSON by its type, {name}: it "
@@ -130,34 +141,45 @@ class Codec[R: BaseModel]:
         try:
             self._checker.validate_json(text)
         except Exception as error:
+            failed = error
+        if failed is not None:
             # The serializer wrote the text, so text that is not JSON to the
             # reader is past a limit of the reader's, which the description
             # does not state.
             reason = (
-                "is nested too deeply to be read as JSON text"
-                if _is_unread_json(error)
-                else f"does not fit the contract's description of {name}"
+                _reader_limit(failed)
+                or f"does not fit the contract's description of {name}"
             )
-            raise ValueError(
-                f"{subject} {reason} ({type(error).__name__}; see the cause)"
-            ) from error
+            raise self._refusal(f"{subject} {reason}", failed)
         try:
             received = self._validator.validate_json(text)
         except Exception as error:
-            raise ValueError(
-                f"{subject} does not read back as a {name} "
-                f"({type(error).__name__}; see the cause)"
-            ) from error
+            failed = error
+        if failed is not None:
+            raise self._refusal(f"{subject} does not read back as a {name}", failed)
+        changed: str | None = None
         try:
-            changed = _difference(copy, received, name)
+            changed = _difference(copy, received, name, by_position=self._hides)
         except Exception as error:
-            raise ValueError(
-                f"{subject} cannot be compared with what it reads back as "
-                f"({type(error).__name__}; see the cause)"
-            ) from error
+            failed = error
+        if failed is not None:
+            raise self._refusal(
+                f"{subject} cannot be compared with what it reads back as", failed
+            )
         if changed is not None:
             raise ValueError(f"{subject} {changed}, so it is not sent")
         return text
+
+    def _refusal(self, said: str, behind: Exception) -> ValueError:
+        """The refusal to raise for an exception, outside its handler, so that
+        the exception is kept only as the cause, and not at all for a record
+        that hides its inputs."""
+        kind = type(behind).__name__
+        if self._hides:
+            return ValueError(f"{said} ({kind})")
+        refusal = ValueError(f"{said} ({kind}; see the cause)")
+        refusal.__cause__ = behind
+        return refusal
 
     def read(self, text: bytes) -> R:
         """Read JSON text into a new value of the record, ignoring unknown fields.
@@ -207,11 +229,6 @@ class _Fields(dict[Any, Any]):
 
 
 _MINUTE = timedelta(minutes=1)
-# The classes of a timestamp and a date, held in a tuple. A tool that freezes
-# time for a test, as freezegun does, rebinds every module-level name bound to
-# ``datetime`` or ``date``, in this module too, to a fake of its own, so the
-# code below never reads those names while it runs.
-_TIMES = (datetime, date)
 
 
 def _converted(dumped: object) -> tuple[object, str | None]:
@@ -221,12 +238,15 @@ def _converted(dumped: object) -> tuple[object, str | None]:
     the copy each dict is a ``_Fields``, and each date and timestamp is of
     exactly its class, with a fixed offset: the offset its ``tzinfo`` gave
     when asked here, once, or UTC where that offset is not a whole number of
-    minutes (CON-36). So nothing the copy holds runs a caller's code later,
-    and a zone with two offsets has given one. A number's ``-0`` becomes
-    ``0`` (CON-35). Walks without recursion, so a deep value cannot exhaust
-    the stack.
+    minutes (CON-36). So no date or timestamp in the copy runs a caller's
+    code later, and a zone with two offsets has given one. The one thing in
+    the copy that still can is a map key that is not exactly a ``str``: its
+    own ``__hash__`` runs when the copy is walked and written, and the
+    comparison then refuses it, whatever that code did. A number's ``-0``
+    becomes ``0`` (CON-35). Walks without recursion, so a deep value cannot
+    exhaust the stack.
     """
-    timestamp, day = _TIMES
+    timestamp, day = TIMES
     root: list[object] = [dumped]
     pending: list[tuple[Any, Any]] = [(root, 0)]
     while pending:
@@ -265,12 +285,24 @@ def _converted(dumped: object) -> tuple[object, str | None]:
     return root[0], None
 
 
-def _is_unread_json(error: Exception) -> bool:
-    """Whether a check refused its text as not being JSON at all."""
-    return isinstance(error, ValidationError) and any(
-        problem["type"] == "json_invalid"
+def _reader_limit(error: Exception) -> str | None:
+    """Which limit of the JSON reader a text is past, if a check refused it
+    as not being JSON at all. pydantic-core's reader (jiter) names its limits
+    only in its messages: on depth, and on the digits of an integer."""
+    if not isinstance(error, ValidationError):
+        return None
+    said = [
+        str(problem["msg"])
         for problem in error.errors(include_url=False, include_input=False)
-    )
+        if problem["type"] == "json_invalid"
+    ]
+    if not said:
+        return None
+    if any("recursion limit" in message for message in said):
+        return "is nested too deeply to be read as JSON text"
+    if any("number out of range" in message for message in said):
+        return "holds a number too long to be read as JSON text"
+    return "is written as JSON text that its reader refuses"
 
 
 # Read from the instance, never through its class's attribute lookup.
@@ -278,13 +310,15 @@ _FIELDS_OF = type.__dict__["__dict__"].__get__(BaseModel)["__dict__"]
 # Kinds held by exact type and equality. A timestamp is not among them, since
 # equality is not a comparison of instants, nor is a decimal, whose digits
 # equality does not compare.
-_EXACT = frozenset({str, int, bool, bytes, timedelta, date})
+_EXACT = frozenset({str, int, bool, bytes, timedelta, TIMES[1]})
 # A decimal as its own writer spells it: a positive exponent written out and
 # a zero without its sign (CON-37).
 _AS_WRITTEN = FORM_FOR_KIND["decimal"].read
 
 
-def _difference(sent: object, received: object, name: str) -> str | None:
+def _difference(
+    sent: object, received: object, name: str, *, by_position: bool = False
+) -> str | None:
     """Say how the value read back differs from the sender's copy, or None.
 
     ``sent`` is the copy that was written, where each record and map is a
@@ -292,8 +326,10 @@ def _difference(sent: object, received: object, name: str) -> str | None:
     text. Each part must be equal and of the same kind (see ``_same``). A
     record must hold every field that was read, so that a default the reader
     fills in never stands for a value the sender lacks, and a map the same
-    keys, each exactly a ``str``. Walks without recursion, in the order of
-    the text.
+    keys, each exactly a ``str``. A place in a map is named by its key, or
+    with ``by_position`` by where the entry comes in the text, counted from
+    0, so that no key is shown. Walks without recursion, in the order of the
+    text.
     """
     pending: list[tuple[object, object, object]] = [(sent, received, (None, name))]
     while pending:
@@ -335,8 +371,12 @@ def _difference(sent: object, received: object, name: str) -> str | None:
             if len(held) != len(entries) or not all(key in held for key in entries):
                 return _reshaped(mine, theirs, trail)
             parts = [
-                (held[key], back, (trail, f"[{key!r}]"))
-                for key, back in entries.items()
+                (
+                    held[key],
+                    back,
+                    (trail, f"[entry {at}]" if by_position else f"[{key!r}]"),
+                )
+                for at, (key, back) in enumerate(entries.items())
             ]
         elif _same(mine, theirs):
             continue
@@ -360,7 +400,7 @@ def _same(mine: object, theirs: object) -> bool:
     digits, so ``1.50`` is not held where ``1.5`` is read.
     """
     kind = type(theirs)
-    timestamp = _TIMES[0]
+    timestamp = TIMES[0]
     if theirs is None or isinstance(theirs, Enum):
         return mine is theirs
     if kind is float:

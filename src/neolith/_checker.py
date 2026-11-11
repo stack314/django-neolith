@@ -52,9 +52,20 @@ _PATTERNS = frozenset(
 )
 _REFERENCE = "#/$defs/"
 _NULL = {"type": "null"}
-# The classes of a timestamp and a date, held in a tuple: a tool that freezes
-# time for a test rebinds a module's own names for them (see neolith._crossing).
-_TIMES = (datetime, date)
+
+
+def _real(named: type) -> type:
+    """The class of the datetime module that a name for it leads to."""
+    return next(kind for kind in named.__mro__ if kind.__module__ == "datetime")
+
+
+# The classes of a timestamp and a date. A tool that freezes time for a test,
+# as freezegun does, binds every module-level name for ``datetime`` or
+# ``date``, in every loaded module, to a fake of its own that subclasses the
+# real class, and a module first imported meanwhile gets the fakes by those
+# names. So the real classes are found once, through whatever the names lead
+# to, and no code here reads those names while it runs.
+TIMES: tuple[type[datetime], type[date]] = (_real(datetime), _real(date))
 
 
 def description_checker(defs: Mapping[str, Any], name: str) -> SchemaValidator:
@@ -287,7 +298,7 @@ def _double(rest: dict[str, Any], keyword: str) -> float | None:
 def _existing_day(text: str) -> str:
     """A date whose day exists (CON-40); its pattern has fixed its form."""
     try:
-        _TIMES[1].fromisoformat(text)
+        TIMES[1].fromisoformat(text)
     except ValueError:
         raise PydanticCustomError(
             "day_exists", "the text names a day that does not exist"
@@ -299,7 +310,7 @@ def _instant(text: str) -> str:
     """A timestamp whose day exists, and whose instant falls in years 0001 to
     9999 in UTC (CON-40); its pattern has fixed its form."""
     try:
-        _TIMES[0].fromisoformat(text).astimezone(UTC)
+        TIMES[0].fromisoformat(text).astimezone(UTC)
     except OverflowError:
         raise PydanticCustomError(
             "instant_in_range", "the text is outside years 0001 to 9999 in UTC"
