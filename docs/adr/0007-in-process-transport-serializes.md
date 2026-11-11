@@ -21,19 +21,24 @@ Option 3. Values cross as JSON text, in-process too.
 1. **Sending.** The sender first checks that the value is an instance of exactly the declared type. The check is explicit, because the serializer does not refuse look-alikes: at the top level, pydantic-core serializes any object with the right attributes (`SerCheck::None`, `src/serializers/type_serializers/model.rs`). The sender then dumps the value to JSON text with the declared type's schema-built serializer (`__pydantic_serializer__`, with warnings as errors), never with a record's overridable methods such as `model_dump_json`. Values that the JSON dump would lose or change are refused before the dump, under the wire encodings of [0019](0019-wire-encodings-of-the-portable-forms.md): a non-finite number, a timestamp whose offset has seconds, a string outside its pattern.
 2. **The check.** Each value is checked against the contract's published description (spec 01, CON-16) by a strict checker derived from that description, with the patterns and ranges of 0019. The checker adds no runtime dependency.
 3. **Receiving.** The receiver ignores unknown fields (CON-6, CON-7) and runs the description check, then the declared type's schema-built validator (`__pydantic_validator__`). Callers and implementations get fresh contract-typed objects, never shared references. In-process the description check runs once per value, on the sending side: the receiver gets the very JSON text that passed it, and still ignores unknown fields and runs the validator.
-4. **Failures, in order.** The caller's side runs, in both modes:
-   1. a call with no context is a usage error ([0008](0008-typed-contract-errors-in-both-modes.md) Decision 6);
-   2. a request that is not an instance of exactly the declared type, that the serializer refuses, or that fails the check is a usage error too, not a `ContractError`: it is a bug in the calling code;
-   3. a remaining budget of zero or less fails with `timeout`;
-   4. the call is sent.
+4. **Order of checks.** On the caller's side, in both modes:
 
-   The provider's side runs:
-   1. authentication of the calling app and the principal (`unauthenticated`, `permission_denied`, [0010](0010-pluggable-principal-resolution.md));
-   2. the deadline (`timeout`);
-   3. the receive check (`invalid_argument`);
-   4. dispatch.
+   1. The call context must be present; a call without one is a usage error.
+   2. The request is checked: exact type, serializer and description. A failure is a usage error.
+   3. The idempotency key is derived, and the parent's occurrence count goes up by one.
+   4. A remaining budget that rounds down to 0 ms fails with `timeout`.
+   5. The call is sent.
 
-   A neolith caller gets the same results in both modes, because its own checks run first. `invalid_argument` from the receive check reaches only a caller whose own checks did not run, such as a client that is not neolith. A reply or an error detail that fails the check is `internal` (0008 Decisions 2 and 3), apart from the detail of a kind the caller does not know, which arrives untyped (0008 Decision 5).
+   A call counts as made once it passes steps 1 and 2, whatever the deadline does next. On the provider's side:
+
+   1. The calling app and the principal are authenticated (`unauthenticated`, `permission_denied`).
+   2. The deadline is checked (`timeout`).
+   3. The request gets the receive check (`invalid_argument`).
+   4. The call is dispatched.
+
+   A connector retries only an idempotent action, only on `unavailable`, and only within the call's one deadline, as in gRPC's retry design (A6). It never retries or falls back on `timeout`, whose outcome is unknown.
+
+   A neolith caller gets the same results in both modes, because its own checks run first. `invalid_argument` from the receive check reaches only a caller whose own checks did not run, such as a client that is not neolith. A reply or an error detail that fails the check is `internal` ([0008](0008-typed-contract-errors-in-both-modes.md) Decisions 2 and 3), apart from the detail of a kind the caller does not know, which arrives untyped (0008 Decision 5).
 
 Follows principles 5 (*same semantics over same mechanics*) and 8 (*one test suite over many code paths*).
 
@@ -54,4 +59,5 @@ Follows principles 5 (*same semantics over same mechanics*) and 8 (*one test sui
 - grpchan [`inprocgrpc`](https://pkg.go.dev/github.com/fullstorydev/grpchan/inprocgrpc): in-process gRPC copies messages so client and server never share them.
 - Temporal [sdk-java#3124](https://github.com/temporalio/sdk-java/issues/3124): local activity arguments are serialized even in the same process.
 - Akka [serialization, verification](https://doc.akka.io/libraries/akka-core/current/serialization.html): serializing local messages, for tests only.
+- [gRPC A6, client retries](https://github.com/grpc/proposal/blob/master/A6-client-retries.md): retries within the call's one deadline.
 - [python-jsonschema, validating formats](https://python-jsonschema.readthedocs.io/en/stable/validate/#validating-formats): `FormatChecker` and the `format-nongpl` extra.
