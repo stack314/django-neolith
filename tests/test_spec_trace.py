@@ -713,6 +713,19 @@ def test_unreadable_settings_are_a_problem(repo: Repo) -> None:
     assert only.startswith("tests/spec_trace.toml: ")
 
 
+def test_main_expands_the_report_path(
+    repo: Repo, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # As the plugin does: a shell does not expand "~" after "=".
+    root = repo("**CON-1.** It MUST work.\n")
+    write_report(root, {"tests/t.py::test_a": (["CON-1"], "passed")})
+    monkeypatch.setenv("HOME", str(root))
+    monkeypatch.setenv("REPORTS", str(root))
+    for value in ["~/spec-report.json", "$REPORTS/spec-report.json"]:
+        assert spec_trace.main(["--root", str(root), f"--report={value}"]) == 0
+        assert "1 covered by passing tests" in capsys.readouterr().out
+
+
 def test_main_reports_and_sets_the_exit_code(
     repo: Repo, capsys: pytest.CaptureFixture[str]
 ) -> None:

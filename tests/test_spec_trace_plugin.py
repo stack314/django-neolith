@@ -216,6 +216,16 @@ def test_a_path_that_cannot_be_written_is_refused_before_the_run(
     result.stdout.no_fnmatch_line("*passed*")
 
 
+@pytest.mark.parametrize("option", ["--help", "--markers"])
+def test_a_command_without_a_session_leaves_the_report_alone(
+    pytester: pytest.Pytester, option: str
+) -> None:
+    (pytester.path / "report.json").write_text("earlier")
+    result = pytester.runpytest(*ARGS, "--spec-report=report.json", option)
+    assert result.ret == pytest.ExitCode.OK
+    assert (pytester.path / "report.json").read_text() == "earlier"
+
+
 def test_a_run_that_dies_leaves_no_earlier_report(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -264,8 +274,12 @@ def test_the_option_works_when_the_report_already_exists(
     )
     report = (tmp_path if outside else project) / "spec-report.json"
     args = [arg.format(report if outside else report.name) for arg in option]
-    # Only this process's pytest on PYTHONPATH, so the project is not.
-    env = {**os.environ, "PYTHONPATH": str(Path(pytest.__file__).parents[1])}
+    # Only this process's pytest on PYTHONPATH, so the project is not, and no
+    # options from the environment, as pytester does.
+    env = {
+        name: value for name, value in os.environ.items() if name != "PYTEST_ADDOPTS"
+    }
+    env["PYTHONPATH"] = str(Path(pytest.__file__).parents[1])
     for _ in range(2):
         result = subprocess.run(  # noqa: S603
             [sys.executable, "-P", "-m", "pytest", *args],

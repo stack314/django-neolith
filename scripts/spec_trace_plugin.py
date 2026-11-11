@@ -13,9 +13,10 @@ configuration file the same way, before it loads any plugin, so write
 ``--spec-report=PATH``. With a space, an existing report outside the project is
 still taken for a path. As for ``--junitxml``, the plugin expands ``~`` and
 environment variables in PATH itself, since a shell does not expand ``~``
-after ``=``. It empties the report before the first test, so a PATH that cannot
-be written is refused at once, and a run that dies before the end leaves no
-earlier report behind.
+after ``=``; ``scripts/spec_trace.py --report`` does the same. When the session
+starts, it empties the report, so a PATH that cannot be written is refused
+before any test runs, and a run that dies before the end leaves no earlier
+report behind. ``--help`` and ``--markers`` start no session and leave it alone.
 
 Outcomes:
 
@@ -54,17 +55,18 @@ def pytest_configure(config: pytest.Config) -> None:
     config.pluginmanager.register(_Recorder(config), "spec-trace-recorder")
 
 
-def _report_path(value: str | None) -> Path | None:
-    """The report's absolute path, emptied; a usage error if it can't be written."""
-    if value is None:
-        return None
+def _emptied(value: str) -> Path:
+    """The report's absolute path, emptied; a usage error if it can't be written.
+
+    ``..`` is left for the system to resolve, as ``spec_trace.py`` leaves it.
+    """
     expanded = os.path.expanduser(os.path.expandvars(value))
     if not expanded or expanded.endswith(("/", os.sep)):
         raise pytest.UsageError(f"--spec-report needs a file path, not {value!r}")
-    path = Path(os.path.abspath(expanded))
+    path = Path(expanded).absolute()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("")
+        path.write_text("", encoding="utf-8")
     except OSError as error:
         raise pytest.UsageError(
             f"--spec-report cannot write {path}: {error.strerror or error}"
@@ -74,8 +76,13 @@ def _report_path(value: str | None) -> Path | None:
 
 class _Recorder:
     def __init__(self, config: pytest.Config) -> None:
-        self.path = _report_path(config.getoption("--spec-report"))
+        self.value: str | None = config.getoption("--spec-report")
+        self.path: Path | None = None
         self.tests: dict[str, dict[str, object]] = {}
+
+    def pytest_sessionstart(self, session: pytest.Session) -> None:
+        if self.value is not None:
+            self.path = _emptied(self.value)
 
     def record(self, item: pytest.Item) -> None:
         """Note the IDs an item cites, with the outcome "not run" for now."""
@@ -126,4 +133,6 @@ class _Recorder:
         if self.path is None:
             return
         report = {"format": FORMAT, "tests": self.tests}
-        self.path.write_text(json.dumps(report, indent=1, sort_keys=True) + "\n")
+        self.path.write_text(
+            json.dumps(report, indent=1, sort_keys=True) + "\n", encoding="utf-8"
+        )

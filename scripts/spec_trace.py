@@ -62,6 +62,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import tomllib
@@ -601,11 +602,16 @@ def render(trace: Trace) -> str:
     return "\n".join(lines)
 
 
+def _expanded(value: str) -> Path:
+    """A path with ``~`` and environment variables expanded, as the plugin does."""
+    return Path(os.path.expanduser(os.path.expandvars(value)))
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
         "--report",
-        type=Path,
+        type=_expanded,
         metavar="PATH",
         help="the report written by pytest --spec-report",
     )
