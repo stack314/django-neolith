@@ -23,6 +23,8 @@ A transport MUST:
 
 **TRN-6.** The in-process transport MUST run the provider's action in the caller's thread of control, so that attached mode has no hidden concurrency.
 
+Because the action runs in the caller's thread, the in-process transport checks the deadline before it dispatches the call and again when the action returns. A reply that comes back after the deadline is discarded, and the call fails with `timeout` ([ADR 0008](../docs/adr/0008-typed-contract-errors-in-both-modes.md)). The action may have run, so `timeout` leaves the outcome unknown, as it does over a network.
+
 ## Providers and routing
 
 A connector holds an ordered set of providers for a contract version. Each provider names a transport and the configuration that transport needs.

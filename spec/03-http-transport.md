@@ -34,6 +34,7 @@ Errors are carried as a JSON body with a fixed shape and an HTTP status that fol
 | Kind | Status |
 |---|---|
 | `invalid_argument` | 400 |
+| `unauthenticated` | 401 |
 | `permission_denied` | 403 |
 | `not_found` | 404 |
 | `conflict` | 409 |
@@ -42,7 +43,11 @@ Errors are carried as a JSON body with a fixed shape and an HTTP status that fol
 | `internal` | 500 |
 | declared kinds | 422 |
 
-Body: `{"kind": "<kind>", "message": "<text>", "detail": {<typed detail record>}}`.
+Body: `{"kind": "<kind>", "message": "<text>", "data": {<typed detail record>}}`. `data` is present only for a declared kind. The member is not named `detail`, which RFC 9457 uses for a human-readable explanation.
+
+A 401 response also carries `WWW-Authenticate: Bearer`, as RFC 9110 (section 15.5.2) requires for that status.
+
+The provider's host carries every failure on a contract path in this body, including a request that fails validation (`invalid_argument`) and a failure of the host itself (`internal`). A response in the error format of the host's web framework never reaches a caller.
 
 A connector takes the kind from the body only, never from the status. A non-success response without a neolith error body maps to `unavailable`. Examples are a 404 from a host that does not serve that contract version, or an error page from a proxy. A success response whose body is not a valid reply maps to `internal`.
 

@@ -1,6 +1,6 @@
 # 01. Contracts
 
-**Status:** draft. Identity, actions, the portable type system, publication and checking are specified. Errors stay an outline until [ADR 0008](../docs/adr/0008-typed-contract-errors-in-both-modes.md) is decided.
+**Status:** draft. Identity, actions, the portable type system, publication and checking are specified. Errors are an outline that follows [ADR 0008](../docs/adr/0008-typed-contract-errors-in-both-modes.md). They are specified with their tests in the error tasks of roadmap step 2.
 
 ## Identity and versioning
 
@@ -68,13 +68,22 @@ Every action's error set includes the standard kinds, whether declared or not:
 |---|---|---|
 | `invalid_argument` | The request failed validation | no |
 | `not_found` | A referenced entity does not exist | no |
+| `unauthenticated` | The call's credentials are missing or could not be verified | no |
 | `permission_denied` | The principal may not perform the action | no |
 | `conflict` | The action conflicts with current state | no |
 | `unavailable` | No provider could be reached | yes, if idempotent |
-| `timeout` | The provider did not reply in time | yes, if idempotent |
+| `timeout` | The deadline passed before a reply arrived; the action may or may not have run | yes, if idempotent |
 | `internal` | The provider failed | no |
 
 **CON-8.** A contract MAY declare additional error kinds per action, each with a typed detail record. Error kinds are part of the contract and follow its compatibility rules.
+
+An error that crosses a contract carries its kind, a message and, for a declared kind, its detail record. In outline:
+
+- Only hosts and transports produce `unavailable` and `timeout`. An implementation produces any other standard kind, or a kind its action declares.
+- An unexpected failure of an implementation, or an error whose kind is not in the action's error set, reaches the caller as `internal`. Its message is fixed and carries the trace identifier. Nothing of the original failure crosses.
+- An error that an implementation receives from one of its own outgoing calls, and does not handle, reaches its caller as `internal`. Passing it on is an explicit act of the implementation.
+- A caller whose version of the contract does not know a kind receives an error with that kind, and with its detail as an untyped value.
+- A mistake in the calling code, such as a call made with no call context, is not a contract error.
 
 Decision record: [0008](../docs/adr/0008-typed-contract-errors-in-both-modes.md).
 
