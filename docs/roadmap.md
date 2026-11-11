@@ -61,7 +61,7 @@ Rules that shape it:
 - A contract is declared as a `Protocol` class; it is never instantiated. `connect()` returns a connector whose methods mirror the actions.
 - Why `Protocol` and `@implements(Inventory)` rather than a plain class and `@Inventory.implement`: mypy accepts the `...` bodies of the actions only inside a Protocol, and it does not apply a class decorator's return type ([python/mypy#3135](https://github.com/python/mypy/issues/3135)), so an `implement` attribute added by `@contract` would not type-check.
 - An implementation class is checked against its contract when the module is imported: every action present, signatures compatible. Missing or extra methods are errors, not warnings.
-- How `CallContext` reaches an implementation is undecided ([open question 6](open-questions.md)). The sketch above shows the explicit-argument option that [ADR 0017](adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md) proposes. Until a record on it is Accepted, an implementation's actions take the request only.
+- An implementation receives the call context as an optional second parameter annotated `CallContext`, as the sketch shows. Outgoing calls find it on their own ([ADR 0017](adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md)).
 - Configuration of providers, transports and routing lives in Django settings under one key, `NEOLITH`, and is validated by the host at startup.
 
 Shell:

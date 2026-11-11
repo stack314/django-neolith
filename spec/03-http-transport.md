@@ -23,9 +23,15 @@ The context travels in headers. The calling app's credential travels in `Authori
 | `Neolith-Principal` | The principal on whose behalf the call is made, if there is one ([below](#the-principal)) |
 | `Idempotency-Key` | The idempotency key |
 | `traceparent` | The trace identifier, per W3C Trace Context |
-| `Neolith-Timeout` | The remaining time budget, in whole milliseconds |
+| `Neolith-Timeout` | The remaining time budget, in whole milliseconds, rounded down |
 
-The deadline is sent as a relative budget, not an absolute time, so that the deadline does not depend on synchronised clocks. The receiving host computes its own local deadline from the budget when the request arrives.
+The deadline is sent as a relative budget, not an absolute time, so that the deadline does not depend on synchronised clocks. The receiving host computes its own local deadline from the budget when the request arrives. In outline, following [ADR 0017](../docs/adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md):
+
+- `Neolith-Timeout` is 1 to 10 ASCII digits. An absent header means the call has no deadline. A caller never sends a budget of zero: a call whose budget is zero or less fails with `timeout` before it is sent. A provider's host fails a call whose header is present but malformed with `invalid_argument`.
+- A `traceparent` that is absent or invalid starts a fresh trace, as W3C Trace Context does for an invalid one.
+- `Idempotency-Key` carries the call's key: one derived from its parent's key as in [02](02-transports.md), or a random one at a root.
+
+These become requirements, with their tests, with the HTTP transport in roadmap step 5 (#12).
 
 ## Errors
 
