@@ -65,7 +65,7 @@ python -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -e . --group dev
-pytest --spec-report spec-report.json
+pytest --spec-report=spec-report.json
 ruff check . && ruff format --check .
 mypy
 python scripts/spec_trace.py --report spec-report.json

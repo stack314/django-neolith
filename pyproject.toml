@@ -70,7 +70,18 @@ include = ["src/neolith", "tests", "scripts", "spec", "LICENSE", "README.md", "C
 minversion = "8.4"
 testpaths = ["tests"]
 # pytester: the spec trace plugin is tested by running pytest on sample tests.
-addopts = ["-ra", "--strict-markers", "--strict-config", "--import-mode=importlib", "-p", "pytester"]
+# scripts.spec_trace_plugin: loaded with -p, not from a conftest, so pytest knows
+# --spec-report before it picks conftests from the paths in its arguments (ADR 0018).
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+    "--import-mode=importlib",
+    "-p",
+    "pytester",
+    "-p",
+    "scripts.spec_trace_plugin",
+]
 xfail_strict = true
 DJANGO_SETTINGS_MODULE = "tests.settings"
 django_find_project = false

@@ -2,7 +2,7 @@
 
 The script reads the specification and ``tests/spec_trace.toml``. Coverage
 comes from the report that ``scripts/spec_trace_plugin.py`` writes when pytest
-runs with ``--spec-report PATH``: only a test that ran and passed covers the
+runs with ``--spec-report=PATH``: only a test that ran and passed covers the
 requirements it cites.
 
 The specification is parsed with markdown-it-py, a CommonMark parser, with
@@ -53,7 +53,7 @@ a problem, so the gate cannot be skipped by leaving the report out.
 
 Usage::
 
-    python -m pytest --spec-report spec-report.json
+    python -m pytest --spec-report=spec-report.json
     python scripts/spec_trace.py --report spec-report.json
     python scripts/spec_trace.py              # the specification only
 """

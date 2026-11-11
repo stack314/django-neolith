@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
 
 ARGS = ("-p", "scripts.spec_trace_plugin", "-p", "no:django", "-p", "no:cacheprovider")
 
@@ -16,7 +19,7 @@ def run(pytester: pytest.Pytester, source: str, *args: str) -> Tests:
     """Run ``source`` as a test module and return the report's tests."""
     pytester.makeini("[pytest]\nmarkers =\n    spec(*ids): requirement IDs\n")
     pytester.makepyfile(test_example=source)
-    pytester.runpytest(*ARGS, "--spec-report", "report.json", *args)
+    pytester.runpytest(*ARGS, "--spec-report=report.json", *args)
     report = json.loads((pytester.path / "report.json").read_text())
     assert report["format"] == 1
     tests: Tests = report["tests"]
@@ -162,7 +165,7 @@ def test_dropped(): pass
 def test_marker_arguments_must_be_ids(pytester: pytest.Pytester, marker: str) -> None:
     pytester.makeini("[pytest]\nmarkers =\n    spec(*ids): requirement IDs\n")
     pytester.makepyfile(f"import pytest\n\n@{marker}\ndef test_it(): pass\n")
-    result = pytester.runpytest(*ARGS, "--spec-report", "report.json")
+    result = pytester.runpytest(*ARGS, "--spec-report=report.json")
     assert result.ret == pytest.ExitCode.USAGE_ERROR
     result.stderr.fnmatch_lines(["*the spec marker takes one or more requirement IDs*"])
 
@@ -173,3 +176,50 @@ def test_no_report_without_the_option(pytester: pytest.Pytester) -> None:
     )
     pytester.runpytest(*ARGS).assert_outcomes(passed=1)
     assert not (pytester.path / "report.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("option", "outside"),
+    [
+        (["--spec-report", "{}"], False),
+        (["--spec-report={}"], False),
+        (["--spec-report={}"], True),
+    ],
+    ids=["space", "equals", "outside the root"],
+)
+def test_the_option_works_when_the_report_already_exists(
+    pytester: pytest.Pytester,
+    tmp_path_factory: pytest.TempPathFactory,
+    option: list[str],
+    outside: bool,
+) -> None:
+    # The repository's own pytest setup, in a fresh process. pytest reads the
+    # paths in its arguments before it loads conftests, so when the plugin was
+    # loaded from one, the second run took the existing report for a test path.
+    # It finds its configuration before it loads any plugin, so only the "="
+    # form works for a report outside the project.
+    for source in [
+        ROOT / "pyproject.toml",
+        *ROOT.glob("scripts/*.py"),
+        *(
+            path
+            for path in ROOT.glob("tests/*.py")
+            if not path.name.startswith("test_")
+        ),
+    ]:
+        target = pytester.path / source.relative_to(ROOT)
+        target.parent.mkdir(exist_ok=True)
+        target.write_text(source.read_text())
+    (pytester.path / "tests" / "test_cited.py").write_text(
+        "import pytest\n\n@pytest.mark.spec('CON-1')\ndef test_it(): pass\n"
+    )
+    report = (
+        tmp_path_factory.mktemp("elsewhere") if outside else pytester.path
+    ) / "spec-report.json"
+    args = [arg.format(report if outside else report.name) for arg in option]
+    for _ in range(2):
+        result = pytester.runpytest_subprocess(*args)
+        assert result.ret == pytest.ExitCode.OK, result.stderr.str()
+        assert json.loads(report.read_text())["tests"] == {
+            "tests/test_cited.py::test_it": {"ids": ["CON-1"], "outcome": "passed"}
+        }

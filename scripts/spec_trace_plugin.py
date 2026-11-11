@@ -1,9 +1,17 @@
 """Record which requirements the tests that ran verified (ADR 0018).
 
-A pytest plugin. With ``--spec-report PATH``, it writes a JSON report of every
+A pytest plugin. With ``--spec-report=PATH``, it writes a JSON report of every
 collected test that carries the ``spec`` marker: the requirement IDs it cites
 and how it ended. ``scripts/spec_trace.py --report PATH`` reads the report and
 counts a requirement as covered only by tests whose outcome is ``passed``.
+
+``pyproject.toml`` loads the plugin with ``-p``, not from a conftest. pytest
+picks the conftests to load from the paths among its arguments, and an option
+it does not know yet makes its value look like one: an existing ``report.json``
+in ``--spec-report report.json`` was taken for a test path. pytest finds its
+configuration file the same way, before it loads any plugin, so write
+``--spec-report=PATH``. With a space, an existing report outside the project is
+still taken for a path.
 
 Outcomes:
 
