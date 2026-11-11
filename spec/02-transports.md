@@ -27,19 +27,15 @@ Every value that crosses a call, whether a request, a reply or an error's detail
 
 **TRN-9.** A sender MUST refuse a value whose type is not exactly its declared type, such as a value of a subtype, or of another type with the same fields. The check covers the value itself. A record inside it crosses as the JSON text written for it, and only when that text passes the checks below.
 
-**TRN-10.** A sender MUST write a value as JSON text by the rules of its declared type that the contract's description is derived from (CON-16). Nothing a value or its type overrides, such as its own way of writing itself as JSON, changes the text.
+**TRN-10.** A sender MUST write a value as JSON text by the rules of its declared type that the contract's description is derived from (CON-16), once converted as CON-35 and CON-36 say. Nothing a value or its type overrides, such as its own way of writing itself as JSON, changes the text. Until the send-side check of roadmap step 3 (#10 task 3), the reference implementation writes values without those two conversions.
 
 **TRN-11.** A sender MUST refuse a value that holds, at any depth, something its declared type does not hold at that place, such as text in an integer field, rather than write it in another form.
 
 **TRN-12.** A receiver MUST build the value it hands on by reading the JSON text with its declared type, ignoring unknown fields (CON-6, CON-7), so that caller and provider never share an object, in-process too.
 
-Before a call is sent, the caller MUST check its request, in this order ([ADR 0017](../docs/adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md), Decision 9, step 2):
+**TRN-13.** Before a call is sent, the caller MUST check its request with the request check of [ADR 0017](../docs/adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md) Decision 9, the caller's step 2, in its order. Writing the request there follows TRN-9 to TRN-11, and reading it back follows TRN-12.
 
-- **TRN-13.** its type, as TRN-9 says;
-- **TRN-14.** its JSON text, written as TRN-10 and TRN-11 say;
-- **TRN-15.** that text, read with the request type as TRN-12 says.
-
-**TRN-16.** A request that fails one of these checks MUST NOT be sent. The failure is a mistake in the calling code (CON-29), not a contract error, so a caller that checks its own requests never receives `invalid_argument` for one.
+**TRN-14.** A request that fails that check MUST NOT be sent. The failure is a mistake in the calling code (CON-29), not a contract error, so a caller that checks its own requests never receives `invalid_argument` for one.
 
 ## In-process transport
 
