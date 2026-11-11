@@ -1201,7 +1201,7 @@ def test_documentation_and_constraints_are_allowed() -> None:
     assert defs["Documented"]["properties"]["count"]["minimum"] == 0
 
 
-@pytest.mark.spec("CON-16", "CON-32")
+@pytest.mark.spec("CON-16", "CON-33")
 @pytest.mark.parametrize(
     "field",
     [
@@ -1215,7 +1215,7 @@ def test_field_alias_is_rejected(field: object) -> None:
         declare_with_field(Annotated[int, field])
 
 
-@pytest.mark.spec("CON-16", "CON-32")
+@pytest.mark.spec("CON-16", "CON-33")
 def test_alias_generator_is_rejected() -> None:
     camel = create_model(
         "Camel", __config__=ConfigDict(alias_generator=to_camel), item_id=(int, ...)

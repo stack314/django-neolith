@@ -52,11 +52,11 @@ The portable forms are the types that every transport can represent, JSON Schema
 
 **CON-14.** A reply type MUST be either a record built only from the portable forms, or empty. An empty reply carries no value.
 
-[ADR 0019](../docs/adr/0019-wire-encodings-of-the-portable-forms.md) fixes the JSON encoding of each form. Its encodings take effect with roadmap step 3 (#10 task 1), which turns them into requirements here. From then on, in outline: every encoded form will have a pattern or a range in the description, and the record names the few rules a description cannot state; integers will be limited to ±(2^53 − 1); bytes will be padded base64url; numbers will be finite, with `-0` written as `0`; decimals will be admitted, as strings with no exponent that keep trailing zeros; durations will be written as ProtoJSON writes them, like `-1.500s`, one spelling per value; timestamps and dates will follow RFC 3339 with years 0001 to 9999 and no leap second.
+[ADR 0019](../docs/adr/0019-wire-encodings-of-the-portable-forms.md) fixes the JSON encoding of each form. Its encodings take effect with roadmap step 3 (#10 task 1), which turns them into requirements here. From then on, in outline: every encoded form will have a pattern or a range in the description, and the record names the two rules a description does not state; integers will be limited to ±(2^53 − 1); bytes will be padded base64url; numbers will be finite, with `-0` written as `0`; decimals will be admitted, as strings with no exponent that keep trailing zeros; durations will be written as ProtoJSON writes them, like `-1.500s`, one spelling per value; timestamps and dates will follow RFC 3339 with years 0001 to 9999 and no leap second.
 
 **CON-21.** Until the encodings of ADR 0019 are implemented (#10 task 1), an implementation MUST reject a contract whose request type, reply type or detail record (CON-8) uses decimal, before it serves the contract or calls any of its actions. The rejection names the contract, the action and the field.
 
-**CON-32.** A field of a record MUST travel under its own name, with no alias.
+**CON-33.** A field of a record MUST travel under its own name, with no alias.
 
 Records are nominal within a contract and structural across the wire. **CON-15.** Two different records or enums used by one contract MUST NOT have the same name. Generated code for other languages names each record and enum once, so two with one name would collide.
 
@@ -119,7 +119,7 @@ Decision record: [0008](../docs/adr/0008-typed-contract-errors-in-both-modes.md)
 
 ## Checking a contract
 
-**CON-17.** An implementation MUST reject a contract that does not meet CON-10, CON-11, CON-12, CON-13, CON-14, CON-15, CON-20, CON-22, CON-23, CON-24 or CON-32, or whose records cannot ignore unknown fields as CON-6 and CON-7 require, before it serves the contract or calls any of its actions. The rejection names the contract, the action, the error kind where there is one and, for a type, the field.
+**CON-17.** An implementation MUST reject a contract that does not meet CON-10, CON-11, CON-12, CON-13, CON-14, CON-15, CON-20, CON-22, CON-23, CON-24 or CON-33, or whose records cannot ignore unknown fields as CON-6 and CON-7 require, before it serves the contract or calls any of its actions. The rejection names the contract, the action, the error kind where there is one and, for a type, the field.
 
 **CON-18.** A provider MUST implement every action of its contract, taking the action's request type and returning its reply type.
 
