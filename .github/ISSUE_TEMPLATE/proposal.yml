@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Please check the [decision records](https://github.com/vignzpie/django-neolith/blob/main/docs/adr/README.md) and [open questions](https://github.com/vignzpie/django-neolith/blob/main/docs/open-questions.md) first. A change that is hard to reverse, shapes public API, adds a runtime dependency or changes what the specification means needs a decision record (CONTRIBUTING S3, D1).
+        Please check the [decision records](https://github.com/stack314/django-neolith/blob/main/docs/adr/README.md) and [open questions](https://github.com/stack314/django-neolith/blob/main/docs/open-questions.md) first. A change that is hard to reverse, shapes public API, adds a runtime dependency or changes what the specification means needs a decision record (CONTRIBUTING S3, D1).
   - type: textarea
     id: problem
     attributes:

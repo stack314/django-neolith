@@ -33,9 +33,9 @@ classifiers = [
 ]
 
 [project.urls]
-Source = "https://github.com/vignzpie/django-neolith"
-Issues = "https://github.com/vignzpie/django-neolith/issues"
-Changelog = "https://github.com/vignzpie/django-neolith/blob/main/CHANGELOG.md"
+Source = "https://github.com/stack314/django-neolith"
+Issues = "https://github.com/stack314/django-neolith/issues"
+Changelog = "https://github.com/stack314/django-neolith/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 # markdown-it-py: the spec trace parses spec/ as CommonMark (ADR 0018). Development
