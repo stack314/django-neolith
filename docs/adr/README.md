@@ -24,7 +24,7 @@ Questions not yet decided are in [open-questions.md](../open-questions.md).
 | [0007](0007-in-process-transport-serializes.md) | The in-process transport serializes, like the network ones | Proposed |
 | [0008](0008-typed-contract-errors-in-both-modes.md) | Contract errors are typed and identical in both modes | Accepted |
 | [0009](0009-one-database-alias-per-app.md) | One database alias per app | Proposed |
-| [0010](0010-pluggable-principal-resolution.md) | Pluggable principal resolution in core | Proposed |
+| [0010](0010-pluggable-principal-resolution.md) | Pluggable principal resolution in core | Accepted |
 | [0011](0011-django-ninja-for-contract-endpoints.md) | django-ninja for contract endpoints | Proposed |
 | [0012](0012-supported-python-and-django-versions.md) | Supported Python and Django versions | Accepted |
 | [0013](0013-license.md) | License: BSD-3-Clause | Accepted |

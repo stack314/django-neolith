@@ -20,7 +20,8 @@ The context travels in headers. Names and semantics are fixed by this document s
 
 | Header | Carries |
 |---|---|
-| `Authorization: Bearer <token>` | The principal, as a token the provider's host can resolve |
+| `Authorization: Bearer <token>` | The calling app's credential, which the provider's host authenticates |
+| `Neolith-Principal` | The principal on whose behalf the call is made, if there is one |
 | `Idempotency-Key` | The idempotency key |
 | `traceparent` | The trace identifier, per W3C Trace Context |
 | `Neolith-Timeout` | The remaining time budget, in whole milliseconds |
@@ -53,9 +54,41 @@ A connector takes the kind from the body only, never from the status. A non-succ
 
 **HTTP-2.** A provider MUST serve an OpenAPI 3.1 document describing every contract version it provides, derived from the contracts. The document is the HTTP transport's publication of the contract ([01](01-contracts.md)). Its location is `GET /.well-known/neolith/openapi.json`.
 
-## Principal resolution
+## Caller and principal
 
-The token in `Authorization` is opaque to the transport. The host resolves it into a principal through a pluggable resolver ([ADR 0010](../docs/adr/0010-pluggable-principal-resolution.md)). A shared-secret token for host-to-host calls is the minimum every implementation supports.
+Two identities cross with a call ([ADR 0010](../docs/adr/0010-pluggable-principal-resolution.md)): the calling app, which the provider's host authenticates, and an optional principal on whose behalf the calling app calls, which the calling app asserts.
+
+`Authorization` carries the calling app's credential as a bearer token (RFC 6750). The provider's host resolves it through a pluggable backend. A call whose credential is missing or does not resolve, or that reaches a host with no backend, fails with `unauthenticated`.
+
+`Neolith-Principal` carries the principal as the base64url encoding, without padding (RFC 4648, section 5), of a UTF-8 JSON object:
+
+```
+{"iss": "<issuer>", "sub": "<subject>", "claims": {<claims>}}
+```
+
+`iss` and `sub` are non-empty strings. `claims` is an optional object. The header is absent when the call has no principal. A header that does not decode to such an object fails the call with `unauthenticated`. The shared-secret backend does not sign the principal: it is an assertion by the authenticated calling app. Which calling apps a provider accepts that assertion from is not fixed yet ([ADR 0017](../docs/adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md), Proposed).
+
+### Shared-secret tokens
+
+The shared-secret token is the one credential every implementation supports. It is for development only: a calling app's secret is held by that app and by every provider it calls, and any holder can call as that app.
+
+Each calling app has its own secret of at least 32 random bytes, named by a key id. A provider's host holds the key id and secret of each app it accepts calls from, and knows which app each key id belongs to.
+
+The token is a JSON Web Token (RFC 7519) in JWS compact serialization (RFC 7515), signed with HMAC SHA-256 (`HS256`, RFC 7518, section 3.2) under the calling app's secret. Its JOSE header and claims are exactly these, and nothing else:
+
+| Member | Where | Value |
+|---|---|---|
+| `alg` | header | `"HS256"` |
+| `typ` | header | `"neolith+jwt"`, so that the token cannot be mistaken for a JWT of another kind (RFC 8725, section 3.11) |
+| `kid` | header | The key id of the calling app's secret |
+| `iss` | claims | The calling app's `name` from its declaration ([05](05-app-declaration.md)) |
+| `aud` | claims | One string: the identity of the contract being called, such as `inventory.v1` |
+| `iat` | claims | When the token was issued, in whole seconds since the epoch |
+| `exp` | claims | When the token expires, in whole seconds since the epoch, at most 300 seconds after `iat` |
+
+The provider's host accepts the token only when the header and claims are exactly those above, `kid` names a key it holds, the signature verifies under that key's secret, `iss` is the app that key belongs to, `aud` is the contract named in the request path, `iat` is not in the future and `exp` is not in the past. Each time comparison allows 60 seconds of difference between the hosts' clocks. Any other token fails the call with `unauthenticated`. A caller can reuse a token for calls to the same contract until it expires.
+
+Unlike the deadline, the token depends on the hosts' clocks agreeing, within the 60 seconds allowed.
 
 ## Health
 

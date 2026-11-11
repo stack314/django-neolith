@@ -8,7 +8,7 @@
 | 2 | Contracts: `@contract`, `@action`, portable types, typed errors, `@implements`, validation at import time | 01 |
 | 3 | In-process transport with serialization round-trip; connector with `single` routing | 02 |
 | 4 | App declaration and host: `NeolithAppConfig`, settings built from declarations, `neolith run <app>` boots one app on SQLite | 05 |
-| 5 | HTTP transport: provider endpoints via django-ninja, OpenAPI at the well-known path, connector over httpx, shared-secret principal resolver | 03 |
+| 5 | HTTP transport: provider endpoints via django-ninja, OpenAPI at the well-known path, connector over httpx, shared-secret token backend for the calling app and principal | 03 |
 | 6 | Conformance suite running every contract test over both transports; `local-first` routing and a failover test with two providers | 06, 02 |
 | 7 | Boundary check: `neolith check` wrapping import-linter, report-only then enforce per app | — |
 | 8 | Two small example apps under `examples/` showing attached, detached and both-at-once; the 0.1 proof | all |

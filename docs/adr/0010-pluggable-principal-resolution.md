@@ -1,29 +1,50 @@
 # 0010. Pluggable principal resolution in core
 
-- **Status:** Proposed
+- **Status:** Accepted
+- **Accepted:** 2026-11-11
 - **Date:** 2026-11-03
 
 ## Context
 
-A detached app has no shared user table, so `request.user` needs another source. Some projects will have an identity app or an external identity provider (OIDC, tokens, permission checks), but [0005](0005-small-required-core.md) says the core depends on no particular app.
+A detached app has no shared user table, so `request.user` needs another source. Some projects will have an identity app or an external identity provider (OIDC, tokens, permission checks). Principle 12 (*small core over broad features*) keeps such capabilities out of the core: they are ordinary apps behind contracts.
+
+A call between apps involves two parties. The calling app sends the call and can be authenticated from what the transport carries. The principal is the party on whose behalf the call is made, often an end user, and the calling app vouches for it. OAuth 2.0 Token Exchange ([RFC 8693](https://www.rfc-editor.org/rfc/rfc8693)) calls these the actor and the subject. Service meshes such as Istio authenticate the workload with mutual TLS and carry the end user in a separate token.
+
+A principal crosses hosts, so it has to mean the same thing on each of them. A model instance, or a primary key on its own, means something only in one database ([0004](0004-each-app-owns-its-data.md)).
 
 ## Options
 
 1. **Core depends on a specific identity app.** Simple, but it makes that app mandatory and blocks v0.1 on building one.
-2. **Core defines a principal-resolution seam.** Pluggable backends turn an incoming request or call into a principal (user or service), with an `is_allowed()` hook.
+2. **Core defines a resolution seam.** Pluggable backends turn the credentials of an incoming call into the calling app and, optionally, a principal. Each action decides what they may do.
+3. **The same seam with a permission hook**, an `is_allowed()` that the host calls before each action. Authorization sits in one place, but the core then defines a permission model, which principle 12 leaves to apps, and the hook decides without the request the action receives.
 
 ## Decision
 
-Option 2. The core defines a small interface for resolving principals and checking permissions:
+Option 2.
 
-- v0.1 ships a minimal backend: signed service tokens with a shared secret, for service-to-service calls between detached apps.
-- An identity app or an external provider plugs into this seam as a backend (OIDC, user tokens, roles).
-- In attached mode, the existing Django user can be resolved through the same interface.
+1. **Two identities.** The seam resolves the calling app, authenticated from the transport's credentials, and separately an optional principal on whose behalf the calling app calls, as RFC 8693 separates the actor from the subject. Spec 03 fixes how each crosses HTTP.
+2. **A principal is a portable value.** It is frozen and made of portable types: an issuer and a subject, both strings and stable across hosts, plus optional claims. It is never a model instance, in any mode, and a primary key on its own is never a subject ([0004](0004-each-app-owns-its-data.md)).
+3. **No permission hook.** Actions authorize themselves and refuse with `permission_denied` (principle 12).
+4. **Shared-secret tokens, for development only.** v0.1 ships one backend. Each calling app has its own secret, named by a key id. Each token carries the issuing app, a single audience and a short expiry, as SPIFFE JWT-SVIDs do. Spec 03 fixes the format, so that implementations interoperate.
+5. **Fail closed.** Credentials that do not resolve, and a host with no backend, refuse the call with `unauthenticated` ([0008](0008-typed-contract-errors-in-both-modes.md)).
+6. **Other backends.** An identity app or an external provider (OIDC, user tokens) plugs into the seam as a backend. In attached mode, the Django user is resolved through the same seam, into the same portable value.
 
-Follows principles 12 (*small core*) and 13 (*integrate over own*).
+Follows principles 12 (*small core over broad features*) and 13 (*integrate over own*).
 
 ## Consequences
 
 - v0.1 can demo detached calls without building identity first.
-- Adopters can plug in their existing auth (an OIDC provider, an internal token service).
-- The shared-secret backend is for development and getting started, not a production recommendation. The docs must say so.
+- Adopters can plug in their existing auth, such as an OIDC provider or an internal token service.
+- The shared-secret backend is for development and getting started, not a production recommendation. The docs must say so. A secret is held by the calling app and by every provider it calls, and any holder can act as that app.
+- The only credential every implementation must support is therefore one for development. Interoperable authentication for production needs a later record ([open questions](../open-questions.md)).
+- Authorization is code in each action. A policy shared by several actions is a function or library the app chooses.
+- A principal compares equal on every host, which [0017](0017-call-context-explicit-at-the-action-ambient-for-propagation.md) relies on. A project that resolves Django users in attached mode needs an identifier for each user that is stable across hosts, which the primary key alone is not.
+- Backends declare which inputs of a request they read to resolve a principal, such as a header or a cookie, so that the host can vary responses on them. [0017](0017-call-context-explicit-at-the-action-ambient-for-propagation.md) needs this declaration.
+- Shared-secret tokens expire, so this backend needs the hosts' clocks to agree within a small margin. Spec 03 says how much.
+
+## References
+
+- [RFC 8693](https://www.rfc-editor.org/rfc/rfc8693), OAuth 2.0 Token Exchange: subject and actor.
+- [Istio security](https://istio.io/latest/docs/concepts/security/): peer authentication with mutual TLS, request authentication with a separate end-user token.
+- [SPIFFE JWT-SVID](https://github.com/spiffe/spiffe/blob/main/standards/JWT-SVID.md): workload tokens with an audience and a short lifetime.
+- [RFC 7519](https://www.rfc-editor.org/rfc/rfc7519) (JSON Web Token) and [RFC 8725](https://www.rfc-editor.org/rfc/rfc8725) (JSON Web Token Best Current Practices).
