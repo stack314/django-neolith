@@ -8,6 +8,7 @@ between the dump and the read-back, arrive with #10 tasks 3 and 4.
 
 import json
 import re
+import sys
 import types
 from collections.abc import Generator, Iterator
 from typing import Annotated, Any, Protocol, cast
@@ -470,6 +471,147 @@ def test_a_record_class_that_replaces_what_pydantic_reads_is_refused(
 ) -> None:
     with pytest.raises(ContractDefinitionError, match=re.escape(refusal)):
         _declare(_holding(record) if nested else record)
+
+
+class Selfish(BaseModel):
+    ns: list[int] = []
+
+    def __deepcopy__(self, memo: object = None) -> "Selfish":
+        return self
+
+
+class CopiesSelfish:
+    def __deepcopy__(self, memo: dict[int, Any] | None = None) -> "CopiesSelfish":
+        return self
+
+
+class MixinCopy(BaseModel, CopiesSelfish):
+    ns: list[int] = []
+
+
+@pytest.mark.spec("TRN-12", "CON-17")
+@pytest.mark.parametrize(
+    ("record", "refusal"),
+    [(Selfish, "defines __deepcopy__"), (MixinCopy, "defines __deepcopy__ in")],
+)
+@pytest.mark.parametrize("nested", [False, True], ids=["request", "nested"])
+def test_a_record_class_that_replaces_its_deep_copy_is_refused(
+    record: type[BaseModel], refusal: str, nested: bool
+) -> None:
+    # pydantic-core deep-copies a default it cannot hash, so a record whose
+    # copy returns itself would be shared by every value read without it.
+    with pytest.raises(ContractDefinitionError, match=re.escape(refusal)):
+        _declare(_holding(record) if nested else record)
+
+
+class Plain(BaseModel):
+    ns: list[int] = []
+
+
+class SelfishPlain(Plain):
+    def __deepcopy__(self, memo: object = None) -> "SelfishPlain":
+        return self
+
+
+def _with_own_copy() -> Plain:
+    plain = Plain()
+    object.__setattr__(plain, "__deepcopy__", lambda memo=None: plain)
+    return plain
+
+
+@pytest.mark.spec("TRN-12", "CON-17")
+@pytest.mark.parametrize(
+    ("default", "refusal"),
+    [
+        (SelfishPlain(), "holding a SelfishPlain, which defines __deepcopy__"),
+        ([SelfishPlain()], "holding a SelfishPlain, which defines __deepcopy__"),
+        (_with_own_copy(), "values outside its fields: '__deepcopy__'"),
+    ],
+    ids=["subclass", "subclass-in-a-list", "instance-attribute"],
+)
+def test_a_default_holding_a_record_that_copies_itself_otherwise_is_refused(
+    default: object, refusal: str
+) -> None:
+    annotation = list[Plain] if type(default) is list else Plain
+    record = create_model(_name("Defaulted"), value=(annotation, default))
+    with pytest.raises(ContractDefinitionError, match=re.escape(refusal)):
+        _declare(record)
+
+
+@pytest.mark.spec("TRN-12")
+def test_a_default_of_plain_records_is_copied_for_each_read() -> None:
+    record = create_model(
+        _name("Defaulted"), one=(Plain, Plain(ns=[1])), many=(list[Plain], [Plain()])
+    )
+    reader = codec(_declare(record), record)
+    first, second = reader.read(b"{}"), reader.read(b"{}")
+    assert first.one is not second.one  # type: ignore[attr-defined]
+    assert first.many[0] is not second.many[0]  # type: ignore[attr-defined]
+
+
+_REBUILT = """
+from pydantic import BaseModel
+
+
+class Forward(BaseModel):
+    x: "T"
+
+
+class UsesForward(BaseModel):
+    inner: Forward
+"""
+
+
+@pytest.mark.spec("TRN-10", "TRN-12", "CON-17")
+def test_a_record_rebuilt_after_a_record_using_it_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # UsesForward is built with Forward.x an integer; Forward, rebuilt, then
+    # reads text. pydantic-core 2.41 reuses Forward's own serializer and
+    # validator inside UsesForward, so they would not follow the description.
+    module = types.ModuleType(_name("rebuilt"))
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    exec(_REBUILT, vars(module))  # noqa: S102
+    forward, uses = module.Forward, module.UsesForward
+    namespace = vars(module)
+    namespace["T"] = int
+    uses.model_rebuild()
+    namespace["T"] = str
+    forward.model_rebuild(force=True)
+    with pytest.raises(
+        ContractDefinitionError,
+        match="record Forward has a core schema that differs from the one built",
+    ):
+        _declare(uses)
+    # Rebuilt in order, both agree again.
+    uses.model_rebuild(force=True)
+    declared = _declare(uses)
+    value = uses(inner=forward(x="a"))
+    text = check_request(declared, declared.actions["send"], value)
+    assert json.loads(text) == {"inner": {"x": "a"}}
+    assert codec(declared, uses).read(text) == value
+
+
+class Branch(BaseModel):
+    kids: list["Branch"] = []
+    part: Part | None = None
+
+
+class HoldsBranches(BaseModel):
+    branch: Branch | None = None
+    branches: list[Branch] = []
+
+
+@pytest.mark.spec("TRN-10", "TRN-12")
+def test_a_recursive_record_nested_in_another_crosses() -> None:
+    # The nearest legitimate shape: a recursive record's node inside another
+    # record refers to it by reference, as its own schema does.
+    declared = _declare(HoldsBranches)
+    value = HoldsBranches(
+        branch=Branch(kids=[Branch(part=Part(sku="a"))]), branches=[Branch()]
+    )
+    text = check_request(declared, declared.actions["send"], value)
+    assert codec(declared, HoldsBranches).read(text) == value
 
 
 class Ordinary(BaseModel):

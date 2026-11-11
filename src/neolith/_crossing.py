@@ -55,7 +55,7 @@ class Codec[R: BaseModel]:
         for node in _nodes(schema):
             kind = node.get("type")
             if kind in ("model", "dataclass"):
-                _check_reused(node.get("cls"))
+                _check_reused(node)
             floats = floats or kind in _FLOAT_NODES
         try:
             core: Any = schema
@@ -160,7 +160,7 @@ def _nodes(schema: Mapping[str, Any]) -> Iterator[Mapping[str, Any]]:
             pending.extend(item)
 
 
-def _check_reused(cls: object) -> None:
+def _check_reused(node: Mapping[str, Any]) -> None:
     """Refuse a record whose stored serializer or validator pydantic-core would
     reuse although it was not built from the record's own core schema.
 
@@ -171,6 +171,7 @@ def _check_reused(cls: object) -> None:
     Pydantic builds for its plugins does. What each was built from is read
     from its pickled form.
     """
+    cls = node.get("cls")
     if not issubclass(type(cls), type):
         return
     name = typing.cast(type, cls).__name__
@@ -178,6 +179,15 @@ def _check_reused(cls: object) -> None:
     if own.get("__pydantic_complete__") is not True:
         return
     schema = own.get("__pydantic_core_schema__")
+    # What pydantic-core reuses was built from the class's own schema, so the
+    # class's model node there must be the node the description was written
+    # from, apart from its reference name, which an alias changes.
+    if _model_node(schema, cls) != _without_ref(node):
+        raise TypeError(
+            f"record {name} has a core schema that differs from the one built "
+            "into a record that uses it, as after a rebuild; rebuild the "
+            "records that use it after it"
+        )
     serializer = own.get("__pydantic_serializer__")
     if (
         type(serializer) is not SchemaSerializer
@@ -198,6 +208,20 @@ def _check_reused(cls: object) -> None:
             f"record {name} has a validator that Pydantic did not build from "
             "its core schema"
         )
+
+
+def _without_ref(node: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in node.items() if key != "ref"}
+
+
+def _model_node(schema: object, cls: object) -> dict[str, Any] | None:
+    """The model node for ``cls`` in a class's own core schema, without its ref."""
+    if type(schema) is not dict:
+        return None
+    for node in _nodes(schema):
+        if node.get("type") in ("model", "dataclass") and node.get("cls") is cls:
+            return _without_ref(node)
+    return None
 
 
 def _built_from(built: SchemaSerializer | SchemaValidator) -> object:

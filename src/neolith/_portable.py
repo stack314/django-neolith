@@ -477,6 +477,10 @@ class Portable:
             f"field {path}",
         )
         description = self.describe(node["schema"], path, ())
+        if "default" in node:
+            problem = _default_record_problem(node["default"])
+            if problem is not None:
+                raise self.fail(f"field {path} has a default {problem}")
         if issubclass(type(node.get("default")), BaseModel) and _hashable(
             node["default"]
         ):
@@ -1134,9 +1138,10 @@ def _unchanged(held: object, written: object) -> bool:
     return type(held) is type(written) and held == written
 
 
-# What pydantic-core reads from a record instance, or calls to build one, that a
-# record class could otherwise replace: attribute lookup, instance creation,
-# and the instance slots BaseModel declares.
+# What pydantic-core reads from a record instance, or calls to build or copy
+# one, that a record class could otherwise replace: attribute lookup, instance
+# creation, the instance slots BaseModel declares, and the deep copy it makes
+# of a default it cannot hash (src/validators/with_default.rs).
 _RECORD_HOOKS = frozenset(
     {
         "__getattribute__",
@@ -1144,6 +1149,7 @@ _RECORD_HOOKS = frozenset(
         "__new__",
         "__dict__",
         "__class__",
+        "__deepcopy__",
         "__pydantic_extra__",
         "__pydantic_fields_set__",
         "__pydantic_private__",
@@ -1170,6 +1176,42 @@ def _class_hook(cls: type[Any]) -> str | None:
             if key in _RECORD_HOOKS:
                 where = "" if klass is cls else f" in {klass.__qualname__}"
                 return f"defines {key}{where}"
+    return None
+
+
+def _default_record_problem(default: object) -> str | None:
+    """Say why a default holds a record pydantic-core would not copy, or None.
+
+    pydantic-core deep-copies a default it cannot hash, and ``copy.deepcopy``
+    finds ``__deepcopy__`` on the instance before its class. So every record
+    in the default, of whatever class, keeps Pydantic's own copy and holds
+    nothing but its fields.
+    """
+    pending = [default]
+    seen: set[int] = set()
+    while pending:
+        item = pending.pop()
+        kind = type(item)
+        if id(item) in seen:
+            continue
+        seen.add(id(item))
+        if issubclass(kind, BaseModel):
+            hook = _class_hook(kind)
+            if hook is not None:
+                return f"holding a {kind.__qualname__}, which {hook}"
+            held = type.__dict__["__dict__"].__get__(BaseModel)["__dict__"]
+            fields = held.__get__(item)
+            extra = set(fields) - set(kind.__pydantic_fields__)
+            if extra:
+                return (
+                    f"holding a {kind.__qualname__} with values outside its "
+                    f"fields: {', '.join(sorted(map(repr, extra)))}"
+                )
+            pending.extend(fields.values())
+        elif kind in (list, tuple, set, frozenset):
+            pending.extend(cast("list[object]", item))
+        elif kind is dict:
+            pending.extend(cast("dict[object, object]", item).values())
     return None
 
 
