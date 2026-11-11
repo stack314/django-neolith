@@ -319,12 +319,14 @@ class Portable:
         cls = node["cls"]
         subject = f"record {path}"
         admitted = {"cls", "schema", "config", "custom_init", "root_model"}
-        post_init = node.get("post_init")
-        if (
-            type(post_init) is str
-            and post_init == "model_post_init"
-            and _only_initialises_private_attributes(cls)
+        if "post_init" in node and not (
+            type(node["post_init"]) is str and node["post_init"] == "model_post_init"
         ):
+            raise self.fail(
+                f"{subject} runs a post-init other than model_post_init, which "
+                "can change values after validation"
+            )
+        if _only_initialises_private_attributes(cls):
             # Private attributes never travel; Pydantic sets post_init to
             # initialise them when the record has any.
             admitted.add("post_init")
@@ -929,12 +931,19 @@ def _from_classes(cls: type[Any], name: str) -> object:
 
     The method resolution order and each class's namespace are read through
     ``type``'s own descriptors, as an instance lookup reads them, so a
-    metaclass can neither run code here nor hide an entry.
+    metaclass can neither run code here nor hide an entry. A namespace key
+    that is not exactly a str could compare equal to ``name`` by code of its
+    own, so it gives None.
     """
     for klass in type.__dict__["__mro__"].__get__(cls):
-        namespace = type.__dict__["__dict__"].__get__(klass)
-        if name in namespace:
-            return namespace[name]
+        found: list[object] = []
+        for key, value in type.__dict__["__dict__"].__get__(klass).items():
+            if type(key) is not str:
+                return None
+            if key == name:
+                found.append(value)
+        if found:
+            return found[0]
     return None
 
 

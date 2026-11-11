@@ -1981,6 +1981,29 @@ class PrivateUnderUnhashableMetaclass(WithPrivate, metaclass=UnhashableMetaclass
     pass
 
 
+class NamespaceKey(str):
+    """A key equal to nothing, which raises when compared once switched on."""
+
+    raising = False
+    __hash__ = str.__hash__
+
+    def __eq__(self, other: object) -> bool:
+        if NamespaceKey.raising:
+            raise RuntimeError("compared")
+        return False
+
+
+class OddNamespaceKey(WithPrivate):
+    # Looking up "model_post_init" in this namespace now compares this key.
+    locals()[NamespaceKey("model_post_init")] = WithPrivate.model_post_init
+
+    def model_post_init(self, context: object, /) -> None:
+        self.x = 2
+
+
+NamespaceKey.raising = True
+
+
 class RenamedPostInit(BaseModel):
     x: int
     _cache: int = PrivateAttr(0)
@@ -2028,12 +2051,20 @@ def test_private_attributes_are_accepted(record: type[BaseModel]) -> None:
         ForgedClosure,
         ForgedGlobals,
         PostInitBehindMetaclass,
-        RenamedPostInit,
+        OddNamespaceKey,
     ],
 )
 def test_own_model_post_init_is_refused(record: type[BaseModel]) -> None:
     with pytest.raises(ContractDefinitionError, match="defines model_post_init"):
         declare_with_field(record)
+
+
+@pytest.mark.spec("CON-13", "CON-17")
+def test_post_init_under_another_name_is_refused() -> None:
+    with pytest.raises(
+        ContractDefinitionError, match="runs a post-init other than model_post_init"
+    ):
+        declare_with_field(RenamedPostInit)
 
 
 # Unknown fields

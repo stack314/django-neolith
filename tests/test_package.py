@@ -81,7 +81,7 @@ def _dotted_names(source: str) -> set[str]:
     return names
 
 
-def test_no_private_pydantic_name_is_imported_or_read() -> None:
+def test_no_private_pydantic_name_in_imports_or_their_attributes() -> None:
     # Pydantic's private modules may change in any minor release, and the
     # dependency allows any 2.x from 2.12, so using one could break neolith.
     names = set().union(
