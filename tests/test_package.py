@@ -1,8 +1,10 @@
 """The package skeleton and the guarantees ADR 0012 asks of the test harness."""
 
+import ast
 import importlib.metadata
 import importlib.resources
 import warnings
+from pathlib import Path
 
 import django
 import pytest
@@ -22,6 +24,25 @@ def test_version_matches_installed_metadata() -> None:
 
 def test_package_is_typed() -> None:
     assert importlib.resources.files("neolith").joinpath("py.typed").is_file()
+
+
+def test_nothing_private_is_imported_from_pydantic() -> None:
+    # Pydantic's private modules may change in any minor release, and the
+    # dependency allows every 2.x, so importing one could break import neolith.
+    imported: set[str] = set()
+    for path in Path(neolith.__file__).parent.rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text(), str(path))):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported.update(f"{node.module}.{alias.name}" for alias in node.names)
+    assert "pydantic.BaseModel" in imported
+    assert not [
+        name
+        for name in imported
+        if name.split(".")[0] in ("pydantic", "pydantic_core")
+        and any(part.startswith("_") for part in name.split(".")[1:])
+    ]
 
 
 def test_running_on_a_supported_django() -> None:

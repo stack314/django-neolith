@@ -23,8 +23,7 @@ import re
 from collections.abc import Iterator, Mapping
 from typing import Any, Literal, cast
 
-from pydantic import BaseModel
-from pydantic._internal._model_construction import init_private_attributes
+from pydantic import BaseModel, PrivateAttr
 from pydantic.errors import PydanticUndefinedAnnotation, PydanticUserError
 from pydantic_core import (
     SchemaSerializer,
@@ -919,6 +918,24 @@ def _unchanged(held: object, written: object) -> bool:
     return type(held) is type(written) and held == written
 
 
+class _Private(BaseModel):
+    _x: int = PrivateAttr(0)
+
+
+class _InheritsPrivate(_Private):
+    pass
+
+
+# Pydantic's own model_post_init for a record with private attributes, and the
+# code of the wrapper it puts around an existing one (here, the inherited one).
+# Both are taken from records built here, not imported from pydantic._internal,
+# whose names a minor release may change.
+_INIT_PRIVATE_ATTRIBUTES = _Private.model_post_init
+_POST_INIT_WRAPPER: object = getattr(
+    _InheritsPrivate.model_post_init, "__code__", object()
+)
+
+
 def _only_initialises_private_attributes(cls: type[Any]) -> bool:
     """True if the record's model_post_init is Pydantic's own, for private attributes.
 
@@ -927,17 +944,19 @@ def _only_initialises_private_attributes(cls: type[Any]) -> bool:
     a model_post_init already exists, such as one inherited from a record that
     has private attributes too (pydantic/_internal/_model_construction.py,
     ``ModelMetaclass.__new__``, at 2.12 and 2.14). Following ``__wrapped__``
-    must end at ``init_private_attributes``; anything an author wrote ends
-    elsewhere.
+    through Pydantic's wrappers must end at ``init_private_attributes``;
+    anything an author wrote ends elsewhere.
     """
     function = getattr(cls, "model_post_init", None)
     for _ in range(64):
-        if function is init_private_attributes:
+        if function is _INIT_PRIVATE_ATTRIBUTES:
             return True
         wrapped = getattr(function, "__wrapped__", None)
         # functools.wraps copies the name, so the wrapper is known by its code.
-        code = getattr(function, "__code__", None)
-        if wrapped is None or getattr(code, "co_name", "") != "wrapped_model_post_init":
+        if (
+            wrapped is None
+            or getattr(function, "__code__", None) is not _POST_INIT_WRAPPER
+        ):
             return False
         function = wrapped
     return False
