@@ -25,7 +25,7 @@ Which kinds a transport produces is set by [ADR 0008](../docs/adr/0008-typed-con
 
 **TRN-6.** The in-process transport MUST run the provider's action in the caller's thread of control, so that attached mode has no hidden concurrency.
 
-Because the action runs in the caller's thread, the in-process transport checks the deadline before it dispatches the call and again when the action ends. If the deadline has passed by then, the action's reply or error is discarded and the call fails with `timeout`. The action might have run, so `timeout` leaves the outcome unknown, as it does over a network.
+Because the action runs in the caller's thread, the in-process transport checks the deadline before it dispatches the call and again when the action ends. If the deadline has passed by then, the action's reply, or a failure it ends with, is discarded and the call fails with `timeout`; the provider's host still records a discarded failure. A signal to stop, such as cancellation or the process exiting, is not a failure of the action and is not discarded. The action might have run, so `timeout` leaves the outcome unknown, as it does over a network.
 
 ## Providers and routing
 
