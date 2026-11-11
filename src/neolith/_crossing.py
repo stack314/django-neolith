@@ -3,12 +3,17 @@
 Every request, reply and error detail crosses as JSON text, in-process too
 (ADR 0007). When a contract is declared, neolith builds a serializer and a
 validator for each of its records from the core schema the description was
-written from, with the record's config, as Pydantic does. A sender takes a
-value of exactly its declared record and writes it with that serializer, with
-warnings as errors. A receiver reads the text with that validator, so what it
-hands on shares no object with the sender. Nothing set on a record class
-afterwards, and none of its own methods, such as ``model_dump_json``, change
-what crosses.
+written from, with the record's config, as Pydantic does, and compiles the
+description itself into the description check (``neolith._checker``).
+
+A sender (``Codec.send``) takes a value of exactly its declared record and
+reads it once with that serializer, into a copy of its own. It converts the
+copy as spec 01 says, writes it with the same serializer, with warnings as
+errors, checks the text against the description, reads the text back with
+the validator, and compares what it read with the copy. A receiver reads the
+text with the validator, so what it hands on shares no object with the
+sender. Nothing set on a record class afterwards, and none of its own
+methods, such as ``model_dump_json``, change what crosses.
 
 pydantic-core reuses, for each record a schema names, the serializer and
 validator Pydantic stored on that record's class, when the class is complete
@@ -20,43 +25,46 @@ core schema.
 import math
 import typing
 from collections.abc import Iterator, Mapping
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
+from enum import Enum
 from typing import Any, final
 
 from pydantic import BaseModel
 from pydantic_core import SchemaSerializer, SchemaValidator
+
+from neolith._checker import description_checker
+from neolith._portable import shown
 
 if typing.TYPE_CHECKING:
     from neolith._contracts import Action, Contract
 
 __all__ = ["Codec", "check_request", "codec"]
 
-# Core schema nodes whose values can be floats: a number, or an untyped value.
-_FLOAT_NODES = frozenset({"float", "any"})
-
 
 @final
 class Codec[R: BaseModel]:
-    """The serializer and validator of one record, as declared in a contract."""
+    """The serializer, validator and description check of one record."""
 
-    __slots__ = ("_floats", "_serializer", "_validator", "record")
+    __slots__ = ("_checker", "_serializer", "_validator", "record")
 
     def __init__(
         self,
         record: type[R],
         schema: Mapping[str, Any],
         config: Mapping[str, Any] | None,
+        defs: Mapping[str, Any],
     ) -> None:
-        """Build from the record's core schema and the config of its model node.
+        """Build from the record's core schema and the config of its model node,
+        and compile its description, in ``defs``, into the description check.
 
         Raises ``TypeError`` when a record the schema names would bring a
-        serializer or validator not built from its own core schema.
+        serializer or validator not built from its own core schema, or when
+        the description is not one the description check reads.
         """
-        floats = False
         for node in _nodes(schema):
-            kind = node.get("type")
-            if kind in ("model", "dataclass"):
+            if node.get("type") in ("model", "dataclass"):
                 _check_reused(node)
-            floats = floats or kind in _FLOAT_NODES
         try:
             core: Any = schema
             settings: Any = config
@@ -70,41 +78,74 @@ class Codec[R: BaseModel]:
         self.record = record
         self._serializer = serializer
         self._validator = validator
-        self._floats = floats
+        self._checker = description_checker(defs, record.__name__)
 
-    def write(self, value: object, subject: str) -> bytes:
-        """Write a value of exactly the record's type as JSON text.
+    def send(self, value: object, subject: str) -> bytes:
+        """Check a value for sending and return its JSON text.
 
-        ``subject`` names the value in a message, such as "the reply". A value
-        of another type is a ``TypeError``. A value holding something its type
-        does not hold at that place, or that JSON cannot hold, such as a
-        record that contains itself or a number that is not finite, is a
-        ``ValueError``.
+        ``subject`` names the value in a message, such as "the reply". The
+        checks run in the order of ADR 0017 Decision 9, the caller's step 2:
+
+        1. the value is exactly of the record's type;
+        2. the serializer reads it, once, into a copy of the sender's own,
+           where a ``-0`` and a timestamp offset with seconds are converted
+           (CON-35, CON-36) and a number that is not finite is refused, and
+           then writes the copy;
+        3. the text passes the description check;
+        4. the validator reads the text back, and each part it reads is the
+           part of the copy it was written from: equal, and of the same kind
+           (TRN-11).
+
+        A value of another type is a ``TypeError``; every other failure is a
+        ``ValueError`` that keeps its cause. What is sent is the value as it
+        was when the serializer read it; a change made to it meanwhile does
+        not reach the text.
         """
         if type(value) is not self.record:
             raise TypeError(
                 f"{subject} is {_kind(value)}, not exactly a {self.record.__name__}"
             )
+        name = self.record.__name__
+        problem: str | None = None
+        text = b""
         try:
-            text = self._serializer.to_json(value, warnings="error")
-            # pydantic-core writes a number that is not finite as null, so
-            # the value as the serializer sees it is checked for one.
-            found = (
-                _non_finite(self._serializer.to_python(value, warnings=False))
-                if self._floats
-                else None
-            )
+            copy = self._serializer.to_python(value, warnings="error")
+            copy, problem = _converted(copy)
+            if problem is None:
+                text = self._serializer.to_json(copy, warnings="error")
         except Exception as error:
             raise ValueError(
-                f"{subject} cannot be written as JSON by its type, "
-                f"{self.record.__name__} ({type(error).__name__}; see the cause)"
+                f"{subject} cannot be written as JSON by its type, {name} "
+                f"({type(error).__name__}; see the cause)"
             ) from error
-        if found is not None:
+        if problem is not None:
             raise ValueError(
-                f"{subject} cannot be written as JSON by its type, "
-                f"{self.record.__name__}: it holds {found}, and a number "
-                "must be finite"
+                f"{subject} cannot be written as JSON by its type, {name}: it "
+                f"holds {problem}"
             )
+        try:
+            self._checker.validate_json(text)
+        except Exception as error:
+            raise ValueError(
+                f"{subject} does not fit the contract's description of {name} "
+                f"({type(error).__name__}; see the cause)"
+            ) from error
+        try:
+            received = self._validator.validate_json(text)
+        except Exception as error:
+            raise ValueError(
+                f"{subject} does not read back as a {name} "
+                f"({type(error).__name__}; see the cause)"
+            ) from error
+        try:
+            changed = _difference(copy, received, name)
+        except Exception as error:
+            raise ValueError(
+                f"{subject} cannot be compared with what it reads back as "
+                f"({type(error).__name__}; see the cause)"
+            ) from error
+        if changed is not None:
+            raise ValueError(f"{subject} {changed}, so it is not sent")
         return text
 
     def read(self, text: bytes) -> R:
@@ -124,24 +165,193 @@ def codec[R: BaseModel](contract: "Contract", record: type[R]) -> Codec[R]:
 def check_request(contract: "Contract", action: "Action", request: object) -> bytes:
     """Check a request before it is sent, and return its JSON text.
 
-    This is the request check of ADR 0017 Decision 9, step 2, in its order,
-    without the description check, which comes with #10 task 3: the request's
-    exact type, writing it, and reading the text back with the request type.
+    This is the request check of ADR 0017 Decision 9, step 2 (``Codec.send``).
     A failure is a mistake in the calling code, so it raises ``TypeError`` or
     ``ValueError``, never a ``ContractError``. An exception that is not an
     ``Exception`` propagates unchanged.
     """
-    request_codec = codec(contract, action.request)
     subject = f"{contract.identity}, action {action.name!r}: the request"
-    text = request_codec.write(request, subject)
-    try:
-        request_codec.read(text)
-    except Exception as error:
-        raise ValueError(
-            f"{subject} does not read back as a {action.request.__name__} "
-            f"({type(error).__name__}; see the cause)"
-        ) from error
-    return text
+    return codec(contract, action.request).send(request, subject)
+
+
+class _Fields(dict[Any, Any]):
+    """A record's fields, or a map's entries, in a sender's copy of a value.
+
+    The serializer dumps a record and a map alike as a dict. To write the
+    copy with the same serializer, each of its dicts is one of these:
+    pydantic-core writes an object in a record's place from its ``__dict__``,
+    whatever its class (``SerCheck::None`` in
+    ``src/serializers/type_serializers/model.rs``, at 2.41.1 and 2.50.4), and
+    writes a dict of any class in a map's place. A plain dict in a record's
+    place is refused, so this class is what lets the copy stand for the value.
+    """
+
+    __slots__ = ()
+
+    @property
+    def __dict__(self) -> dict[Any, Any]:  # type: ignore[override]
+        # A property where object has an attribute, on purpose: pydantic-core
+        # reads it where the copy stands for a record.
+        return self
+
+
+_MINUTE = timedelta(minutes=1)
+
+
+def _converted(dumped: object) -> tuple[object, str | None]:
+    """Make a value dumped in Python mode the sender's copy, converted.
+
+    Returns the copy, with each dict as ``_Fields``, and what it holds that
+    cannot be sent, if anything. A number's ``-0`` becomes ``0`` (CON-35),
+    and a timestamp whose offset is not a whole number of minutes becomes the
+    same instant in UTC (CON-36). Walks without recursion, so a deep value
+    cannot exhaust the stack.
+    """
+    root: list[object] = [dumped]
+    pending: list[tuple[Any, Any]] = [(root, 0)]
+    while pending:
+        holder, at = pending.pop()
+        item = holder[at]
+        kind = type(item)
+        if kind is dict:
+            fields = _Fields(item)
+            holder[at] = fields
+            pending.extend((fields, key) for key in reversed(fields))
+        elif kind is list:
+            pending.extend((item, index) for index in reversed(range(len(item))))
+        elif isinstance(item, float):
+            if not math.isfinite(item):
+                return root[0], f"{shown(item)}, and a number must be finite"
+            if kind is float and item == 0 and math.copysign(1.0, item) < 0:
+                holder[at] = 0.0
+        elif isinstance(item, datetime):
+            # Read through datetime's own methods, so that a subclass, which
+            # Pydantic keeps as it is given, runs no code of its own here.
+            offset = datetime.utcoffset(item)
+            if offset is not None and offset % _MINUTE:
+                local = datetime.combine(datetime.date(item), datetime.time(item))
+                try:
+                    holder[at] = (local - offset).replace(tzinfo=UTC)
+                except OverflowError:
+                    return root[0], (
+                        f"{shown(item)}, a timestamp outside years 0001 to 9999 in UTC"
+                    )
+    return root[0], None
+
+
+# Read from the instance, never through its class's attribute lookup.
+_FIELDS_OF = type.__dict__["__dict__"].__get__(BaseModel)["__dict__"]
+# Kinds held by exact type and equality. A date and a timestamp are not among
+# them: Pydantic keeps a value of a subclass as it is given.
+_EXACT = frozenset({str, int, bool, bytes, Decimal, timedelta})
+
+
+def _difference(sent: object, received: object, name: str) -> str | None:
+    """Say how the value read back differs from the sender's copy, or None.
+
+    ``sent`` is the copy that was written, where each record and map is a
+    ``_Fields``; ``received`` is what the record's validator read from the
+    text. Each part must be equal and of the same kind (see ``_same``). A
+    record must hold every field that was read, so that a default the reader
+    fills in never stands for a value the sender lacks, and a map the same
+    keys, each exactly a ``str``. Walks without recursion, in the order of
+    the text.
+    """
+    pending: list[tuple[object, object, object]] = [(sent, received, (None, name))]
+    while pending:
+        mine, theirs, trail = pending.pop()
+        kind = type(theirs)
+        parts: list[tuple[object, object, object]]
+        if isinstance(theirs, BaseModel):
+            if type(mine) is not _Fields:
+                return _reshaped(mine, theirs, trail)
+            parts = []
+            for key, part in _FIELDS_OF.__get__(theirs).items():
+                if key not in mine:
+                    return f"lacks {_path((trail, f'.{key}'))}"
+                parts.append((mine[key], part, (trail, f".{key}")))
+        elif kind is list:
+            items = typing.cast(list[object], theirs)
+            if type(mine) is not list or len(typing.cast(list[object], mine)) != len(
+                items
+            ):
+                return _reshaped(mine, theirs, trail)
+            parts = [
+                (part, back, (trail, f"[{index}]"))
+                for index, (part, back) in enumerate(
+                    zip(typing.cast(list[object], mine), items, strict=True)
+                )
+            ]
+        elif kind is dict:
+            entries = typing.cast(dict[str, object], theirs)
+            if type(mine) is not _Fields:
+                return _reshaped(mine, theirs, trail)
+            held = mine
+            for key in held:
+                # Before any key is looked up, so that no key's own code runs.
+                if type(key) is not str:
+                    return (
+                        f"holds the key {shown(key)} ({type(key).__qualname__}) at "
+                        f"{_path(trail)}, which reads back as a str"
+                    )
+            if len(held) != len(entries) or not all(key in held for key in entries):
+                return _reshaped(mine, theirs, trail)
+            parts = [
+                (held[key], back, (trail, f"[{key!r}]"))
+                for key, back in entries.items()
+            ]
+        elif _same(mine, theirs):
+            continue
+        else:
+            return (
+                f"holds {shown(mine)} ({type(mine).__qualname__}) at {_path(trail)}, "
+                f"which reads back as {shown(theirs)} ({kind.__qualname__})"
+            )
+        pending.extend(reversed(parts))
+    return None
+
+
+def _same(mine: object, theirs: object) -> bool:
+    """Whether a part read back is the part the sender holds.
+
+    Each scalar is held by exact type and equality, so that no code of a
+    subclass runs here and a boolean never stands for an integer. Three kinds
+    are wider. An integer is held for a number when the double read back
+    equals it exactly. A date or a timestamp may be of a subclass, compared
+    through the base class's own methods, since Pydantic keeps one as it is
+    given; a timestamp is an instant, so its offset is not compared (spec
+    01). An enum member is the very member.
+    """
+    kind = type(theirs)
+    if theirs is None or isinstance(theirs, Enum):
+        return mine is theirs
+    if kind is float:
+        return type(mine) in (float, int) and mine == theirs
+    if kind is datetime:
+        return (
+            isinstance(mine, datetime)
+            and datetime.__eq__(typing.cast(datetime, theirs), mine) is True
+        )
+    if kind is date:
+        # A timestamp is a date too, but never equal to one.
+        return (
+            isinstance(mine, date)
+            and date.__eq__(typing.cast(date, theirs), mine) is True
+        )
+    return kind in _EXACT and type(mine) is kind and mine == theirs
+
+
+def _reshaped(mine: object, theirs: object, trail: object) -> str:
+    return f"holds {shown(mine)} at {_path(trail)}, which reads back as {shown(theirs)}"
+
+
+def _path(trail: object) -> str:
+    """The path that a trail of (the trail before, a step) pairs spells."""
+    steps: list[str] = []
+    while trail is not None:
+        trail, step = typing.cast(tuple[object, str], trail)
+        steps.append(step)
+    return "".join(reversed(steps))
 
 
 def _nodes(schema: Mapping[str, Any]) -> Iterator[Mapping[str, Any]]:
@@ -235,27 +445,6 @@ def _built_from(built: SchemaSerializer | SchemaValidator) -> object:
     if type(arguments) is not tuple or not arguments:
         return None
     return arguments[0]
-
-
-def _non_finite(value: object) -> str | None:
-    """Name the first number in a plain value that is not finite, or None."""
-    pending = [value]
-    seen: set[int] = set()
-    while pending:
-        item = pending.pop()
-        kind = type(item)
-        if issubclass(kind, float):
-            if not math.isfinite(typing.cast(float, item)):
-                return repr(item)
-        elif kind in (list, tuple, set, frozenset, dict):
-            if id(item) in seen:
-                continue
-            seen.add(id(item))
-            if kind is dict:
-                pending.extend(typing.cast(dict[object, object], item).values())
-            else:
-                pending.extend(typing.cast(list[object], item))
-    return None
 
 
 def _kind(value: object) -> str:

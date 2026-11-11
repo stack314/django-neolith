@@ -143,8 +143,8 @@ _SCALARS: dict[str, tuple[dict[str, Any], Mapping[str, str], frozenset[str]]] = 
 # type contains no record, and refused on records and on fields whose type
 # contains a record at any depth: a list item, a map value, an optional value
 # or an alias. A record instance that a provider builds itself, such as a
-# subclass with looser fields, still travels unchecked; only a send-side
-# check against the description can catch that (step 3, #10). An after or
+# subclass with looser fields, is still kept unchecked; the sender's check
+# is what refuses it (neolith._crossing, Codec.send). An after or
 # wrap validator returns a value after the check, which nothing checks again,
 # and a plain validator replaces the schema; both are refused. A before
 # validator must also be idempotent: the value it returns travels, and is

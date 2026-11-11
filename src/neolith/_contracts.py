@@ -550,7 +550,9 @@ def contract[T](identity: str, /) -> Callable[[type[T]], type[T]]:
         def capture(record: type[BaseModel]) -> None:
             if record not in codecs:
                 try:
-                    codecs[record] = Codec(record, *portable.built[record])
+                    codecs[record] = Codec(
+                        record, *portable.built[record], portable.defs
+                    )
                 except TypeError as error:
                     raise portable.fail(str(error)) from error
 
