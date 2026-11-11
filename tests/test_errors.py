@@ -37,6 +37,7 @@ from neolith import (
     contract,
     implements,
 )
+from neolith._contracts import is_received, mark_received
 from neolith._portable import json_value_problem
 
 STANDARD_KINDS = [
@@ -439,10 +440,15 @@ def test_error_type_cannot_be_subclassed() -> None:
     [copy.copy, copy.deepcopy, lambda error: pickle.loads(pickle.dumps(error))],  # noqa: S301
     ids=["copy", "deepcopy", "pickle"],
 )
-def test_copy_and_pickle_carry_kind_message_and_detail_only(
-    build: Callable[[], ContractError], duplicate: Callable[[Any], Any]
+@pytest.mark.parametrize("received", [False, True], ids=["raised", "received"])
+def test_copy_and_pickle_carry_kind_message_detail_and_the_mark_only(
+    build: Callable[[], ContractError],
+    duplicate: Callable[[Any], Any],
+    received: bool,
 ) -> None:
     error = build()
+    if received:
+        mark_received(error)
     error.add_note("db=10.0.0.5")
     error.provider_detail = "host 7"  # type: ignore[attr-defined]
     again = duplicate(error)
@@ -455,6 +461,9 @@ def test_copy_and_pickle_carry_kind_message_and_detail_only(
     assert again.args == error.args
     assert not hasattr(again, "__notes__")
     assert not hasattr(again, "provider_detail")
+    # Whether a connector raised it is kept, so a copy of a received error is
+    # still one (ADR 0008 Decision 4), and a copy of one built here is not.
+    assert is_received(again) is received
     if isinstance(again.data, dict):
         with pytest.raises(TypeError, match="read-only"):
             again.data["sku"] = "B2"

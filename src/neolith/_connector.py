@@ -197,30 +197,32 @@ class InProcess:
         """
         try:
             value = codec(self._contract, action.request).read(request)
-            # In a copy of the caller's context, so that what the action sets
-            # in a context variable stays on the provider's side.
-            reply = contextvars.copy_context().run(
-                self._functions[action.name], self._implementation, value
-            )
-            if action.reply is None:
-                if reply is not None:
-                    raise TypeError(
-                        f"the reply is {type(reply).__qualname__}, but the "
-                        "action's reply is empty"
-                    )
-                return None
-            return codec(self._contract, action.reply).write(reply, "the reply")
-        except ContractError as error:
+        except Exception as error:  # a failure of the host, whatever it is
+            failure: BaseException = error
+        else:
             try:
-                delivered = self._deliver(action, error)
-            except Exception as problem:  # the detail cannot be sent
-                failure: BaseException = problem
-            else:
-                if delivered is not None:
-                    return delivered
+                # In a copy of the caller's context, so that what the action
+                # sets in a context variable stays on the provider's side.
+                reply = contextvars.copy_context().run(
+                    self._functions[action.name], self._implementation, value
+                )
+            except ContractError as error:
+                # Only an error the action itself ends with is delivered.
+                try:
+                    delivered = self._deliver(action, error)
+                except Exception as problem:  # the detail cannot be sent
+                    failure = problem
+                else:
+                    if delivered is not None:
+                        return delivered
+                    failure = error
+            except Exception as error:
                 failure = error
-        except Exception as error:
-            failure = error
+            else:
+                try:
+                    return self._write(action, reply)
+                except Exception as error:
+                    failure = error
         # Logged outside the handler, so a failing log does not chain to it,
         # then dropped, so its traceback does not keep the provider's frames.
         _report(
@@ -229,6 +231,17 @@ class InProcess:
         )
         del failure
         return _FAILED
+
+    def _write(self, action: Action, reply: object) -> bytes | None:
+        """The reply's text, or ``None`` for an empty reply."""
+        if action.reply is None:
+            if reply is not None:
+                raise TypeError(
+                    f"the reply is {type(reply).__qualname__}, but the action's "
+                    "reply is empty"
+                )
+            return None
+        return codec(self._contract, action.reply).write(reply, "the reply")
 
     def _deliver(
         self, action: Action, error: ContractError

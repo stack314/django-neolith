@@ -12,13 +12,13 @@ import logging
 import pickle
 import types
 from collections.abc import Callable
-from typing import Any, Protocol, cast
+from typing import Annotated, Any, Protocol, cast
 
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 from hypothesis_jsonschema import from_schema
-from pydantic import BaseModel
+from pydantic import BaseModel, BeforeValidator
 
 from neolith import Contract, ContractDefinitionError, ContractError, action, contract
 from neolith._connector import Connector, Failure, InProcess
@@ -482,3 +482,41 @@ def test_generated_details_cross_equal_and_unshared(data: st.DataObject) -> None
     assert type(caught.value.data) is record
     assert caught.value.data == detail
     assert _shared(detail, caught.value.data) == set()
+
+
+_READS = [0]
+
+
+def _second_read_refused(value: object) -> object:
+    # Building the request and the caller's check read it first; the
+    # provider's read is the third, where state the validator reads changed.
+    _READS[0] += 1
+    if _READS[0] == 3:
+        raise ContractError("permission_denied", "refused while reading")
+    return value
+
+
+class Guarded(BaseModel):
+    order: Annotated[int, BeforeValidator(_second_read_refused)]
+
+
+@contract("guarded.v1")
+class GuardedShop(Protocol):
+    @action
+    def reserve(self, request: Guarded) -> Done: ...
+
+
+class GuardedImpl:
+    def reserve(self, request: Guarded) -> Done:
+        return Done()
+
+
+@pytest.mark.spec("CON-44", "CON-43")
+def test_an_error_from_reading_the_request_is_the_hosts_failure() -> None:
+    # Only an error the action itself ends with is delivered; one raised while
+    # the provider's host reads the request is a failure of the host.
+    _READS[0] = 0
+    connector: Any = Connector(GuardedShop, InProcess(GuardedShop, GuardedImpl()))
+    with pytest.raises(ContractError) as raised:
+        connector.reserve(Guarded(order=1))
+    _assert_internal(raised.value)
