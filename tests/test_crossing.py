@@ -7,6 +7,7 @@ between the dump and the read-back, arrive with #10 tasks 3 and 4.
 """
 
 import json
+import re
 import types
 from collections.abc import Generator, Iterator
 from typing import Annotated, Any, Protocol, cast
@@ -17,7 +18,15 @@ from hypothesis import given
 from hypothesis import strategies as st
 from hypothesis_jsonschema import from_schema
 from jsonschema import Draft202012Validator
-from pydantic import BaseModel, BeforeValidator, ValidationError
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    ValidationError,
+    create_model,
+)
 from pydantic_core import SchemaSerializer
 
 from neolith import Contract, ContractDefinitionError, action, contract
@@ -187,7 +196,7 @@ class OverridingContract(Protocol):
     def send(self, request: Overriding) -> Overriding: ...
 
 
-@pytest.mark.spec("TRN-10", "TRN-12", "TRN-14")
+@pytest.mark.spec("TRN-10", "TRN-12", "TRN-13")
 def test_a_records_own_methods_do_not_change_what_crosses() -> None:
     declared = Contract.of(OverridingContract)
     request = Overriding(n=3, parts=[Part(sku="a")])
@@ -197,98 +206,300 @@ def test_a_records_own_methods_do_not_change_what_crosses() -> None:
     assert vars(received) == {"n": 3, "parts": [Part(sku="a")]}
 
 
-@pytest.mark.spec("TRN-10")
-def test_the_serializer_is_the_one_captured_when_the_contract_was_declared() -> None:
-    class Late(BaseModel):
-        n: int
+class Late(BaseModel):
+    n: int
+    part: Part
 
-    @contract("late.v1")
-    class LateContract(Protocol):
-        @action
-        def send(self, request: Late) -> None: ...
 
-    declared = Contract.of(LateContract)
-    original = Late.__pydantic_serializer__
-    # Replaced after declaration: what crosses still follows the schema the
-    # description was written from.
-    Late.__pydantic_serializer__ = SchemaSerializer({"type": "any"})
-    try:
-        text = check_request(declared, declared.actions["send"], Late(n=1))
-    finally:
-        Late.__pydantic_serializer__ = original
-    assert json.loads(text) == {"n": 1}
+@contract("late.v1")
+class LateContract(Protocol):
+    @action
+    def send(self, request: Late) -> None: ...
+
+
+class Spoof:
+    """Validates as nothing a record would, wherever it is used."""
+
+    def validate_json(self, *args: object, **kwargs: object) -> object:
+        return Part.model_construct(sku=1)
+
+    validate_python = validate_json
 
 
 @pytest.mark.spec("TRN-10", "TRN-12")
-def test_a_validator_pydantic_wraps_for_a_plugin_is_used(
+@pytest.mark.parametrize("record", [Late, Part], ids=["request", "nested"])
+@pytest.mark.parametrize(
+    ("attribute", "replacement"),
+    [
+        ("__pydantic_serializer__", SchemaSerializer({"type": "any"})),
+        ("__pydantic_serializer__", Reserved.__pydantic_serializer__),
+        ("__pydantic_validator__", Reserved.__pydantic_validator__),
+        ("__pydantic_validator__", Spoof()),
+    ],
+)
+def test_nothing_set_on_a_record_class_after_declaration_changes_what_crosses(
+    monkeypatch: pytest.MonkeyPatch,
+    record: type[BaseModel],
+    attribute: str,
+    replacement: object,
+) -> None:
+    declared = Contract.of(LateContract)
+    value = Late(n=1, part=Part(sku="a"))
+    monkeypatch.setattr(record, attribute, replacement)
+    text = check_request(declared, declared.actions["send"], value)
+    assert json.loads(text) == {"n": 1, "part": {"sku": "a", "quantity": 1}}
+    assert codec(declared, Late).read(text) == value
+
+
+class WrapsAValidator:
+    """Exposes a validator as Pydantic's plugin wrapper does."""
+
+    def __init__(self, validator: object) -> None:
+        self.__pydantic_schema_validator__ = validator
+
+
+def _declare(record: type[BaseModel]) -> Contract:
+    def send(self: object, request: record) -> None: ...  # type: ignore[valid-type]
+
+    declaration = types.new_class(
+        _name("D"), (Protocol,), exec_body=lambda ns: ns.update(send=action(send))
+    )
+    contract(f"{_name('declared')}.v1")(declaration)
+    return Contract.of(declaration)
+
+
+def _holding(inner: type[BaseModel]) -> type[BaseModel]:
+    """A record with one field of another record."""
+    return create_model(_name("Holder"), inner=(inner, ...))
+
+
+@pytest.mark.spec("TRN-10", "TRN-12", "CON-17")
+@pytest.mark.parametrize("nested", [False, True], ids=["request", "nested"])
+@pytest.mark.parametrize(
+    ("attribute", "replacement", "what"),
+    [
+        ("__pydantic_serializer__", Reserved.__pydantic_serializer__, "serializer"),
+        ("__pydantic_serializer__", object(), "serializer"),
+        ("__pydantic_validator__", Reserved.__pydantic_validator__, "validator"),
+        (
+            "__pydantic_validator__",
+            WrapsAValidator(Reserved.__pydantic_validator__),
+            "validator",
+        ),
+    ],
+)
+def test_a_record_that_pydantic_core_would_reuse_otherwise_is_refused(
+    nested: bool, attribute: str, replacement: object, what: str
+) -> None:
+    # pydantic-core reuses, for each record a schema names, what is stored on
+    # its class, so a record whose stored serializer or validator was not
+    # built from its own core schema is refused when it is declared.
+    class Odd(BaseModel):
+        n: int
+
+    setattr(Odd, attribute, replacement)
+    record = _holding(Odd) if nested else Odd
+    with pytest.raises(
+        ContractDefinitionError,
+        match=f"record Odd has a {what} that Pydantic did not build from its core",
+    ):
+        _declare(record)
+
+
+@pytest.mark.spec("TRN-10", "TRN-12")
+@pytest.mark.parametrize("nested", [False, True], ids=["request", "nested"])
+@pytest.mark.parametrize(
+    "replacement", [object(), Spoof(), WrapsAValidator(object())], ids=repr
+)
+def test_a_stored_validator_pydantic_core_never_reuses_is_ignored(
+    nested: bool, replacement: object
+) -> None:
+    # The nearest legitimate shape: nothing there that pydantic-core would
+    # take, so neolith's own validator, built from the schema, reads.
+    class Odd(BaseModel):
+        n: int
+
+    Odd.__pydantic_validator__ = replacement  # type: ignore[assignment]
+    record = _holding(Odd) if nested else Odd
+    declared = _declare(record)
+    value = (
+        record.model_construct(inner=Odd.model_construct(n=1))
+        if nested
+        else (Odd.model_construct(n=1))
+    )
+    text = check_request(declared, declared.actions["send"], value)
+    received = codec(declared, record).read(text)
+    assert json.loads(text) == ({"inner": {"n": 1}} if nested else {"n": 1})
+    assert type(received) is record
+
+
+@pytest.mark.spec("TRN-10", "TRN-12")
+def test_a_pydantic_plugin_does_not_see_or_change_what_crosses(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # With a Pydantic plugin installed, such as an observability one, every
-    # record's validator is Pydantic's wrapper, which lets the plugin see each
-    # validation. A contract is declared and crosses as without one.
+    # With a Pydantic plugin installed, every record's validator is Pydantic's
+    # wrapper, which runs the plugin's handlers when it reads JSON. neolith
+    # reads with its own validator, so none of them runs.
     seen: list[object] = []
 
-    class OnJson:
-        def on_enter(self, input: object, **kwargs: object) -> None:
-            seen.append(input)
+    class Handler:
+        def on_enter(self, *args: object, **kwargs: object) -> None:
+            seen.append(args)
+
+        def on_success(self, result: object) -> None:
+            seen.append(result)
+            if isinstance(result, BaseModel):
+                object.__setattr__(result, "n", "changed")
 
     class Plugin:
         def new_schema_validator(
             self, *args: object, **kwargs: object
         ) -> tuple[Any, ...]:
-            return None, OnJson(), None
+            return None, Handler(), Handler()
 
     monkeypatch.setattr(pydantic.plugin._loader, "_plugins", {"probe": Plugin()})
 
     class Watched(BaseModel):
         n: int
 
+    class Holds(BaseModel):
+        watched: Watched
+
     assert type(Watched.__pydantic_validator__).__name__ == "PluggableSchemaValidator"
-
-    @contract("watched.v1")
-    class WatchedContract(Protocol):
-        @action
-        def send(self, request: Watched) -> None: ...
-
-    declared = Contract.of(WatchedContract)
-    text = check_request(declared, declared.actions["send"], Watched(n=1))
-    assert codec(declared, Watched).read(text) == Watched(n=1)
-    assert seen == [text, text]
-
-
-class PluggableSchemaValidator:
-    """Has the name of Pydantic's plugin wrapper, outside Pydantic."""
-
-    def validate_json(self, *args: object, **kwargs: object) -> None:
-        return None
+    seen.clear()
+    for record, value in (
+        (Watched, Watched(n=1)),
+        (Holds, Holds(watched=Watched(n=1))),
+    ):
+        seen.clear()
+        declared = _declare(record)
+        text = check_request(declared, declared.actions["send"], value)
+        assert codec(declared, record).read(text) == value
+        assert seen == []
 
 
-@pytest.mark.spec("TRN-10")
+# TRN-10: a record class keeps what Pydantic reads from its values.
+
+
+class Issue36(BaseModel):
+    x: int
+    _cache: int = PrivateAttr(0)
+
+    def __getattribute__(self, name: str) -> Any:  # noqa: ANN401
+        if name == "model_post_init":
+
+            def changed(context: object, /) -> None:
+                object.__setattr__(self, "x", "not an int")
+
+            return changed
+        return super().__getattribute__(name)
+
+
+class ReadsDict(BaseModel):
+    n: int
+
+    def __getattribute__(self, name: str) -> Any:  # noqa: ANN401
+        return super().__getattribute__(name)
+
+
+class MissingAttribute(BaseModel):
+    n: int
+
+    def __getattr__(self, name: str) -> Any:  # noqa: ANN401
+        return 1
+
+
+class Constructs(BaseModel):
+    n: int
+
+    def __new__(cls, *args: object, **kwargs: object) -> "Constructs":
+        return super().__new__(cls)
+
+
+class Mixin:
+    def __getattr__(self, name: str) -> Any:  # noqa: ANN401
+        return 1
+
+
+class MixinAfter(BaseModel, Mixin):
+    n: int
+
+
+class Base(BaseModel):
+    n: int
+
+    def __getattribute__(self, name: str) -> Any:  # noqa: ANN401
+        return super().__getattribute__(name)
+
+
+class FromBase(Base):
+    pass
+
+
+def _slot_shadow(name: str) -> type[BaseModel]:
+    return create_model(
+        _name("Shadow"), __base__=type(_name("Base"), (BaseModel,), {name: property()})
+    )
+
+
+@pytest.mark.spec("TRN-10", "TRN-12", "CON-17")
 @pytest.mark.parametrize(
-    ("attribute", "value"),
+    ("record", "refusal"),
     [
-        ("__pydantic_serializer__", object()),
-        ("__pydantic_validator__", object()),
-        ("__pydantic_validator__", PluggableSchemaValidator()),
+        (Issue36, "defines __getattribute__"),
+        (ReadsDict, "defines __getattribute__"),
+        (MissingAttribute, "defines __getattr__"),
+        (Constructs, "defines __new__"),
+        (MixinAfter, "defines __getattr__ in Mixin"),
+        (FromBase, "defines __getattribute__ in Base"),
+        *(
+            (_slot_shadow(name), f"defines {name}")
+            for name in (
+                "__dict__",
+                "__class__",
+                "__pydantic_extra__",
+                "__pydantic_fields_set__",
+                "__pydantic_private__",
+            )
+        ),
     ],
 )
-def test_a_record_without_pydantics_own_serializer_or_validator_is_refused(
-    attribute: str, value: object
+@pytest.mark.parametrize("nested", [False, True], ids=["request", "nested"])
+def test_a_record_class_that_replaces_what_pydantic_reads_is_refused(
+    record: type[BaseModel], refusal: str, nested: bool
 ) -> None:
-    class Odd(BaseModel):
-        n: int
-
-    setattr(Odd, attribute, value)
-
-    with pytest.raises(ContractDefinitionError, match=r"odd\.v1.*record Odd"):
-
-        @contract("odd.v1")
-        class OddContract(Protocol):
-            @action
-            def send(self, request: Odd) -> None: ...
+    with pytest.raises(ContractDefinitionError, match=re.escape(refusal)):
+        _declare(_holding(record) if nested else record)
 
 
-# TRN-9 and TRN-13: exactly the declared type.
+class Ordinary(BaseModel):
+    """Defines methods Pydantic does not read from a value to write or read it."""
+
+    n: int
+
+    def __repr__(self) -> str:
+        return "Ordinary"
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Ordinary) and other.n == self.n
+
+    __hash__ = None  # type: ignore[assignment]
+
+    def __setattr__(self, name: str, value: object) -> None:
+        super().__setattr__(name, value)
+
+    def total(self) -> int:
+        return self.n
+
+
+@pytest.mark.spec("TRN-10", "TRN-12")
+def test_a_record_class_with_methods_pydantic_does_not_read_crosses() -> None:
+    declared = _declare(Ordinary)
+    text = check_request(declared, declared.actions["send"], Ordinary(n=2))
+    assert codec(declared, Ordinary).read(text) == Ordinary(n=2)
+
+
+# TRN-9: exactly the declared type.
 
 
 class SubReserve(Reserve):
@@ -315,7 +526,7 @@ class Liar:
         return Reserve
 
 
-@pytest.mark.spec("TRN-9", "TRN-13", "TRN-16", "CON-29")
+@pytest.mark.spec("TRN-9", "TRN-13", "TRN-14", "CON-29")
 @pytest.mark.parametrize(
     ("value", "shown"),
     [
@@ -366,7 +577,7 @@ def test_the_nearest_legitimate_shapes_pass_the_type_check() -> None:
         assert json.loads(check_request(INVENTORY, RESERVE, value))["order"] == 1
 
 
-@pytest.mark.spec("TRN-9", "TRN-15")
+@pytest.mark.spec("TRN-9", "TRN-13")
 def test_a_nested_look_alike_crosses_only_as_text_that_reads_back() -> None:
     # The type check covers the request itself. A record inside it is written
     # from its fields, and crosses only if that text reads back.
@@ -388,7 +599,7 @@ def test_a_nested_look_alike_crosses_only_as_text_that_reads_back() -> None:
         check_request(INVENTORY, RESERVE, request)
 
 
-# TRN-11 and TRN-14: a value the type does not hold is refused, not written.
+# TRN-11: a value the type does not hold is refused, not written.
 
 
 def _assigned(**fields: object) -> Reserve:
@@ -398,7 +609,7 @@ def _assigned(**fields: object) -> Reserve:
     return request
 
 
-@pytest.mark.spec("TRN-11", "TRN-14", "TRN-16", "CON-29")
+@pytest.mark.spec("TRN-11", "TRN-13", "TRN-14", "CON-29")
 @pytest.mark.parametrize(
     "request_value",
     [
@@ -436,6 +647,128 @@ def test_the_nearest_legitimate_assignments_are_written() -> None:
     }
 
 
+class Measure(BaseModel):
+    value: float = 0.0
+
+
+class Measures(BaseModel):
+    single: float = 0.0
+    maybe: float | None = None
+    series: list[float | None] = []
+    named: dict[str, float] = {}
+    nested: Measure = Measure()
+    many: list[Measure] = []
+
+
+@contract("measures.v1")
+class MeasuresContract(Protocol):
+    @action
+    def send(self, request: Measures) -> Measures: ...
+
+
+MEASURES = Contract.of(MeasuresContract)
+
+
+def _measured(**fields: object) -> Measures:
+    """Built through the record's own validator, which takes nan and inf."""
+    return Measures.model_validate(fields)
+
+
+def _assigned_measure(name: str, value: object) -> Measures:
+    measures = Measures()
+    setattr(measures, name, value)
+    return measures
+
+
+_NAN, _INF = float("nan"), float("inf")
+
+
+@pytest.mark.spec("TRN-11", "TRN-13", "TRN-14")
+@pytest.mark.parametrize(
+    ("value", "shown"),
+    [
+        pytest.param(_measured(maybe=_NAN), "nan", id="nan-in-an-optional"),
+        pytest.param(_measured(series=[1.0, _INF]), "inf", id="inf-in-a-list"),
+        pytest.param(_measured(single=_NAN), "nan", id="nan"),
+        pytest.param(_measured(named={"a": -_INF}), "-inf", id="in-a-map"),
+        pytest.param(_measured(nested={"value": _NAN}), "nan", id="in-a-record"),
+        pytest.param(
+            _measured(many=[{"value": 1.0}, {"value": _INF}]),
+            "inf",
+            id="in-a-record-in-a-list",
+        ),
+        pytest.param(_assigned_measure("maybe", _NAN), "nan", id="assigned"),
+        pytest.param(_assigned_measure("single", 1e308 * 10), "inf", id="overflowed"),
+    ],
+)
+def test_a_number_that_is_not_finite_is_refused_not_written_as_null(
+    value: Measures, shown: str
+) -> None:
+    # pydantic-core writes nan and inf as null, which an optional field reads
+    # back as None, so the value is refused before it is sent.
+    with pytest.raises(ValueError, match=f"it holds {shown}, and a number must be"):
+        check_request(MEASURES, MEASURES.actions["send"], value)
+    with pytest.raises(ValueError, match="the reply cannot be written"):
+        codec(MEASURES, Measures).write(value, "the reply")
+
+
+@pytest.mark.spec("TRN-11", "TRN-13")
+def test_finite_numbers_and_absent_ones_are_written() -> None:
+    # The nearest legitimate shapes: the largest finite doubles, and None.
+    value = _measured(
+        single=1.7976931348623157e308,
+        maybe=None,
+        series=[None, -1.7976931348623157e308],
+        named={"a": 5e-324},
+        nested={"value": 1.5},
+    )
+    text = check_request(MEASURES, MEASURES.actions["send"], value)
+    assert codec(MEASURES, Measures).read(text) == value
+
+
+class Frozen(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    n: int = 0
+
+
+class FrozenWithList(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    ns: list[int] = []
+
+
+@pytest.mark.spec("TRN-12", "CON-17")
+@pytest.mark.parametrize("nested", [False, True], ids=["field", "nested-field"])
+def test_a_record_default_every_read_would_share_is_refused(nested: bool) -> None:
+    # pydantic-core copies a default only when it cannot be hashed, so a
+    # frozen record default would be the same object in every value read
+    # without the field.
+    record = create_model(_name("Sharing"), frozen=(Frozen, Frozen(n=1)))
+    with pytest.raises(
+        ContractDefinitionError, match="has a hashable record as its default"
+    ):
+        _declare(_holding(record) if nested else record)
+
+
+@pytest.mark.spec("TRN-12")
+@pytest.mark.parametrize(
+    ("annotation", "default"),
+    [
+        pytest.param(Frozen, Field(default_factory=lambda: Frozen(n=1)), id="factory"),
+        pytest.param(Part, Part(sku="a"), id="unfrozen"),
+        pytest.param(FrozenWithList, FrozenWithList(ns=[1]), id="frozen-unhashable"),
+    ],
+)
+def test_a_record_default_each_read_gets_its_own_of_is_admitted(
+    annotation: type[BaseModel], default: object
+) -> None:
+    record = create_model(_name("Own"), value=(annotation, default))
+    declared = _declare(record)
+    reader = codec(declared, record)
+    first, second = reader.read(b"{}"), reader.read(b"{}")
+    assert first.value == second.value  # type: ignore[attr-defined]
+    assert first.value is not second.value  # type: ignore[attr-defined]
+
+
 class Tree(BaseModel):
     name: str = "t"
     children: list["Tree"] = []
@@ -464,7 +797,7 @@ def _cyclic(through: str) -> Tree:
     return tree
 
 
-@pytest.mark.spec("TRN-11", "TRN-14", "TRN-16")
+@pytest.mark.spec("TRN-11", "TRN-13", "TRN-14")
 @pytest.mark.parametrize(
     "value",
     [
@@ -479,7 +812,7 @@ def test_a_value_json_cannot_hold_is_a_value_error(value: Tree) -> None:
         check_request(declared, declared.actions["plant"], value)
 
 
-@pytest.mark.spec("TRN-15", "TRN-16")
+@pytest.mark.spec("TRN-13", "TRN-14")
 def test_a_value_written_deeper_than_the_reader_goes_is_a_value_error() -> None:
     # Each level of the tree is two levels of JSON, an object and a list. The
     # serializer writes this one, and the validator's JSON reader refuses it,
@@ -490,7 +823,7 @@ def test_a_value_written_deeper_than_the_reader_goes_is_a_value_error() -> None:
     assert isinstance(raised.value.__cause__, ValidationError)
 
 
-@pytest.mark.spec("TRN-11", "TRN-14", "TRN-15")
+@pytest.mark.spec("TRN-11", "TRN-13")
 def test_a_deep_tree_and_a_shared_subtree_are_written() -> None:
     # The nearest legitimate shapes: deep, but within what the serializer
     # writes and the reader reads, and one subtree reached twice without a
@@ -518,10 +851,10 @@ def test_a_reply_holding_what_its_type_does_not_is_refused_too() -> None:
         codec(INVENTORY, Reserved).write(reply, "the reply")
 
 
-# TRN-15: the text is read back with the request type.
+# TRN-13: the text is read back with the request type.
 
 
-@pytest.mark.spec("TRN-15", "TRN-16", "CON-29")
+@pytest.mark.spec("TRN-13", "TRN-14", "CON-29")
 @pytest.mark.parametrize(
     "request_value",
     [
@@ -572,7 +905,7 @@ class CheckedContract(Protocol):
     def stop(self, request: Interrupting) -> None: ...
 
 
-@pytest.mark.spec("TRN-15", "TRN-16")
+@pytest.mark.spec("TRN-13", "TRN-14")
 def test_any_exception_from_reading_back_is_a_value_error_that_keeps_its_cause() -> (
     None
 ):
@@ -594,7 +927,7 @@ def test_an_exception_that_is_not_an_exception_propagates_unchanged() -> None:
         check_request(declared, declared.actions["stop"], request)
 
 
-@pytest.mark.spec("TRN-13", "TRN-14", "TRN-15")
+@pytest.mark.spec("TRN-13")
 def test_the_request_checks_run_in_order() -> None:
     # A value failing every check reports the first: its type, then the
     # writing, then the reading back.
@@ -645,7 +978,7 @@ def _crosses(
     assert _shared(received, back) == set()
 
 
-@pytest.mark.spec("TRN-10", "TRN-12", "TRN-14", "TRN-15")
+@pytest.mark.spec("TRN-10", "TRN-12", "TRN-13")
 @_HYPOTHESIS
 @given(st.data())
 def test_generated_values_cross_equal_and_unshared(data: st.DataObject) -> None:
@@ -657,7 +990,7 @@ def test_generated_values_cross_equal_and_unshared(data: st.DataObject) -> None:
     _crosses(found, record, schema, data.draw(from_schema(schema)))
 
 
-@pytest.mark.spec("TRN-10", "TRN-12", "TRN-14", "TRN-15")
+@pytest.mark.spec("TRN-10", "TRN-12", "TRN-13")
 @_HYPOTHESIS
 @given(st.data())
 def test_every_portable_form_crosses_equal_and_unshared(data: st.DataObject) -> None:

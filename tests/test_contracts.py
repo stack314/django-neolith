@@ -2003,7 +2003,6 @@ class RenamedPostInit(BaseModel):
         WithPlainPrivate,
         InheritsPrivate,
         InheritsPrivateTwice,
-        PrivateUnderUnhashableMetaclass,
     ],
 )
 def test_private_attributes_are_accepted(record: type[BaseModel]) -> None:
@@ -2025,12 +2024,31 @@ def test_private_attributes_are_accepted(record: type[BaseModel]) -> None:
         PrivateObjectPostInit,
         ForgedClosure,
         ForgedGlobals,
-        PostInitBehindMetaclass,
-        OddNamespaceKey,
     ],
 )
 def test_own_model_post_init_is_refused(record: type[BaseModel]) -> None:
     with pytest.raises(ContractDefinitionError, match="defines model_post_init"):
+        declare_with_field(record)
+
+
+@pytest.mark.spec("CON-17", "TRN-10")
+@pytest.mark.parametrize(
+    ("record", "refusal"),
+    [
+        (PostInitBehindMetaclass, "has the metaclass HidesNamespace, not Pydantic's"),
+        (
+            PrivateUnderUnhashableMetaclass,
+            "has the metaclass UnhashableMetaclass, not Pydantic's",
+        ),
+        (OddNamespaceKey, "has a namespace key that is not text in OddNamespaceKey"),
+    ],
+)
+def test_a_record_class_pydantic_cannot_read_plainly_is_refused(
+    record: type[BaseModel], refusal: str
+) -> None:
+    # A metaclass, or a namespace key that compares by code of its own, can
+    # change what Pydantic reads from the class.
+    with pytest.raises(ContractDefinitionError, match=re.escape(refusal)):
         declare_with_field(record)
 
 
