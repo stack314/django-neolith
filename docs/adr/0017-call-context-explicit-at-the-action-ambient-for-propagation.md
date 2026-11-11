@@ -193,8 +193,8 @@ Option 4.
    A call counts as made once it passes steps 1 and 2, whatever the deadline does next. The connector runs these steps before the transport, so the transport's requirements in spec 02 apply only to calls that passed steps 1 and 2. On the provider's side:
 
    1. The calling app is authenticated (`unauthenticated`).
-   2. Over HTTP, the neolith headers (the principal, the timeout and the idempotency key) are parsed and validated (`invalid_argument`).
-   3. The principal assertion is authorized (`permission_denied`).
+   2. If the call carries a principal and the calling app is not on the contract's allow-list, the call fails with `permission_denied`, whatever the principal header holds.
+   3. Over HTTP, the neolith headers (the principal, the timeout and the idempotency key) are parsed and validated (`invalid_argument`).
    4. The deadline is checked (`timeout`).
    5. The request gets the receive check (`invalid_argument`).
    6. The call is dispatched.
