@@ -15,7 +15,7 @@ import re
 import sys
 import types
 from collections.abc import Callable
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any, Protocol, TypedDict, cast
 from uuid import UUID
@@ -708,15 +708,11 @@ def test_detail_fields_use_the_portable_forms(annotation: object) -> None:
     assert "value" in message
 
 
-@pytest.mark.spec("CON-21")
+@pytest.mark.spec("CON-24")
 @pytest.mark.parametrize("annotation", [Decimal, list[Decimal], Decimal | None])
-def test_decimal_in_a_detail_record_is_refused(annotation: object) -> None:
+def test_decimal_in_a_detail_record_is_accepted(annotation: object) -> None:
     detail = type("Money", (BaseModel,), {"__annotations__": {"amount": annotation}})
-    with pytest.raises(ContractDefinitionError, match="decimal") as caught:
-        _declare({"over_limit": detail})
-    assert str(caught.value).startswith(
-        "orders.v1, action 'place', error 'over_limit': "
-    )
+    _declare({"over_limit": detail})
 
 
 @pytest.mark.spec("CON-24", "CON-17")
@@ -795,7 +791,11 @@ def test_description_gives_each_declared_kind_and_its_detail() -> None:
         "type": "object",
         "properties": {
             "sku": {"type": "string"},
-            "available": {"type": "integer"},
+            "available": {
+                "type": "integer",
+                "minimum": -(2**53 - 1),
+                "maximum": 2**53 - 1,
+            },
         },
         "required": ["sku", "available"],
     }
@@ -1168,7 +1168,8 @@ _EDGES: list[tuple[str, object, object]] = [
     ("str", str, "\U0001f600"),
     ("timestamp", AwareDatetime, datetime(1, 1, 1, tzinfo=UTC)),
     ("date", date, date.max),
-    ("duration", timedelta, timedelta.max),
+    ("decimal", Decimal, Decimal("-" + "9" * 34)),
+    ("bytes", bytes, b"\xff" * 3),
 ]
 
 
@@ -1180,40 +1181,35 @@ _EDGES: list[tuple[str, object, object]] = [
 def test_every_admitted_scalar_builds_at_its_edges(
     annotation: object, value: object
 ) -> None:
-    edge = type("Edge", (BaseModel,), {"__annotations__": {"v": annotation}})
+    edge = type(
+        "Edge",
+        (BaseModel,),
+        {"__annotations__": {"v": annotation}, "model_config": _BASE64},
+    )
     declared = _declare({"edge": edge})
     record = declared.actions["place"].errors["edge"](v=value)
     ContractError("edge", "text", record)
 
 
-@pytest.mark.spec("CON-32", "CON-17")
+_BASE64 = ConfigDict(ser_json_bytes="base64", val_json_bytes="base64")
+
+
+@pytest.mark.spec("CON-24")
 @pytest.mark.parametrize(
     "annotation",
     [bytes, list[bytes], dict[str, bytes], bytes | None, "Nested"],
     ids=["bytes", "list", "map", "optional", "nested-record"],
 )
-def test_bytes_in_a_detail_record_is_refused_at_declaration(annotation: object) -> None:
-    inner = type("Blob", (BaseModel,), {"__annotations__": {"raw": bytes}})
+def test_bytes_in_a_detail_record_is_accepted(annotation: object) -> None:
+    # Bytes travel as base64url text, which an untyped map holds (CON-30), so
+    # the refusal of CON-32 is withdrawn.
+    namespace = {"model_config": _BASE64}
+    inner = type("Blob", (BaseModel,), {"__annotations__": {"raw": bytes}, **namespace})
     field = inner if annotation == "Nested" else annotation
-    detail = type("Checksum", (BaseModel,), {"__annotations__": {"v": field}})
-    with pytest.raises(ContractDefinitionError, match="uses bytes") as caught:
-        _declare({"bad_checksum": detail})
-    assert str(caught.value).startswith(
-        "orders.v1, action 'place', error 'bad_checksum': "
+    detail = type(
+        "Checksum", (BaseModel,), {"__annotations__": {"v": field}, **namespace}
     )
-
-
-@pytest.mark.spec("CON-32")
-def test_bytes_stay_admitted_in_requests_and_replies() -> None:
-    blob = type("Blob", (BaseModel,), {"__annotations__": {"raw": bytes}})
-
-    def place(self: object, request: Ping) -> None: ...
-
-    place.__annotations__["request"] = blob
-    declared = types.new_class(
-        "Orders", (Protocol,), exec_body=lambda ns: ns.update({"place": action(place)})
-    )
-    contract("orders.v1")(declared)
+    _declare({"bad_checksum": detail})
 
 
 def _chain(depth: int, fields: int) -> type[BaseModel]:

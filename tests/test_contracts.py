@@ -69,6 +69,11 @@ from neolith import (
     implements,
 )
 
+# The descriptions of an integer and a number, with the range each form has on
+# the wire (spec 01, ADR 0019).
+INTEGER = {"type": "integer", "minimum": -(2**53 - 1), "maximum": 2**53 - 1}
+NUMBER_RANGE = {"minimum": -1.7976931348623157e308, "maximum": 1.7976931348623157e308}
+
 
 class Ping(BaseModel):
     text: str
@@ -412,10 +417,9 @@ def test_action_is_synchronous() -> None:
         int,
         float,
         str,
-        bytes,
+        Decimal,
         AwareDatetime,
         date,
-        timedelta,
         list[int],
         dict[str, int],
         Line,
@@ -467,43 +471,6 @@ def test_portable_forms_are_accepted(annotation: object) -> None:
 def test_other_types_are_rejected(annotation: object) -> None:
     with pytest.raises(ContractDefinitionError, match=r"Shape\.value"):
         declare_with_field(annotation)
-
-
-@pytest.mark.spec("CON-21")
-@pytest.mark.parametrize(
-    "annotation",
-    [
-        Decimal,
-        Decimal | None,
-        list[Decimal],
-        dict[str, Decimal],
-        Annotated[Decimal, Field(max_digits=5, decimal_places=2)],
-    ],
-    ids=repr,
-)
-def test_decimal_is_refused_until_its_encoding_is_settled(annotation: object) -> None:
-    with pytest.raises(
-        ContractDefinitionError,
-        match=r"^shapes\.v1, action 'send': field Shape\.value\S* is a decimal",
-    ):
-        declare_with_field(annotation)
-
-
-@pytest.mark.spec("CON-21")
-def test_decimal_in_a_reply_is_refused() -> None:
-    Total = create_model("Total", amount=(Decimal, ...))
-    Empty = create_model("Empty")
-
-    with pytest.raises(
-        ContractDefinitionError,
-        match=r"^totals\.v1, action 'total': field Total\.amount is a decimal",
-    ):
-
-        @contract("totals.v1")
-        class Totals(Protocol):
-            @action
-            def total(self, request: Empty) -> Total:  # type: ignore[valid-type]
-                ...
 
 
 @pytest.mark.spec("CON-13", "CON-17")
@@ -696,7 +663,6 @@ _SERIALIZING = [
             ("ser_json_temporal", "milliseconds"),
             ("ser_json_timedelta", "float"),
             ("ser_json_inf_nan", "strings"),
-            ("ser_json_bytes", "base64"),
         ]
     ),
 ]
@@ -861,7 +827,7 @@ def _field_description(record: type[BaseModel], name: str) -> object:
                 ),
             ),
             "n",
-            {"type": "integer"},
+            INTEGER,
             id="WithJsonSchema",
         ),
         pytest.param(
@@ -875,7 +841,7 @@ def _field_description(record: type[BaseModel], name: str) -> object:
                 ),
             ),
             "n",
-            {"type": "array", "items": {"type": "integer"}},
+            {"type": "array", "items": INTEGER},
             id="nested WithJsonSchema",
         ),
         pytest.param(
@@ -883,7 +849,7 @@ def _field_description(record: type[BaseModel], name: str) -> object:
                 "Shown", n=(int, Field(json_schema_extra={"type": "string"}))
             ),
             "n",
-            {"type": "integer"},
+            INTEGER,
             id="field json_schema_extra",
         ),
         pytest.param(
@@ -895,7 +861,7 @@ def _field_description(record: type[BaseModel], name: str) -> object:
                 a=(int, ...),
             ),
             "a",
-            {"type": "integer"},
+            INTEGER,
             id="config json_schema_extra",
         ),
         pytest.param(
@@ -913,13 +879,13 @@ def _field_description(record: type[BaseModel], name: str) -> object:
                 ),
             ),
             "n",
-            {"type": "integer"},
+            INTEGER,
             id="json_schema_mode_override",
         ),
         pytest.param(
             _custom_json_schema,
             "value",
-            {"type": "integer"},
+            INTEGER,
             id="__get_pydantic_json_schema__",
         ),
     ],
@@ -996,7 +962,7 @@ def _hooked_enum(hook: str) -> type[enum.Enum]:
         ),
         pytest.param(
             _hooked_enum("__get_pydantic_core_schema__"),
-            {"type": "integer"},
+            INTEGER,
             id="enum core schema hook",
         ),
         pytest.param(
@@ -1036,7 +1002,6 @@ def test_plain_validator_is_rejected() -> None:
 @pytest.mark.parametrize(
     "config",
     [
-        pytest.param(ConfigDict(val_json_bytes="base64"), id="val_json_bytes"),
         pytest.param(ConfigDict(str_max_length=3), id="str_max_length"),
     ],
 )
@@ -1141,11 +1106,13 @@ def test_default_that_does_not_read_back_as_itself_is_rejected(
 @pytest.mark.spec("CON-13", "CON-16")
 def test_defaults_of_the_field_type_are_allowed() -> None:
     class Defaults(BaseModel):
+        model_config = ConfigDict(ser_json_bytes="base64", val_json_bytes="base64")
+
         maybe: int | None = None
         colour: Colour = Colour.RED
         size: Literal["s", "m"] = "s"
-        span: timedelta = timedelta(seconds=90)
-        raw: bytes = b""
+        amount: Decimal = Decimal("1.50")
+        raw: bytes = b"\xff"
         ratio: float = 1
         lines: list[Line] = []
         counts: dict[str, int] = {"a": 1}
@@ -1258,9 +1225,8 @@ def test_records_written_top_down_are_resolved() -> None:
 @pytest.mark.parametrize(
     ("annotation", "default"),
     [
-        pytest.param(bytes, b"\xff", id="bytes not UTF-8"),
         pytest.param(str, "\ud800", id="lone surrogate"),
-        pytest.param(list[bytes], [b"\xff"], id="in a list"),
+        pytest.param(list[str], ["\ud800"], id="in a list"),
         pytest.param(dict[str, str], {"a": "\ud800"}, id="in a dict"),
     ],
 )
@@ -1426,7 +1392,7 @@ def test_type_aliases_are_written_out_and_never_named() -> None:
     description = Contract.of(declare_with_field(record)).describe()
     assert set(description["$defs"]) == {"Shape", "Pair", "Item"}
     properties = description["$defs"]["Pair"]["properties"]
-    assert properties["a"] == {"type": "array", "items": {"type": "integer"}}
+    assert properties["a"] == {"type": "array", "items": INTEGER}
     assert properties["b"] == {"type": "array", "items": {"type": "string"}}
     assert properties["item"] == {"$ref": "#/$defs/Item"}
 
@@ -1459,7 +1425,7 @@ def test_one_type_alias_may_be_used_many_times() -> None:
     )
     description = Contract.of(declare_with_field(record)).describe()
     assert set(description["$defs"]) == {"Shape", "Counts"}
-    ints = {"type": "array", "items": {"type": "integer"}}
+    ints = {"type": "array", "items": INTEGER}
     assert description["$defs"]["Counts"]["properties"]["d"] == {
         "type": "object",
         "additionalProperties": ints,
@@ -1595,7 +1561,7 @@ def test_every_core_schema_key_is_admitted_or_named(
         pytest.param(_Base, {"$ref": "#/$defs/_Base"}, id="plain reference"),
         pytest.param(
             Annotated[float, Field(ge=0.5)],
-            {"type": "number", "minimum": 0.5},
+            {"type": "number", **NUMBER_RANGE, "minimum": 0.5},
             id="float bound",
         ),
         pytest.param(Literal["a"] | None, None, id="literal or None"),
@@ -1757,7 +1723,7 @@ def test_integer_multiple_of_is_accepted() -> None:
         declare_with_field(Annotated[int, Field(multiple_of=3)])
     ).describe()
     assert described["$defs"]["Shape"]["properties"]["value"] == {
-        "type": "integer",
+        **INTEGER,
         "multipleOf": 3,
     }
 
@@ -2369,37 +2335,3 @@ def test_subclass_of_a_contract_is_not_a_contract() -> None:
 def test_implements_decorates_a_class() -> None:
     with pytest.raises(ContractDefinitionError, match="decorates a class"):
         implements(Greeter)(lambda: None)  # type: ignore[arg-type]
-
-
-def _declare_with_default(annotation: object, default: object) -> None:
-    request = create_model("Big", value=(cast("Any", annotation), default))
-
-    @contract("big.v1")
-    class Big(Protocol):
-        @action
-        def send(self, request: request) -> None:  # type: ignore[valid-type]
-            ...
-
-
-@pytest.mark.spec("CON-13", "CON-17")
-@pytest.mark.parametrize(
-    ("annotation", "default"),
-    [
-        pytest.param(int, 2**63, id="above"),
-        pytest.param(int, -(2**63) - 1, id="below"),
-        pytest.param(list[int], [1, 2**63], id="in-list"),
-        pytest.param(dict[str, int], {"k": -(2**63) - 1}, id="in-map"),
-        pytest.param(int, 10**5000, id="huge"),
-    ],
-)
-def test_default_outside_the_64_bit_integer_range_is_refused(
-    annotation: object, default: object
-) -> None:
-    with pytest.raises(ContractDefinitionError, match="outside the 64-bit"):
-        _declare_with_default(annotation, default)
-
-
-@pytest.mark.spec("CON-13")
-@pytest.mark.parametrize("default", [2**63 - 1, -(2**63)])
-def test_default_at_the_64_bit_integer_bounds_is_accepted(default: int) -> None:
-    _declare_with_default(int, default)

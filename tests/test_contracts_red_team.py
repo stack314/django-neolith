@@ -394,7 +394,7 @@ class FloatInt64(BaseModel):
 
 
 class Price(BaseModel):
-    """p04: a decimal, whose accepted forms no pattern states exactly."""
+    """p04: a decimal, admitted once its wire form is fixed (ADR 0019)."""
 
     amount: Decimal
 
@@ -440,7 +440,6 @@ class Nothing(BaseModel):
             FloatPast53, "which a float cannot hold exactly", id="p03 2**53+1"
         ),
         pytest.param(FloatInt64, "which a float cannot hold exactly", id="p13 int64"),
-        pytest.param(Price, "is a decimal", id="p04 decimal"),
         pytest.param(Precise, "beyond microseconds", id="p08 precision"),
         pytest.param(Nothing, "has type is-instance", id="p07 empty enum"),
     ],
@@ -477,11 +476,20 @@ class WithRepeated(BaseModel):
 @pytest.mark.spec("CON-16")
 def test_second_pass_nearest_shapes_are_accepted() -> None:
     _declare(OwnLengthKey)
+    _declare(Price)
     bounds = _declare(ExactFloatBounds)["$defs"]["ExactFloatBounds"]["properties"]
     assert bounds["x"] == {
         "type": "number",
+        "minimum": -1.7976931348623157e308,
+        "maximum": 1.7976931348623157e308,
         "exclusiveMinimum": 0.1,
         "exclusiveMaximum": 2**53,
+    }
+    # The narrower of the field's bound and the integer range is stated.
+    assert bounds["n"] == {
+        "type": "integer",
+        "minimum": -(2**53 - 1),
+        "maximum": 2**53 - 1,
     }
     assert _declare(WithRepeated)["$defs"]["Repeated"] == {
         "type": "string",
@@ -700,4 +708,9 @@ def test_strict_mode_is_refused_wherever_it_sits(container: str) -> None:
 def test_int_bound_beyond_the_float_range_is_stated() -> None:
     record = _holder(Annotated[int, Field(lt=10**400)], False)
     described = _declare(record)["$defs"]["Holder"]["properties"]["v"]
-    assert described == {"type": "integer", "exclusiveMaximum": 10**400}
+    assert described == {
+        "type": "integer",
+        "minimum": -(2**53 - 1),
+        "maximum": 2**53 - 1,
+        "exclusiveMaximum": 10**400,
+    }
