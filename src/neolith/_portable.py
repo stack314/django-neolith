@@ -19,13 +19,15 @@ written out where they are used.
 """
 
 import copy
+import enum
 import json
 import math
 import re
 import sys
 import types
 from collections.abc import Iterator, Mapping
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, time, timedelta
+from decimal import Decimal
 from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, PrivateAttr
@@ -478,9 +480,13 @@ class Portable:
         )
         description = self.describe(node["schema"], path, ())
         if "default" in node:
-            problem = _default_record_problem(node["default"])
+            problem = _default_problem(node["default"])
             if problem is not None:
-                raise self.fail(f"field {path} has a default {problem}")
+                raise self.fail(
+                    f"field {path} has a default holding {problem}, which "
+                    "pydantic-core might not copy for each value read without "
+                    "the field"
+                )
         if issubclass(type(node.get("default")), BaseModel) and _hashable(
             node["default"]
         ):
@@ -498,23 +504,28 @@ class Portable:
                 raise self.fail(
                     f"field {path} has a default factory that takes the other fields"
                 )
+            factory = node["default_factory"]
+            holds, records = self.mutable_parts(node["schema"])
+            if (
+                holds
+                and not any(factory is made for made in (list, dict, set))
+                and not any(factory is record for record in records)
+            ):
+                # pydantic-core calls the factory for each value read
+                # without the field, and only a new list, map, set or
+                # record keeps those values apart.
+                raise self.fail(
+                    f"field {path} holds lists, maps or records, so its "
+                    "default factory must be list, dict, set or the record "
+                    "class itself; or give it a default= value"
+                )
             try:
-                # Called twice: pydantic-core calls it once for each value read
-                # without the field, so each call must make new objects.
-                made = node["default_factory"]()
-                again = node["default_factory"]()
+                made = factory()
             except Exception as error:  # the author's factory may raise anything
                 raise self.fail(
                     f"field {path} has a default factory that raised "
                     f"{type(error).__name__}: {error}"
                 ) from error
-            shared = _shared_between(made, again)
-            if shared is not None:
-                raise self.fail(
-                    f"field {path} has a default factory that returns the same "
-                    f"{shared} on every call, which every value read without the "
-                    "field would share; make it build a new one"
-                )
             self.round_trip(node["schema"], made, path, description)
             return description, True
         return {
@@ -523,6 +534,32 @@ class Portable:
                 node["schema"], node["default"], path, description
             ),
         }, True
+
+    def mutable_parts(self, schema: Mapping[str, Any]) -> tuple[bool, list[type[Any]]]:
+        """Whether a field's values can hold a list, map, set or record, and
+        the records its schema names."""
+        holds = False
+        records: list[type[Any]] = []
+        pending: list[object] = [schema]
+        seen: set[int] = set()
+        while pending:
+            item = pending.pop()
+            if id(item) in seen:
+                continue
+            seen.add(id(item))
+            if type(item) is dict:
+                kind = item.get("type")
+                if kind == "definition-ref":
+                    pending.append(self.definitions.get(str(item.get("schema_ref"))))
+                elif kind in ("list", "dict", "set", "frozenset", "tuple", "any"):
+                    holds = True
+                elif kind == "model":
+                    holds = True
+                    records.append(cast("type[Any]", item.get("cls")))
+                pending.extend(item.values())
+            elif type(item) is list:
+                pending.extend(item)
+        return holds, records
 
     def round_trip(
         self,
@@ -1189,76 +1226,52 @@ def _class_hook(cls: type[Any]) -> str | None:
     return None
 
 
-def _default_record_problem(default: object) -> str | None:
-    """Say why a default holds a record pydantic-core would not copy, or None.
+# Values pydantic-core may hand to every value read without the field, since
+# none of them can change: these exact types, and enum members.
+_IMMUTABLE = frozenset(
+    {str, int, float, bool, bytes, type(None), Decimal, date, datetime, time, timedelta}
+)
+
+
+def _default_problem(default: object) -> str | None:
+    """Name what in a default pydantic-core might not copy, or None.
 
     pydantic-core deep-copies a default it cannot hash, and ``copy.deepcopy``
-    finds ``__deepcopy__`` on the instance before its class. So every record
-    in the default, of whatever class, keeps Pydantic's own copy and holds
-    nothing but its fields.
+    asks each object how to copy it, finding ``__deepcopy__`` on the instance
+    before its class. So a default holds only exact lists, dicts, sets,
+    tuples and frozensets, immutable scalars of exact types, enum members, and
+    records that keep Pydantic's own copy and hold nothing but their fields.
+    Anything else, such as a subclass of a list, is refused.
     """
     pending = [default]
     seen: set[int] = set()
+    instance_dict = type.__dict__["__dict__"].__get__(BaseModel)["__dict__"]
     while pending:
         item = pending.pop()
         kind = type(item)
+        if kind in _IMMUTABLE or issubclass(kind, enum.Enum):
+            continue
         if id(item) in seen:
             continue
         seen.add(id(item))
         if issubclass(kind, BaseModel):
             hook = _class_hook(kind)
             if hook is not None:
-                return f"holding a {kind.__qualname__}, which {hook}"
-            held = type.__dict__["__dict__"].__get__(BaseModel)["__dict__"]
-            fields = held.__get__(item)
+                return f"a {kind.__qualname__}, which {hook}"
+            fields = instance_dict.__get__(item)
             extra = set(fields) - set(kind.__pydantic_fields__)
             if extra:
                 return (
-                    f"holding a {kind.__qualname__} with values outside its "
-                    f"fields: {', '.join(sorted(map(repr, extra)))}"
+                    f"a {kind.__qualname__} with values outside its fields: "
+                    f"{', '.join(sorted(map(repr, extra)))}"
                 )
             pending.extend(fields.values())
         elif kind in (list, tuple, set, frozenset):
             pending.extend(cast("list[object]", item))
         elif kind is dict:
-            pending.extend(cast("dict[object, object]", item).values())
-    return None
-
-
-def _mutable_parts(value: object) -> Iterator[object]:
-    """Every list, dict, set and record in a value, each once.
-
-    Tuples and frozensets are walked through, and a record through its
-    instance dict, as ``_default_record_problem`` reads it.
-    """
-    pending = [value]
-    seen: set[int] = set()
-    instance_dict = type.__dict__["__dict__"].__get__(BaseModel)["__dict__"]
-    while pending:
-        item = pending.pop()
-        kind = type(item)
-        if id(item) in seen:
-            continue
-        seen.add(id(item))
-        if issubclass(kind, BaseModel):
-            yield item
-            pending.extend(instance_dict.__get__(item).values())
-        elif kind in (list, set):
-            yield item
-            pending.extend(cast("list[object]", item))
-        elif kind is dict:
-            yield item
-            pending.extend(cast("dict[object, object]", item).values())
-        elif kind in (tuple, frozenset):
-            pending.extend(cast("tuple[object, ...]", item))
-
-
-def _shared_between(first: object, second: object) -> str | None:
-    """Name a mutable object two values both hold, or None."""
-    held = {id(part): part for part in _mutable_parts(first)}
-    for part in _mutable_parts(second):
-        if held.get(id(part)) is part:
-            return type(part).__qualname__
+            pending.extend(cast("dict[object, object]", item).items())
+        else:
+            return f"a {kind.__qualname__}"
     return None
 
 

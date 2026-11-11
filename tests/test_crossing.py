@@ -6,10 +6,12 @@ side. The transport and connector that use it, and the description check
 between the dump and the read-back, arrive with #10 tasks 3 and 4.
 """
 
+import functools
 import json
 import re
 import sys
 import types
+from collections import OrderedDict, defaultdict
 from collections.abc import Callable, Generator, Iterator
 from typing import Annotated, Any, Protocol, cast
 
@@ -898,7 +900,7 @@ def test_a_record_default_every_read_would_share_is_refused(nested: bool) -> Non
 @pytest.mark.parametrize(
     ("annotation", "default"),
     [
-        pytest.param(Frozen, Field(default_factory=lambda: Frozen(n=1)), id="factory"),
+        pytest.param(Frozen, Field(default_factory=Frozen), id="factory"),
         pytest.param(Part, Part(sku="a"), id="unfrozen"),
         pytest.param(FrozenWithList, FrozenWithList(ns=[1]), id="frozen-unhashable"),
     ],
@@ -914,44 +916,66 @@ def test_a_record_default_each_read_gets_its_own_of_is_admitted(
     assert first.value is not second.value  # type: ignore[attr-defined]
 
 
+class Counts(BaseModel):
+    m: dict[str, int] = {}
+
+
+class SubList(list[int]):
+    pass
+
+
+def _template() -> Counts:
+    """Fagan's repro: a record holding a defaultdict, set without validation."""
+    template = Counts()
+    template.m = defaultdict(int)
+    return template
+
+
 _SHARED_PLAIN = Plain()
-_SHARED_PLAINS = [Plain()]
-_SHARED_LIST: list[int] = []
+
+
+def _new_list() -> list[int]:
+    return []
 
 
 @pytest.mark.spec("TRN-12", "CON-17")
 @pytest.mark.parametrize(
-    ("annotation", "factory", "shared"),
+    ("annotation", "factory"),
     [
-        (Plain, lambda: _SHARED_PLAIN, "Plain"),
-        (list[Plain], lambda: _SHARED_PLAINS, "list"),
-        (list[Plain], lambda: [_SHARED_PLAIN], "Plain"),
-        (dict[str, list[int]], lambda: {"a": _SHARED_LIST}, "list"),
-        (Plain, lambda: Plain.model_construct(ns=_SHARED_LIST), "list"),
-        (Frozen, lambda: _FROZEN, "Frozen"),
+        (Plain, lambda: _SHARED_PLAIN),
+        (list[Plain], lambda: [_SHARED_PLAIN]),
+        (Counts, _template().model_copy),
+        (Plain, lambda: Plain.model_construct(ns=SubList())),
+        (list[int], _new_list),
+        (list[int], SubList),
+        (list[int], functools.partial(list)),
+        (Plain, SelfishPlain),
+        (dict[str, list[int]], lambda: {"a": []}),
     ],
     ids=[
-        "record",
-        "list",
-        "record-in-a-list",
-        "list-in-a-map",
-        "list-in-a-new-record",
-        "frozen-record",
+        "shared-record",
+        "shared-record-in-a-list",
+        "bound-method-copying-a-defaultdict",
+        "record-holding-a-list-subclass",
+        "function-building-a-new-list",
+        "list-subclass",
+        "partial",
+        "record-subclass",
+        "lambda-building-a-new-map",
     ],
 )
-def test_a_default_factory_that_returns_the_same_object_is_refused(
+def test_a_default_factory_other_than_the_fields_own_type_is_refused(
     annotation: Any,  # noqa: ANN401
     factory: Callable[[], object],
-    shared: str,
 ) -> None:
     # pydantic-core calls the factory for each value read without the field,
-    # so a factory that hands back one object makes every such value share it.
+    # and only the type itself is sure to build new objects each time.
     record = create_model(
         _name("Factory"), value=(annotation, Field(default_factory=factory))
     )
     with pytest.raises(
         ContractDefinitionError,
-        match=f"default factory that returns the same {shared} on every call",
+        match="default factory must be list, dict, set or the record class itself",
     ):
         _declare(record)
 
@@ -961,14 +985,15 @@ def test_a_default_factory_that_returns_the_same_object_is_refused(
     ("annotation", "factory"),
     [
         (Plain, Plain),
-        (list[Plain], lambda: [Plain(), Plain()]),
-        (dict[str, list[int]], lambda: {"a": []}),
+        (Plain | None, Plain),
+        (list[Plain], list),
+        (dict[str, list[int]], dict),
         (int, lambda: 5),
         (str, lambda: "same text"),
     ],
-    ids=["record", "list", "map", "integer", "text"],
+    ids=["record", "optional-record", "list", "map", "integer", "text"],
 )
-def test_a_default_factory_that_builds_new_objects_is_admitted(
+def test_a_default_factory_that_is_the_fields_own_type_is_admitted(
     annotation: Any,  # noqa: ANN401
     factory: Callable[[], object],
 ) -> None:
@@ -983,6 +1008,35 @@ def test_a_default_factory_that_builds_new_objects_is_admitted(
         for part in _mutable(first.value)  # type: ignore[attr-defined]
         for other in _mutable(second.value)  # type: ignore[attr-defined]
     )
+
+
+@pytest.mark.spec("TRN-12", "CON-17")
+@pytest.mark.parametrize(
+    ("annotation", "default", "held"),
+    [
+        (list[int], SubList([1]), "SubList"),
+        (Counts, _template(), "defaultdict"),
+        (Counts, Counts.model_construct(m=OrderedDict(a=1)), "OrderedDict"),
+    ],
+    ids=[
+        "list-subclass",
+        "record-holding-a-defaultdict",
+        "record-holding-an-ordered-dict",
+    ],
+)
+def test_a_default_holding_an_object_deepcopy_may_not_copy_is_refused(
+    annotation: Any,  # noqa: ANN401
+    default: object,
+    held: str,
+) -> None:
+    # pydantic-core deep-copies a default, and deepcopy asks each object how
+    # to copy itself, so a default holds only exact containers, records and
+    # immutable values.
+    record = create_model(_name("Defaulted"), value=(annotation, default))
+    with pytest.raises(
+        ContractDefinitionError, match=f"has a default holding a {held}"
+    ):
+        _declare(record)
 
 
 def _mutable(value: object) -> list[object]:
