@@ -20,17 +20,16 @@ declaration.
 
 import copy
 import inspect
-import math
 import re
 import types
 import typing
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
-from typing import Annotated, Any, Protocol, final, overload
+from dataclasses import dataclass
+from typing import Annotated, Any, NoReturn, Protocol, final, overload
 
 from pydantic import BaseModel
 
-from neolith._portable import Portable
+from neolith._portable import Portable, json_value_problem, shown, text_problem
 
 __all__ = [
     "Action",
@@ -64,9 +63,27 @@ _STANDARD_KINDS = frozenset(
         "internal",
     }
 )
-# JSON's scalars, as the json module reads them. bool is a subclass of int,
-# so each is matched by exact type, never with isinstance.
-_JSON_SCALARS = frozenset({str, int, float, bool, type(None)})
+# Spec 01, CON-23: names kept for standard kinds that a later version of the
+# specification may add, taken from gRPC's status codes. A receiver holds a
+# kind it does not know without a detail, so these are not standard yet.
+_RESERVED_KINDS = frozenset(
+    {
+        "cancelled",
+        "unknown",
+        "deadline_exceeded",
+        "already_exists",
+        "resource_exhausted",
+        "failed_precondition",
+        "aborted",
+        "out_of_range",
+        "unimplemented",
+        "data_loss",
+    }
+)
+# Spec 01, CON-30: how deep an untyped detail may nest. Far below the depth at
+# which copy.deepcopy (about 490 levels of plain dicts at the default
+# recursion limit) and pydantic_core.to_json (255) fail.
+_UNTYPED_DEPTH = 32
 
 _CONTRACT_ATTR = "__neolith_contract__"
 _ACTION_ATTR = "__neolith_action__"
@@ -82,6 +99,94 @@ class ContractDefinitionError(TypeError):
     """
 
 
+class _FrozenMap(dict[str, Any]):
+    """A ``dict`` that refuses changes through its own methods.
+
+    It stays a ``dict``, so that JSON writers and equality with a plain
+    ``dict`` work, and it is hashable, copyable and picklable. As with a frozen
+    dataclass, calling ``dict``'s methods on it directly still changes it.
+    """
+
+    __slots__ = ()
+
+    def __new__(cls, items: object = ()) -> "_FrozenMap":
+        made = super().__new__(cls)
+        dict.update(made, items)  # type: ignore[call-overload]  # checked by dict
+        return made
+
+    def __init__(self, items: object = ()) -> None:
+        """Filled by ``__new__``, so calling this again changes nothing."""
+
+    def _refuse(self, *args: object, **kwargs: object) -> NoReturn:
+        raise TypeError(f"{type(self).__name__[1:]} is read-only")
+
+    __setitem__ = __delitem__ = __ior__ = _refuse
+    clear = pop = popitem = setdefault = update = _refuse
+
+    def __hash__(self) -> int:  # type: ignore[override]  # dict sets it to None
+        return hash(frozenset(self.items()))
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        return (type(self), (dict(self),))
+
+    def __copy__(self) -> "_FrozenMap":
+        return self
+
+    def __deepcopy__(self, memo: object) -> "_FrozenMap":
+        # Immutable, and so is everything it holds.
+        return self
+
+
+class _FrozenList(list[Any]):
+    """A ``list`` that refuses changes through its own methods (see _FrozenMap)."""
+
+    __slots__ = ()
+
+    def __new__(cls, items: object = ()) -> "_FrozenList":
+        made = super().__new__(cls)
+        list.extend(made, items)  # type: ignore[arg-type]  # checked by list
+        return made
+
+    def __init__(self, items: object = ()) -> None:
+        """Filled by ``__new__``, so calling this again changes nothing."""
+
+    def _refuse(self, *args: object, **kwargs: object) -> NoReturn:
+        raise TypeError(f"{type(self).__name__[1:]} is read-only")
+
+    __setitem__ = __delitem__ = __iadd__ = __imul__ = _refuse
+    append = extend = insert = pop = remove = clear = sort = reverse = _refuse
+
+    def __hash__(self) -> int:  # type: ignore[override]  # list sets it to None
+        return hash(tuple(self))
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        return (type(self), (list(self),))
+
+    def __copy__(self) -> "_FrozenList":
+        return self
+
+    def __deepcopy__(self, memo: object) -> "_FrozenList":
+        return self
+
+
+def _freeze(value: object) -> object:
+    """A frozen copy of a checked JSON value, at most _UNTYPED_DEPTH deep."""
+    if type(value) is dict:
+        return _FrozenMap({key: _freeze(item) for key, item in value.items()})
+    if type(value) is list:
+        return _FrozenList(_freeze(item) for item in value)
+    return value
+
+
+def _thaw(value: object) -> object:
+    """A plain copy of a frozen JSON value, as ``ContractError`` admits it."""
+    if isinstance(value, dict):
+        return {key: _thaw(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_thaw(item) for item in value]
+    return value
+
+
 @final
 class ContractError(Exception):
     """An error that crosses a contract (spec 01, Errors; ADR 0008).
@@ -90,26 +195,43 @@ class ContractError(Exception):
     standard kind, such as ``"not_found"`` or ``"conflict"``, or a kind the
     action declares. ``message`` is text for people. ``data`` is the detail:
     ``None`` for a standard kind; the kind's detail record for a declared
-    kind; and, for a kind the receiver's version of the contract does not
-    declare, the detail's fields as they arrived, a ``dict`` of JSON values.
+    kind. A caller holds a kind it does not know, declared by a newer version
+    of the contract or made standard by a newer version of the specification,
+    with the detail's fields as they arrived, or ``None`` if there are none.
+    Those fields are a read-only copy: maps and lists that compare equal to
+    ``dict`` and ``list`` and are written as JSON like them, but refuse
+    changes. A record is held as given.
 
     The fields are read-only, and the class cannot be subclassed: a subclass
     would not survive a transport, so callers could tell the modes apart.
     Building one wrongly raises ``TypeError`` or ``ValueError``, never a
     ``ContractError``, so that code handling contract errors does not swallow
-    a bug.
+    a bug. A copy or a pickle carries the kind, message and detail only, not
+    notes or other attributes.
     """
 
     __slots__ = ("_data", "_kind", "_message")
+    _kind: str
+    _message: str
+    _data: BaseModel | Mapping[str, Any] | None
 
     def __init__(
-        self, kind: str, message: str, data: BaseModel | dict[str, Any] | None = None
+        self,
+        kind: str,
+        message: str,
+        data: BaseModel | Mapping[str, Any] | None = None,
     ) -> None:
+        try:
+            built = self._kind
+        except AttributeError:
+            pass
+        else:
+            raise TypeError(f"this ContractError is already built, as {built!r}")
         if type(kind) is not str:
-            raise TypeError(f"a contract error's kind is a str, not {kind!r}")
+            raise TypeError(f"a contract error's kind is a str, not {shown(kind)}")
         if not _KIND.fullmatch(kind):
             raise ValueError(
-                f"{kind!r} is not an error kind: a kind starts with a lowercase "
+                f"{shown(kind)} is not an error kind: a kind starts with a lowercase "
                 "ASCII letter, followed by lowercase ASCII letters, digits or "
                 "underscores"
             )
@@ -117,24 +239,28 @@ class ContractError(Exception):
             raise TypeError(
                 f"a contract error's message is a str, not {type(message).__name__}"
             )
+        problem = text_problem(message)
+        if problem is not None:
+            raise ValueError(f"a contract error's message is Unicode text: {problem}")
         if kind in _STANDARD_KINDS:
             if data is not None:
                 raise TypeError(
                     f"a {kind!r} error is of a standard kind, which carries no detail"
                 )
-        elif not isinstance(data, BaseModel | dict):
-            raise TypeError(
-                f"a {kind!r} error carries a detail: its detail record, or, for a "
-                "kind the contract does not declare, an untyped dict of the "
-                f"detail's fields; not {_name(type(data))}"
-            )
-        elif not isinstance(data, BaseModel):
-            problem = _untyped_problem(data)
+        elif type(data) is dict:
+            problem = json_value_problem(data, _UNTYPED_DEPTH)
             if problem is not None:
                 raise TypeError(
                     f"the untyped detail of a {kind!r} error is a dict of JSON "
                     f"values, but {problem}"
                 )
+            data = typing.cast(_FrozenMap, _freeze(data))
+        elif data is not None and not isinstance(data, BaseModel):
+            raise TypeError(
+                f"a {kind!r} error carries its detail record, or, for a kind the "
+                "receiver does not know, an untyped dict of the detail's fields or "
+                f"None; not {_name(type(data))}"
+            )
         super().__init__(kind, message)
         self._kind = kind
         self._message = message
@@ -151,7 +277,7 @@ class ContractError(Exception):
         return self._message
 
     @property
-    def data(self) -> BaseModel | dict[str, Any] | None:
+    def data(self) -> BaseModel | Mapping[str, Any] | None:
         """The detail; ``None`` for a standard kind."""
         return self._data
 
@@ -162,7 +288,9 @@ class ContractError(Exception):
         )
 
     def __reduce__(self) -> tuple[Any, ...]:
-        return (ContractError, (self._kind, self._message, self._data), self.__dict__)
+        # Kind, message and detail only: no notes, no other attributes, and the
+        # detail is checked again when the copy is built.
+        return (ContractError, (self._kind, self._message, _thaw(self._data)))
 
     def __str__(self) -> str:
         return f"{self._kind}: {self._message}"
@@ -185,7 +313,7 @@ class Action:
     idempotent: bool
     request: type[BaseModel]
     reply: type[BaseModel] | None
-    errors: Mapping[str, type[BaseModel]] = field(hash=False)
+    errors: Mapping[str, type[BaseModel]]
 
 
 class Contract:
@@ -243,6 +371,17 @@ class Contract:
 
     def _check_implementation(self, impl: type[Any]) -> None:
         where = f"{self.identity}, implementation {impl.__qualname__}"
+        for klass in impl.__mro__:
+            if klass is object or klass is self.declaration:
+                continue
+            for attr, value in vars(klass).items():
+                function = getattr(value, "__func__", value)
+                if inspect.isfunction(function) and _ACTION_ATTR in vars(function):
+                    raise ContractDefinitionError(
+                        f"{where}: {attr!r} is marked with @action; the contract "
+                        "declares each action, its idempotency and its error "
+                        "kinds, so implementation methods are not marked"
+                    )
         for name, item in self._actions.items():
             member = inspect.getattr_static(impl, name, None)
             if member is None or member is vars(self.declaration).get(name):
@@ -353,7 +492,7 @@ def contract[T](identity: str, /) -> Callable[[type[T]], type[T]]:
                 idempotent,
                 request_type,
                 reply_type,
-                types.MappingProxyType(errors),
+                _FrozenMap(errors),
             )
             described[attr] = {
                 "idempotent": idempotent,
@@ -418,6 +557,11 @@ def action(
             raise ContractDefinitionError(
                 f"@action marks a function defined in a contract, not {_name(method)}"
             )
+        if _ACTION_ATTR in vars(method):
+            raise ContractDefinitionError(
+                f"{method.__qualname__} is marked with @action twice; mark it "
+                "once, as @action(idempotent=..., errors=...)"
+            )
         vars(method)[_ACTION_ATTR] = (idempotent, errors)
         return method
 
@@ -460,7 +604,7 @@ def _declared_kinds(where: str, errors: object) -> list[tuple[str, object]]:
     for kind in errors:
         if type(kind) is not str or not _KIND.fullmatch(kind):
             raise ContractDefinitionError(
-                f"{where}: error kind {kind!r} must be a str that starts with a "
+                f"{where}: error kind {shown(kind)} must be a str that starts with a "
                 "lowercase ASCII letter, followed by lowercase ASCII letters, "
                 "digits or underscores"
             )
@@ -469,41 +613,13 @@ def _declared_kinds(where: str, errors: object) -> list[tuple[str, object]]:
                 f"{where}: error kind {kind!r} is a standard kind, which every "
                 "action has; declare only kinds of the action's own"
             )
+        if kind in _RESERVED_KINDS:
+            raise ContractDefinitionError(
+                f"{where}: error kind {kind!r} is reserved for a standard kind "
+                "that a later version of the specification may add; choose "
+                "another name"
+            )
     return list(errors.items())
-
-
-def _untyped_problem(data: dict[Any, Any]) -> str | None:
-    """Say why ``data`` is not a JSON object as the json module reads one.
-
-    Walks without recursion, so that a deep value cannot exhaust the stack,
-    and refuses a value that contains itself.
-    """
-    pending: list[tuple[object, bool]] = [(data, False)]
-    open_containers: set[int] = set()
-    while pending:
-        value, leaving = pending.pop()
-        if leaving:
-            open_containers.discard(id(value))
-            continue
-        kind = type(value)
-        if kind in _JSON_SCALARS:
-            if kind is float and not math.isfinite(typing.cast(float, value)):
-                return f"{value!r} is not a JSON number"
-            continue
-        if kind is not dict and kind is not list:
-            return f"it holds a {_name(kind)}"
-        if id(value) in open_containers:
-            return "it contains itself"
-        open_containers.add(id(value))
-        pending.append((value, True))
-        if kind is list:
-            pending.extend((item, False) for item in typing.cast(list[Any], value))
-            continue
-        for key, item in typing.cast(dict[Any, Any], value).items():
-            if type(key) is not str:
-                return f"its key {key!r} is not a str"
-            pending.append((item, False))
-    return None
 
 
 def _parse_identity(identity: object) -> tuple[str, int]:

@@ -11,13 +11,15 @@ import enum
 import json
 import pickle
 import re
+import sys
 import types
 from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Protocol, TypedDict
+from typing import Any, Protocol, TypedDict, cast
 from uuid import UUID
 
+import pydantic_core
 import pytest
 from pydantic import AwareDatetime, BaseModel, ConfigDict, RootModel
 
@@ -27,6 +29,7 @@ from neolith import (
     ContractError,
     action,
     contract,
+    implements,
 )
 
 STANDARD_KINDS = [
@@ -58,6 +61,19 @@ BAD_KINDS = [
 
 GOOD_KINDS = ["out_of_stock", "x", "limit2", "a_b_c_1"]
 
+RESERVED_KINDS = [
+    "cancelled",
+    "unknown",
+    "deadline_exceeded",
+    "already_exists",
+    "resource_exhausted",
+    "failed_precondition",
+    "aborted",
+    "out_of_range",
+    "unimplemented",
+    "data_loss",
+]
+
 
 class Ping(BaseModel):
     text: str
@@ -74,6 +90,12 @@ class Expired(BaseModel):
 
 class Nothing(BaseModel):
     pass
+
+
+@contract("inventory.v1")
+class Inventory(Protocol):
+    @action(idempotent=True, errors={"out_of_stock": OutOfStock})
+    def reserve(self, request: Ping) -> None: ...
 
 
 class Kind(enum.StrEnum):
@@ -128,7 +150,9 @@ def test_kind_outside_the_grammar_is_refused(kind: str) -> None:
 
 
 @pytest.mark.spec("CON-22", "CON-29")
-@pytest.mark.parametrize("kind", [None, 7, b"conflict", Kind.CONFLICT])
+@pytest.mark.parametrize(
+    "kind", [None, 7, pytest.param(10**5000, id="huge-int"), b"conflict", Kind.CONFLICT]
+)
 def test_kind_is_plain_text(kind: object) -> None:
     with pytest.raises(TypeError, match="kind"):
         ContractError(kind, "text")  # type: ignore[arg-type]
@@ -142,7 +166,7 @@ def test_standard_kind_carries_no_detail(kind: str, data: object) -> None:
         ContractError(kind, "text", data)  # type: ignore[arg-type]
 
 
-@pytest.mark.spec("CON-22", "CON-27")
+@pytest.mark.spec("CON-22")
 @pytest.mark.parametrize("kind", GOOD_KINDS)
 def test_other_kind_carries_its_detail_record(kind: str) -> None:
     detail = OutOfStock(sku="A1", available=0)
@@ -155,30 +179,35 @@ def test_other_kind_carries_its_detail_record(kind: str) -> None:
     )
 
 
-@pytest.mark.spec("CON-27")
+@pytest.mark.spec("CON-30")
 @pytest.mark.parametrize(
     "data",
     [
         {},
         {"sku": "A1", "available": 0},
         {"nested": {"list": [1, 2.5, "x", True, None, {"deep": []}]}},
-        {"big": 2**80, "negative": -1.5e300},
+        {"edges": [2**63 - 1, -(2**63), -1.5e300, "￿", "\U0001f600"]},
     ],
 )
 def test_other_kind_carries_an_untyped_map(data: dict[str, Any]) -> None:
-    # The form a caller receives for a kind its version of the contract does
-    # not declare (CON-28): the detail's fields as they arrived.
+    # The form a caller holds for a kind it does not know (CON-28): the
+    # detail's fields as they arrived.
     error = ContractError("added_later", "text", data)
-    assert error.data is data
+    assert error.data == data
+    assert error.data is not data
+    assert json.loads(json.dumps(error.data)) == data
+    assert json.loads(pydantic_core.to_json(error.data)) == data
 
 
-@pytest.mark.spec("CON-27", "CON-29")
-def test_other_kind_needs_a_detail() -> None:
-    with pytest.raises(TypeError, match="detail"):
-        ContractError("out_of_stock", "text")
+@pytest.mark.parametrize("kind", ["resource_exhausted", "added_later"])
+def test_unknown_kind_may_come_without_a_detail(kind: str) -> None:
+    # A standard kind added by a later version of the specification carries no
+    # detail, and a receiver that does not know it holds it as it came (CON-28).
+    error = ContractError(kind, "busy")
+    assert (error.kind, error.data) == (kind, None)
 
 
-@pytest.mark.spec("CON-27", "CON-29")
+@pytest.mark.spec("CON-29")
 @pytest.mark.parametrize(
     "data",
     [
@@ -188,10 +217,10 @@ def test_other_kind_needs_a_detail() -> None:
         ("sku", "A1"),
         b"{}",
         OutOfStock,
-        Ping.model_fields,
+        Ping.model_fields.items(),
         {"sku": "A1"}.items(),
     ],
-    ids=["str", "int", "list", "tuple", "bytes", "class", "mapping", "items"],
+    ids=["str", "int", "list", "tuple", "bytes", "class", "field-items", "items"],
 )
 def test_detail_is_a_record_or_a_map(data: object) -> None:
     with pytest.raises(TypeError, match="detail"):
@@ -208,11 +237,20 @@ def _cycle() -> dict[str, Any]:
     return {"loop": inner}
 
 
-@pytest.mark.spec("CON-27", "CON-29")
+def _nest(levels: int) -> dict[str, Any]:
+    """A map holding maps, ``levels`` deep in all, the outermost included."""
+    outer: dict[str, Any] = {}
+    node = outer
+    for _ in range(levels - 1):
+        node["next"] = {}
+        node = node["next"]
+    return outer
+
+
+@pytest.mark.spec("CON-30", "CON-29")
 @pytest.mark.parametrize(
     "data",
     [
-        _Map(sku="A1"),
         {1: "one"},
         {"sku": b"A1"},
         {"at": datetime(2026, 1, 1, tzinfo=UTC)},
@@ -223,11 +261,19 @@ def _cycle() -> dict[str, Any]:
         {"nan": float("nan")},
         {"inf": [float("inf")]},
         {"kind": Kind.CONFLICT},
+        {"list": _Map(sku="A1")},
         {"record": OutOfStock(sku="A1", available=0)},
+        {"big": 2**63},
+        {"small": [-(2**63) - 1]},
+        {"huge": 10**5000},
+        {"text": "\ud800"},
+        {"\udc00": 1},
+        {"deep": ["\ud800"]},
         _cycle(),
+        _nest(33),
+        [_nest(32)],
     ],
     ids=[
-        "dict-subclass",
         "int-key",
         "bytes",
         "datetime",
@@ -238,32 +284,105 @@ def _cycle() -> dict[str, Any]:
         "nan",
         "inf",
         "str-enum",
+        "dict-subclass",
         "record",
+        "int64-above",
+        "int64-below",
+        "huge-int",
+        "surrogate-value",
+        "surrogate-key",
+        "surrogate-nested",
         "cycle",
+        "depth-33",
+        "depth-33-in-list",
     ],
 )
-def test_untyped_map_holds_json_values_only(data: dict[Any, Any]) -> None:
+def test_untyped_map_holds_portable_json_values_only(data: object) -> None:
     with pytest.raises(TypeError, match="untyped"):
-        ContractError("out_of_stock", "text", data)
+        ContractError("out_of_stock", "text", {"wrapped": data})
 
 
-@pytest.mark.spec("CON-27")
-def test_deeply_nested_untyped_map_is_checked_without_recursion() -> None:
-    deep: dict[str, Any] = {}
-    node = deep
-    for _ in range(5000):
-        node["next"] = {}
-        node = node["next"]
-    ContractError("out_of_stock", "text", deep)
-    node["bad"] = b"x"
-    with pytest.raises(TypeError, match="untyped"):
-        ContractError("out_of_stock", "text", deep)
+@pytest.mark.spec("CON-30", "CON-29")
+def test_untyped_detail_is_a_plain_dict() -> None:
+    with pytest.raises(TypeError, match="detail"):
+        ContractError("out_of_stock", "text", _Map(sku="A1"))
 
 
-@pytest.mark.spec("CON-27")
+def _deep_stack(levels: int, then: Callable[[], object]) -> object:
+    return then() if levels == 0 else _deep_stack(levels - 1, then)
+
+
+@pytest.mark.spec("CON-30")
+def test_untyped_map_at_the_depth_limit_copies_pickles_and_writes() -> None:
+    at_limit = _nest(32)
+    ContractError("out_of_stock", "text", at_limit)
+    # The outermost map counts, so wrapping it once more passes the limit.
+    with pytest.raises(TypeError, match="32 levels"):
+        ContractError("out_of_stock", "text", {"outer": at_limit})
+    error = ContractError("out_of_stock", "text", at_limit)
+    # With half the recursion limit already in use, as in a deep call stack.
+    for operation in (
+        lambda: copy.deepcopy(error),
+        lambda: pickle.loads(pickle.dumps(error)),  # noqa: S301 - built here
+        lambda: pydantic_core.to_json(error.data),
+        lambda: json.dumps(error.data),
+        lambda: repr(error),
+    ):
+        _deep_stack(sys.getrecursionlimit() // 2, operation)
+
+
+@pytest.mark.spec("CON-30")
+def test_very_deep_untyped_map_is_refused_without_recursion() -> None:
+    with pytest.raises(TypeError, match="32 levels"):
+        ContractError("out_of_stock", "text", _nest(100_000))
+
+
+@pytest.mark.spec("CON-30")
 def test_shared_values_are_not_a_cycle() -> None:
     shared = {"sku": "A1"}
     ContractError("out_of_stock", "text", {"a": shared, "b": [shared, shared]})
+
+
+@pytest.mark.spec("CON-25", "CON-29")
+@pytest.mark.parametrize("message", ["\ud800", "ok \udfff"])
+def test_message_holds_no_lone_surrogate(message: str) -> None:
+    with pytest.raises(ValueError, match="surrogate"):
+        ContractError("conflict", message)
+
+
+@pytest.mark.spec("CON-25")
+def test_message_may_hold_any_unicode_scalar() -> None:
+    assert ContractError("conflict", "\U0001f600 ￿ \x00").message.startswith(
+        "\U0001f600"
+    )
+
+
+def test_untyped_detail_is_a_frozen_copy() -> None:
+    data: dict[str, Any] = {"n": 1.0, "items": [{"sku": "A1"}]}
+    error = ContractError("out_of_stock", "text", data)
+    data["n"] = float("nan")
+    data["items"].append({"bad": b"x"})
+    data["self"] = data
+    assert error.data == {"n": 1.0, "items": [{"sku": "A1"}]}
+    held = error.data
+    assert isinstance(held, dict)
+    for change in (
+        lambda: held.__setitem__("n", 2),
+        lambda: held.update(n=2),
+        lambda: held.pop("n"),
+        lambda: held.clear(),
+        lambda: held.setdefault("m", 1),
+        lambda: held.__delitem__("n"),
+        lambda: held["items"].append(1),
+        lambda: held["items"].__setitem__(0, 1),
+        lambda: held["items"][0].__setitem__("sku", "B2"),
+    ):
+        with pytest.raises(TypeError, match="read-only"):
+            change()
+    held.__init__({"n": 3})  # type: ignore[misc]
+    assert error.data == {"n": 1.0, "items": [{"sku": "A1"}]}
+    assert copy.copy(error).data == error.data
+    hash(held)
 
 
 def test_fields_are_read_only() -> None:
@@ -272,6 +391,17 @@ def test_fields_are_read_only() -> None:
         with pytest.raises(AttributeError):
             setattr(error, name, "conflict")
     assert (error.kind, error.message) == ("out_of_stock", "text")
+
+
+def test_error_is_built_once() -> None:
+    error = ContractError("not_found", "no order 7")
+    with pytest.raises(TypeError, match="already built"):
+        error.__init__("internal", "changed")
+    assert (error.kind, error.message, error.args) == (
+        "not_found",
+        "no order 7",
+        ("not_found", "no order 7"),
+    )
 
 
 def test_error_type_cannot_be_subclassed() -> None:
@@ -292,8 +422,9 @@ def test_error_type_cannot_be_subclassed() -> None:
             "out_of_stock", "text", OutOfStock(sku="A1", available=0)
         ),
         lambda: ContractError("added_later", "text", {"sku": "A1", "n": [1, None]}),
+        lambda: ContractError("resource_exhausted", "busy"),
     ],
-    ids=["standard", "record", "map"],
+    ids=["standard", "record", "map", "unknown-without-detail"],
 )
 @pytest.mark.parametrize(
     "duplicate",
@@ -301,11 +432,12 @@ def test_error_type_cannot_be_subclassed() -> None:
     [copy.copy, copy.deepcopy, lambda error: pickle.loads(pickle.dumps(error))],  # noqa: S301
     ids=["copy", "deepcopy", "pickle"],
 )
-def test_error_survives_copy_and_pickle(
+def test_copy_and_pickle_carry_kind_message_and_detail_only(
     build: Callable[[], ContractError], duplicate: Callable[[Any], Any]
 ) -> None:
     error = build()
-    error.add_note("logged with trace 4bf92f")
+    error.add_note("db=10.0.0.5")
+    error.provider_detail = "host 7"  # type: ignore[attr-defined]
     again = duplicate(error)
     assert type(again) is ContractError
     assert (again.kind, again.message, again.data) == (
@@ -313,7 +445,12 @@ def test_error_survives_copy_and_pickle(
         error.message,
         error.data,
     )
-    assert again.__notes__ == ["logged with trace 4bf92f"]
+    assert again.args == error.args
+    assert not hasattr(again, "__notes__")
+    assert not hasattr(again, "provider_detail")
+    if isinstance(again.data, dict):
+        with pytest.raises(TypeError, match="read-only"):
+            again.data["sku"] = "B2"
 
 
 # Usage errors
@@ -394,6 +531,31 @@ def test_action_with_declared_kinds_stays_hashable() -> None:
     assert hash(_declare({"out_of_stock": OutOfStock}).actions["place"]) is not None
 
 
+@pytest.mark.parametrize(
+    "duplicate",
+    [
+        copy.copy,
+        copy.deepcopy,
+        lambda value: pickle.loads(pickle.dumps(value)),  # noqa: S301 - built here
+    ],
+    ids=["copy", "deepcopy", "pickle"],
+)
+def test_action_copies_and_pickles(duplicate: Callable[[Any], Any]) -> None:
+    # Action held only names, flags and classes before it held error kinds, so
+    # it copied and pickled; the kinds keep that working.
+    held = Contract.of(Inventory).actions["reserve"]
+    again = duplicate(held)
+    assert again == held
+    assert dict(again.errors) == {"out_of_stock": OutOfStock}
+    with pytest.raises(TypeError, match="read-only"):
+        cast("dict[str, Any]", again.errors)["expired"] = Expired
+
+
+def test_action_converts_to_a_dict() -> None:
+    held = Contract.of(Inventory).actions["reserve"]
+    assert dataclasses.asdict(held)["errors"] == {"out_of_stock": OutOfStock}
+
+
 @pytest.mark.spec("CON-8")
 def test_no_errors_argument_declares_no_kinds() -> None:
     assert dict(_declare(None).actions["place"].errors) == {}
@@ -429,7 +591,9 @@ def test_declared_kind_outside_the_grammar_is_rejected(kind: str) -> None:
 
 
 @pytest.mark.spec("CON-22", "CON-17")
-@pytest.mark.parametrize("kind", [7, None, b"gone", Kind.OUT_OF_STOCK])
+@pytest.mark.parametrize(
+    "kind", [7, pytest.param(10**5000, id="huge-int"), None, b"gone", Kind.OUT_OF_STOCK]
+)
 def test_declared_kind_is_plain_text(kind: object) -> None:
     with pytest.raises(ContractDefinitionError, match="error kind"):
         _declare({kind: OutOfStock})
@@ -452,6 +616,22 @@ def test_declared_kind_is_not_a_standard_kind(kind: str) -> None:
         + ".*standard kind",
     ):
         _declare({kind: OutOfStock})
+
+
+@pytest.mark.spec("CON-23", "CON-17")
+@pytest.mark.parametrize("kind", RESERVED_KINDS)
+def test_declared_kind_is_not_a_reserved_name(kind: str) -> None:
+    with pytest.raises(
+        ContractDefinitionError,
+        match=re.escape(f"orders.v1, action 'place': error kind {kind!r}")
+        + ".*reserved",
+    ):
+        _declare({kind: OutOfStock})
+
+
+@pytest.mark.spec("CON-23")
+def test_reserved_names_are_not_standard_kinds() -> None:
+    assert not set(RESERVED_KINDS) & set(STANDARD_KINDS)
 
 
 @pytest.mark.spec("CON-23")
@@ -514,7 +694,7 @@ def test_detail_rejection_says_a_record_is_needed() -> None:
 
 
 @pytest.mark.spec("CON-24", "CON-17")
-@pytest.mark.parametrize("annotation", [UUID, Decimal, set[str], tuple[int, int]])
+@pytest.mark.parametrize("annotation", [UUID, set[str], tuple[int, int]])
 def test_detail_fields_use_the_portable_forms(annotation: object) -> None:
     detail = type("Gone", (BaseModel,), {"__annotations__": {"value": annotation}})
     with pytest.raises(ContractDefinitionError) as caught:
@@ -522,6 +702,17 @@ def test_detail_fields_use_the_portable_forms(annotation: object) -> None:
     message = str(caught.value)
     assert message.startswith("orders.v1, action 'place', error 'gone': ")
     assert "value" in message
+
+
+@pytest.mark.spec("CON-21")
+@pytest.mark.parametrize("annotation", [Decimal, list[Decimal], Decimal | None])
+def test_decimal_in_a_detail_record_is_refused(annotation: object) -> None:
+    detail = type("Money", (BaseModel,), {"__annotations__": {"amount": annotation}})
+    with pytest.raises(ContractDefinitionError, match="decimal") as caught:
+        _declare({"over_limit": detail})
+    assert str(caught.value).startswith(
+        "orders.v1, action 'place', error 'over_limit': "
+    )
 
 
 @pytest.mark.spec("CON-24", "CON-17")
@@ -613,3 +804,63 @@ def test_description_does_not_list_the_standard_kinds() -> None:
     listed = description["actions"]["place"]["errors"]
     assert list(listed) == ["out_of_stock"]
     assert not set(listed) & set(STANDARD_KINDS)
+
+
+# Marks
+
+
+@pytest.mark.parametrize(
+    "stack",
+    [
+        [action(idempotent=True), action(errors={"out_of_stock": OutOfStock})],
+        [action(errors={"out_of_stock": OutOfStock}), action(idempotent=True)],
+        [action, action(idempotent=True)],
+        [action(errors={"a_kind": Nothing}), action(errors={"b_kind": Nothing})],
+    ],
+    ids=["errors-under-idempotent", "idempotent-under-errors", "bare", "two-sets"],
+)
+def test_action_marks_a_method_once(stack: list[Callable[[Any], Any]]) -> None:
+    # Two marks would keep only the outer one's settings, silently.
+    def reserve(self: object, request: Ping) -> None: ...
+
+    inner, outer = stack[1], stack[0]
+    marked = inner(reserve)
+    with pytest.raises(ContractDefinitionError, match="twice"):
+        outer(marked)
+
+
+@pytest.mark.parametrize(
+    "mark",
+    [
+        action(errors={"Not A Kind!": int}),  # type: ignore[dict-item]
+        action(errors={"out_of_stock": OutOfStock}),
+        action(idempotent=True),
+        action,
+    ],
+    ids=["invalid-errors", "same-errors", "idempotent", "bare"],
+)
+def test_implementation_methods_are_not_marked(mark: Callable[[Any], Any]) -> None:
+    # The contract declares actions; a mark on the implementation would be
+    # ignored, so it is refused rather than read as a declaration.
+    def reserve(self: object, request: Ping) -> None: ...
+
+    impl = type("InventoryImpl", (), {"reserve": mark(reserve)})
+    with pytest.raises(ContractDefinitionError, match="marked with @action"):
+        implements(Inventory)(impl)
+
+
+def test_implementation_helper_is_not_marked_either() -> None:
+    def reserve(self: object, request: Ping) -> None: ...
+
+    def _helper(self: object, request: Ping) -> None: ...
+
+    impl = type("InventoryImpl", (), {"reserve": reserve, "_helper": action(_helper)})
+    with pytest.raises(ContractDefinitionError, match="'_helper' is marked"):
+        implements(Inventory)(impl)
+
+
+def test_unmarked_implementation_is_accepted() -> None:
+    def reserve(self: object, request: Ping) -> None: ...
+
+    impl = type("InventoryImpl", (), {"reserve": reserve})
+    assert implements(Inventory)(impl) is impl

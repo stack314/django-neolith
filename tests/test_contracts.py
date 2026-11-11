@@ -2182,3 +2182,37 @@ def test_subclass_of_a_contract_is_not_a_contract() -> None:
 def test_implements_decorates_a_class() -> None:
     with pytest.raises(ContractDefinitionError, match="decorates a class"):
         implements(Greeter)(lambda: None)  # type: ignore[arg-type]
+
+
+def _declare_with_default(annotation: object, default: object) -> None:
+    request = create_model("Big", value=(cast("Any", annotation), default))
+
+    @contract("big.v1")
+    class Big(Protocol):
+        @action
+        def send(self, request: request) -> None:  # type: ignore[valid-type]
+            ...
+
+
+@pytest.mark.spec("CON-13", "CON-17")
+@pytest.mark.parametrize(
+    ("annotation", "default"),
+    [
+        pytest.param(int, 2**63, id="above"),
+        pytest.param(int, -(2**63) - 1, id="below"),
+        pytest.param(list[int], [1, 2**63], id="in-list"),
+        pytest.param(dict[str, int], {"k": -(2**63) - 1}, id="in-map"),
+        pytest.param(int, 10**5000, id="huge"),
+    ],
+)
+def test_default_outside_the_64_bit_integer_range_is_refused(
+    annotation: object, default: object
+) -> None:
+    with pytest.raises(ContractDefinitionError, match="outside the 64-bit"):
+        _declare_with_default(annotation, default)
+
+
+@pytest.mark.spec("CON-13")
+@pytest.mark.parametrize("default", [2**63 - 1, -(2**63)])
+def test_default_at_the_64_bit_integer_bounds_is_accepted(default: int) -> None:
+    _declare_with_default(int, default)

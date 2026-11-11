@@ -21,7 +21,7 @@ import json
 import math
 import re
 from collections.abc import Iterator, Mapping
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from pydantic import BaseModel
 from pydantic._internal._model_construction import init_private_attributes
@@ -455,18 +455,18 @@ class Portable:
             held = validator.validate_python(value, strict=True)
         except (ValueError, TypeError) as error:
             raise self.fail(
-                f"field {path} has the default {value!r}, which is not a value of "
+                f"field {path} has the default {shown(value)}, which is not a value of "
                 "its type; Pydantic keeps a default as written, so write one"
             ) from error
         except Exception as error:  # an author's validator may raise anything
             raise self.fail(
-                f"field {path} has the default {value!r}, on which its validators "
+                f"field {path} has the default {shown(value)}, on which its validators "
                 f"raised {type(error).__name__}: {error}"
             ) from error
         if not _unchanged(held, value):
             raise self.fail(
-                f"field {path} has the default {value!r}, which its validators "
-                f"turn into {held!r}; write the default as {held!r}"
+                f"field {path} has the default {shown(value)}, which its validators "
+                f"turn into {shown(held)}; write the default as {shown(held)}"
             )
         try:
             # Pydantic serialises a default it was given as written, with the
@@ -475,34 +475,49 @@ class Portable:
             sent = serializer.to_json(value, warnings=False)
         except (ValueError, TypeError) as error:
             raise self.fail(
-                f"field {path} has the default {value!r}, which cannot be written "
+                f"field {path} has the default {shown(value)}, which cannot be written "
                 "as JSON: a string with a lone surrogate never can, and bytes "
                 "that are not UTF-8 need the base64 encoding that the in-process "
                 "transport settles"
             ) from error
+        written: object = None
+        problem: str | None
+        try:
+            written = json.loads(sent)
+        except ValueError:
+            # The json module refuses an integer of more than 4300 digits
+            # (sys.set_int_max_str_digits), far outside the 64-bit range.
+            problem = "it holds an integer outside the 64-bit range"
+        else:
+            problem = json_value_problem(written)
+        if problem is not None:
+            raise self.fail(
+                f"field {path} has the default {shown(value)}, which travels as a "
+                f"JSON value outside the portable forms: {problem}"
+            )
         try:
             read_value = validator.validate_json(sent)
             read = serializer.to_json(read_value, warnings=False)
         except Exception as error:  # ValidationError, or an author's validator
             raise self.fail(
-                f"field {path} has the default {value!r}, which travels as "
+                f"field {path} has the default {shown(value)}, which travels as "
                 f"{sent.decode()} and does not read back as a value of its type"
             ) from error
         if not _unchanged(read_value, held):
             # The wire lost something the value holds, such as the seconds of
             # a timestamp's offset, which RFC 3339 cannot write.
             raise self.fail(
-                f"field {path} has the default {value!r}, which travels as "
-                f"{sent.decode()} and reads back as {read_value!r}, so the wire "
+                f"field {path} has the default {shown(value)}, which travels as "
+                f"{sent.decode()} and reads back as {shown(read_value)}, so the wire "
                 "loses part of it"
             )
         if sent != read:
             raise self.fail(
-                f"field {path} has the default {value!r}, which travels as "
+                f"field {path} has the default {shown(value)}, which travels as "
                 f"{sent.decode()} but reads back as {read.decode()}; write the "
                 "default so that it reads back as itself"
             )
-        return json.loads(sent)
+        return written
 
     def describe(
         self, node: Mapping[str, Any], path: str, aliases: tuple[str, ...]
@@ -789,6 +804,89 @@ def portable_constructs() -> Mapping[str, frozenset[str]]:
 def portable_settings() -> frozenset[str]:
     """The admitted record settings, for the property test's generator."""
     return _SETTINGS
+
+
+# The portable integer is 64-bit (spec 01, the portable type system).
+_INT64 = range(-(2**63), 2**63)
+# JSON's scalars, as the json module reads them. bool is a subclass of int,
+# so each is matched by exact type, never with isinstance.
+_JSON_SCALARS = frozenset({str, int, float, bool, type(None)})
+
+
+def shown(value: object, limit: int = 200) -> str:
+    """``repr`` of an input for a message, cut short, and never raising.
+
+    ``repr`` of an int with more than 4300 digits raises ValueError
+    (sys.set_int_max_str_digits), and an author's ``__repr__`` may raise too.
+    """
+    try:
+        text = repr(value)
+    except Exception:  # an author's __repr__ may raise anything
+        text = f"<{type(value).__qualname__} that cannot be shown>"
+    return text if len(text) <= limit else f"{text[: limit - 3]}..."
+
+
+def text_problem(text: str) -> str | None:
+    """Say why ``text`` cannot travel as JSON text: a lone surrogate.
+
+    JSON text is UTF-8 (RFC 8259, section 8.1), which cannot encode a lone
+    surrogate; pydantic-core refuses to write one, and the json module writes
+    an escape that other readers refuse.
+    """
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return f"{shown(text)} holds a lone surrogate, which JSON text cannot carry"
+    return None
+
+
+def json_value_problem(value: object, max_depth: int | None = None) -> str | None:
+    """Say why ``value`` is not a portable JSON value, or return None.
+
+    Admitted: ``dict`` with ``str`` keys, ``list``, ``str`` without a lone
+    surrogate, ``int`` within 64 bits, finite ``float``, ``bool`` and ``None``,
+    each by exact type. With ``max_depth``, maps and lists nest at most that
+    many levels, the outermost being the first. Walks without recursion, so a
+    deep value cannot exhaust the stack, and refuses a value that contains
+    itself.
+    """
+    pending: list[tuple[object, int, bool]] = [(value, 1, False)]
+    open_containers: set[int] = set()
+    while pending:
+        item, depth, leaving = pending.pop()
+        if leaving:
+            open_containers.discard(id(item))
+            continue
+        kind = type(item)
+        if kind in _JSON_SCALARS:
+            if kind is str:
+                problem = text_problem(cast(str, item))
+                if problem is not None:
+                    return problem
+            elif kind is int and item not in _INT64:
+                return f"it holds {shown(item)}, outside the 64-bit integer range"
+            elif kind is float and not math.isfinite(cast(float, item)):
+                return f"{shown(item)} is not a JSON number"
+            continue
+        if kind is not dict and kind is not list:
+            return f"it holds a {kind.__qualname__}"
+        if id(item) in open_containers:
+            return "it contains itself"
+        if max_depth is not None and depth > max_depth:
+            return f"it nests maps and lists more than {max_depth} levels deep"
+        open_containers.add(id(item))
+        pending.append((item, depth, True))
+        if kind is list:
+            pending.extend((child, depth + 1, False) for child in cast(list[Any], item))
+            continue
+        for key, child in cast(dict[Any, Any], item).items():
+            if type(key) is not str:
+                return f"its key {shown(key)} is not a str"
+            problem = text_problem(key)
+            if problem is not None:
+                return problem
+            pending.append((child, depth + 1, False))
+    return None
 
 
 def _unchanged(held: object, written: object) -> bool:
