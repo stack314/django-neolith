@@ -34,6 +34,7 @@ from pydantic import BaseModel
 from pydantic_core import SchemaSerializer, SchemaValidator
 
 from neolith._checker import description_checker
+from neolith._forms import FORM_FOR_KIND
 from neolith._portable import shown
 
 if typing.TYPE_CHECKING:
@@ -96,10 +97,10 @@ class Codec[R: BaseModel]:
            part of the copy it was written from: equal, and of the same kind
            (TRN-11).
 
-        A value of another type is a ``TypeError``; every other failure is a
-        ``ValueError`` that keeps its cause. What is sent is the value as it
-        was when the serializer read it; a change made to it meanwhile does
-        not reach the text.
+        A value of another type is a ``TypeError``. Every other failure is a
+        ``ValueError``, whose cause is the exception behind it where there is
+        one. What is sent is the value as it was when the serializer read it;
+        a change made to it meanwhile does not reach the text.
         """
         if type(value) is not self.record:
             raise TypeError(
@@ -196,6 +197,11 @@ class _Fields(dict[Any, Any]):
 
 
 _MINUTE = timedelta(minutes=1)
+# The classes of a timestamp and a date, held in a tuple. A tool that freezes
+# time for a test, as freezegun does, rebinds every module-level name bound to
+# ``datetime`` or ``date``, in this module too, to a fake of its own, so the
+# code below never reads those names while it runs.
+_TIMES = (datetime, date)
 
 
 def _converted(dumped: object) -> tuple[object, str | None]:
@@ -207,6 +213,7 @@ def _converted(dumped: object) -> tuple[object, str | None]:
     same instant in UTC (CON-36). Walks without recursion, so a deep value
     cannot exhaust the stack.
     """
+    timestamp = _TIMES[0]
     root: list[object] = [dumped]
     pending: list[tuple[Any, Any]] = [(root, 0)]
     while pending:
@@ -224,12 +231,12 @@ def _converted(dumped: object) -> tuple[object, str | None]:
                 return root[0], f"{shown(item)}, and a number must be finite"
             if kind is float and item == 0 and math.copysign(1.0, item) < 0:
                 holder[at] = 0.0
-        elif isinstance(item, datetime):
+        elif isinstance(item, timestamp):
             # Read through datetime's own methods, so that a subclass, which
             # Pydantic keeps as it is given, runs no code of its own here.
-            offset = datetime.utcoffset(item)
+            offset = timestamp.utcoffset(item)
             if offset is not None and offset % _MINUTE:
-                local = datetime.combine(datetime.date(item), datetime.time(item))
+                local = timestamp.combine(timestamp.date(item), timestamp.time(item))
                 try:
                     holder[at] = (local - offset).replace(tzinfo=UTC)
                 except OverflowError:
@@ -242,8 +249,12 @@ def _converted(dumped: object) -> tuple[object, str | None]:
 # Read from the instance, never through its class's attribute lookup.
 _FIELDS_OF = type.__dict__["__dict__"].__get__(BaseModel)["__dict__"]
 # Kinds held by exact type and equality. A date and a timestamp are not among
-# them: Pydantic keeps a value of a subclass as it is given.
-_EXACT = frozenset({str, int, bool, bytes, Decimal, timedelta})
+# them, since Pydantic keeps a value of a subclass as it is given, nor is a
+# decimal, whose digits equality does not compare.
+_EXACT = frozenset({str, int, bool, bytes, timedelta})
+# A decimal as its own writer spells it: a positive exponent written out and
+# a zero without its sign (CON-37).
+_AS_WRITTEN = FORM_FOR_KIND["decimal"].read
 
 
 def _difference(sent: object, received: object, name: str) -> str | None:
@@ -320,24 +331,27 @@ def _same(mine: object, theirs: object) -> bool:
     equals it exactly. A date or a timestamp may be of a subclass, compared
     through the base class's own methods, since Pydantic keeps one as it is
     given; a timestamp is an instant, so its offset is not compared (spec
-    01). An enum member is the very member.
+    01). An enum member is the very member. One kind is narrower: a decimal
+    keeps its digits, so ``1.50`` is not held where ``1.5`` is read.
     """
     kind = type(theirs)
+    timestamp, day = _TIMES
     if theirs is None or isinstance(theirs, Enum):
         return mine is theirs
     if kind is float:
         return type(mine) in (float, int) and mine == theirs
-    if kind is datetime:
-        return (
-            isinstance(mine, datetime)
-            and datetime.__eq__(typing.cast(datetime, theirs), mine) is True
-        )
-    if kind is date:
+    if kind is timestamp:
+        moment = typing.cast("datetime", theirs)
+        return isinstance(mine, timestamp) and timestamp.__eq__(moment, mine) is True
+    if kind is day:
         # A timestamp is a date too, but never equal to one.
         return (
-            isinstance(mine, date)
-            and date.__eq__(typing.cast(date, theirs), mine) is True
+            isinstance(mine, day)
+            and day.__eq__(typing.cast("date", theirs), mine) is True
         )
+    if kind is Decimal:
+        digits = typing.cast(Decimal, theirs).as_tuple()
+        return type(mine) is Decimal and _AS_WRITTEN(mine).as_tuple() == digits
     return kind in _EXACT and type(mine) is kind and mine == theirs
 
 

@@ -52,6 +52,9 @@ _PATTERNS = frozenset(
 )
 _REFERENCE = "#/$defs/"
 _NULL = {"type": "null"}
+# The classes of a timestamp and a date, held in a tuple: a tool that freezes
+# time for a test rebinds a module's own names for them (see neolith._crossing).
+_TIMES = (datetime, date)
 
 
 def description_checker(defs: Mapping[str, Any], name: str) -> SchemaValidator:
@@ -281,7 +284,7 @@ def _double(rest: dict[str, Any], keyword: str) -> float | None:
 def _existing_day(text: str) -> str:
     """A date whose day exists (CON-40); its pattern has fixed its form."""
     try:
-        date.fromisoformat(text)
+        _TIMES[1].fromisoformat(text)
     except ValueError:
         raise PydanticCustomError(
             "day_exists", "{text} names a day that does not exist", {"text": text}
@@ -293,7 +296,7 @@ def _instant(text: str) -> str:
     """A timestamp whose day exists, and whose instant falls in years 0001 to
     9999 in UTC (CON-40); its pattern has fixed its form."""
     try:
-        datetime.fromisoformat(text).astimezone(UTC)
+        _TIMES[0].fromisoformat(text).astimezone(UTC)
     except OverflowError:
         raise PydanticCustomError(
             "instant_in_range",
