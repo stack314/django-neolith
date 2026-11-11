@@ -468,7 +468,8 @@ def test_other_types_are_rejected(annotation: object) -> None:
         declare_with_field(annotation)
 
 
-@pytest.mark.spec("CON-21")
+# ADR 0019 settles decimal's encoding and spec 01 withdraws CON-21. This
+# implementation refuses decimal until roadmap step 3 (#10) admits it.
 @pytest.mark.parametrize(
     "annotation",
     [
@@ -480,7 +481,7 @@ def test_other_types_are_rejected(annotation: object) -> None:
     ],
     ids=repr,
 )
-def test_decimal_is_refused_until_its_encoding_is_settled(annotation: object) -> None:
+def test_decimal_is_refused_until_it_is_implemented(annotation: object) -> None:
     with pytest.raises(
         ContractDefinitionError,
         match=r"^shapes\.v1, action 'send': field Shape\.value\S* is a decimal",
@@ -488,7 +489,6 @@ def test_decimal_is_refused_until_its_encoding_is_settled(annotation: object) ->
         declare_with_field(annotation)
 
 
-@pytest.mark.spec("CON-21")
 def test_decimal_in_a_reply_is_refused() -> None:
     Total = create_model("Total", amount=(Decimal, ...))
     Empty = create_model("Empty")
@@ -1201,7 +1201,7 @@ def test_documentation_and_constraints_are_allowed() -> None:
     assert defs["Documented"]["properties"]["count"]["minimum"] == 0
 
 
-@pytest.mark.spec("CON-16")
+@pytest.mark.spec("CON-16", "CON-32")
 @pytest.mark.parametrize(
     "field",
     [
@@ -1215,7 +1215,7 @@ def test_field_alias_is_rejected(field: object) -> None:
         declare_with_field(Annotated[int, field])
 
 
-@pytest.mark.spec("CON-16")
+@pytest.mark.spec("CON-16", "CON-32")
 def test_alias_generator_is_rejected() -> None:
     camel = create_model(
         "Camel", __config__=ConfigDict(alias_generator=to_camel), item_id=(int, ...)

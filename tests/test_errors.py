@@ -708,7 +708,8 @@ def test_detail_fields_use_the_portable_forms(annotation: object) -> None:
     assert "value" in message
 
 
-@pytest.mark.spec("CON-21")
+# ADR 0019 settles decimal's encoding and spec 01 withdraws CON-21. This
+# implementation refuses decimal until roadmap step 3 (#10) admits it.
 @pytest.mark.parametrize("annotation", [Decimal, list[Decimal], Decimal | None])
 def test_decimal_in_a_detail_record_is_refused(annotation: object) -> None:
     detail = type("Money", (BaseModel,), {"__annotations__": {"amount": annotation}})

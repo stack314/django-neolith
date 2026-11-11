@@ -41,7 +41,7 @@ Each action is either idempotent or non-idempotent.
 
 The portable forms are the types that every transport can represent, JSON Schema and protobuf at least. They are:
 
-- scalars: boolean, integer (64-bit), number (IEEE 754 double), string, bytes, decimal, timestamp (RFC 3339, so with an offset from UTC), date, duration;
+- scalars: boolean, integer (within ±(2^53 − 1)), number (a finite IEEE 754 double), string, bytes, decimal (at most 34 significant digits), timestamp (RFC 3339, with an offset from UTC), date, duration;
 - `list<T>`;
 - `map<string, T>`;
 - `record`: named, ordered fields, each with a type and required/optional;
@@ -52,7 +52,11 @@ The portable forms are the types that every transport can represent, JSON Schema
 
 **CON-14.** A reply type MUST be either a record built only from the portable forms, or empty. An empty reply carries no value.
 
-The encoding of decimal is settled by the in-process transport (step 3 of the [roadmap](../docs/roadmap.md), issue #10). **CON-21.** Until that encoding is settled, an implementation MUST reject a contract whose request type, reply type or detail record (CON-8) uses decimal, before it serves the contract or calls any of its actions. The rejection names the contract, the action and the field.
+The JSON encoding of each form follows [ADR 0019](../docs/adr/0019-wire-encodings-of-the-portable-forms.md). In outline: every encoded form has a pattern or a range in the description; an integer is a JSON number with no fraction or exponent; bytes are padded base64url; a number is finite; a decimal is a string with no exponent and its scale kept; a duration is written like `-1.5s`; a timestamp and a date follow RFC 3339 with years 0001 to 9999 and no leap second. These become requirements, with the description and validation that implement them, in roadmap step 3 (#10).
+
+~~**CON-21.** Until that encoding is settled, an implementation MUST reject a contract whose request type, reply type or detail record (CON-8) uses decimal, before it serves the contract or calls any of its actions. The rejection names the contract, the action and the field.~~ Withdrawn in spec 0.1: ADR 0019 settles decimal's encoding.
+
+**CON-32.** A field of a record MUST travel under its own name, with no alias.
 
 Records are nominal within a contract and structural across the wire. **CON-15.** Two different records or enums used by one contract MUST NOT have the same name. Generated code for other languages names each record and enum once, so two with one name would collide.
 
@@ -115,7 +119,7 @@ Decision record: [0008](../docs/adr/0008-typed-contract-errors-in-both-modes.md)
 
 ## Checking a contract
 
-**CON-17.** An implementation MUST reject a contract that does not meet CON-10, CON-11, CON-12, CON-13, CON-14, CON-15, CON-20, CON-22, CON-23 or CON-24, or whose records cannot ignore unknown fields as CON-6 and CON-7 require, before it serves the contract or calls any of its actions. The rejection names the contract, the action, the error kind where there is one and, for a type, the field.
+**CON-17.** An implementation MUST reject a contract that does not meet CON-10, CON-11, CON-12, CON-13, CON-14, CON-15, CON-20, CON-22, CON-23, CON-24 or CON-32, or whose records cannot ignore unknown fields as CON-6 and CON-7 require, before it serves the contract or calls any of its actions. The rejection names the contract, the action, the error kind where there is one and, for a type, the field.
 
 **CON-18.** A provider MUST implement every action of its contract, taking the action's request type and returning its reply type.
 

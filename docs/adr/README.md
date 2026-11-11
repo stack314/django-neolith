@@ -33,3 +33,4 @@ Questions not yet decided are in [open-questions.md](../open-questions.md).
 | [0016](0016-an-app-may-run-attached-and-detached-at-once.md) | An app may run attached and detached at the same time | Proposed |
 | [0017](0017-call-context-explicit-at-the-action-ambient-for-propagation.md) | The call context is explicit at the action and ambient for propagation | Proposed |
 | [0018](0018-requirement-ids-and-spec-to-test-traceability.md) | Requirement IDs and spec-to-test traceability | Accepted |
+| [0019](0019-wire-encodings-of-the-portable-forms.md) | Wire encodings of the portable forms | Accepted |
