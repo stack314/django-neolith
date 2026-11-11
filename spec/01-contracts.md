@@ -76,7 +76,7 @@ An action's *error set* is the standard kinds below, which every action has whet
 | `permission_denied` | The caller, or the principal it calls for, may not perform the action | no |
 | `conflict` | The action conflicts with current state | no |
 | `unavailable` | No provider could be reached | yes, if idempotent |
-| `timeout` | The deadline passed before the call ended; the action might or might not have run | yes, if idempotent |
+| `timeout` | The deadline passed before the call ended; the action might or might not have run | no: the outcome is unknown, and the call's one deadline has passed |
 | `internal` | The provider failed, or its reply or error could not be read | no |
 
 **CON-8.** A contract MAY declare additional error kinds per action, each with a typed detail record. Error kinds are part of the contract and follow its compatibility rules.

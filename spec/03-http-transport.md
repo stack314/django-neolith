@@ -27,9 +27,9 @@ The context travels in headers. The calling app's credential travels in `Authori
 
 The deadline is sent as a relative budget, not an absolute time, so that the deadline does not depend on synchronised clocks. The receiving host computes its own local deadline from the budget when the request arrives. In outline, following [ADR 0017](../docs/adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md):
 
-- `Neolith-Timeout` is 1 to 10 ASCII digits, as Connect's `Connect-Timeout-Ms` is. An absent header means the call has no deadline. A provider's host can clamp the budget to its own maximum. A caller never sends a budget of zero: a call whose budget is zero or less fails with `timeout` before it is sent. A provider's host fails a call whose header is present but malformed with `invalid_argument`.
-- A `traceparent` that is absent or invalid starts a fresh trace, as W3C Trace Context does for an invalid one.
-- `Idempotency-Key` carries the call's key: one derived from its parent's key as in [02](02-transports.md), or a random one at a root.
+- `Neolith-Timeout` is a positive integer of at most 10 digits with no leading zeros, as Connect's `Connect-Timeout-Ms` is. An absent header means the call has no deadline. A caller sends a budget above 9999999999 ms as 9999999999, and never sends 0: a call whose budget rounds down to 0 ms fails with `timeout` before it is sent. A provider's host fails a call whose header is present but does not match with `invalid_argument`, and can clamp a budget to its own maximum.
+- `traceparent` follows W3C Trace Context, including its rules for versions above `00`. One that is absent or invalid starts a fresh trace, and `tracestate` is then dropped; otherwise `tracestate` is passed on.
+- `Idempotency-Key` carries the call's key as a structured-field string (RFC 9651), of at most 255 characters, as the IETF Idempotency-Key draft defines it: one derived from its parent's key as in [02](02-transports.md), or a random one at a root. A malformed one fails the call with `invalid_argument`. A call that arrives without one has no key, so the calls it makes get random keys, and a retry of it does not reproduce them.
 
 These become requirements, with their tests, with the HTTP transport in roadmap step 5 (#12).
 
