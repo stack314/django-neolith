@@ -3,7 +3,7 @@
 
 # Documents whose must-level requirements need a citing test. The pull request
 # of the roadmap step that implements a document adds its number here.
-enforce = ["01"]
+enforce = ["01", "02"]
 
 # Must-level requirements that no test in this implementation verifies, each
 # with the reason: what verifies it instead, or the roadmap step that will test
@@ -13,7 +13,6 @@ OVR-2 = "Binds app code. Checked by the boundary check, roadmap step 7."
 OVR-5 = "Shown by the example apps running attached and detached, roadmap step 8."
 OVR-7 = "Binds app code, which keeps the call context out of request types."
 CON-1 = "Binds contract authors. Breaking-change detection is deferred past 0.1."
-CON-4 = "Binds connectors, which arrive in roadmap step 3; the no-retry and no-fallback rule is tested there and with failover in step 6."
 CON-5 = "Binds app authors. The conformance suite checks it for the reference contract, roadmap step 6."
 CON-27 = "Binds the provider's host, roadmap step 3: the error type does not know which action raised it, so the host checks that a declared kind carries the record the action declares for it."
 CON-31 = "Binds the provider's host, roadmap step 3: a record is held as given, so the host checks, as it sends the error, that the record's value meets CON-30. Step 2 refuses at declaration what no value can meet: a record too deep (CON-24)."
@@ -22,3 +21,5 @@ CON-12 = "Holds by construction in this implementation: a contract's actions are
 CON-39 = "Binds receivers that read text from a network: the receive check, roadmap step 5 (#12), which reuses the description check that senders run (TRN-15). In-process, a receiver reads only text that a sender's check passed (ADR 0007 Decision 3)."
 CON-40 = "Binds receivers that read text from a network: the receive check, roadmap step 5 (#12). Senders meet the same rules, tested under TRN-15."
 CON-42 = "Binds receivers that read text from a network: the receive check, roadmap step 5 (#12). In-process, a receiver reads only text that a sender wrote (CON-41)."
+TRN-2 = "Binds transports: the call context arrives with roadmap step 3 (#10 task 6), which tests it across the in-process transport."
+TRN-4 = "Binds transports: the deadline arrives with roadmap step 3 (#10 task 6), which tests it before dispatch and when the action ends."

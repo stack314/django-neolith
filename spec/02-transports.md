@@ -47,6 +47,16 @@ Every value that crosses a call, whether a request, a reply or an error's detail
 
 Because the action runs in the caller's thread, the in-process transport checks the deadline before it dispatches the call and again when the action ends. If the deadline has passed by then, the action's reply, or a failure it ends with, is discarded and the call fails with `timeout`; the provider's host still records a discarded failure. A signal to stop, such as cancellation or the process exiting, is not a failure of the action and is not discarded. The action might have run, so `timeout` leaves the outcome unknown, as it does over a network.
 
+## Connectors
+
+A *connector* is what calling code holds to call one contract version. It runs the caller's checks (ADR 0017, Decision 9), then hands the call to a transport.
+
+**TRN-15.** A connector MUST let its caller call each action of its contract version by name, with one request of the action's request type, and return the action's reply. A call to an action the contract version does not have, or with anything other than one request, is a mistake in the calling code (CON-29).
+
+**TRN-16.** A connector with the `single` policy MUST send each call that passes the caller's checks to its one provider exactly once.
+
+**TRN-17.** A reply that its provider cannot send under TRN-9 to TRN-11, or that the caller cannot read under TRN-12, MUST reach the caller as `internal`. That includes a reply to an action whose reply is empty, and a missing reply to one whose reply is not.
+
 ## Providers and routing
 
 A connector holds an ordered set of providers for a contract version. Each provider names a transport and the configuration that transport needs.
