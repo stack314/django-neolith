@@ -41,7 +41,7 @@ Each action is either idempotent or non-idempotent.
 
 The portable forms are the types that every transport can represent, JSON Schema and protobuf at least. They are:
 
-- scalars: boolean, integer (64-bit), number (IEEE 754 double), string, bytes, decimal, timestamp (RFC 3339, so with an offset from UTC), date, duration;
+- scalars: boolean, integer, number (a finite IEEE 754 double), string, bytes, decimal, timestamp (RFC 3339, so with an offset from UTC), date, duration;
 - `list<T>`;
 - `map<string, T>`;
 - `record`: named, ordered fields, each with a type and required/optional;
@@ -52,9 +52,9 @@ The portable forms are the types that every transport can represent, JSON Schema
 
 **CON-14.** A reply type MUST be either a record built only from the portable forms, or empty. An empty reply carries no value.
 
-[ADR 0019](../docs/adr/0019-wire-encodings-of-the-portable-forms.md) fixes the JSON encoding of each form. Its encodings take effect with roadmap step 3 (#10 task 1), which turns them into requirements here. From then on, in outline: every encoded form will have a pattern or a range in the description, and the record names the rules a description does not state; integers will be limited to ±(2^53 − 1); bytes will be padded base64url; numbers will be finite, with `-0` written as `0`; decimals will be admitted, as strings with no exponent that keep trailing zeros; durations will be written as ProtoJSON writes them, like `-1.500s`, one spelling per value; timestamps and dates will follow RFC 3339 with years 0001 to 9999 and no leap second.
+How each form is written in JSON is under [Wire encodings](#wire-encodings).
 
-**CON-21.** Until the encodings of ADR 0019 are implemented (#10 task 1), an implementation MUST reject a contract whose request type, reply type or detail record (CON-8) uses decimal, before it serves the contract or calls any of its actions. The rejection names the contract, the action and the field.
+~~**CON-21.** Until the encodings of ADR 0019 are implemented (#10 task 1), an implementation MUST reject a contract whose request type, reply type or detail record (CON-8) uses decimal, before it serves the contract or calls any of its actions. The rejection names the contract, the action and the field.~~ Withdrawn in spec 0.1: decimals travel in the form under [Wire encodings](#wire-encodings), with the restriction of CON-42 (ADR 0019).
 
 **CON-33.** A field of a record MUST travel under its own name, with no alias.
 
@@ -63,6 +63,39 @@ Records are nominal within a contract and structural across the wire. **CON-15.*
 **CON-20.** The name of a record or an enum MUST start with an ASCII letter, followed by ASCII letters, digits or underscores, so that generated code in any language can use it unchanged.
 
 **CON-6.** Unknown fields in a request MUST be ignored by providers. **CON-7.** Unknown fields in a reply MUST be ignored by callers. This is what makes additive changes compatible.
+
+## Wire encodings
+
+Values travel as JSON text (RFC 8259), with each form written as below ([ADR 0019](../docs/adr/0019-wire-encodings-of-the-portable-forms.md)). Records and maps are JSON objects, a record's fields under their own names (CON-33); lists are arrays; an enum is its member's string; and an absent optional value is `null`. Every pattern is anchored with `^…$` and uses only ASCII, so it matches the same strings under ECMA-262 (with no flag, `u` or `v`), Rust's `regex` and Python's regular expressions. A string matches a pattern only when the whole string does, so `$` never admits a final newline.
+
+- **boolean** and **string:** JSON's own.
+- **integer:** a JSON number with no fraction or exponent, from −(2^53 − 1) to 2^53 − 1, the range every JSON reader holds exactly (I-JSON, RFC 7493, section 2.2). A 64-bit identifier travels as a string.
+- **number:** a JSON number from −1.7976931348623157e308 to 1.7976931348623157e308, the largest double, so it is finite and a reader that turns `1e400` into infinity refuses it. `-0` and `0` are the same value.
+- **bytes:** a string in base64url with padding and zero unused bits (RFC 4648, sections 3.5 and 5): `^([A-Za-z0-9_\-]{4})*([A-Za-z0-9_\-][AQgw]==|[A-Za-z0-9_\-]{2}[AEIMQUYcgkosw048]=)?$`.
+- **decimal:** a string of an optional `-`, digits with no leading zero, and optionally a point followed by at least one digit, with no exponent and no negative zero at any scale: `^(0(\.[0-9]+)?|-?[1-9][0-9]*(\.[0-9]+)?|-?0\.0*[1-9][0-9]*)$`. It has at most 34 digits, not counting the sign and the point: `^-?[0-9](\.?[0-9]){0,33}$`. So every value is an IEEE 754 decimal128, below 10^34 in magnitude. Trailing zeros are kept: `1.50` stays `1.50`.
+- **duration:** seconds with an `s` suffix, with no fraction or with 3 or 6 fractional digits, as few as the value needs, below 10^11 seconds in magnitude: `^(0|-?(0|[1-9][0-9]{0,10})\.([0-9]{3})?(00[1-9]|0[1-9][0-9]|[1-9][0-9]{2})|-?[1-9][0-9]{0,10})s$`. For example `0s`, `-2s`, `1.500s` and `0.000001s`.
+- **timestamp:** RFC 3339 with `T` and `Z` in upper case, an offset, years 0001 to 9999, no leap second and at most 6 fractional digits: `^(000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3})-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\.[0-9]{1,6})?(Z|[+\-]([01][0-9]|2[0-3]):[0-5][0-9])$`. A timestamp is an instant; its offset is not data.
+- **date:** the part of a timestamp before the `T`: `^(000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3})-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$`.
+
+**CON-34.** The description (CON-16) MUST state each form's range or pattern above: an integer's and a number's range as `minimum` and `maximum`, and a pattern as `pattern`, with a decimal's further patterns under `allOf`. It also marks bytes with `contentEncoding: base64url`, a timestamp with `format: date-time` and a date with `format: date`.
+
+**CON-35.** Before it writes a value, a sender MUST write a number's `-0` as `0`, a timestamp whose offset is not a whole number of minutes in UTC, with `Z`, and a decimal with a positive exponent at exponent 0 with its value kept (`1E+2` as `100`). RFC 3339 writes an offset in hours and minutes only, and RFC 9557 (section 2.2) reads `Z` as "local offset unknown".
+
+**CON-36.** A sender MUST NOT send a value that does not then meet its form, such as an infinite or NaN number.
+
+**CON-37.** A receiver MUST refuse a value that its form's range or pattern refuses.
+
+**CON-38.** A receiver MUST also refuse a value that breaks a rule the description cannot state: a date or timestamp whose day does not exist (`2027-02-29`), a timestamp whose instant falls outside years 0001 to 9999 in UTC, and an integer written with a fraction or an exponent (`1.0`), which JSON Schema counts as an integer.
+
+**CON-39.** A sender MUST NOT send a body that holds a duplicate member name, a lone surrogate or a number outside the range of a double, which RFC 8785 (section 3.1) excludes from its input.
+
+**CON-40.** A receiver MUST refuse a body that holds a duplicate member name, a lone surrogate or a number outside the range of a double.
+
+Text may hold a noncharacter, such as U+FFFF, as CON-25 and CON-30 allow, although I-JSON (RFC 7493, section 2.1) excludes it.
+
+**CON-41.** Until #10 settles the type that writes durations in their form, an implementation MUST reject a contract whose request type, reply type or detail record uses duration, before it serves the contract or calls any of its actions. The rejection names the contract, the action and the field.
+
+**CON-42.** Until #10 settles how such decimals are written, a decimal MUST NOT be nonzero and below 10^−6 in magnitude, or zero with more than 6 fractional digits, such as `0.0000001` or `0.0000000`. The description states this with a third pattern under `allOf`: `^-?([1-9][0-9.]*|0|0\.[0-9]{1,6}|0\.0{0,5}[1-9][0-9]*)$`. A later version can admit them, as a compatible change.
 
 ## Errors
 
@@ -95,11 +128,11 @@ An action's *error set* is the standard kinds below, which every action has whet
 
 **CON-28.** When an error's kind is neither a standard kind the caller knows nor a kind its version of the contract declares, the caller MUST receive the error with that kind, not as `internal`, and with its detail, if there is one, as an untyped map from the detail's field names to their values, unless the detail breaks CON-30. A provider that meets CON-31 never sends such a detail; what the caller receives then is settled with the connectors in roadmap step 3. Adding an error kind to an action is a compatible change (CON-1), and a later version of this specification can add a standard kind (CON-23), so a caller can receive a kind it does not know.
 
-**CON-30.** An untyped map MUST hold only text keys and values that are untyped maps, lists, text, booleans, null, integers from −(2^53−1) to 2^53−1 or finite numbers, nested at most 32 levels deep, the outermost map being the first, and holding at most 10,000 values in all, counting every map value and list item at every depth, with each occurrence of a repeated value counted separately. Its text is Unicode text, as in CON-25. The integer range is the one every JSON reader holds exactly (I-JSON, RFC 7493, section 2.2), narrower than the 64-bit portable integer.
+**CON-30.** An untyped map MUST hold only text keys and values that are untyped maps, lists, text, booleans, null, integers from −(2^53−1) to 2^53−1 or finite numbers, nested at most 32 levels deep, the outermost map being the first, and holding at most 10,000 values in all, counting every map value and list item at every depth, with each occurrence of a repeated value counted separately. Its text is Unicode text, as in CON-25. The integer range is the portable integer's (see [Wire encodings](#wire-encodings)).
 
 **CON-31.** The value of a detail record, as it travels, MUST meet the bounds of an untyped map (CON-30), so that a caller that does not know its kind can hold it (CON-28). CON-24 makes the depth bound hold for every value of a detail record; the other bounds depend on the value, so the provider's host checks them as it sends the error.
 
-**CON-32.** Until the encodings of ADR 0019 are implemented (#10 task 1), an implementation MUST reject a contract whose detail record uses bytes, before it serves the contract or calls any of its actions, since whether such a detail travels within CON-30 depends on the encoding of bytes. The rejection names the contract, the action and the error kind.
+~~**CON-32.** Until the encodings of ADR 0019 are implemented (#10 task 1), an implementation MUST reject a contract whose detail record uses bytes, before it serves the contract or calls any of its actions, since whether such a detail travels within CON-30 depends on the encoding of bytes. The rejection names the contract, the action and the error kind.~~ Withdrawn in spec 0.1: bytes travel as base64url text, which an untyped map holds (ADR 0019).
 
 **CON-29.** A mistake in the calling code, such as a call to an action the contract does not have, MUST NOT be reported as a contract error. It reports a bug in the calling code, not the outcome of a call, so code that handles contract errors does not swallow it.
 
