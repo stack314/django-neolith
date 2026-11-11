@@ -128,7 +128,7 @@ An action's *error set* is the standard kinds below, which every action has whet
 
 **CON-27.** An error of a declared kind MUST carry the kind's detail record.
 
-**CON-28.** When an error's kind is neither a standard kind the caller knows nor a kind its version of the contract declares, the caller MUST receive the error with that kind, not as `internal`, and with its detail, if there is one, as an untyped map from the detail's field names to their values, unless the detail breaks CON-30. A provider that meets CON-31 never sends such a detail; what the caller receives then is settled with the connectors in roadmap step 3. Adding an error kind to an action is a compatible change (CON-1), and a later version of this specification can add a standard kind (CON-23), so a caller can receive a kind it does not know.
+**CON-28.** When an error's kind is neither a standard kind the caller knows nor a kind its version of the contract declares, the caller MUST receive the error with that kind, not as `internal`, and with its detail, if there is one, as an untyped map from the detail's field names to their values, unless the detail breaks CON-30. A provider that meets CON-31 never sends such a detail, and a caller receives one that breaks it as `internal` (CON-49). Adding an error kind to an action is a compatible change (CON-1), and a later version of this specification can add a standard kind (CON-23), so a caller can receive a kind it does not know.
 
 **CON-30.** An untyped map MUST hold only text keys and values that are untyped maps, lists, text, booleans, null, integers from −(2^53−1) to 2^53−1 or finite numbers, nested at most 32 levels deep, the outermost map being the first, and holding at most 10,000 values in all, counting every map value and list item at every depth, with each occurrence of a repeated value counted separately. Its text is Unicode text, as in CON-25. The integer range is the portable integer's (see [Wire encodings](#wire-encodings)).
 
@@ -138,12 +138,23 @@ An action's *error set* is the standard kinds below, which every action has whet
 
 **CON-29.** A mistake in the calling code, such as a call to an action the contract does not have, MUST NOT be reported as a contract error. It reports a bug in the calling code, not the outcome of a call, so code that handles contract errors does not swallow it.
 
-How transports and the provider's host produce errors becomes requirements together with them, in roadmap steps 3 to 5. In outline:
+The provider's host and the connectors deliver errors as [ADR 0008](../docs/adr/0008-typed-contract-errors-in-both-modes.md) decides. Only hosts and transports produce `unavailable` and `timeout`.
 
-- Only hosts and transports produce `unavailable` and `timeout`. A provider's action produces any other standard kind, or a kind the action declares.
-- A failure of a provider's action that is not an error of its error set, an `unavailable` or `timeout` that the action produces, and a failure of the provider's host itself reach the caller as `internal`. A signal to stop, such as cancellation or the process exiting, is not a failure of the action and is not converted. The `internal` error's message is fixed text with the trace identifier, and nothing of the original failure crosses. The provider's host records the original with the trace identifier.
-- An error that a provider's action receives from one of its own outgoing calls, and lets end the action, reaches its caller as `internal`. Passing a nested error on takes a new error produced by the action.
-- A call can also fail with `internal` at the caller, over its principal, at the step [ADR 0017](../docs/adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md) Decision 9 gives. The message is the same fixed text with the trace identifier, and the caller's host records the cause with it.
+**CON-43.** A provider's host MUST deliver an error that the action produced itself, of a kind in the action's error set other than `unavailable` and `timeout`, with its kind, its message and, for a declared kind, its detail record.
+
+**CON-44.** A provider's host MUST deliver as `internal` every other failure that ends an action, and a failure of the host itself. That includes an error of a kind outside the action's error set, an `unavailable` or `timeout` the action produced, an error of a declared kind without a detail record of that kind, and a detail whose value as it travels breaks CON-31.
+
+**CON-45.** A provider's host MUST NOT convert a signal to stop, such as cancellation or the process exiting, which is not a failure of the action.
+
+**CON-46.** An `internal` error that stands for another failure MUST carry nothing of that failure: its message is fixed text. The text gains the trace identifier with the call context (roadmap step 3, #10 task 6).
+
+**CON-47.** A provider's host MUST record the original failure behind each `internal` error it delivers.
+
+**CON-48.** An error that a provider's action receives from one of its own outgoing calls, and lets end the action, MUST reach the action's caller as `internal`, however the action raises it again. Passing a nested error on takes a new error produced by the action.
+
+**CON-49.** A caller MUST receive as `internal` an error that arrives but cannot be read against its contract: a standard kind with a detail, a declared kind without a detail its record reads, an unknown kind whose detail breaks CON-30, or a kind or a message that breaks CON-22 or CON-25.
+
+A call can also fail with `internal` at the caller, over its principal, at the step [ADR 0017](../docs/adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md) Decision 9 gives. The message is the same fixed text with the trace identifier, and the caller's host records the cause with it. This becomes a requirement with the call context (#10 task 6).
 
 Decision record: [0008](../docs/adr/0008-typed-contract-errors-in-both-modes.md).
 
