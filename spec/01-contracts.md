@@ -1,6 +1,6 @@
 # 01. Contracts
 
-**Status:** draft. Identity, actions, the portable type system, errors, publication and checking are specified. How transports and the provider's host produce errors is an outline of [ADR 0008](../docs/adr/0008-typed-contract-errors-in-both-modes.md). It becomes requirements, with their tests, in roadmap steps 3 to 5 (#10 to #12).
+**Status:** draft. Identity, actions, the portable type system, errors, publication and checking are specified. How the provider's host and the connectors deliver errors follows [ADR 0008](../docs/adr/0008-typed-contract-errors-in-both-modes.md); the failure at the caller over its principal becomes a requirement with the call context (#10).
 
 ## Identity and versioning
 
@@ -128,7 +128,7 @@ An action's *error set* is the standard kinds below, which every action has whet
 
 **CON-27.** An error of a declared kind MUST carry the kind's detail record.
 
-**CON-28.** When an error's kind is neither a standard kind the caller knows nor a kind its version of the contract declares, the caller MUST receive the error with that kind, not as `internal`, and with its detail, if there is one, as an untyped map from the detail's field names to their values, unless the detail breaks CON-30. A provider that meets CON-31 never sends such a detail, and a caller receives one that breaks it as `internal` (CON-49). Adding an error kind to an action is a compatible change (CON-1), and a later version of this specification can add a standard kind (CON-23), so a caller can receive a kind it does not know.
+**CON-28.** When an error's kind is neither a standard kind the caller knows nor a kind its version of the contract declares for the action, the caller MUST receive the error with that kind, not as `internal`, and with its detail, if there is one, as an untyped map from the detail's field names to their values, unless the detail breaks CON-30. A provider that meets CON-31 never sends such a detail, and a caller receives one that breaks it as `internal` (CON-49). Adding an error kind to an action is a compatible change (CON-1), and a later version of this specification can add a standard kind (CON-23), so a caller can receive a kind it does not know.
 
 **CON-30.** An untyped map MUST hold only text keys and values that are untyped maps, lists, text, booleans, null, integers from −(2^53−1) to 2^53−1 or finite numbers, nested at most 32 levels deep, the outermost map being the first, and holding at most 10,000 values in all, counting every map value and list item at every depth, with each occurrence of a repeated value counted separately. Its text is Unicode text, as in CON-25. The integer range is the portable integer's (see [Wire encodings](#wire-encodings)).
 

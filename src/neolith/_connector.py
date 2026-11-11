@@ -408,9 +408,9 @@ class Connector:
             return ContractError(
                 kind, message, codec(self._contract, record).read(detail)
             )
-        if any(kind in other.errors for other in self._contract.actions.values()):
-            raise ValueError(f"a {kind!r} error arrived for an action without it")
-        # A kind this version of the contract does not know (CON-28).
+        # A kind this version of the contract does not declare for the action
+        # (CON-28): a later version may have added it, even if another action
+        # declares it here (CON-1).
         return ContractError(
             kind, message, None if detail is None else _untyped(detail)
         )

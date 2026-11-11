@@ -9,6 +9,7 @@ nothing of the original. The connector reads what arrives against its contract.
 import copy
 import json
 import logging
+import pickle
 import types
 from collections.abc import Callable
 from typing import Any, Protocol, cast
@@ -244,6 +245,12 @@ class Missing:
 
 
 _DOWNSTREAM: Any = Connector(Downstream, InProcess(Downstream, Missing()))
+# Pickles an error the test built itself, never untrusted data.
+_DUPLICATES: dict[str, Callable[[ContractError], ContractError]] = {
+    "a copy": copy.copy,
+    "a deep copy": copy.deepcopy,
+    "a pickle": lambda error: pickle.loads(pickle.dumps(error)),  # noqa: S301
+}
 _KEPT: list[ContractError] = []
 
 
@@ -278,8 +285,8 @@ class Nesting:
                 raise error.with_traceback(None) from None
             if how == "a new error":
                 raise ContractError(error.kind, error.message) from error
-            if how == "a copy":
-                raise copy.copy(error) from None
+            if how in _DUPLICATES:
+                raise _DUPLICATES[how](error) from None
         raise AssertionError(how)
 
     def cancel(self, request: Order) -> Done:
@@ -295,6 +302,7 @@ class Nesting:
         "from None",
         "without its traceback",
         "kept from an earlier call",
+        *_DUPLICATES,
     ],
 )
 def test_an_error_received_from_a_nested_call_reaches_the_caller_as_internal(
@@ -308,10 +316,8 @@ def test_an_error_received_from_a_nested_call_reaches_the_caller_as_internal(
 
 
 @pytest.mark.spec("CON-48", "CON-43")
-@pytest.mark.parametrize("how", ["a new error", "a copy"])
-def test_a_new_error_passing_a_nested_one_on_is_delivered(how: str) -> None:
-    # A copy is built anew from the kind, message and detail, as a new error is.
-    connector: Any = Connector(Shop, InProcess(Shop, Nesting(how)))
+def test_a_new_error_passing_a_nested_one_on_is_delivered() -> None:
+    connector: Any = Connector(Shop, InProcess(Shop, Nesting("a new error")))
     with pytest.raises(ContractError) as raised:
         connector.reserve(Order(order=1))
     assert (raised.value.kind, raised.value.message) == (
@@ -364,6 +370,13 @@ def test_an_unknown_kinds_detail_arrives_as_an_untyped_map() -> None:
         received.data["sku"] = "b"
 
 
+@pytest.mark.spec("CON-28")
+def test_a_kind_another_action_declares_arrives_as_an_unknown_kind() -> None:
+    # A later version may have added it to this action, a compatible change.
+    received = _arrives("locked", detail=b'{"until": "noon"}')
+    assert (received.kind, received.data) == ("locked", {"until": "noon"})
+
+
 @pytest.mark.spec("CON-28", "CON-49")
 def test_a_reserved_name_arrives_as_an_unknown_kind() -> None:
     # A later version of the specification may make it standard (CON-23).
@@ -379,7 +392,6 @@ _UNREADABLE: dict[str, tuple[object, object, object]] = {
     "declared kind without a detail": ("out_of_stock", "x", None),
     "declared kind with an unreadable detail": ("out_of_stock", "x", b'{"sku": 1}'),
     "declared kind with a detail that is not JSON": ("out_of_stock", "x", b"{"),
-    "kind of another action": ("locked", "x", b'{"until": "noon"}'),
     "malformed kind": ("Not-A-Kind", "x", None),
     "kind not text": (3, "x", None),
     "message with a lone surrogate": ("not_found", "\ud800", None),

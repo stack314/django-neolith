@@ -243,6 +243,19 @@ def is_received(error: "ContractError") -> bool:
     return getattr(error, "_received", False) is True
 
 
+def _rebuilt(
+    kind: str,
+    message: str,
+    data: BaseModel | dict[str, Any] | None,
+    received: bool,
+) -> "ContractError":
+    """A ``ContractError`` rebuilt from a copy or a pickle."""
+    error = ContractError(kind, message, data)
+    if received is True:
+        mark_received(error)
+    return error
+
+
 def _freeze(value: object) -> object:
     """A frozen copy of a private, checked JSON value (at most 32 levels deep)."""
     if type(value) is dict:
@@ -280,8 +293,8 @@ class ContractError(Exception):
     would not survive a transport, so callers could tell the modes apart.
     Building one wrongly raises ``TypeError`` or ``ValueError``, never a
     ``ContractError``, so that code handling contract errors does not swallow
-    a bug. A copy or a pickle carries the kind, message and detail only, not
-    notes or other attributes.
+    a bug. A copy or a pickle carries the kind, message and detail, and
+    whether a connector raised the error, but not notes or other attributes.
     """
 
     __slots__ = ("_data", "_kind", "_message", "_received")
@@ -374,9 +387,13 @@ class ContractError(Exception):
         )
 
     def __reduce__(self) -> tuple[Any, ...]:
-        # Kind, message and detail only: no notes, no other attributes, and the
-        # detail is checked again when the copy is built.
-        return (ContractError, (self._kind, self._message, _thaw(self._data)))
+        # Kind, message and detail only, and whether a connector raised it: no
+        # notes, no other attributes, and the detail is checked again when the
+        # copy is built. A copy of a received error is still a received one.
+        return (
+            _rebuilt,
+            (self._kind, self._message, _thaw(self._data), is_received(self)),
+        )
 
     def __str__(self) -> str:
         try:
