@@ -43,17 +43,11 @@ Errors are carried as a JSON body with a fixed shape and an HTTP status that fol
 | `internal` | 500 |
 | declared kinds | 422 |
 
-Body: `{"kind": "<kind>", "message": "<text>", "data": {<typed detail record>}}`. A response carries a *neolith error body* when its body is a JSON object whose `kind` is a string. The member for the detail record is named `data`, not `detail`, which RFC 9457 and some web frameworks use for a human-readable explanation.
+Body: `{"kind": "<kind>", "message": "<text>", "data": {<typed detail record>}}`, with `data` present only for a declared kind. A response carries a *neolith error body* when its body is a JSON object whose `kind` is a string. The member for the detail record is named `data`, not `detail`, which RFC 9457 and some web frameworks use for a human-readable explanation.
 
-A *contract path* is the path of an action of a contract version the host provides.
+A *contract path* is the path of an action of a contract version the host provides. The provider's host answers every failure on a contract path with a neolith error body and the status of its kind, including a request that fails validation and a failure of the host itself ([ADR 0008](../docs/adr/0008-typed-contract-errors-in-both-modes.md)). A 401 also carries a `Bearer` challenge in `WWW-Authenticate` (RFC 6750, section 3), since RFC 9110, section 15.5.2, requires a challenge with that status.
 
-**HTTP-3.** A provider's host MUST answer every failure on a contract path with a neolith error body and the status the table gives its kind, including a request that fails validation and a failure of the host itself.
-
-**HTTP-4.** A neolith error body MUST carry `data` when its kind is a declared kind, and only then.
-
-**HTTP-5.** A 401 response MUST carry the challenge `WWW-Authenticate: Bearer` (RFC 6750, section 3). RFC 9110, section 15.5.2, requires a challenge with that status.
-
-A connector takes the kind from the body only, never from the status. A non-success response without a neolith error body maps to `unavailable`. Examples are a 404 from a host that does not provide that contract version, which is not a contract path, or an error page from a proxy. A success response whose body is not a valid reply, and a neolith error body that does not validate against the contract, map to `internal` ([02](02-transports.md), TRN-9).
+A connector takes the kind from the body only, never from the status. A non-success response without a neolith error body maps to `unavailable`. Examples are a 404 from a host that does not provide that contract version, which is not a contract path, or an error page from a proxy. A success response whose body is not a valid reply, and a neolith error body that does not validate against the contract, map to `internal`, apart from an error of a kind the caller does not know.
 
 ## Projection
 

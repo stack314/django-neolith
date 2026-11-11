@@ -14,12 +14,10 @@ A transport MUST:
 
 - **TRN-1.** serialize the request into the portable type system before it leaves the caller, and deserialize the reply before it reaches the caller, even when caller and provider share a process;
 - **TRN-2.** carry the call context intact;
-- ~~**TRN-3.** map every failure it can observe onto a standard error kind ([01](01-contracts.md)); a transport MUST NOT surface its own exception types to the caller;~~ Withdrawn in spec 0.1: it allowed any standard kind; TRN-8 and TRN-9 name the kinds a transport produces ([ADR 0008](../docs/adr/0008-typed-contract-errors-in-both-modes.md)).
-- **TRN-4.** enforce a deadline, and fail with `timeout` when it passes;
-- **TRN-8.** map every failure of its own in carrying a call onto `unavailable` or `timeout`, and never pass its own exception types to the caller;
-- **TRN-9.** map a reply or an error from the provider that does not validate against the contract onto `internal`.
+- **TRN-3.** map every failure it can observe onto a standard error kind ([01](01-contracts.md)); a transport MUST NOT surface its own exception types to the caller;
+- **TRN-4.** enforce a deadline: a call whose deadline passes before the call ends fails with `timeout`.
 
-An error the provider's host delivers passes through the transport unchanged. Only hosts and transports produce `unavailable` and `timeout`.
+Which kinds a transport produces is set by [ADR 0008](../docs/adr/0008-typed-contract-errors-in-both-modes.md): `unavailable` or `timeout` for a failure of its own in carrying a call, and `internal` for a reply or error from the provider that does not validate against the contract, apart from an error of a kind the caller does not know. An error the provider's host delivers otherwise passes through unchanged.
 
 ## In-process transport
 
@@ -27,7 +25,7 @@ An error the provider's host delivers passes through the transport unchanged. On
 
 **TRN-6.** The in-process transport MUST run the provider's action in the caller's thread of control, so that attached mode has no hidden concurrency.
 
-**TRN-10.** Because the action runs in the caller's thread, the in-process transport MUST check the deadline before it dispatches the call and again when the action ends, and fail the call with `timeout` if the deadline has passed, discarding the action's reply or error. The action might have run, so `timeout` leaves the outcome unknown, as it does over a network ([ADR 0008](../docs/adr/0008-typed-contract-errors-in-both-modes.md)).
+Because the action runs in the caller's thread, the in-process transport checks the deadline before it dispatches the call and again when the action ends. If the deadline has passed by then, the action's reply or error is discarded and the call fails with `timeout`. The action might have run, so `timeout` leaves the outcome unknown, as it does over a network.
 
 ## Providers and routing
 
