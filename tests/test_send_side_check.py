@@ -13,7 +13,9 @@ hold the whole check to a JSON Schema validator.
 import enum
 import json
 import math
+import os
 import re
+import subprocess
 import sys
 import traceback
 import types
@@ -48,7 +50,14 @@ from neolith import (
     contract,
 )
 from neolith._checker import description_checker
-from neolith._crossing import _converted, _difference, _Fields, check_request, codec
+from neolith._crossing import (
+    _EXACT,
+    _converted,
+    _difference,
+    _Fields,
+    check_request,
+    codec,
+)
 from tests.test_contract_round_trip import (
     _FORMAT_CHECKER,
     _HYPOTHESIS,
@@ -805,41 +814,124 @@ class Login(BaseModel):
     token: Annotated[str, BeforeValidator(str.strip)] = ""
     few: list[str] = Field(default_factory=list, max_length=1)
     tokens: dict[str, str] = Field(default_factory=dict)
+    pins: dict[str, int] = Field(default_factory=dict)
     pin: int = Field(default=0, lt=10**12)
     issued: AwareDatetime | None = None
+
+
+class Open(Login):
+    """The same fields, with Pydantic's own setting: inputs show in errors."""
+
+    model_config = ConfigDict(hide_input_in_errors=False)
+
+
+_UNSHOWN = [
+    ("token", _PRIVATE + "\n", "which reads back as another value of type str"),
+    ("token", Marked(_PRIVATE), _NOT_HELD),
+    ("few", [_PRIVATE, _PRIVATE], _NOT_DESCRIBED),
+    ("tokens", {Marked(_PRIVATE): "a"}, _NOT_HELD),
+    ("tokens", {"a": Marked(_PRIVATE)}, _NOT_HELD),
+    ("pin", 5111111111111, _NOT_DESCRIBED),
+    (
+        "issued",
+        datetime(1, 1, 1, tzinfo=timezone(timedelta(seconds=51))),
+        "a timestamp outside years 0001 to 9999 in UTC",
+    ),
+]
+_SHOWN = (_PRIVATE, "5111111111111", "0001-01-01", "datetime(1, 1, 1")
+
+
+def _whole_text(error: BaseException) -> str:
+    """Everything an exception can put in a log: its own text and that of
+    each exception behind it, chained or only kept as its context."""
+    said = "".join(traceback.format_exception(error))
+    behind = error.__cause__ or error.__context__
+    return said + (_whole_text(behind) if behind is not None else "")
 
 
 @pytest.mark.spec("TRN-11", "TRN-15")
 @pytest.mark.parametrize(
     ("field", "value", "refusal"),
     [
-        ("token", _PRIVATE + "\n", "which reads back as another value of type str"),
-        ("token", Marked(_PRIVATE), _NOT_HELD),
-        ("few", [_PRIVATE, _PRIVATE], _NOT_DESCRIBED),
-        ("tokens", {Marked(_PRIVATE): "a"}, _NOT_HELD),
-        ("tokens", {"a": Marked(_PRIVATE)}, _NOT_HELD),
-        ("pin", 5111111111111, _NOT_DESCRIBED),
-        (
-            "issued",
-            datetime(1, 1, 1, tzinfo=timezone(timedelta(seconds=51))),
-            "a timestamp outside years 0001 to 9999 in UTC",
-        ),
+        *_UNSHOWN,
+        # A map's key, and what only the serializer's own error shows.
+        ("tokens", {_PRIVATE: Marked("a")}, r"at Login\.tokens\[entry 0\], which "),
+        ("pins", {"a": 1, _PRIVATE: True}, r"at Login\.pins\[entry 1\], which "),
+        ("pin", _PRIVATE, _NOT_WRITTEN),
+        ("few", [1, _PRIVATE], _NOT_WRITTEN),
+        ("pins", {_PRIVATE: "a"}, _NOT_WRITTEN),
+        ("pins", {_PRIVATE: 2**60}, _NOT_DESCRIBED),
     ],
 )
-def test_a_refusal_shows_no_value_the_record_holds(
+def test_a_refusal_shows_nothing_a_record_that_hides_its_inputs_holds(
     field: str, value: object, refusal: str
 ) -> None:
     # A value held at send time can be a secret, and an exception's text is
-    # logged, so a refusal names the place and the types and shows no value,
-    # in its own words or in those of the exception behind it.
+    # logged. For a record whose config hides inputs in errors, a refusal
+    # shows no value and no map key, in its own words or in those of any
+    # exception behind it.
     declared, _ = _contract_for(Login)
     held = Login()
     setattr(held, field, value)
     with pytest.raises(ValueError, match=refusal) as refused:
         check_request(declared, declared.actions["send"], held)
-    said = "".join(traceback.format_exception(refused.value))
-    for shown in (_PRIVATE, "5111111111111", "0001-01-01", "datetime(1, 1, 1"):
+    said = _whole_text(refused.value)
+    for shown in _SHOWN:
         assert shown not in said
+
+
+@pytest.mark.spec("TRN-11", "TRN-15")
+@pytest.mark.parametrize(("field", "value", "refusal"), _UNSHOWN)
+def test_a_refusal_in_neoliths_own_words_shows_no_value(
+    field: str, value: object, refusal: str
+) -> None:
+    # Whatever the record's config, the message itself names the place and
+    # the types and shows no value.
+    declared, _ = _contract_for(Open)
+    held = Open()
+    setattr(held, field, value)
+    with pytest.raises(ValueError, match=refusal) as refused:
+        check_request(declared, declared.actions["send"], held)
+    for shown in _SHOWN:
+        assert shown not in str(refused.value)
+
+
+@pytest.mark.spec("TRN-11")
+def test_a_refusal_names_a_map_entry_by_its_key_as_pydantic_does() -> None:
+    # Without the setting, a place in a map is named by its key, and the
+    # serializer's error stays as the cause, for the author to find the field.
+    declared, _ = _contract_for(Open)
+    held = Open()
+    held.pins = {"first": True}
+    with pytest.raises(ValueError, match=r"at Open\.pins\['first'\], which reads"):
+        check_request(declared, declared.actions["send"], held)
+    held.pins = {"first": "text"}  # type: ignore[dict-item]
+    with pytest.raises(ValueError, match=r"Open \(\w+; see the cause\)") as refused:
+        check_request(declared, declared.actions["send"], held)
+    assert refused.value.__cause__ is not None
+    hidden = Login()
+    hidden.pins = {"first": "text"}  # type: ignore[dict-item]
+    declared, _ = _contract_for(Login)
+    with pytest.raises(ValueError, match=r"Login \(\w+\)$") as refused:
+        check_request(declared, declared.actions["send"], hidden)
+    assert refused.value.__cause__ is None
+    assert refused.value.__context__ is None
+
+
+@pytest.mark.spec("TRN-10")
+@pytest.mark.parametrize(
+    ("digits", "said"),
+    [
+        (5000, "holds a number too long to be read as JSON text"),
+        (400, _NOT_DESCRIBED),
+    ],
+)
+def test_a_number_too_long_to_read_is_refused_as_that(digits: int, said: str) -> None:
+    # A JSON reader stops at an integer of more than 4300 digits, which is
+    # not what its limit on depth refuses, nor a misfit with the description.
+    with pytest.raises(ValueError, match=said) as refused:
+        _send(_built("count", 10**digits))
+    assert "nested" not in str(refused.value)
 
 
 @pytest.mark.spec("TRN-11")
@@ -1043,21 +1135,55 @@ def test_a_deep_value_is_sent_from_a_deep_call_stack() -> None:
 # What the reader's own validator makes another value of the same type.
 
 
+def _floored(given: object) -> object:
+    """A timestamp without its seconds."""
+    moment = datetime.fromisoformat(given) if type(given) is str else given
+    return cast("datetime", moment).replace(second=0, microsecond=0)
+
+
+def _first_of_its_month(given: object) -> object:
+    day = date.fromisoformat(given) if type(given) is str else given
+    return cast("date", day).replace(day=1)
+
+
 class Clamped(BaseModel):
+    """Each field's own before validator reads some values as another value
+    of the same type, and reads what it returns as itself."""
+
     name: Annotated[str, BeforeValidator(str.lower)] = ""
     level: Annotated[int, BeforeValidator(lambda level: min(level, 9))] = 0
     flag: Annotated[bool, BeforeValidator(lambda flag: False)] = False
+    ratio: Annotated[float, BeforeValidator(lambda ratio: round(ratio * 2) / 2)] = 0.0
+    span: Annotated[
+        Duration, BeforeValidator(lambda span: "1s" if type(span) is str else span)
+    ] = timedelta(seconds=1)
+    raw: Annotated[
+        Binary, BeforeValidator(lambda raw: "YQ==" if type(raw) is str else raw)
+    ] = b"a"
+    when: Annotated[AwareDatetime, BeforeValidator(_floored)] = datetime(
+        2026, 1, 1, tzinfo=UTC
+    )
+    day: Annotated[date, BeforeValidator(_first_of_its_month)] = date(2026, 1, 1)
+
+
+_CLAMPED = [
+    ("name", "ABC", "abc"),
+    ("level", 10, 9),
+    ("flag", True, False),
+    ("ratio", 0.3, 0.5),
+    ("span", timedelta(seconds=5), timedelta(seconds=1)),
+    ("raw", b"abc", b"a"),
+    (
+        "when",
+        datetime(2026, 1, 1, 12, 0, 30, tzinfo=UTC),
+        datetime(2026, 1, 1, 12, tzinfo=UTC),
+    ),
+    ("day", date(2026, 1, 15), date(2026, 1, 1)),
+]
 
 
 @pytest.mark.spec("TRN-11")
-@pytest.mark.parametrize(
-    ("field", "value", "kept"),
-    [
-        ("name", "ABC", "abc"),
-        ("level", 10, 9),
-        ("flag", True, False),
-    ],
-)
+@pytest.mark.parametrize(("field", "value", "kept"), _CLAMPED)
 def test_a_value_read_back_as_another_of_its_type_is_refused(
     field: str, value: object, kept: object
 ) -> None:
@@ -1070,6 +1196,51 @@ def test_a_value_read_back_as_another_of_its_type_is_refused(
         check_request(declared, declared.actions["send"], held)
     setattr(held, field, kept)
     assert check_request(declared, declared.actions["send"], held)
+
+
+def test_every_kind_compared_by_value_has_a_value_that_reads_back_changed() -> None:
+    """Fails when the comparison learns a kind the table above lacks. A
+    decimal has a test of its own, below."""
+    assert {type(kept) for _, _, kept in _CLAMPED} | {Decimal} == _EXACT | {
+        float,
+        datetime,
+        Decimal,
+    }
+
+
+def _in_local_time(given: object) -> object:
+    """A timestamp in the zone whose clocks go back, as a reader that keeps
+    local times hands it on."""
+    if type(given) is not str:
+        return given
+    moment = datetime.fromisoformat(given).astimezone(UTC).replace(tzinfo=None)
+    back = datetime(2025, 10, 26, 1)
+    if moment < back:
+        return (moment + timedelta(hours=2)).replace(tzinfo=_LOCAL)
+    again = moment < back + timedelta(hours=1)
+    return (moment + timedelta(hours=1)).replace(tzinfo=_LOCAL, fold=int(again))
+
+
+class Zoned(BaseModel):
+    when: Annotated[AwareDatetime, BeforeValidator(_in_local_time)]
+
+
+@pytest.mark.spec("TRN-11")
+@pytest.mark.parametrize("hour", [0, 1, 2])
+def test_a_timestamp_its_reader_hands_back_in_a_zone_is_the_same_instant(
+    hour: int,
+) -> None:
+    # The reader's own validator hands back a time in a zone where that time
+    # comes twice, for which ``==`` across zones is False (PEP 495). An
+    # instant is compared by subtraction, so the value is sent.
+    declared, _ = _contract_for(Zoned)
+    held = Zoned(when=datetime(2025, 10, 26, hour, 30, tzinfo=UTC))
+    read = codec(declared, Zoned).read(
+        check_request(declared, declared.actions["send"], held)
+    )
+    assert read.when.tzinfo is _LOCAL
+    assert (read.when == held.when) is (hour == 2)
+    assert read.when - held.when == timedelta(0)
 
 
 class _Unnamed(type):
@@ -1202,6 +1373,67 @@ def test_timestamps_and_dates_cross_while_a_tool_freezes_time(frozen: int) -> No
     ]:
         with pytest.raises(ValueError, match=re.escape(refusal)):
             _send(_built(field, value))
+
+
+_IMPORTED_FROZEN = """
+import datetime as module
+from typing import Protocol
+
+from pydantic import AwareDatetime, BaseModel
+
+
+class _Frozen(type):
+    def __instancecheck__(cls, instance):
+        return type.__instancecheck__(cls.__mro__[1], instance)
+
+
+class FrozenDatetime(module.datetime, metaclass=_Frozen):
+    pass
+
+
+class FrozenDate(module.date, metaclass=_Frozen):
+    pass
+
+
+real = module.datetime, module.date
+module.datetime, module.date = FrozenDatetime, FrozenDate
+from neolith import Contract, action, contract
+from neolith._crossing import check_request
+module.datetime, module.date = real
+
+
+class Event(BaseModel):
+    when: AwareDatetime
+    day: module.date
+
+
+@contract("frozen.v1")
+class Events(Protocol):
+    @action
+    def send(self, request: Event) -> None: ...
+
+
+declared = Contract.of(Events)
+text = b'{"when":"2026-01-01T12:00:00+01:00","day":"2026-01-01"}'
+event = Event.model_validate_json(text)
+assert check_request(declared, declared.actions["send"], event) == text
+print("sent")
+"""
+
+
+@pytest.mark.spec("TRN-10", "TRN-11")
+def test_timestamps_and_dates_cross_when_neolith_was_imported_under_a_freeze() -> None:
+    # A test that freezes time may be the first to import neolith. The names
+    # ``datetime`` and ``date`` are then fakes while its modules run, and the
+    # sender must still know the real classes, for the rest of the process.
+    ran = subprocess.run(  # noqa: S603
+        [sys.executable, "-c", _IMPORTED_FROZEN],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={"PYTHONPATH": os.pathsep.join(sys.path)},
+    )
+    assert (ran.stdout.strip(), ran.stderr[-600:]) == ("sent", "")
 
 
 @pytest.mark.spec("TRN-15")
@@ -1567,9 +1799,9 @@ class Inner(BaseModel):
 class Worded(BaseModel):
     """A record whose description uses every keyword the writer emits."""
 
-    whole: int = Field(default=2, gt=0, lt=10, multiple_of=2)
-    part: float = Field(default=0.5, ge=0, le=1)
-    open: float = Field(default=0.5, gt=0.25, lt=1)
+    whole: int = Field(default=4, gt=2, lt=10, multiple_of=2)
+    part: float = Field(default=0.0, ge=-1.5, le=0.1)
+    open: float = Field(default=0.5, gt=0.25, lt=0.75)
     code: str = Field(default="ab", min_length=1, max_length=3)
     flag: bool = False
     day: date | None = None
@@ -1598,8 +1830,8 @@ _ANNOTATIONS = {"default", "contentEncoding"}
 _SAFE = 2**53 - 1
 _KEYWORDS: dict[tuple[str, str], tuple[dict[str, Any], dict[str, Any]]] = {
     ("type", "boolean"): ({"flag": 1}, {"flag": True}),
-    ("type", "integer"): ({"whole": "2"}, {"whole": 2}),
-    ("type", "number"): ({"part": "0.5"}, {"part": 0.5}),
+    ("type", "integer"): ({"whole": "4"}, {"whole": 4}),
+    ("type", "number"): ({"part": "0.1"}, {"part": 0.1}),
     ("type", "string"): ({"code": 1}, {"code": "a"}),
     ("type", "array"): ({"pair": 1}, {"pair": [1, 2]}),
     ("type", "object"): ({"inner": 1}, {"inner": {"sku": "b"}}),
@@ -1610,13 +1842,13 @@ _KEYWORDS: dict[tuple[str, str], tuple[dict[str, Any], dict[str, Any]]] = {
     ("anyOf", ""): ({"day": 1}, {"day": None}),
     ("enum", "string"): ({"size": "l"}, {"size": "m"}),
     ("enum", ""): ({"keyed": {"c": 1}}, {"keyed": {"a": 1}}),
-    ("minimum", "number"): ({"part": -0.5}, {"part": 0}),
-    ("maximum", "number"): ({"part": 1.5}, {"part": 1}),
-    ("exclusiveMinimum", "number"): ({"open": 0.25}, {"open": 0.5}),
-    ("exclusiveMaximum", "number"): ({"open": 1}, {"open": 0.75}),
+    ("minimum", "number"): ({"part": -1.75}, {"part": -1.5}),
+    ("maximum", "number"): ({"part": 0.5}, {"part": 0.1}),
+    ("exclusiveMinimum", "number"): ({"open": 0.25}, {"open": 0.3}),
+    ("exclusiveMaximum", "number"): ({"open": 0.75}, {"open": 0.7}),
     ("minimum", "integer"): ({"pair": [1, -_SAFE - 1]}, {"pair": [1, -_SAFE]}),
     ("maximum", "integer"): ({"pair": [1, _SAFE + 1]}, {"pair": [1, _SAFE]}),
-    ("exclusiveMinimum", "integer"): ({"whole": 0}, {"whole": 2}),
+    ("exclusiveMinimum", "integer"): ({"whole": 2}, {"whole": 4}),
     ("exclusiveMaximum", "integer"): ({"whole": 10}, {"whole": 8}),
     ("multipleOf", "integer"): ({"whole": 3}, {"whole": 4}),
     ("minLength", "string"): ({"code": ""}, {"code": "a"}),
@@ -1714,17 +1946,28 @@ def test_the_keywords_tested_are_the_keywords_written() -> None:
     assert written == set(_KEYWORDS)
     for schema in (_REFERENCE_SCHEMA, _LEAVES_SCHEMA):
         assert _keywords(schema) <= written
+    # A bound that rounding or truncating would leave as it is hides a check
+    # that rounds: each number's bound here has a fraction, and no bound is 0.
+    bounds = ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum")
+    for name in ("whole", "part", "open"):
+        field = _WORDED_SCHEMA["$defs"]["Worded"]["properties"][name]
+        for bound in (field[keyword] for keyword in bounds if keyword in field):
+            # Beside the range of its form, which the writer always states.
+            if abs(bound) < 2**53 - 1:
+                assert bound != 0
+                assert field["type"] == "integer" or bound != int(bound)
 
 
 @pytest.mark.spec("TRN-15")
 @pytest.mark.parametrize(
     ("value", "admitted"),
     [
-        ({"whole": 2}, True),
-        ({"whole": 2.0}, False),
+        ({"whole": 4}, True),
+        ({"whole": 4.0}, False),
         ({"whole": True}, False),
-        ({"whole": "2"}, False),
-        ({"part": 1}, True),
+        ({"whole": "4"}, False),
+        ({"part": 0}, True),
+        ({"part": -1}, True),
         ({"part": True}, False),
         ({"part": -0.0}, True),
         ({"flag": 0}, False),
@@ -1762,6 +2005,7 @@ def _described(field: object, **defs: object) -> dict[str, Any]:
 
 _PATTERN = _WORDED_SCHEMA["$defs"]["Worded"]["properties"]["span"]["pattern"]
 _DAY = _LEAVES_SCHEMA["$defs"]["Leaves"]["properties"]["day"]["anyOf"][0]
+_AMOUNT = _WORDED_SCHEMA["$defs"]["Worded"]["properties"]["amount"]
 _BOOLEAN = {"type": "boolean"}
 
 
@@ -1788,6 +2032,7 @@ _BOOLEAN = {"type": "boolean"}
         {"type": "string", "enum": []},
         {"type": "string", "enum": ["a", 1]},
         {"type": "string", "allOf": [{"minLength": 1}]},
+        {**_AMOUNT, "allOf": [{**_AMOUNT["allOf"][0], "maxLength": 1}]},
         {"type": "string", "maxLength": True},
         {"type": "string", "maxLength": "3"},
         {"type": "string", "minLength": -1},
