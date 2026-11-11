@@ -145,7 +145,7 @@ class InProcess:
                         "action's reply is empty"
                     )
                 return None
-            return codec(self._contract, action.reply).write(reply, "the reply")
+            return codec(self._contract, action.reply).send(reply, "the reply")
         except Exception as error:
             failure: BaseException = error
         # Logged outside the handler, so a failing log does not chain to it,

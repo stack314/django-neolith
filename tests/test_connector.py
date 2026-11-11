@@ -108,7 +108,7 @@ def _reserve() -> Reserve:
 # The connector mirrors the contract's actions.
 
 
-@pytest.mark.spec("TRN-15", "TRN-1", "TRN-5")
+@pytest.mark.spec("TRN-16", "TRN-1", "TRN-5")
 def test_a_call_returns_the_reply_as_a_new_value() -> None:
     provider = Recording()
     request = _reserve()
@@ -125,7 +125,7 @@ def test_a_call_returns_the_reply_as_a_new_value() -> None:
     assert _shared(request, reply) == set()
 
 
-@pytest.mark.spec("TRN-15")
+@pytest.mark.spec("TRN-16")
 def test_a_request_can_be_passed_by_keyword() -> None:
     assert _connect(Recording()).reserve(request=_reserve()).ok is True
 
@@ -141,7 +141,7 @@ class NamedImpl:
         pass
 
 
-@pytest.mark.spec("TRN-15", "CON-29")
+@pytest.mark.spec("TRN-16", "CON-29")
 def test_a_request_is_passed_by_the_name_its_declaration_gives_it() -> None:
     connector: Any = Connector(Named, InProcess(Named, NamedImpl()))
     assert connector.go(order=Release(order=1)) is None
@@ -149,14 +149,14 @@ def test_a_request_is_passed_by_the_name_its_declaration_gives_it() -> None:
         connector.go(request=Release(order=1))
 
 
-@pytest.mark.spec("TRN-15")
+@pytest.mark.spec("TRN-16")
 def test_an_action_with_an_empty_reply_returns_none() -> None:
     provider = Recording()
     assert _connect(provider).release(Release(order=1)) is None
     assert provider.received == [Release(order=1)]
 
 
-@pytest.mark.spec("TRN-15", "TRN-1")
+@pytest.mark.spec("TRN-16", "TRN-1")
 def test_changes_after_the_call_do_not_reach_the_other_side() -> None:
     provider = Recording()
     request = _reserve()
@@ -167,14 +167,14 @@ def test_changes_after_the_call_do_not_reach_the_other_side() -> None:
     assert len(provider.returned[0].parts) == 2  # type: ignore[attr-defined]
 
 
-@pytest.mark.spec("TRN-15")
+@pytest.mark.spec("TRN-16")
 def test_the_connector_lists_its_actions() -> None:
     connector = _connect(Recording())
     assert {"reserve", "release"} <= set(dir(connector))
     assert repr(connector) == "<connector to connector.v1>"
 
 
-@pytest.mark.spec("TRN-15", "CON-29")
+@pytest.mark.spec("TRN-16", "CON-29")
 @pytest.mark.parametrize("name", ["ship", "Reserve", "reserve_", "_contract_", "__x__"])
 def test_an_action_the_contract_does_not_have_is_a_usage_error(name: str) -> None:
     connector = _connect(Recording())
@@ -184,7 +184,7 @@ def test_an_action_the_contract_does_not_have_is_a_usage_error(name: str) -> Non
         assert "its actions are reserve, release" in str(raised.value)
 
 
-@pytest.mark.spec("TRN-15", "CON-29")
+@pytest.mark.spec("TRN-16", "CON-29")
 @pytest.mark.parametrize(
     ("args", "kwargs"),
     [
@@ -250,7 +250,7 @@ def test_the_action_runs_in_the_callers_thread_in_a_copy_of_its_context() -> Non
     assert after == "set by the caller"
 
 
-@pytest.mark.spec("TRN-6", "TRN-15")
+@pytest.mark.spec("TRN-6", "TRN-16")
 def test_concurrent_callers_each_get_their_own_reply() -> None:
     connector = _connect(Recording(lambda r: Reserved(ok=r.order % 2 == 0)))
 
@@ -286,7 +286,7 @@ def _timeout(action: Action, request: bytes) -> bytes | None:
     raise ContractError("timeout", "the deadline passed")
 
 
-@pytest.mark.spec("TRN-16", "TRN-8", "CON-4")
+@pytest.mark.spec("TRN-17", "TRN-8", "CON-4")
 @pytest.mark.parametrize("name", ["reserve", "release"], ids=["idempotent", "not"])
 @pytest.mark.parametrize(
     "outcome", [_unavailable, _timeout], ids=["unavailable", "timeout"]
@@ -304,7 +304,7 @@ def test_a_failed_call_is_never_retried(
     assert raised.value.kind == outcome.__name__.lstrip("_")
 
 
-@pytest.mark.spec("TRN-16", "TRN-13")
+@pytest.mark.spec("TRN-17", "TRN-13")
 def test_the_transport_gets_the_text_that_passed_the_request_check() -> None:
     transport = Counting(lambda a, r: b'{"ok": true}')
     Connector(Inventory, transport).reserve(_reserve())
@@ -343,7 +343,7 @@ _WRONG_REPLIES: dict[str, Callable[[Reserve], object]] = {
 }
 
 
-@pytest.mark.spec("TRN-17", "TRN-9", "TRN-11", "TRN-3")
+@pytest.mark.spec("TRN-18", "TRN-9", "TRN-11", "TRN-3")
 @pytest.mark.parametrize("wrong", list(_WRONG_REPLIES), ids=list(_WRONG_REPLIES))
 def test_a_reply_the_provider_cannot_send_reaches_the_caller_as_internal(
     wrong: str, caplog: pytest.LogCaptureFixture
@@ -366,14 +366,14 @@ class ReleasingWithAReply:
         return Reserved(ok=True)  # type: ignore[return-value]
 
 
-@pytest.mark.spec("TRN-17", "TRN-3")
+@pytest.mark.spec("TRN-18", "TRN-3")
 def test_a_reply_for_an_empty_reply_reaches_the_caller_as_internal() -> None:
     with pytest.raises(ContractError) as raised:
         _connect(ReleasingWithAReply()).release(Release(order=1))
     _assert_internal(raised)
 
 
-@pytest.mark.spec("TRN-17", "TRN-12", "TRN-3")
+@pytest.mark.spec("TRN-18", "TRN-12", "TRN-3")
 @pytest.mark.parametrize(
     "reply",
     [b'{"ok": "maybe"}', b"{", b'{"parts": []}', "not bytes", None],
@@ -392,7 +392,7 @@ def test_a_reply_the_caller_cannot_read_reaches_it_as_internal(
     assert "the reply could not be read" in caplog.text
 
 
-@pytest.mark.spec("TRN-17", "TRN-3")
+@pytest.mark.spec("TRN-18", "TRN-3")
 def test_a_reply_text_for_an_empty_reply_reaches_the_caller_as_internal() -> None:
     transport = Counting(lambda a, r: b"null")
     with pytest.raises(ContractError) as raised:
@@ -483,14 +483,14 @@ def test_an_implementation_that_does_not_meet_its_contract_is_refused() -> None:
         InProcess(Inventory, Missing())
 
 
-@pytest.mark.spec("TRN-15")
+@pytest.mark.spec("TRN-16")
 def test_an_attribute_set_on_the_instance_does_not_replace_an_action() -> None:
     provider = Recording()
     provider.reserve = lambda request: Reserved(ok=False)  # type: ignore[method-assign]
     assert _connect(provider).reserve(_reserve()).ok is True
 
 
-@pytest.mark.spec("TRN-15")
+@pytest.mark.spec("TRN-16")
 def test_an_action_of_another_contract_is_refused_by_the_transport() -> None:
     @contract("other.v1")
     class Other(Protocol):
@@ -523,7 +523,7 @@ def _echo(record: type[BaseModel]) -> tuple[Any, list[BaseModel]]:
     return Connector(declared, InProcess(declared, implementation)), received
 
 
-@pytest.mark.spec("TRN-1", "TRN-5", "TRN-15")
+@pytest.mark.spec("TRN-1", "TRN-5", "TRN-16")
 @_HYPOTHESIS
 @given(st.data())
 def test_generated_values_cross_to_the_provider_and_back_unchanged(
@@ -566,7 +566,7 @@ def _frames_hold(error: BaseException, held: list[object]) -> list[str]:
     return found
 
 
-@pytest.mark.spec("TRN-3", "TRN-17")
+@pytest.mark.spec("TRN-3", "TRN-18")
 @pytest.mark.parametrize(
     "reply",
     [_raises(Secret("x")), lambda r: {"ok": True, "pw": "hunter2"}],
