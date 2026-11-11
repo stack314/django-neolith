@@ -170,6 +170,16 @@ def _write_binary(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).decode("ascii")
 
 
+# The core schema type of each form's plain type, and the keys Pydantic gives
+# it with nothing added (a timedelta always carries microseconds_precision).
+_KINDS: dict[type[Any], str] = {
+    timedelta: "timedelta",
+    Decimal: "decimal",
+    bytes: "bytes",
+}
+_BARE_KEYS = frozenset({"type", "ref", "metadata", "microseconds_precision"})
+
+
 @dataclass(frozen=True, eq=False)
 class _Form:
     """The marker of one form: its type, reader, writer and description."""
@@ -208,6 +218,20 @@ class _Form:
             raise TypeError(
                 f"neolith.{self.name} annotates {self.python_type.__name__}, "
                 f"not {source!r}; use neolith.{self.name} itself"
+            )
+        # Pydantic applies whatever precedes this marker, such as a Field(...)
+        # in the default slot, to the plain type first and hands the result
+        # here. This schema replaces it, so anything there would be dropped
+        # without a trace; it is refused instead.
+        before = handler(source)
+        added = sorted(set(before) - _BARE_KEYS)
+        same = before.get("type") == _KINDS[self.python_type]
+        if not same or added:
+            built = ", ".join(added) if same else f"a {before.get('type')} node"
+            raise TypeError(
+                f"neolith.{self.name} admits no constraint, setting or validator "
+                f"placed before it, as a Field(...) default places them (here: "
+                f"{built}); its own reader and writer fix its form"
             )
         return self.core_schema()
 

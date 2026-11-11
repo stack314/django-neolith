@@ -455,6 +455,88 @@ def test_anything_added_to_a_neolith_form_is_refused_naming_it(
         _field(list[annotation])  # type: ignore[valid-type]
 
 
+# A Field(...) default puts its constraints before the type's marker, which
+# Pydantic applies to the plain type and hands to the marker; so does a Field
+# placed before the marker in Annotated.
+_SET_BEFORE: dict[str, tuple[object, Callable[[object, object], object]]] = {
+    "constraint": (Field(min_length=1), lambda t, m: t),
+    "bound": (Field(ge=0), lambda t, m: t),
+    "strict": (Field(strict=True), lambda t, m: t),
+    "Field before the marker": (
+        ...,
+        lambda t, m: Annotated[t.__origin__, Field(strict=True), m],  # type: ignore[attr-defined]
+    ),
+}
+
+
+@pytest.mark.spec("CON-13", "CON-17")
+@pytest.mark.parametrize(
+    ("form", "name", "added"),
+    [
+        pytest.param(form, name, added, id=f"{name}-{added}")
+        for name, form in (
+            ("Duration", Duration),
+            ("Decimal128", Decimal128),
+            ("Binary", Binary),
+        )
+        for added in _SET_BEFORE
+        # Pydantic has no ge on bytes.
+        if not (added == "bound" and name == "Binary")
+    ],
+)
+def test_a_constraint_set_before_a_neolith_form_is_refused(
+    form: object, name: str, added: str
+) -> None:
+    default, place = _SET_BEFORE[added]
+    marker = form.__metadata__[0]  # type: ignore[attr-defined]
+    with pytest.raises(
+        TypeError,
+        match=rf"^neolith\.{name} admits no constraint, setting or validator placed",
+    ):
+        _record(place(form, marker), default)
+
+
+@pytest.mark.spec("CON-13", "CON-17")
+@pytest.mark.parametrize("form", [Duration, Decimal128, Binary])
+def test_a_validator_before_a_neolith_forms_marker_is_refused(form: object) -> None:
+    marker = form.__metadata__[0]  # type: ignore[attr-defined]
+    plain: Any = form.__origin__  # type: ignore[attr-defined]
+    with pytest.raises(TypeError, match="here: a function-before node"):
+        _record(Annotated[plain, BeforeValidator(_same), marker])
+
+
+@pytest.mark.spec("CON-13", "CON-17")
+@pytest.mark.parametrize(
+    "alias",
+    [SpanAlias, Blob, Binary | None],
+    ids=["type", "TypeAliasType", "Optional"],
+)
+def test_a_constraint_default_on_an_alias_of_a_neolith_form_is_refused(
+    alias: object,
+) -> None:
+    # Behind an alias or Optional, Pydantic applies it after the form instead.
+    with pytest.raises(ContractDefinitionError, match="adds a constraint"):
+        _field(alias, Field(min_length=1))
+
+
+@pytest.mark.spec("CON-34")
+@pytest.mark.parametrize(
+    "default",
+    [
+        Field(description="held as bytes"),
+        Field(json_schema_extra={"example": "_w=="}),
+        Field(default=b""),
+        Field(title="Raw"),
+    ],
+    ids=["description", "json_schema_extra", "default value", "title"],
+)
+def test_a_field_default_without_constraints_on_a_neolith_form_is_admitted(
+    default: object,
+) -> None:
+    assert _record(Binary, default).model_json_schema()["properties"]
+    assert _declare(_record(Binary, default))["$defs"]["Holder"]["properties"]
+
+
 @pytest.mark.spec("CON-34")
 @pytest.mark.parametrize(
     ("form", "described"),
