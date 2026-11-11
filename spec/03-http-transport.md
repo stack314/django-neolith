@@ -21,7 +21,7 @@ The context travels in headers. Names and semantics are fixed by this document s
 | Header | Carries |
 |---|---|
 | `Authorization: Bearer <token>` | The calling app's credential, which the provider's host authenticates |
-| `Neolith-Principal` | The principal on whose behalf the call is made, if there is one |
+| `Neolith-Principal` | The principal on whose behalf the call is made, if there is one ([below](#the-principal)) |
 | `Idempotency-Key` | The idempotency key |
 | `traceparent` | The trace identifier, per W3C Trace Context |
 | `Neolith-Timeout` | The remaining time budget, in whole milliseconds |
@@ -54,41 +54,82 @@ A connector takes the kind from the body only, never from the status. A non-succ
 
 **HTTP-2.** A provider MUST serve an OpenAPI 3.1 document describing every contract version it provides, derived from the contracts. The document is the HTTP transport's publication of the contract ([01](01-contracts.md)). Its location is `GET /.well-known/neolith/openapi.json`.
 
-## Caller and principal
+## Calling app and principal
 
 Two identities cross with a call ([ADR 0010](../docs/adr/0010-pluggable-principal-resolution.md)): the calling app, which the provider's host authenticates, and an optional principal on whose behalf the calling app calls, which the calling app asserts.
 
-`Authorization` carries the calling app's credential as a bearer token (RFC 6750). The provider's host resolves it through a pluggable backend. A call whose credential is missing or does not resolve, or that reaches a host with no backend, fails with `unauthenticated`.
+Every value below that is said to be base64url-encoded uses the base64url alphabet only (RFC 4648, section 5), with no padding, no whitespace and zero unused bits. Every JSON object below is I-JSON (RFC 7493), so a duplicate member name or a lone surrogate makes it invalid.
 
-`Neolith-Principal` carries the principal as the base64url encoding, without padding (RFC 4648, section 5), of a UTF-8 JSON object:
+**HTTP-6.** A caller MUST send the calling app's credential in `Authorization`, as a bearer token (RFC 6750).
+
+**HTTP-7.** A provider's host MUST fail a call with `unauthenticated` when its credential is missing or does not resolve, or when the host has no backend to resolve it.
+
+### The principal
+
+A *principal object* is a JSON object with exactly the members `issuer` and `subject`, both non-empty strings, and optionally `claims`, an object whose values are strings, integers, booleans or lists of strings. Two principals are equal when their members are equal, with strings compared code point by code point and without Unicode normalization. `Neolith-Principal` carries a principal object, base64url-encoded, in at most 4096 bytes.
+
+**HTTP-8.** A caller MUST send `Neolith-Principal` exactly when the call has a principal.
+
+**HTTP-9.** A provider's host MUST fail a call with `invalid_argument` when `Neolith-Principal` is present but is not a principal object, encoded as above.
+
+The shared-secret backend does not sign the principal: the calling app asserts it. Which calling apps a provider accepts that assertion from is not fixed yet ([ADR 0017](../docs/adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md), Proposed).
+
+For example, the principal `{"issuer":"https://id.example.com","subject":"u-81f3","claims":{"roles":["clerk"]}}` is sent as:
 
 ```
-{"iss": "<issuer>", "sub": "<subject>", "claims": {<claims>}}
+Neolith-Principal: eyJpc3N1ZXIiOiJodHRwczovL2lkLmV4YW1wbGUuY29tIiwic3ViamVjdCI6InUtODFmMyIsImNsYWltcyI6eyJyb2xlcyI6WyJjbGVyayJdfX0
 ```
-
-`iss` and `sub` are non-empty strings. `claims` is an optional object. The header is absent when the call has no principal. A header that does not decode to such an object fails the call with `unauthenticated`. The shared-secret backend does not sign the principal: it is an assertion by the authenticated calling app. Which calling apps a provider accepts that assertion from is not fixed yet ([ADR 0017](../docs/adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md), Proposed).
 
 ### Shared-secret tokens
 
-The shared-secret token is the one credential every implementation supports. It is for development only: a calling app's secret is held by that app and by every provider it calls, and any holder can call as that app.
+**HTTP-10.** Every implementation MUST support the shared-secret token as a credential, on both the caller's and the provider's side.
 
-Each calling app has its own secret of at least 32 random bytes, named by a key id. A provider's host holds the key id and secret of each app it accepts calls from, and knows which app each key id belongs to.
+The shared-secret token is for development only. A calling app's secret is held by that app and by every provider it calls, and any holder can mint tokens for that app. A token is a bearer token: anyone who sees one can call as the calling app, and assert any principal, until it expires.
 
-The token is a JSON Web Token (RFC 7519) in JWS compact serialization (RFC 7515), signed with HMAC SHA-256 (`HS256`, RFC 7518, section 3.2) under the calling app's secret. Its JOSE header and claims are exactly these, and nothing else:
+**HTTP-11.** A token SHOULD travel only over TLS or a loopback connection (RFC 6750, section 5.3).
 
-| Member | Where | Value |
+Each calling app has its own secret, named by a key id: a non-empty string, unique among the keys a provider's host holds. A host can hold more than one key for an app, so that a secret can be replaced without downtime.
+
+**HTTP-12.** A secret MUST be at least 32 bytes from a cryptographically secure random source (RFC 7518, section 3.2).
+
+A token is a JSON Web Token (RFC 7519) in JWS compact serialization (RFC 7515), signed with HMAC SHA-256 (`HS256`) under the calling app's secret. It is three base64url-encoded parts joined by `.`: the JOSE header, the claims, and the signature over the first two parts as sent. Times are integers, meaning JSON numbers with no fraction or exponent, in seconds since the epoch.
+
+| Member | Part | Value |
 |---|---|---|
 | `alg` | header | `"HS256"` |
-| `typ` | header | `"neolith+jwt"`, so that the token cannot be mistaken for a JWT of another kind (RFC 8725, section 3.11) |
+| `typ` | header | `"neolith+jwt"`, so that the token cannot be taken for a JWT of another kind (RFC 8725, section 3.11) |
 | `kid` | header | The key id of the calling app's secret |
 | `iss` | claims | The calling app's `name` from its declaration ([05](05-app-declaration.md)) |
 | `aud` | claims | One string: the identity of the contract being called, such as `inventory.v1` |
-| `iat` | claims | When the token was issued, in whole seconds since the epoch |
-| `exp` | claims | When the token expires, in whole seconds since the epoch, at most 300 seconds after `iat` |
+| `iat` | claims | When the token was issued |
+| `exp` | claims | When the token expires, at most 300 seconds after `iat` |
 
-The provider's host accepts the token only when the header and claims are exactly those above, `kid` names a key it holds, the signature verifies under that key's secret, `iss` is the app that key belongs to, `aud` is the contract named in the request path, `iat` is not in the future and `exp` is not in the past. Each time comparison allows 60 seconds of difference between the hosts' clocks. Any other token fails the call with `unauthenticated`. A caller can reuse a token for calls to the same contract until it expires.
+A token is valid only when all of these hold, with *now* the provider host's current time in seconds since the epoch:
 
-Unlike the deadline, the token depends on the hosts' clocks agreeing, within the 60 seconds allowed.
+- it is at most 4096 bytes, and its three parts are base64url-encoded, the first two as JSON objects;
+- the header has exactly the members `alg`, `typ` and `kid`, and the claims exactly `iss`, `aud`, `iat` and `exp`, each of the type in the table;
+- `alg` is `HS256`;
+- `typ` is `neolith+jwt` or `application/neolith+jwt`, ignoring ASCII case (RFC 7515, section 4.1.9);
+- `kid` names a key the host holds, and `iss` is the app that key belongs to;
+- the signature is the HMAC SHA-256 of the first two parts, as sent, under that key's secret;
+- `aud` is the identity of the contract in the request path;
+- `iat` < `exp` ≤ `iat` + 300, `iat` ≤ *now* + 60, and *now* < `exp` + 60.
+
+**HTTP-13.** A provider's host MUST fail a call with `unauthenticated` when its token is not valid.
+
+**HTTP-14.** A provider's host SHOULD compare signatures in constant time.
+
+**HTTP-15.** A caller MAY reuse a token for calls to the same contract until it expires.
+
+The audience names the contract, which both sides know from the request path. It keeps a token from being used at another contract. It does not tell two providers of one contract apart; with a shared secret, every provider that checks a calling app's tokens could mint them anyway.
+
+The 60 seconds allowed each way absorb differences between the hosts' clocks, so a host accepts a token for at most 420 seconds of its own clock. Unlike the deadline, the token depends on the clocks agreeing within that margin.
+
+For example, with the secret `000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f` (hexadecimal) under the key id `orders-1`, the app `orders` calling `inventory.v1` with `iat` 1767225600 and `exp` 1767225900 sends:
+
+```
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6Im5lb2xpdGgrand0Iiwia2lkIjoib3JkZXJzLTEifQ.eyJpc3MiOiJvcmRlcnMiLCJhdWQiOiJpbnZlbnRvcnkudjEiLCJpYXQiOjE3NjcyMjU2MDAsImV4cCI6MTc2NzIyNTkwMH0.AhMk-cm_SInC6ek-6CLP8pN7ciQFHuGb-i2MSGu3efU
+```
 
 ## Health
 

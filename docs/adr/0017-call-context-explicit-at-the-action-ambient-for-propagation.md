@@ -39,7 +39,7 @@ class InventoryImpl:
     def reserve(self, request: ReserveRequest, ctx: CallContext) -> ReserveReply:
         if ctx.principal is None:
             raise ContractError(kind="permission_denied", message="reserving needs a principal")
-        owner = ctx.principal.id
+        owner = ctx.principal.subject
         quote = connect("pricing.v1").quote(QuoteRequest(sku=request.sku), context=ctx)
         ...
 ```
@@ -60,7 +60,7 @@ from neolith import current_context
 @Inventory.implement
 class InventoryImpl:
     def reserve(self, request: ReserveRequest) -> ReserveReply:
-        owner = current_context().principal.id   # raises outside a call
+        owner = current_context().principal.subject   # raises outside a call
         quote = connect("pricing.v1").quote(QuoteRequest(sku=request.sku))  # inherits automatically
         ...
 ```
@@ -81,7 +81,7 @@ The transport sets a `contextvars.ContextVar` for the duration of the action and
 @Inventory.implement
 class InventoryImpl:
     def reserve(self, call: Call[ReserveRequest]) -> ReserveReply:
-        owner = call.principal.id
+        owner = call.principal.subject
         sku = call.request.sku
         quote = connect("pricing.v1").quote(QuoteRequest(sku=sku), parent=call)
         ...
@@ -105,7 +105,7 @@ class InventoryImpl:
     def reserve(self, request: ReserveRequest, ctx: CallContext) -> ReserveReply:
         if ctx.principal is None:
             raise ContractError(kind="permission_denied", message="reserving needs a principal")
-        owner = ctx.principal.id
+        owner = ctx.principal.subject
         quote = connect("pricing.v1").quote(QuoteRequest(sku=request.sku))  # child context derived by the host
         ...
 

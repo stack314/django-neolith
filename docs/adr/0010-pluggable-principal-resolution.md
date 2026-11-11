@@ -25,8 +25,8 @@ Option 2.
 1. **Two identities.** The seam resolves the calling app, authenticated from the transport's credentials, and separately an optional principal on whose behalf the calling app calls, as RFC 8693 separates the actor from the subject. Spec 03 fixes how each crosses HTTP.
 2. **A principal is a portable value.** It is frozen and made of portable types: an issuer and a subject, both strings and stable across hosts, plus optional claims. It is never a model instance, in any mode, and a primary key on its own is never a subject ([0004](0004-each-app-owns-its-data.md)).
 3. **No permission hook.** Actions authorize themselves and refuse with `permission_denied` (principle 12).
-4. **Shared-secret tokens, for development only.** v0.1 ships one backend. Each calling app has its own secret, named by a key id. Each token carries the issuing app, a single audience and a short expiry, as SPIFFE JWT-SVIDs do. Spec 03 fixes the format, so that implementations interoperate.
-5. **Fail closed.** Credentials that do not resolve, and a host with no backend, refuse the call with `unauthenticated` ([0008](0008-typed-contract-errors-in-both-modes.md)).
+4. **Shared-secret tokens, for development only.** v0.1 ships one backend. Each calling app has its own secret, named by a key id. Each token carries the issuing app, a single audience and a short expiry. SPIFFE JWT-SVIDs also carry an audience and a short lifetime, though they are signed with keys only the issuer holds. Spec 03 fixes the format, so that implementations interoperate.
+5. **Fail closed.** A call whose credentials are missing or do not resolve, or that reaches a host with no backend to resolve them, is refused with `unauthenticated` ([0008](0008-typed-contract-errors-in-both-modes.md)).
 6. **Other backends.** An identity app or an external provider (OIDC, user tokens) plugs into the seam as a backend. In attached mode, the Django user is resolved through the same seam, into the same portable value.
 
 Follows principles 12 (*small core over broad features*) and 13 (*integrate over own*).
@@ -35,12 +35,13 @@ Follows principles 12 (*small core over broad features*) and 13 (*integrate over
 
 - v0.1 can demo detached calls without building identity first.
 - Adopters can plug in their existing auth, such as an OIDC provider or an internal token service.
-- The shared-secret backend is for development and getting started, not a production recommendation. The docs must say so. A secret is held by the calling app and by every provider it calls, and any holder can act as that app.
+- The shared-secret backend is for development and getting started, not a production recommendation. The docs must say so. A secret is held by the calling app and by every provider it calls, and any holder can act as that app. A token is a bearer token, so anyone who sees one can act as that app, and assert any principal, until it expires.
+- The audience is the contract being called, which both sides know without extra configuration. It keeps a token from being used at another contract, but not at another provider of the same contract, which a shared secret could not prevent anyway.
 - The only credential every implementation must support is therefore one for development. Interoperable authentication for production needs a later record ([open questions](../open-questions.md)).
 - Authorization is code in each action. A policy shared by several actions is a function or library the app chooses.
 - A principal compares equal on every host, which [0017](0017-call-context-explicit-at-the-action-ambient-for-propagation.md) relies on. A project that resolves Django users in attached mode needs an identifier for each user that is stable across hosts, which the primary key alone is not.
 - Backends declare which inputs of a request they read to resolve a principal, such as a header or a cookie, so that the host can vary responses on them. [0017](0017-call-context-explicit-at-the-action-ambient-for-propagation.md) needs this declaration.
-- Shared-secret tokens expire, so this backend needs the hosts' clocks to agree within a small margin. Spec 03 says how much.
+- Shared-secret tokens expire, so this backend needs the hosts' clocks to agree within a small margin. Spec 03 allows 60 seconds each way, so a token is accepted for at most 420 seconds.
 
 ## References
 
