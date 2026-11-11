@@ -21,6 +21,26 @@ A transport MUST:
 
 Which kinds a transport produces is set by [ADR 0008](../docs/adr/0008-typed-contract-errors-in-both-modes.md): `unavailable` or `timeout` for a failure of its own in carrying a call, and `internal` for a reply or error from the provider that does not validate against the contract, apart from an error of a kind the caller does not know. A request that fails the caller's own check is never sent, and the caller and the provider run their checks in the order given under [The call context across calls](#the-call-context-across-calls), so a caller that checks its own requests gets the same result in every mode ([ADR 0007](../docs/adr/0007-in-process-transport-serializes.md)). An error the provider's host delivers otherwise passes through unchanged.
 
+## Values across a call
+
+Every value that crosses a call, whether a request, a reply or an error's detail record, crosses as JSON text, in every mode ([ADR 0007](../docs/adr/0007-in-process-transport-serializes.md)). A value's *declared type* is the record the contract names for it: the action's request or reply type, or the detail record of the error's kind.
+
+**TRN-9.** A sender MUST refuse a value whose type is not exactly its declared type, such as a value of a subtype, or of another type with the same fields. The check covers the value itself. A record inside it crosses as the JSON text written for it, and only when that text passes the checks below.
+
+**TRN-10.** A sender MUST write a value as JSON text by the rules of its declared type that the contract's description is derived from (CON-16). Nothing a value or its type overrides, such as its own way of writing itself as JSON, changes the text.
+
+**TRN-11.** A sender MUST refuse a value that holds, at any depth, something its declared type does not hold at that place, such as text in an integer field, rather than write it in another form.
+
+**TRN-12.** A receiver MUST build the value it hands on by reading the JSON text with its declared type, ignoring unknown fields (CON-6, CON-7), so that caller and provider never share an object, in-process too.
+
+Before a call is sent, the caller MUST check its request, in this order ([ADR 0017](../docs/adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md), Decision 9, step 2):
+
+- **TRN-13.** its type, as TRN-9 says;
+- **TRN-14.** its JSON text, written as TRN-10 and TRN-11 say;
+- **TRN-15.** that text, read with the request type as TRN-12 says.
+
+**TRN-16.** A request that fails one of these checks MUST NOT be sent. The failure is a mistake in the calling code (CON-29), not a contract error, so a caller that checks its own requests never receives `invalid_argument` for one.
+
 ## In-process transport
 
 **TRN-5.** Defined by this specification and REQUIRED in every implementation. Caller and provider share a process. The transport still serializes and deserializes ([ADR 0007](../docs/adr/0007-in-process-transport-serializes.md)), so that a provider cannot leak a live object and a caller cannot depend on one. Values cross as JSON text and are checked against the contract's published description (CON-16): once in-process, on the sending side, and on both sides over a network.
