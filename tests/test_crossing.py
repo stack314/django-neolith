@@ -2,8 +2,9 @@
 
 These tests drive the crossing itself, below any transport: the caller's
 request check (ADR 0017 Decision 9, step 2) and reading a value on the other
-side. The transport and connector that use it, and the description check
-between the dump and the read-back, arrive with #10 tasks 3 and 4.
+side. What the check converts and refuses in a value changed after validation
+is in tests/test_send_side_check.py. The transport and connector that use the
+crossing arrive with #10 task 4.
 """
 
 import functools
@@ -17,7 +18,7 @@ from typing import Annotated, Any, Protocol, cast
 
 import pydantic.plugin._loader
 import pytest
-from hypothesis import given
+from hypothesis import assume, given
 from hypothesis import strategies as st
 from hypothesis_jsonschema import from_schema
 from jsonschema import Draft202012Validator
@@ -42,6 +43,7 @@ from tests.test_contract_round_trip import (
     _name,
     _records,
 )
+from tests.test_send_side_check import _fits
 
 
 class Part(BaseModel):
@@ -135,12 +137,12 @@ def test_changes_on_either_side_after_the_call_do_not_reach_the_other() -> None:
 def test_replies_and_detail_records_cross_the_same_way() -> None:
     reply = Reserved(ok=True, parts=[Part(sku="a")])
     replies = codec(INVENTORY, Reserved)
-    received = replies.read(replies.write(reply, "the reply"))
+    received = replies.read(replies.send(reply, "the reply"))
     assert received == reply
     assert _shared(reply, received) == set()
     detail = OutOfStock(sku="a")
     details = codec(INVENTORY, OutOfStock)
-    assert details.read(details.write(detail, "the detail")) == detail
+    assert details.read(details.send(detail, "the detail")) == detail
 
 
 @pytest.mark.spec("TRN-12", "CON-6", "CON-7")
@@ -707,9 +709,9 @@ def test_the_reply_and_detail_get_the_same_exact_type_check() -> None:
     with pytest.raises(
         TypeError, match=r"the reply is a \S*SubReserved, not exactly a Reserved"
     ):
-        codec(INVENTORY, Reserved).write(SubReserved(ok=True), "the reply")
+        codec(INVENTORY, Reserved).send(SubReserved(ok=True), "the reply")
     with pytest.raises(TypeError, match="the detail is a dict"):
-        codec(INVENTORY, OutOfStock).write({"sku": "a"}, "the detail")
+        codec(INVENTORY, OutOfStock).send({"sku": "a"}, "the detail")
 
 
 @pytest.mark.spec("TRN-9", "TRN-13")
@@ -739,7 +741,7 @@ def test_a_nested_look_alike_crosses_only_as_text_that_reads_back() -> None:
 
     request = Reserve(order=1)
     request.parts.append(cast("Part", LooksLikePart(quantity=2)))
-    with pytest.raises(ValueError, match="does not read back"):
+    with pytest.raises(ValueError, match="does not fit the contract's description"):
         check_request(INVENTORY, RESERVE, request)
 
 
@@ -853,7 +855,7 @@ def test_a_number_that_is_not_finite_is_refused_not_written_as_null(
     with pytest.raises(ValueError, match=f"it holds {shown}, and a number must be"):
         check_request(MEASURES, MEASURES.actions["send"], value)
     with pytest.raises(ValueError, match="the reply cannot be written"):
-        codec(MEASURES, Measures).write(value, "the reply")
+        codec(MEASURES, Measures).send(value, "the reply")
 
 
 @pytest.mark.spec("TRN-11", "TRN-13")
@@ -1245,10 +1247,10 @@ def test_a_value_json_cannot_hold_is_a_value_error(value: Tree) -> None:
 @pytest.mark.spec("TRN-13", "TRN-14")
 def test_a_value_written_deeper_than_the_reader_goes_is_a_value_error() -> None:
     # Each level of the tree is two levels of JSON, an object and a list. The
-    # serializer writes this one, and the validator's JSON reader refuses it,
-    # so it is never sent.
+    # serializer writes this one, and pydantic-core's JSON reader refuses it,
+    # in the description check first, so it is never sent.
     declared = Contract.of(Trees)
-    with pytest.raises(ValueError, match="does not read back") as raised:
+    with pytest.raises(ValueError, match="does not fit the contract's") as raised:
         check_request(declared, declared.actions["plant"], _deep(150))
     assert isinstance(raised.value.__cause__, ValidationError)
 
@@ -1278,7 +1280,7 @@ def test_a_reply_holding_what_its_type_does_not_is_refused_too() -> None:
     reply = Reserved(ok=True)
     reply.ok = cast("bool", "yes")
     with pytest.raises(ValueError, match="the reply cannot be written as JSON"):
-        codec(INVENTORY, Reserved).write(reply, "the reply")
+        codec(INVENTORY, Reserved).send(reply, "the reply")
 
 
 # TRN-13: the text is read back with the request type.
@@ -1298,10 +1300,12 @@ def test_a_reply_holding_what_its_type_does_not_is_refused_too() -> None:
         ),
     ],
 )
-def test_a_request_that_does_not_read_back_is_a_value_error(
+def test_a_request_missing_a_required_field_is_a_value_error(
     request_value: Reserve,
 ) -> None:
-    with pytest.raises(ValueError, match="does not read back") as raised:
+    # The description requires the field, so the description check refuses
+    # the text before it is read back.
+    with pytest.raises(ValueError, match="does not fit the contract's") as raised:
         check_request(INVENTORY, RESERVE, request_value)
     assert isinstance(raised.value.__cause__, ValidationError)
 
@@ -1360,7 +1364,7 @@ def test_an_exception_that_is_not_an_exception_propagates_unchanged() -> None:
 @pytest.mark.spec("TRN-13")
 def test_the_request_checks_run_in_order() -> None:
     # A value failing every check reports the first: its type, then the
-    # writing, then the reading back.
+    # writing, then the description check, then the reading back.
     class Wrong(Reserve):
         pass
 
@@ -1370,9 +1374,12 @@ def test_the_request_checks_run_in_order() -> None:
     unwritable = Reserve.model_construct(order="x", tags={})
     with pytest.raises(ValueError, match="cannot be written as JSON"):
         check_request(INVENTORY, RESERVE, unwritable)
-    unreadable = Reserve.model_construct(tags={})
+    undescribed = Reserve.model_construct(tags={})
+    with pytest.raises(ValueError, match="does not fit the contract's description"):
+        check_request(INVENTORY, RESERVE, undescribed)
+    declared = Contract.of(CheckedContract)
     with pytest.raises(ValueError, match="does not read back"):
-        check_request(INVENTORY, RESERVE, unreadable)
+        check_request(declared, declared.actions["send"], Checked.model_construct(n=11))
 
 
 # Invariants over generated contracts and values.
@@ -1393,6 +1400,10 @@ def _declare_request(record: type[BaseModel]) -> tuple[Contract, dict[str, Any]]
 def _crosses(
     found: Contract, record: type[BaseModel], schema: dict[str, Any], value: object
 ) -> None:
+    # The generator follows the description as JSON Schema reads it, which
+    # leaves out the rules the description cannot state (CON-40), such as a
+    # timestamp's year in UTC.
+    assume(_fits(schema, value))
     sent = codec(found, record).read(json.dumps(value).encode())
     text = check_request(found, found.actions["send"], sent)
     Draft202012Validator(schema, format_checker=_FORMAT_CHECKER).validate(
@@ -1403,7 +1414,7 @@ def _crosses(
     assert type(received) is record
     assert _shared(sent, received) == set()
     # The reply crosses back the same way.
-    back = codec(found, record).read(codec(found, record).write(received, "the reply"))
+    back = codec(found, record).read(codec(found, record).send(received, "the reply"))
     assert back == sent
     assert _shared(received, back) == set()
 

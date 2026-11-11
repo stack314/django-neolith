@@ -677,7 +677,7 @@ def test_each_form_takes_its_text_from_python(
     assert type(held) is type(value)
 
 
-# Part of CON-38, whose send-side check comes with #10 task 3.
+# Part of CON-38; a sender's refusal is in tests/test_send_side_check.py.
 @pytest.mark.spec("CON-34")
 @pytest.mark.parametrize(
     ("annotation", "value"),
@@ -750,7 +750,7 @@ def test_timestamps_travel_in_the_form_the_description_states(
     instant: datetime, offset_minutes: int
 ) -> None:
     # Offsets in whole minutes travel unchanged; the sender converts the rest
-    # to UTC (CON-36), with the send-side check of #10.
+    # to UTC (CON-36), tested in tests/test_send_side_check.py.
     value = instant.astimezone(timezone(timedelta(minutes=offset_minutes)))
     record = create_model("Stamped", at=(AwareDatetime, ...), day=(date, ...))
     sent = json.loads(record(at=value, day=value.date()).model_dump_json())
@@ -767,7 +767,8 @@ def test_timestamps_travel_in_the_form_the_description_states(
 def test_finite_numbers_travel_in_the_range_the_description_states(
     number: float,
 ) -> None:
-    # -0.0 is written as 0 by the sender (CON-35), with the send-side check.
+    # -0.0 is written as 0 by the sender (CON-35), tested in
+    # tests/test_send_side_check.py.
     assume(not (number == 0 and str(number).startswith("-")))
     sent = _written(float, number)
     assert _is_valid(NUMBER, sent)
