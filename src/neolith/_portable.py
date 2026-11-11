@@ -613,7 +613,12 @@ class Portable:
             return self.record(node, path)
         if kind == "enum":
             return self.enum(node, path)
-        form = form_of(node)
+        # Judged without the keys any node may carry (_ANY_NODE), such as the
+        # reference Pydantic adds to a type alias.
+        form = form_of(
+            {key: value for key, value in node.items() if key not in _ANY_NODE}
+            | {"type": kind}
+        )
         if form is not None:
             return form.description()
         if kind in FORM_FOR_KIND:

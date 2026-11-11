@@ -10,7 +10,9 @@ serializer. Values are the plain Python types.
 
 - In JSON, each reads only its form, matched over the whole string, and
   writes it exactly.
-- From Python, each takes a value of its type or a string in its form.
+- From Python, Duration and Decimal128 take a value of their type or a string
+  in their form; Binary takes bytes only, since plain bytes read a string as
+  its UTF-8 bytes.
 - Its JSON Schema states its form's pattern, in validation and serialization
   modes alike, so Pydantic's own schema agrees with the wire.
 
@@ -91,11 +93,14 @@ def _decimal_text(value: Decimal) -> str | None:
     """The decimal's form, or None if it has none.
 
     A positive exponent is written at exponent 0 and a zero without its sign,
-    with the value kept (spec 01). The size is checked before the value is
-    written out, so a huge exponent cannot make a huge string.
+    with the value kept (spec 01). Every value, zero included, has its size
+    checked before it is written out, so a huge exponent of either sign cannot
+    make a huge string.
     """
     sign, digits, exponent = value.as_tuple()
     if not isinstance(exponent, int):  # infinity or NaN
+        return None
+    if -exponent > _DECIMAL_DIGITS:
         return None
     if value.is_zero():
         value = Decimal(0) if exponent > 0 else value.copy_abs()
@@ -103,8 +108,6 @@ def _decimal_text(value: Decimal) -> str | None:
         if len(digits) + exponent > _DECIMAL_DIGITS:
             return None
         value = Decimal((sign, (*digits, *(0,) * exponent), 0))
-    elif -exponent > _DECIMAL_DIGITS:
-        return None
     text = format(value, "f")
     if _fullmatch(DECIMAL_PATTERN, text) and _fullmatch(DECIMAL_DIGITS_PATTERN, text):
         return text
@@ -138,8 +141,14 @@ def _write_decimal(value: Decimal) -> str:
     return text
 
 
-def _read_binary(value: object) -> bytes:
+def _read_binary(value: object, info: core_schema.ValidationInfo) -> bytes:
     if type(value) is str:
+        if info.mode == "python":
+            # bytes would read a str as its UTF-8 bytes; reading it as base64url
+            # here would change what the same call holds, so it is refused.
+            raise ValueError(
+                "binary data is bytes; pass bytes, such as text.encode(), not a str"
+            )
         if not _fullmatch(BYTES_PATTERN, value):
             raise ValueError(
                 "bytes are written in base64url with padding and zero unused bits"
@@ -162,16 +171,22 @@ class _Form:
 
     name: str
     python_type: type[Any]
-    read: Callable[[Any], Any]
+    read: Callable[..., Any]
     write: Callable[[Any], str]
     described: Mapping[str, Any] = field(repr=False)
+    # The reader takes the validation info, to tell JSON from Python input.
+    with_info: bool = False
 
     def core_schema(self) -> CoreSchema:
+        serialization = core_schema.plain_serializer_function_ser_schema(
+            self.write, when_used="json"
+        )
+        if self.with_info:
+            return core_schema.with_info_plain_validator_function(
+                self.read, serialization=serialization
+            )
         return core_schema.no_info_plain_validator_function(
-            self.read,
-            serialization=core_schema.plain_serializer_function_ser_schema(
-                self.write, when_used="json"
-            ),
+            self.read, serialization=serialization
         )
 
     def description(self) -> dict[str, Any]:
@@ -221,6 +236,7 @@ _BINARY = _Form(
     _read_binary,
     _write_binary,
     {"type": "string", "contentEncoding": "base64url", "pattern": BYTES_PATTERN},
+    with_info=True,
 )
 
 # A duration (spec 01): a timedelta below 10**11 seconds, written "1.500s".
@@ -239,13 +255,13 @@ def form_of(node: Mapping[str, Any]) -> _Form | None:
     """The form whose marker built this core schema node, or None.
 
     Matched by identity: the node must be exactly the one the marker builds,
-    with neolith's own reader and writer, apart from the metadata Pydantic's
-    JSON Schema generator reads.
+    with neolith's own reader and writer. ``node`` holds only the keys that
+    change what travels; the caller leaves out those any node may carry, such
+    as the reference Pydantic adds to a ``type`` alias.
     """
     if node.get("type") != "function-plain":
         return None
-    own = {key: value for key, value in node.items() if key != "metadata"}
     for form in FORMS:
-        if own == form.core_schema():
+        if node == form.core_schema():
             return form
     return None

@@ -17,7 +17,7 @@ from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Annotated, Any, Protocol, cast
+from typing import Annotated, Any, Optional, Protocol, TypeAliasType, cast
 
 import pytest
 from hypothesis import HealthCheck, assume, given, settings
@@ -494,6 +494,8 @@ def test_each_form_reads_only_its_form_from_json(
         (Decimal128, Decimal("1E-34")),
         (Decimal128, Decimal("1E+999999999")),
         (Decimal128, Decimal("1E-999999999")),
+        (Decimal128, Decimal("0E-999999999")),
+        (Decimal128, Decimal("-0E-999999999")),
         (Decimal128, 3),
         (Decimal128, 1.5),
         (Binary, bytearray(b"x")),
@@ -514,7 +516,6 @@ def test_each_form_refuses_a_python_value_outside_it(
     [
         (Duration, "1.500s", timedelta(seconds=1.5)),
         (Decimal128, "-12.50", Decimal("-12.50")),
-        (Binary, "_w==", b"\xff"),
     ],
 )
 def test_each_form_takes_its_text_from_python(
@@ -776,3 +777,78 @@ def test_timestamp_default_at_the_utc_range_edges_is_accepted(
 def test_a_neolith_form_as_a_map_key_is_refused() -> None:
     with pytest.raises(ContractDefinitionError, match="keys are not strings"):
         _field(dict[Duration, int])
+
+
+@pytest.mark.spec("CON-34")
+@pytest.mark.parametrize("text", ["_w==", "abcd", "data", ""])
+def test_binary_refuses_a_python_str(text: str) -> None:
+    # A plain bytes field reads a str as its UTF-8 bytes, so reading the same
+    # call's str as base64url would change what it holds; it is refused.
+    with pytest.raises(ValidationError, match="pass bytes"):
+        _record(Binary)(v=text)
+    assert _read(Binary, "_w==") == b"\xff"
+
+
+@pytest.mark.spec("CON-34")
+@pytest.mark.parametrize("value", [Decimal("0E-100000000"), Decimal("-0E-999999999")])
+def test_a_zero_decimal_with_a_huge_exponent_is_refused_without_writing_it(
+    value: Decimal,
+) -> None:
+    # Its size is checked before it is written out, as for any other decimal.
+    with pytest.raises(ValidationError):
+        _record(Decimal128)(v=value)
+    with pytest.raises(PydanticSerializationError):
+        _record(Decimal128).model_construct(v=value).model_dump_json()
+
+
+# The TypeAliasType spelling is what the "type" statement builds; both are
+# tested, as authors write either.
+Span = TypeAliasType("Span", Duration)  # noqa: UP040
+Money = TypeAliasType("Money", Decimal128)  # noqa: UP040
+Blob = TypeAliasType("Blob", Binary)  # noqa: UP040
+type SpanAlias = Duration
+type MoneyAlias = Decimal128
+type BlobAlias = Binary
+
+
+def _optional(described: dict[str, Any]) -> dict[str, Any]:
+    return {"anyOf": [described, {"type": "null"}]}
+
+
+@pytest.mark.spec("CON-34")
+@pytest.mark.parametrize(
+    ("alias", "described"),
+    [
+        pytest.param(SpanAlias, DURATION, id="type Duration"),
+        pytest.param(MoneyAlias, DECIMAL, id="type Decimal128"),
+        pytest.param(BlobAlias, BYTES, id="type Binary"),
+        pytest.param(Span, DURATION, id="TypeAliasType Duration"),
+        pytest.param(Money, DECIMAL, id="TypeAliasType Decimal128"),
+        pytest.param(Blob, BYTES, id="TypeAliasType Binary"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("wrap", "shape"),
+    [
+        pytest.param(lambda t: t, lambda d: d, id="field"),
+        pytest.param(lambda t: Optional[t], _optional, id="Optional"),  # noqa: UP045
+        pytest.param(
+            lambda t: list[t],  # type: ignore[valid-type]
+            lambda d: {"type": "array", "items": d},
+            id="list",
+        ),
+        pytest.param(
+            lambda t: dict[str, t],  # type: ignore[valid-type]
+            lambda d: {"type": "object", "additionalProperties": d},
+            id="dict",
+        ),
+    ],
+)
+def test_an_alias_of_a_neolith_form_is_admitted(
+    alias: object,
+    described: dict[str, Any],
+    wrap: Callable[[object], object],
+    shape: Callable[[dict[str, Any]], dict[str, Any]],
+) -> None:
+    # Pydantic adds a reference to an alias's node, which any node may carry.
+    assert _field(wrap(alias)) == shape(described)
