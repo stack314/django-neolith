@@ -25,7 +25,7 @@ The context travels in headers. The calling app's credential travels in `Authori
 | `traceparent` | The trace identifier, per W3C Trace Context |
 | `Neolith-Timeout` | The remaining time budget, in whole milliseconds |
 
-The deadline is sent as a relative budget, not an absolute time, so that hosts do not depend on synchronised clocks. The receiving host computes its own local deadline from the budget when the request arrives.
+The deadline is sent as a relative budget, not an absolute time, so that the deadline does not depend on synchronised clocks. The receiving host computes its own local deadline from the budget when the request arrives.
 
 ## Errors
 
@@ -57,17 +57,19 @@ A connector takes the kind from the body only, never from the status. A non-succ
 
 Two identities cross with a call ([ADR 0010](../docs/adr/0010-pluggable-principal-resolution.md)): the calling app, which the provider's host authenticates, and an optional principal on whose behalf the calling app calls, which the calling app asserts. A *backend* is the part of the provider's host that resolves a call's credentials into the calling app and checks the principal. Other backends, such as one built on mutual TLS or OIDC, can carry both differently. This section fixes the carriage of the shared-secret backend, which every implementation supports.
 
+A host with several backends tries them in a configured order. The first that recognizes a call's credentials decides, by resolving them or refusing the call, and a backend that does not recognize them abstains.
+
 Base64url-encoded values here use the base64url alphabet only (RFC 4648, section 5), with no padding, no whitespace and zero unused bits. JSON objects here are I-JSON (RFC 7493), so a duplicate member name or a lone surrogate makes one invalid, and integers are JSON numbers with no fraction or exponent, within ±(2^53 − 1).
 
-The provider's host authenticates the calling app before it reads anything else of the request. A call whose credential is missing or does not resolve, or that reaches a host with no backend, fails with `unauthenticated`. In-process there is no credential: the host knows the calling app.
+The provider's host authenticates the calling app before it reads anything else of the request. A call whose credential is missing, is recognized by no backend or does not resolve, or that reaches a host with no backend, fails with `unauthenticated`. In-process there is no credential: the host knows the calling app.
 
 ### The principal
 
 A *principal object* is a JSON object with exactly the members `issuer` and `subject`, both non-empty strings, and optionally `claims`, an object whose values are strings, integers, booleans or lists of strings. An absent `claims` is the same as an empty one. Two principals are equal when their members are equal, with strings compared code point by code point and without Unicode normalization, and lists compared in order. A subject is unique only within its issuer, so code that stores a principal stores both.
 
-`Neolith-Principal` carries a principal object, base64url-encoded, in at most 4096 bytes. It is present exactly when the call has a principal. A header that is present but is not a principal object, encoded as above, fails the call with `invalid_argument`, after the calling app has been authenticated.
+`Neolith-Principal` carries a principal object, base64url-encoded, in at most 4096 bytes. It is present exactly when the call has a principal. A header that is present but is not a principal object, encoded as above, fails the call with `invalid_argument`, once the calling app has been authenticated and found on the allow-list below.
 
-The principal is not signed: the authenticated calling app asserts it. Which calling apps a provider accepts that assertion from is not fixed yet ([ADR 0017](../docs/adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md), Proposed).
+The principal is not signed: the authenticated calling app asserts it, and it never goes inside the shared-secret token. A provider accepts `Neolith-Principal` only from a calling app on its allow-list of apps that may assert a principal. A call from any other calling app that carries the header fails with `permission_denied`, whatever the header holds. A later backend can carry a signed delegation token in this header instead of the bare assertion.
 
 For example, the principal `{"issuer":"https://id.example.com","subject":"u-81f3","claims":{"roles":["clerk"]}}` is sent as:
 
@@ -77,7 +79,7 @@ Neolith-Principal: eyJpc3N1ZXIiOiJodHRwczovL2lkLmV4YW1wbGUuY29tIiwic3ViamVjdCI6I
 
 ### Shared-secret tokens
 
-The shared-secret token is for development only. An implementation supports it on both the caller's and the provider's side, and enables it only when configured to. A calling app's secret is held by that app and by every provider it calls, and any holder can mint tokens for that app. A token is a bearer token: anyone who sees one can call as the calling app, and assert any principal, until the provider stops accepting it. RFC 6750, section 5.3, requires TLS for bearer tokens. Development setups often use plain HTTP on a private network, and anyone who can watch that network can replay a token.
+The shared-secret token is for development only. An implementation supports it on both the caller's and the provider's side, and enables it only when configured to. A calling app's secret is held by that app and by every provider it calls, and any holder can mint tokens for that app. A token is a bearer token: anyone who sees one can call as the calling app until the provider stops accepting it, and assert any principal wherever that app is on the allow-list. RFC 6750, section 5.3, requires TLS for bearer tokens. Development setups often use plain HTTP on a private network, and anyone who can watch that network can replay a token.
 
 Each calling app has one or more secrets, each named by a key id that is a non-empty string, unique among that app's keys. More than one key lets a secret be replaced without downtime. A secret is at least 32 bytes (RFC 7518, section 3.2), generated at random (RFC 8725, section 3.5).
 
@@ -104,7 +106,7 @@ A token is valid only when all of these hold, with *now* the provider host's cur
 - `aud` is the identity of the contract in the request path;
 - `iat` < `exp` ≤ `iat` + 300, `iat` ≤ *now* + 60, and *now* < `exp` + 60.
 
-Any other token fails the call with `unauthenticated`. A caller can reuse a token for calls to the same contract while it is valid, so a provider does not refuse a token for having seen it before.
+Any other token fails the call with `unauthenticated`. The token identifies the calling app only; it never carries the end user. A caller can reuse a token for calls to the same contract while it is valid, so a provider does not refuse a token for having seen it before.
 
 The audience names the contract, which both sides know from the request path. It keeps a token from being used at another contract. It does not keep a token seen at one provider of a contract from being replayed at another provider of the same contract, such as the attached and detached providers of one app, until it stops being valid. With a shared secret, every provider that checks a calling app's tokens could also mint them.
 
@@ -116,7 +118,7 @@ For example, with the example secret `000102030405060708090a0b0c0d0e0f1011121314
 Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6Im5lb2xpdGgrand0Iiwia2lkIjoib3JkZXJzLTEifQ.eyJpc3MiOiJvcmRlcnMiLCJhdWQiOiJpbnZlbnRvcnkudjEiLCJpYXQiOjE3NjcyMjU2MDAsImV4cCI6MTc2NzIyNTkwMH0.AhMk-cm_SInC6ek-6CLP8pN7ciQFHuGb-i2MSGu3efU
 ```
 
-These rules become requirements, with IDs and tests, with the HTTP transport in roadmap step 5.
+These rules become requirements, with IDs and tests, with the HTTP transport in roadmap step 5 (#12). The allow-list joins the app declaration in step 4 (#11).
 
 ## Health
 
