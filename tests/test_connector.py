@@ -3,8 +3,7 @@
 A connector mirrors its contract's actions and sends each call that passes the
 caller's request check to its one provider, once. The in-process transport runs
 the action in the caller's thread and carries the request and the reply as JSON
-text. Until the provider's host delivers errors (#10 task 5), every failure on
-the provider's side reaches the caller as ``internal``.
+text. How errors cross is tested in ``test_error_delivery.py``.
 """
 
 import contextvars
@@ -35,7 +34,7 @@ from neolith import (
     contract,
     implements,
 )
-from neolith._connector import Connector, InProcess
+from neolith._connector import Connector, Failure, InProcess
 from neolith._contracts import Action
 from tests.test_contract_round_trip import _HYPOTHESIS, _TYPES, _name, _records
 from tests.test_crossing import _shared
@@ -288,11 +287,11 @@ class Counting:
 
 
 def _unavailable(action: Action, request: bytes) -> bytes | None:
-    raise ContractError("unavailable", "no provider could be reached")
+    raise Failure("unavailable", "no provider could be reached")
 
 
 def _timeout(action: Action, request: bytes) -> bytes | None:
-    raise ContractError("timeout", "the deadline passed")
+    raise Failure("timeout", "the deadline passed")
 
 
 @pytest.mark.spec("TRN-17", "TRN-8", "CON-4")
@@ -422,17 +421,13 @@ def _raises(error: BaseException) -> Callable[[Reserve], object]:
     [
         Secret("password=hunter2"),
         ValueError("bad"),
-        ContractError("not_found", "no such order"),
-        ContractError("out_of_stock", "none left", OutOfStock(sku="a")),
         ContractError("unavailable", "an implementation may not raise this"),
     ],
-    ids=["own exception", "builtin", "standard kind", "declared kind", "unavailable"],
+    ids=["own exception", "builtin", "unavailable"],
 )
 def test_an_exception_from_the_action_reaches_the_caller_as_internal(
     error: Exception, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # Until the provider's host delivers errors (#10 task 5), every failure of
-    # the action fails closed, as internal.
     with (
         caplog.at_level(logging.ERROR, logger="neolith"),
         pytest.raises(ContractError) as raised,
@@ -617,20 +612,8 @@ def test_a_failing_log_does_not_carry_the_failure_to_the_caller(side: str) -> No
 
 
 @pytest.mark.spec("TRN-3")
-def test_a_transport_error_with_a_detail_fails_closed_until_errors_are_delivered() -> (
-    None
-):
-    def out_of_stock(action: Action, request: bytes) -> bytes | None:
-        raise ContractError("out_of_stock", "none left", OutOfStock(sku="a"))
-
-    with pytest.raises(ContractError) as raised:
-        Connector(Inventory, Counting(out_of_stock)).reserve(_reserve())
-    _assert_internal(raised)
-
-
-@pytest.mark.spec("TRN-3")
 def test_a_transport_error_reaches_the_caller_as_a_new_error() -> None:
-    sent = ContractError("unavailable", "no provider could be reached")
+    sent = Failure("unavailable", "no provider could be reached")
     sent.add_note("transport detail")
 
     def unavailable(action: Action, request: bytes) -> bytes | None:
@@ -638,7 +621,6 @@ def test_a_transport_error_reaches_the_caller_as_a_new_error() -> None:
 
     with pytest.raises(ContractError) as raised:
         Connector(Inventory, Counting(unavailable)).reserve(_reserve())
-    assert raised.value is not sent
     assert (raised.value.kind, raised.value.message) == (sent.kind, sent.message)
     assert raised.value.__context__ is None
     assert getattr(raised.value, "__notes__", []) == []
