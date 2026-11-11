@@ -16,20 +16,42 @@ The obvious in-process transport just calls the implementation and returns its r
 
 ## Decision
 
-Option 3. Values cross as JSON bytes, in-process too.
+Option 3. Values cross as JSON text, in-process too.
 
-1. **Sending.** The sender dumps a value with the declared type's schema-built serializer (`__pydantic_serializer__`, with warnings as errors), never with a record's overridable methods such as `model_dump_json`. A value that is not an instance of the declared type is refused.
-2. **The check.** Each value is checked against the contract's published description (spec 01, CON-16) by a strict checker derived from that description. The checker adds no runtime dependency, and it is tested differentially against `jsonschema[format-nongpl]`, a development dependency.
-3. **Receiving.** The receiver runs the same check, ignoring unknown fields (CON-6, CON-7), then the declared type's schema-built validator (`__pydantic_validator__`). Callers and implementations get fresh contract-typed objects, never shared references. In-process the check runs once per value, since sender and receiver share it.
-4. **Failures.** A request that fails the check is `invalid_argument`, raised without dispatching the call, in both modes. A reply or an error detail that fails it is `internal` ([0008](0008-typed-contract-errors-in-both-modes.md) Decisions 2 and 3).
+1. **Sending.** The sender first checks that the value is an instance of exactly the declared type. The check is explicit, because the serializer does not refuse look-alikes: at the top level, pydantic-core serializes any object with the right attributes (`SerCheck::None`, `src/serializers/type_serializers/model.rs`). The sender then dumps the value to JSON text with the declared type's schema-built serializer (`__pydantic_serializer__`, with warnings as errors), never with a record's overridable methods such as `model_dump_json`. Values that the JSON dump would lose or change are refused before the dump, under the wire encodings of [0019](0019-wire-encodings-of-the-portable-forms.md): a non-finite number, a timestamp whose offset has seconds, a string outside its pattern.
+2. **The check.** Each value is checked against the contract's published description (spec 01, CON-16) by a strict checker derived from that description, with the patterns and ranges of 0019. The checker adds no runtime dependency.
+3. **Receiving.** The receiver ignores unknown fields (CON-6, CON-7) and runs the description check, then the declared type's schema-built validator (`__pydantic_validator__`). Callers and implementations get fresh contract-typed objects, never shared references. In-process the description check runs once per value, on the sending side: the receiver gets the very JSON text that passed it, and still ignores unknown fields and runs the validator.
+4. **Failures, in order.** The caller's side runs, in both modes:
+   1. a call with no context is a usage error ([0008](0008-typed-contract-errors-in-both-modes.md) Decision 6);
+   2. a request that is not an instance of exactly the declared type, that the serializer refuses, or that fails the check is a usage error too, not a `ContractError`: it is a bug in the calling code;
+   3. a remaining budget of zero or less fails with `timeout`;
+   4. the call is sent.
+
+   The provider's side runs:
+   1. authentication of the calling app and the principal (`unauthenticated`, `permission_denied`, [0010](0010-pluggable-principal-resolution.md));
+   2. the deadline (`timeout`);
+   3. the receive check (`invalid_argument`);
+   4. dispatch.
+
+   A neolith caller gets the same results in both modes, because its own checks run first. `invalid_argument` from the receive check reaches only a caller whose own checks did not run, such as a client that is not neolith. A reply or an error detail that fails the check is `internal` (0008 Decisions 2 and 3), apart from the detail of a kind the caller does not know, which arrives untyped (0008 Decision 5).
 
 Follows principles 5 (*same semantics over same mechanics*) and 8 (*one test suite over many code paths*).
 
 ## Consequences
 
 - Detach-breaking code fails in attached mode, during development.
-- The round-trip is always on. A round-trip only in tests would make attached production differ from what the tests ran.
+- The round-trip is always on. A round-trip only in tests would make attached production differ from what the tests ran. Akka takes the other path: it serializes local messages only when a test turns it on, and recommends that setting for tests only.
 - Each in-process call pays a serialization cost. Roadmap step 3 publishes it against a direct call (CONTRIBUTING K10). A per-contract escape hatch can be added later only if measurements justify it, and would need its own ADR.
-- The overridable methods of a record (`model_dump*`, `model_validate*`, custom serializers on the instance) cannot change what crosses.
-- The intended checker is a pydantic-core validator compiled from the description, using the patterns and ranges the description carries, so that the description is the single source of what is admitted.
-- A JSON Schema validator at run time was set aside. `jsonschema` brings `rpds-py`, a compiled dependency of every adopter (K5), and it skips `format` checks unless extras are installed, so a value could pass it that the description forbids.
+- The overridable methods of a record cannot change what crosses.
+- The intended checker is a pydantic-core validator compiled from the description, so that the description is the single source of what is admitted.
+- In step 3, `jsonschema[format-nongpl]`, a development dependency, checks the checker: the tests run it with a `FormatChecker`, since `format` alone is only an annotation (JSON Schema 2020-12, section 7.2.1). A duration needs 0019's pattern, as no format checker knows its form.
+- A JSON Schema validator at run time was set aside. `jsonschema` brings `rpds-py`, a compiled dependency of every adopter (K5), and it skips `format` checks unless extras are installed.
+- These rules are outline in spec 02. Their requirement IDs come with step 3 (#10).
+
+## References
+
+- Orleans [serialization](https://learn.microsoft.com/en-us/dotnet/orleans/host/configuration-guide/serialization): objects passed in grain calls are copied by default.
+- grpchan [`inprocgrpc`](https://pkg.go.dev/github.com/fullstorydev/grpchan/inprocgrpc): in-process gRPC copies messages so client and server never share them.
+- Temporal [sdk-java#3124](https://github.com/temporalio/sdk-java/issues/3124): local activity arguments are serialized even in the same process.
+- Akka [serialization, verification](https://doc.akka.io/libraries/akka-core/current/serialization.html): serializing local messages, for tests only.
+- [python-jsonschema, validating formats](https://python-jsonschema.readthedocs.io/en/stable/validate/#validating-formats): `FormatChecker` and the `format-nongpl` extra.
