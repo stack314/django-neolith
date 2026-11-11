@@ -14,9 +14,9 @@ configuration file the same way, before it loads any plugin, so write
 still taken for a path. As for ``--junitxml``, the plugin expands ``~`` and
 environment variables in PATH itself, since a shell does not expand ``~``
 after ``=``; ``scripts/spec_trace.py --report`` does the same. When the session
-starts, it empties the report, so a PATH that cannot be written is refused
-before any test runs, and a run that dies before the end leaves no earlier
-report behind. ``--help`` and ``--markers`` start no session and leave it alone.
+starts, it empties the report, so a PATH it cannot open for writing is refused
+before any test runs, and a run that dies after that leaves no earlier report
+behind. ``--help`` and ``--markers`` start no session and leave it alone.
 
 Outcomes:
 
@@ -56,16 +56,16 @@ def pytest_configure(config: pytest.Config) -> None:
 
 
 def _emptied(value: str) -> Path:
-    """The report's absolute path, emptied; a usage error if it can't be written.
+    """The report's absolute path, emptied; a usage error if it can't be opened.
 
-    ``..`` is left for the system to resolve, as ``spec_trace.py`` leaves it.
+    ``..`` is left for the system to resolve, as ``spec_trace.py`` leaves it,
+    and no directory is created.
     """
     expanded = os.path.expanduser(os.path.expandvars(value))
-    if not expanded or expanded.endswith(("/", os.sep)):
+    if os.path.basename(expanded) in ("", ".", ".."):
         raise pytest.UsageError(f"--spec-report needs a file path, not {value!r}")
     path = Path(expanded).absolute()
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("", encoding="utf-8")
     except OSError as error:
         raise pytest.UsageError(

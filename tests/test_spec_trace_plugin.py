@@ -181,30 +181,49 @@ def test_no_report_without_the_option(pytester: pytest.Pytester) -> None:
     assert not (pytester.path / "report.json").exists()
 
 
-@pytest.mark.parametrize(
-    "value", ["~/reports/report.json", "$REPORTS/reports/report.json"]
-)
+@pytest.mark.parametrize("value", ["~/report.json", "$REPORTS/report.json"])
 def test_home_and_variables_are_expanded(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, value: str
 ) -> None:
     # A shell does not expand "~" after "=", so the plugin does, as --junitxml
-    # does; the reports directory does not exist yet.
+    # does.
+    pytester.mkdir("home")
     monkeypatch.setenv("HOME", str(pytester.path / "home"))
     monkeypatch.setenv("REPORTS", str(pytester.path / "home"))
     pytester.makepyfile(
         "import pytest\n\n@pytest.mark.spec('CON-1')\ndef test_it(): pass\n"
     )
     pytester.runpytest(*ARGS, f"--spec-report={value}").assert_outcomes(passed=1)
-    report = json.loads((pytester.path / "home/reports/report.json").read_text())
+    report = json.loads((pytester.path / "home/report.json").read_text())
     assert list(report["tests"]) == ["test_home_and_variables_are_expanded.py::test_it"]
 
 
 @pytest.mark.parametrize(
     "value",
-    ["", "new/", ".", "sub", "afile/report.json", "x" * 300],
-    ids=["empty", "slash", "here", "directory", "under a file", "too long"],
+    [
+        "",
+        "new/",
+        "new/.",
+        "new/..",
+        ".",
+        "sub",
+        "afile/report.json",
+        "missing/report.json",
+        "x" * 300,
+    ],
+    ids=[
+        "empty",
+        "slash",
+        "dot",
+        "dot dot",
+        "here",
+        "directory",
+        "under a file",
+        "missing directory",
+        "too long",
+    ],
 )
-def test_a_path_that_cannot_be_written_is_refused_before_the_run(
+def test_a_path_that_cannot_be_opened_is_refused_before_the_run(
     pytester: pytest.Pytester, value: str
 ) -> None:
     pytester.mkdir("sub")
@@ -214,6 +233,11 @@ def test_a_path_that_cannot_be_written_is_refused_before_the_run(
     assert result.ret == pytest.ExitCode.USAGE_ERROR
     result.stderr.fnmatch_lines(["ERROR: --spec-report*"])
     result.stdout.no_fnmatch_line("*passed*")
+    assert sorted(path.name for path in pytester.path.iterdir()) == [
+        "afile",
+        "sub",
+        "test_a_path_that_cannot_be_opened_is_refused_before_the_run.py",
+    ]
 
 
 @pytest.mark.parametrize("option", ["--help", "--markers"])
@@ -226,7 +250,7 @@ def test_a_command_without_a_session_leaves_the_report_alone(
     assert (pytester.path / "report.json").read_text() == "earlier"
 
 
-def test_a_run_that_dies_leaves_no_earlier_report(
+def test_a_run_that_dies_in_the_session_leaves_no_earlier_report(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (pytester.path / "report.json").write_text('{"format": 1, "tests": {}}')
