@@ -1,6 +1,6 @@
 # 01. Contracts
 
-**Status:** draft. Identity, actions, the portable type system, publication and checking are specified. Errors are an outline that follows [ADR 0008](../docs/adr/0008-typed-contract-errors-in-both-modes.md). They are specified with their tests in the error tasks of roadmap step 2.
+**Status:** draft. Identity, actions, the portable type system, errors, publication and checking are specified. The error requirements follow [ADR 0008](../docs/adr/0008-typed-contract-errors-in-both-modes.md), and their tests come with roadmap steps 2 and 3.
 
 ## Identity and versioning
 
@@ -67,23 +67,31 @@ Every action's error set includes the standard kinds, whether declared or not:
 | Kind | Meaning | Retry safe |
 |---|---|---|
 | `invalid_argument` | The request failed validation | no |
+| `unauthenticated` | The caller cannot be identified: its credentials are missing or could not be verified | no |
 | `not_found` | A referenced entity does not exist | no |
-| `unauthenticated` | The call's credentials are missing or could not be verified | no |
-| `permission_denied` | The principal may not perform the action | no |
+| `permission_denied` | The caller, or the principal it calls for, may not perform the action | no |
 | `conflict` | The action conflicts with current state | no |
 | `unavailable` | No provider could be reached | yes, if idempotent |
-| `timeout` | The deadline passed before a reply arrived; the action may or may not have run | yes, if idempotent |
-| `internal` | The provider failed | no |
+| `timeout` | The deadline passed before the call ended; the action may or may not have run | yes, if idempotent |
+| `internal` | The provider failed, or a reply or error could not be read | no |
 
 **CON-8.** A contract MAY declare additional error kinds per action, each with a typed detail record. Error kinds are part of the contract and follow its compatibility rules.
 
-An error that crosses a contract carries its kind, a message and, for a declared kind, its detail record. In outline:
+**CON-22.** An error that crosses a contract MUST carry its kind and a message and, for a declared kind, its detail record.
 
-- Only hosts and transports produce `unavailable` and `timeout`. An implementation produces any other standard kind, or a kind its action declares.
-- An unexpected failure of an implementation, or an error whose kind is not in the action's error set, reaches the caller as `internal`. Its message is fixed and carries the trace identifier. Nothing of the original failure crosses.
-- An error that an implementation receives from one of its own outgoing calls, and does not handle, reaches its caller as `internal`. Passing it on is an explicit act of the implementation.
-- A caller whose version of the contract does not know a kind receives an error with that kind, and with its detail as an untyped value.
-- A mistake in the calling code, such as a call made with no call context, is not a contract error.
+Only hosts and transports produce `unavailable` and `timeout` ([02](02-transports.md)). A provider's action produces any other standard kind, or a kind the action declares.
+
+**CON-23.** A provider's host MUST deliver to the caller as `internal` any failure of an action that is not an error of the action's error set, and any error of kind `unavailable` or `timeout` that the action produces.
+
+**CON-24.** An `internal` error delivered under CON-23 or CON-25 MUST carry, as its message, fixed text with the call's trace identifier, and nothing of the original failure.
+
+**CON-25.** A provider's host MUST deliver to the caller as `internal` an error that an action received from one of its own outgoing calls and let end the action unchanged. Passing a nested error on is an explicit act: the action produces a new error of its own.
+
+**CON-26.** The provider's host SHOULD record the original failure with the call's trace identifier.
+
+**CON-27.** A connector MUST deliver an error of a kind that its version of the contract does not know, with that kind and with its detail as an untyped value.
+
+**CON-28.** A mistake in the calling code, such as a call to an action the contract does not have, MUST NOT be reported as a contract error.
 
 Decision record: [0008](../docs/adr/0008-typed-contract-errors-in-both-modes.md).
 
