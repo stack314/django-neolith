@@ -108,7 +108,7 @@ How transports and the provider's host produce errors becomes requirements toget
 - Only hosts and transports produce `unavailable` and `timeout`. A provider's action produces any other standard kind, or a kind the action declares.
 - A failure of a provider's action that is not an error of its error set, an `unavailable` or `timeout` that the action produces, and a failure of the provider's host itself reach the caller as `internal`. A signal to stop, such as cancellation or the process exiting, is not a failure of the action and is not converted. The `internal` error's message is fixed text with the trace identifier, and nothing of the original failure crosses. The provider's host records the original with the trace identifier.
 - An error that a provider's action receives from one of its own outgoing calls, and lets end the action, reaches its caller as `internal`. Passing a nested error on takes a new error produced by the action.
-- A call whose principal cannot be resolved, or cannot be sent as a valid bare assertion ([03](03-http-transport.md)), fails at the caller with `internal` before it is sent ([ADR 0017](../docs/adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md), Decision 1). The message is the same fixed text with the trace identifier, and the caller's host records the cause with it.
+- A call can also fail with `internal` at the caller, over its principal, at the step [ADR 0017](../docs/adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md) Decision 9 gives. The message is the same fixed text with the trace identifier, and the caller's host records the cause with it.
 
 Decision record: [0008](../docs/adr/0008-typed-contract-errors-in-both-modes.md).
 
