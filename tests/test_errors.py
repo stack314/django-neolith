@@ -15,7 +15,7 @@ import re
 import sys
 import types
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Protocol, TypedDict, cast
 from uuid import UUID
@@ -1134,7 +1134,7 @@ def _copy_function(function: Callable[..., Any]) -> Callable[..., Any]:
     return copied
 
 
-# A detail record travels within the untyped bounds (CON-31)
+# Detail records: refused at declaration or built, never refused at raise
 
 
 class Items(BaseModel):
@@ -1145,49 +1145,75 @@ class Count(BaseModel):
     n: int
 
 
-class Ratio(BaseModel):
-    r: float
-
-
-class Label(BaseModel):
-    text: str
-
-
-@pytest.mark.spec("CON-31")
-@pytest.mark.parametrize(
-    ("detail", "problem"),
-    [
-        pytest.param(Items(items=list(range(10_000))), "10000 values", id="size"),
-        pytest.param(Count(n=2**53), "integer range", id="above"),
-        pytest.param(Count(n=-(2**53)), "integer range", id="below"),
-        pytest.param(Count(n=10**5000), "", id="huge"),
-        pytest.param(Label(text="\ud800"), "JSON", id="surrogate"),
-        pytest.param(Count.model_construct(n=b"x"), "JSON", id="off-type"),
-    ],
-)
-def test_detail_record_travels_within_the_untyped_bounds(
-    detail: BaseModel, problem: str
-) -> None:
-    with pytest.raises(TypeError, match=f"can hold untyped, but .*{problem}"):
-        ContractError("refused", "text", detail)
-
-
-@pytest.mark.spec("CON-31")
 @pytest.mark.parametrize(
     "detail",
     [
-        Items(items=list(range(9_999))),
-        Count(n=2**53 - 1),
-        Count(n=-(2**53 - 1)),
-        Ratio(r=1e308),
-        Label(text="\U0001f600"),
+        Items(items=list(range(20_000))),
+        Count(n=2**63 - 1),
+        Count.model_construct(n=b"x"),
     ],
-    ids=["size", "above", "below", "large-float", "astral"],
+    ids=["size", "int64", "off-type"],
 )
-def test_detail_record_at_the_untyped_bounds_is_accepted(detail: BaseModel) -> None:
-    error = ContractError("accepted", "text", detail)
-    assert error.data is detail
-    ContractError("accepted", "text", detail.model_dump(mode="json"))
+def test_record_detail_is_held_as_given(detail: BaseModel) -> None:
+    # Whether its value travels within CON-30 is checked as it is sent (CON-31,
+    # step 3), so raising a valid record never fails here.
+    assert ContractError("held", "text", detail).data is detail
+
+
+_EDGES: list[tuple[str, object, object]] = [
+    ("bool", bool, True),
+    ("int", int, -(2**63)),
+    ("float", float, float("inf")),
+    ("float-nan", float, float("nan")),
+    ("str", str, "\U0001f600"),
+    ("timestamp", AwareDatetime, datetime(1, 1, 1, tzinfo=UTC)),
+    ("date", date, date.max),
+    ("duration", timedelta, timedelta.max),
+]
+
+
+@pytest.mark.spec("CON-24")
+@pytest.mark.parametrize(
+    ("annotation", "value"),
+    [pytest.param(a, v, id=i) for i, a, v in _EDGES],
+)
+def test_every_admitted_scalar_builds_at_its_edges(
+    annotation: object, value: object
+) -> None:
+    edge = type("Edge", (BaseModel,), {"__annotations__": {"v": annotation}})
+    declared = _declare({"edge": edge})
+    record = declared.actions["place"].errors["edge"](v=value)
+    ContractError("edge", "text", record)
+
+
+@pytest.mark.spec("CON-32", "CON-17")
+@pytest.mark.parametrize(
+    "annotation",
+    [bytes, list[bytes], dict[str, bytes], bytes | None, "Nested"],
+    ids=["bytes", "list", "map", "optional", "nested-record"],
+)
+def test_bytes_in_a_detail_record_is_refused_at_declaration(annotation: object) -> None:
+    inner = type("Blob", (BaseModel,), {"__annotations__": {"raw": bytes}})
+    field = inner if annotation == "Nested" else annotation
+    detail = type("Checksum", (BaseModel,), {"__annotations__": {"v": field}})
+    with pytest.raises(ContractDefinitionError, match="uses bytes") as caught:
+        _declare({"bad_checksum": detail})
+    assert str(caught.value).startswith(
+        "orders.v1, action 'place', error 'bad_checksum': "
+    )
+
+
+@pytest.mark.spec("CON-32")
+def test_bytes_stay_admitted_in_requests_and_replies() -> None:
+    blob = type("Blob", (BaseModel,), {"__annotations__": {"raw": bytes}})
+
+    def place(self: object, request: Ping) -> None: ...
+
+    place.__annotations__["request"] = blob
+    declared = types.new_class(
+        "Orders", (Protocol,), exec_body=lambda ns: ns.update({"place": action(place)})
+    )
+    contract("orders.v1")(declared)
 
 
 def _chain(depth: int, fields: int) -> type[BaseModel]:

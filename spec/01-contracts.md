@@ -93,7 +93,9 @@ An action's *error set* is the standard kinds below, which every action has whet
 
 **CON-30.** An untyped map MUST hold only text keys and values that are untyped maps, lists, text, booleans, null, integers from −(2^53−1) to 2^53−1 or finite numbers, nested at most 32 levels deep, the outermost map being the first, and holding at most 10,000 values in all, counting every map value and list item at every depth, with each occurrence of a repeated value counted separately. Its text is Unicode text, as in CON-25. The integer range is the one every JSON reader holds exactly (I-JSON, RFC 7493, section 2.2), narrower than the 64-bit portable integer.
 
-**CON-31.** The value of a detail record, as it travels, MUST meet the bounds of an untyped map (CON-30), so that a caller that does not know its kind can hold it (CON-28). CON-24 makes the depth bound hold for every value of a detail record; the other bounds depend on the value.
+**CON-31.** The value of a detail record, as it travels, MUST meet the bounds of an untyped map (CON-30), so that a caller that does not know its kind can hold it (CON-28). CON-24 makes the depth bound hold for every value of a detail record; the other bounds depend on the value, so the provider's host checks them as it sends the error.
+
+**CON-32.** Until the encoding of bytes is settled with the in-process transport (step 3 of the [roadmap](../docs/roadmap.md), issue #10), an implementation MUST reject a contract whose detail record uses bytes, before it serves the contract or calls any of its actions, since whether such a detail travels within CON-30 depends on that encoding. The rejection names the contract, the action and the error kind.
 
 **CON-29.** A mistake in the calling code, such as a call to an action the contract does not have, MUST NOT be reported as a contract error. It reports a bug in the calling code, not the outcome of a call, so code that handles contract errors does not swallow it.
 

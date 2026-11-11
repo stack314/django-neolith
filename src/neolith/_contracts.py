@@ -21,7 +21,6 @@ declaration.
 import copy
 import functools
 import inspect
-import json
 import math
 import re
 import types
@@ -218,18 +217,6 @@ def _private_copy(value: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
     return top, None
 
 
-def _record_problem(record: BaseModel) -> str | None:
-    """Say why a detail record's JSON breaks CON-30, or return None."""
-    try:
-        sent = json.loads(record.model_dump_json(warnings="error"))
-    except Exception as error:  # a serializer error, or an author's serializer
-        return f"it cannot be written as JSON ({type(error).__name__})"
-    copied, problem = _private_copy(sent)
-    if problem is None:
-        problem = json_value_problem(copied, _UNTYPED_DEPTH, SAFE_INTEGERS)
-    return problem
-
-
 def _freeze(value: object) -> object:
     """A frozen copy of a private, checked JSON value (at most 32 levels deep)."""
     if type(value) is dict:
@@ -325,15 +312,10 @@ class ContractError(Exception):
                 )
             data = typing.cast(_FrozenMap, _freeze(copied))
         elif issubclass(type(data), BaseModel):
-            # CON-31: what the record sends must be a detail that a caller
-            # who does not know the kind can hold (CON-30). The record itself
-            # is held as given.
-            problem = _record_problem(typing.cast(BaseModel, data))
-            if problem is not None:
-                raise TypeError(
-                    f"the detail record of a {kind!r} error must travel as a "
-                    f"detail a caller can hold untyped, but {problem}"
-                )
+            # Held as given. Whether its value travels within CON-30 (CON-31)
+            # depends on the wire encoding, so the provider's host checks it as
+            # it sends the error (step 3); a valid record never fails here.
+            pass
         elif data is not None:
             raise TypeError(
                 f"a {kind!r} error carries its detail record, or, for a kind the "
@@ -580,6 +562,12 @@ def contract[T](identity: str, /) -> Callable[[type[T]], type[T]]:
             for kind, detail in _declared_kinds(where, declared):
                 portable.where = f"{where}, error {kind!r}"
                 errors[kind], error_refs[kind] = portable.root(detail, "detail")
+                if _uses_bytes(portable.defs, error_refs[kind]):
+                    raise portable.fail(
+                        f"detail record {errors[kind].__name__} uses bytes, whose "
+                        "encoding the in-process transport settles (step 3, "
+                        "#10); until then a detail record cannot use bytes"
+                    )
                 if _nests_deeper(portable.defs, error_refs[kind], _UNTYPED_DEPTH):
                     raise portable.fail(
                         f"detail record {errors[kind].__name__} can nest maps and "
@@ -781,6 +769,31 @@ def _carries_mark(value: object) -> bool:
         wrapped = inspect.getattr_static(item, "__wrapped__", None)
         if wrapped is not None:
             pending.append(wrapped)
+    return False
+
+
+def _uses_bytes(defs: Mapping[str, Any], schema: Mapping[str, Any]) -> bool:
+    """True if the description of ``schema`` reaches bytes; each record read once."""
+    pending: list[Any] = [schema]
+    read: set[str] = set()
+    while pending:
+        node = pending.pop()
+        if not isinstance(node, Mapping):
+            continue
+        if node.get("type") == "string" and node.get("format") == "binary":
+            return True
+        ref = node.get("$ref")
+        if isinstance(ref, str):
+            name = ref.rsplit("/", 1)[-1]
+            if name not in read:
+                read.add(name)
+                pending.append(defs[name])
+            continue
+        pending.extend(node.get("properties", {}).values())
+        pending.extend(node.get("anyOf", []))
+        pending.extend(
+            node[key] for key in ("items", "additionalProperties") if key in node
+        )
     return False
 
 
