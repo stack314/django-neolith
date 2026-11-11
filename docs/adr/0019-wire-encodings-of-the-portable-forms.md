@@ -43,7 +43,7 @@ Follows principles 8 (*one test suite over many code paths*) and 11 (*specificat
 - Until #10 task 1, spec 01 describes the encodings as future, and the implementation keeps refusing decimals under CON-21 and bytes in a detail record under CON-32.
 - The idempotency-key derivation of [0017](0017-call-context-explicit-at-the-action-ambient-for-propagation.md) hashes a request's wire form, so it relies on these encodings, I-JSON bodies especially.
 - A duration in Python's default ISO 8601 form (`PT1.5S`), or written `1.5s`, is refused; its form is `1.500s`.
-- Pydantic's default serializer writes bytes as UTF-8 text, a duration as `PT1.5S`, and some decimals with an exponent (`0.0000001` as `1E-7`, `0.00000000` as `0E-8`). No conversion of a duration or of those decimals before the dump changes that, so their forms come from the schema the serializer is built from, through a type or setting neolith provides; the bytes form can come from it too, through `ser_json_bytes`. Which one changes the public API, and is an open design point on #10.
+- Pydantic's default serializer writes bytes as UTF-8 text, a duration as `PT1.5S`, and with an exponent a decimal that is nonzero and below 0.000001 in magnitude, or zero with more than 6 fractional digits (`0.0000001` as `1E-7`, `0.0000000` as `0E-7`). No conversion of a duration or of those decimals before the dump changes that, so their forms come from the schema the serializer is built from, through a type or setting neolith provides; the bytes form can come from it too, through `ser_json_bytes` and, for reading, `val_json_bytes`, since the default validator reads `"-_8="` as those four bytes. Which one changes the public API, and is an open design point on #10.
 
 ## References
 
