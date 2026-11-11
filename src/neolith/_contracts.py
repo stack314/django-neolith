@@ -21,6 +21,8 @@ declaration.
 import copy
 import functools
 import inspect
+import json
+import math
 import re
 import types
 import typing
@@ -30,7 +32,13 @@ from typing import Annotated, Any, NoReturn, Protocol, final, overload
 
 from pydantic import BaseModel
 
-from neolith._portable import Portable, json_value_problem, shown, text_problem
+from neolith._portable import (
+    SAFE_INTEGERS,
+    Portable,
+    json_value_problem,
+    shown,
+    text_problem,
+)
 
 __all__ = [
     "Action",
@@ -210,6 +218,18 @@ def _private_copy(value: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
     return top, None
 
 
+def _record_problem(record: BaseModel) -> str | None:
+    """Say why a detail record's JSON breaks CON-30, or return None."""
+    try:
+        sent = json.loads(record.model_dump_json(warnings="error"))
+    except Exception as error:  # a serializer error, or an author's serializer
+        return f"it cannot be written as JSON ({type(error).__name__})"
+    copied, problem = _private_copy(sent)
+    if problem is None:
+        problem = json_value_problem(copied, _UNTYPED_DEPTH, SAFE_INTEGERS)
+    return problem
+
+
 def _freeze(value: object) -> object:
     """A frozen copy of a private, checked JSON value (at most 32 levels deep)."""
     if type(value) is dict:
@@ -297,14 +317,24 @@ class ContractError(Exception):
             # Copy first, then check the copy, which nothing else can change.
             copied, problem = _private_copy(data)
             if problem is None:
-                problem = json_value_problem(copied, _UNTYPED_DEPTH)
+                problem = json_value_problem(copied, _UNTYPED_DEPTH, SAFE_INTEGERS)
             if problem is not None:
                 raise TypeError(
                     f"the untyped detail of a {kind!r} error is a dict of JSON "
                     f"values, but {problem}"
                 )
             data = typing.cast(_FrozenMap, _freeze(copied))
-        elif data is not None and not issubclass(type(data), BaseModel):
+        elif issubclass(type(data), BaseModel):
+            # CON-31: what the record sends must be a detail that a caller
+            # who does not know the kind can hold (CON-30). The record itself
+            # is held as given.
+            problem = _record_problem(typing.cast(BaseModel, data))
+            if problem is not None:
+                raise TypeError(
+                    f"the detail record of a {kind!r} error must travel as a "
+                    f"detail a caller can hold untyped, but {problem}"
+                )
+        elif data is not None:
             raise TypeError(
                 f"a {kind!r} error carries its detail record, or, for a kind the "
                 "receiver does not know, an untyped dict of the detail's fields or "
@@ -760,32 +790,40 @@ def _nests_deeper(
     """True if a value the description admits can nest deeper than ``limit``.
 
     Reads the description the contract publishes: each object (a record or a
-    map) and each array is one level. A record that refers back to itself
-    admits values of any depth. Stops as soon as the limit is passed.
+    map) and each array is one level. The height of each record is worked out
+    once, so the cost grows with the description, not with how often a record
+    is reused. A record that refers back to itself admits values of any depth.
     """
+    heights: dict[str, float] = {}
+    open_records: set[str] = set()
 
-    def deeper(node: Mapping[str, Any], level: int, refs: frozenset[str]) -> bool:
-        if level > limit:
-            return True
+    def record(name: str) -> float:
+        if name in heights:
+            return heights[name]
+        if name in open_records:
+            return math.inf
+        open_records.add(name)
+        found = height(defs[name])
+        open_records.discard(name)
+        heights[name] = found
+        return found
+
+    def height(node: Mapping[str, Any]) -> float:
         ref = node.get("$ref")
         if isinstance(ref, str):
-            name = ref.rsplit("/", 1)[-1]
-            return name in refs or deeper(defs[name], level, refs | {name})
-        if node.get("type") in ("object", "array"):
-            level += 1
-            if level > limit:
-                return True
+            return record(ref.rsplit("/", 1)[-1])
         children: list[Any] = [
             *node.get("properties", {}).values(),
             *node.get("anyOf", []),
             *(node[key] for key in ("items", "additionalProperties") if key in node),
         ]
-        return any(
-            isinstance(child, Mapping) and deeper(child, level, refs)
-            for child in children
+        below = max(
+            (height(child) for child in children if isinstance(child, Mapping)),
+            default=0,
         )
+        return below + (1 if node.get("type") in ("object", "array") else 0)
 
-    return deeper(schema, 0, frozenset())
+    return height(schema) > limit
 
 
 def _parse_identity(identity: object) -> tuple[str, int]:

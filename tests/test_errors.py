@@ -190,7 +190,7 @@ def test_other_kind_carries_its_detail_record(kind: str) -> None:
         {},
         {"sku": "A1", "available": 0},
         {"nested": {"list": [1, 2.5, "x", True, None, {"deep": []}]}},
-        {"edges": [2**63 - 1, -(2**63), -1.5e300, "￿", "\U0001f600"]},
+        {"edges": [2**53 - 1, -(2**53 - 1), -1.5e300, "￿", "\U0001f600"]},
     ],
 )
 def test_other_kind_carries_an_untyped_map(data: dict[str, Any]) -> None:
@@ -267,8 +267,8 @@ def _nest(levels: int) -> dict[str, Any]:
         {"kind": Kind.CONFLICT},
         {"list": _Map(sku="A1")},
         {"record": OutOfStock(sku="A1", available=0)},
-        {"big": 2**63},
-        {"small": [-(2**63) - 1]},
+        {"big": 2**53},
+        {"small": [-(2**53)]},
         {"huge": 10**5000},
         {"text": "\ud800"},
         {"\udc00": 1},
@@ -290,8 +290,8 @@ def _nest(levels: int) -> dict[str, Any]:
         "str-enum",
         "dict-subclass",
         "record",
-        "int64-above",
-        "int64-below",
+        "safe-integer-above",
+        "safe-integer-below",
         "huge-int",
         "surrogate-value",
         "surrogate-key",
@@ -960,13 +960,17 @@ def test_subclass_cannot_get_around_the_refusal() -> None:
 
 
 def test_repr_of_a_record_detail_never_raises() -> None:
-    class Huge(BaseModel):
+    class Odd(BaseModel):
         n: int
 
-    error = ContractError("too_big", "text", Huge(n=10**5000))
-    assert repr(error).startswith("ContractError('too_big', 'text', data=<")
-    assert repr(error).endswith("Huge that cannot be shown>)")
-    assert len(repr(error)) < 1100
+        def __repr__(self) -> str:
+            raise RuntimeError("no repr")
+
+    error = ContractError("odd", "text", Odd(n=1))
+    assert repr(error) == (
+        "ContractError('odd', 'text', data=<test_repr_of_a_record_detail_never_"
+        "raises.<locals>.Odd that cannot be shown>)"
+    )
 
 
 def test_unbuilt_error_has_a_safe_str_and_repr() -> None:
@@ -1128,3 +1132,79 @@ def _copy_function(function: Callable[..., Any]) -> Callable[..., Any]:
     )
     copied.__annotations__ = dict(function.__annotations__)
     return copied
+
+
+# A detail record travels within the untyped bounds (CON-31)
+
+
+class Items(BaseModel):
+    items: list[int]
+
+
+class Count(BaseModel):
+    n: int
+
+
+class Ratio(BaseModel):
+    r: float
+
+
+class Label(BaseModel):
+    text: str
+
+
+@pytest.mark.spec("CON-31")
+@pytest.mark.parametrize(
+    ("detail", "problem"),
+    [
+        pytest.param(Items(items=list(range(10_000))), "10000 values", id="size"),
+        pytest.param(Count(n=2**53), "integer range", id="above"),
+        pytest.param(Count(n=-(2**53)), "integer range", id="below"),
+        pytest.param(Count(n=10**5000), "", id="huge"),
+        pytest.param(Label(text="\ud800"), "JSON", id="surrogate"),
+        pytest.param(Count.model_construct(n=b"x"), "JSON", id="off-type"),
+    ],
+)
+def test_detail_record_travels_within_the_untyped_bounds(
+    detail: BaseModel, problem: str
+) -> None:
+    with pytest.raises(TypeError, match=f"can hold untyped, but .*{problem}"):
+        ContractError("refused", "text", detail)
+
+
+@pytest.mark.spec("CON-31")
+@pytest.mark.parametrize(
+    "detail",
+    [
+        Items(items=list(range(9_999))),
+        Count(n=2**53 - 1),
+        Count(n=-(2**53 - 1)),
+        Ratio(r=1e308),
+        Label(text="\U0001f600"),
+    ],
+    ids=["size", "above", "below", "large-float", "astral"],
+)
+def test_detail_record_at_the_untyped_bounds_is_accepted(detail: BaseModel) -> None:
+    error = ContractError("accepted", "text", detail)
+    assert error.data is detail
+    ContractError("accepted", "text", detail.model_dump(mode="json"))
+
+
+def _chain(depth: int, fields: int) -> type[BaseModel]:
+    """Records ``depth`` deep, each with ``fields`` fields of the next one."""
+    record: type[BaseModel] = type(
+        "Leaf", (BaseModel,), {"__annotations__": {"n": int}}
+    )
+    for level in range(depth):
+        annotations = {f"f{i}": record for i in range(fields)}
+        record = type(f"Level{level}", (BaseModel,), {"__annotations__": annotations})
+    return record
+
+
+@pytest.mark.spec("CON-24")
+def test_depth_check_is_linear_in_the_description() -> None:
+    # Two fields of the next record, 25 deep: 2**25 paths, 26 records. The
+    # check reads each record once; walking every path would take minutes.
+    _declare({"wide": _chain(25, 2)})
+    with pytest.raises(ContractDefinitionError, match="more than 32 levels"):
+        _declare({"deep": _chain(32, 2)})

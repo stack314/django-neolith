@@ -808,6 +808,9 @@ def portable_settings() -> frozenset[str]:
 
 # The portable integer is 64-bit (spec 01, the portable type system).
 _INT64 = range(-(2**63), 2**63)
+# Spec 01, CON-30: the integers of an untyped detail, those every JSON reader
+# holds exactly (I-JSON, RFC 7493, section 2.2).
+SAFE_INTEGERS = range(-(2**53 - 1), 2**53)
 # JSON's scalars, as the json module reads them. bool is a subclass of int,
 # so each is matched by exact type, never with isinstance.
 _JSON_SCALARS = frozenset({str, int, float, bool, type(None)})
@@ -840,11 +843,14 @@ def text_problem(text: str) -> str | None:
     return None
 
 
-def json_value_problem(value: object, max_depth: int | None = None) -> str | None:
+def json_value_problem(
+    value: object, max_depth: int | None = None, integers: range = _INT64
+) -> str | None:
     """Say why ``value`` is not a portable JSON value, or return None.
 
     Admitted: ``dict`` with ``str`` keys, ``list``, ``str`` without a lone
-    surrogate, ``int`` within 64 bits, finite ``float``, ``bool`` and ``None``,
+    surrogate, ``int`` in ``integers`` (64 bits unless given), finite
+    ``float``, ``bool`` and ``None``,
     each by exact type. With ``max_depth``, maps and lists nest at most that
     many levels, the outermost being the first. Walks without recursion, so a
     deep value cannot exhaust the stack, and refuses a value that contains
@@ -863,8 +869,9 @@ def json_value_problem(value: object, max_depth: int | None = None) -> str | Non
                 problem = text_problem(cast(str, item))
                 if problem is not None:
                     return problem
-            elif kind is int and item not in _INT64:
-                return f"it holds {shown(item)}, outside the 64-bit integer range"
+            elif kind is int and item not in integers:
+                bound = "64-bit" if integers == _INT64 else f"±{integers.stop - 1}"
+                return f"it holds {shown(item)}, outside the {bound} integer range"
             elif kind is float and not math.isfinite(cast(float, item)):
                 return f"{shown(item)} is not a JSON number"
             continue
