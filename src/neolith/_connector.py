@@ -6,7 +6,12 @@ to a transport, which returns the reply's JSON text or raises a
 ``ContractError``. With the ``single`` routing policy a connector has one
 provider and sends each call to it once: it never retries and never falls back.
 
-The in-process transport runs the provider's action in the caller's thread. It
+The in-process transport runs the provider's action in the caller's thread, in
+a copy of the caller's context, so that what it sets in a context variable
+stays on its side. What the process shares, such as thread-local state, the
+warnings filters, logging and the exception the caller is handling, the action
+shares too, as a direct call would; the call context's own scope arrives with
+#10 task 6. It
 reads the request text with the declared request type, so the action gets a new
 value, and writes the reply with the declared reply type; the connector reads
 that text back, so caller and provider never share an object (ADR 0007).
@@ -19,6 +24,7 @@ exception that is not an ``Exception`` propagates unchanged.
 """
 
 import contextlib
+import contextvars
 import inspect
 import logging
 import types
@@ -44,8 +50,9 @@ class Transport(Protocol):
 
     ``call`` takes an action of ``contract`` and the request's JSON text,
     which passed the caller's request check, and returns the reply's JSON
-    text, or ``None`` for an action whose reply is empty. Every outcome that
-    is not a reply is a ``ContractError``.
+    text, or ``None`` for an action whose reply is empty. Every outcome of the
+    call that is not a reply is a ``ContractError``; an action of another
+    contract is a ``TypeError``, a mistake in the code that called it.
     """
 
     @property
@@ -126,7 +133,11 @@ class InProcess:
         """
         try:
             value = codec(self._contract, action.request).read(request)
-            reply = self._functions[action.name](self._implementation, value)
+            # In a copy of the caller's context, so that what the action sets
+            # in a context variable stays on the provider's side.
+            reply = contextvars.copy_context().run(
+                self._functions[action.name], self._implementation, value
+            )
             if action.reply is None:
                 if reply is not None:
                     raise TypeError(
@@ -137,11 +148,13 @@ class InProcess:
             return codec(self._contract, action.reply).write(reply, "the reply")
         except Exception as error:
             failure: BaseException = error
-        # Logged outside the handler, so a failing log does not chain to it.
+        # Logged outside the handler, so a failing log does not chain to it,
+        # then dropped, so its traceback does not keep the provider's frames.
         _report(
             f"{self._contract.identity}, action {action.name!r}: the provider failed",
             failure,
         )
+        del failure
         return _FAILED
 
 
@@ -152,7 +165,8 @@ class Connector:
     Each action of the contract is an attribute taking one request, by
     position or by the name the declaration gives it, and returning the
     reply, or ``None`` for an empty reply. Anything else is a mistake in the
-    calling code, so it raises ``AttributeError`` or ``TypeError``, never a
+    calling code, so it raises ``AttributeError``, ``TypeError`` or
+    ``ValueError`` (a request that fails the request check), never a
     ``ContractError``. A ``ContractError`` the caller gets is a new one,
     raised from the connector, so nothing else of the transport's crosses.
     """
@@ -259,6 +273,7 @@ class Connector:
         Never raises an ``Exception``, so the error the caller gets is built
         here, from the kind and message alone.
         """
+        what = "the transport failed"
         try:
             reply = self._transport.call(action, text)
         except ContractError as error:
@@ -267,6 +282,7 @@ class Connector:
             # A detail crosses as text with the host's error delivery (#10
             # task 5); until then, an error that carries one fails closed.
             failure: BaseException = error
+            what = "an error with a detail arrived"
         except Exception as error:
             failure = error
         else:
@@ -274,11 +290,9 @@ class Connector:
                 return None, "", self._read(action, reply)
             except Exception as error:
                 failure = error
-        _report(
-            f"{self._contract.identity}, action {action.name!r}: the reply "
-            "could not be read",
-            failure,
-        )
+                what = "the reply could not be read"
+        _report(f"{self._contract.identity}, action {action.name!r}: {what}", failure)
+        del failure
         return "internal", _INTERNAL, None
 
     def _read(self, action: Action, reply: object) -> BaseModel | None:

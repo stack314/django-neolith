@@ -53,7 +53,7 @@ A *connector* is what calling code holds to call one contract version. It runs t
 
 **TRN-15.** A connector MUST let its caller call each action of its contract version by name, with one request of the action's request type, and return the action's reply. A call to an action the contract version does not have, or with anything other than one request, is a mistake in the calling code (CON-29).
 
-**TRN-16.** A connector with the `single` policy MUST send each call that passes the caller's checks to its one provider exactly once.
+**TRN-16.** A connector with the `single` policy MUST NOT send a call more than once, or to any provider but its one.
 
 **TRN-17.** A reply that its provider cannot send under TRN-9 to TRN-11, or that the caller cannot read under TRN-12, MUST reach the caller as `internal`. That includes a reply to an action whose reply is empty, and a missing reply to one whose reply is not.
 

@@ -9,11 +9,13 @@ the provider's side reaches the caller as ``internal``.
 
 import contextvars
 import copy
+import gc
 import json
 import logging
 import pickle
 import threading
 import types
+import weakref
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Protocol, cast
@@ -224,7 +226,7 @@ _SEEN: contextvars.ContextVar[str] = contextvars.ContextVar("seen", default="uns
 
 
 @pytest.mark.spec("TRN-6")
-def test_the_action_runs_in_the_callers_thread_and_context() -> None:
+def test_the_action_runs_in_the_callers_thread_in_a_copy_of_its_context() -> None:
     seen: list[str] = []
 
     def reply(request: Reserve) -> Reserved:
@@ -244,8 +246,8 @@ def test_the_action_runs_in_the_callers_thread_and_context() -> None:
         caller, after = pool.submit(contextvars.copy_context().run, call).result()
     assert provider.threads == [caller]
     assert seen == ["set by the caller"]
-    # Same thread and same context: nothing runs elsewhere, as a direct call.
-    assert after == "set by the action"
+    # A copy of the caller's context: what the action sets stays with it.
+    assert after == "set by the caller"
 
 
 @pytest.mark.spec("TRN-6", "TRN-15")
@@ -551,7 +553,8 @@ def test_generated_values_cross_to_the_provider_and_back_unchanged(
 
 
 def _frames_hold(error: BaseException, held: list[object]) -> list[str]:
-    """Names of traceback frame locals that are, or hold, one of ``held``."""
+    """Names of traceback frame locals that are one of ``held``, or hold one
+    in a record, list or map."""
     found = []
     # The first frame is the test's own, which holds them on purpose.
     traceback = error.__traceback__.tb_next if error.__traceback__ else None
@@ -651,3 +654,35 @@ def test_an_unbuilt_connector_still_describes_itself() -> None:
     assert "reserve" not in dir(unbuilt)
     with pytest.raises(AttributeError, match="connector has no action 'reserve'"):
         unbuilt.reserve  # noqa: B018
+
+
+class Kept:
+    """An object only the action's frame holds."""
+
+
+@pytest.mark.spec("TRN-3")
+@pytest.mark.parametrize("where", ["action", "reply"])
+def test_a_failure_keeps_no_frame_of_the_provider_alive(where: str) -> None:
+    kept: list[weakref.ref[Kept]] = []
+
+    def reply(request: Reserve) -> object:
+        held = Kept()
+        kept.append(weakref.ref(held))
+        if where == "action":
+            raise Secret("x")
+        return {"ok": True}
+
+    # The test's log capture keeps each record's traceback, as a log may.
+    logger = logging.getLogger("neolith")
+    gc.collect()
+    gc.disable()
+    logger.disabled = True
+    try:
+        with pytest.raises(ContractError):
+            _connect(Recording(reply)).reserve(_reserve())
+        # Without the cyclic collector, a traceback kept in a frame would
+        # keep the action's frame, and so its objects, alive.
+        assert kept[0]() is None
+    finally:
+        logger.disabled = False
+        gc.enable()
