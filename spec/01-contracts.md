@@ -41,7 +41,7 @@ Each action is either idempotent or non-idempotent.
 
 The portable forms are the types that every transport can represent, JSON Schema and protobuf at least. They are:
 
-- scalars: boolean, integer (within ±(2^53 − 1)), number (a finite IEEE 754 double), string, bytes, decimal (at most 34 significant digits), timestamp (RFC 3339, with an offset from UTC), date, duration;
+- scalars: boolean, integer (64-bit), number (IEEE 754 double), string, bytes, decimal, timestamp (RFC 3339, so with an offset from UTC), date, duration;
 - `list<T>`;
 - `map<string, T>`;
 - `record`: named, ordered fields, each with a type and required/optional;
@@ -52,9 +52,9 @@ The portable forms are the types that every transport can represent, JSON Schema
 
 **CON-14.** A reply type MUST be either a record built only from the portable forms, or empty. An empty reply carries no value.
 
-The JSON encoding of each form follows [ADR 0019](../docs/adr/0019-wire-encodings-of-the-portable-forms.md). In outline: every encoded form has a pattern or a range in the description; an integer is a JSON number with no fraction or exponent; bytes are padded base64url; a number is finite; a decimal is a string with no exponent and its scale kept; a duration is written like `-1.5s`; a timestamp and a date follow RFC 3339 with years 0001 to 9999 and no leap second. These become requirements, with the description and validation that implement them, in roadmap step 3 (#10).
+[ADR 0019](../docs/adr/0019-wire-encodings-of-the-portable-forms.md) fixes the JSON encoding of each form. Its encodings take effect with roadmap step 3 (#10 task 1), which turns them into requirements here. From then on, in outline: every encoded form will have a pattern or a range in the description; integers will be limited to ±(2^53 − 1); bytes will be padded base64url; numbers will be finite; decimals will be admitted, as strings with no exponent and their scale kept; durations will be written like `-1.5s`; timestamps and dates will follow RFC 3339 with years 0001 to 9999 and no leap second.
 
-~~**CON-21.** Until that encoding is settled, an implementation MUST reject a contract whose request type, reply type or detail record (CON-8) uses decimal, before it serves the contract or calls any of its actions. The rejection names the contract, the action and the field.~~ Withdrawn in spec 0.1: ADR 0019 settles decimal's encoding.
+**CON-21.** Until the encodings of ADR 0019 are implemented (#10 task 1), an implementation MUST reject a contract whose request type, reply type or detail record (CON-8) uses decimal, before it serves the contract or calls any of its actions. The rejection names the contract, the action and the field.
 
 **CON-32.** A field of a record MUST travel under its own name, with no alias.
 
