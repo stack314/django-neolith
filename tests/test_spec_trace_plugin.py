@@ -199,18 +199,32 @@ def test_home_and_variables_are_expanded(
     assert list(report["tests"]) == ["test_home_and_variables_are_expanded.py::test_it"]
 
 
-@pytest.mark.parametrize("value", ["", ".", "sub"])
-def test_a_directory_is_refused_before_the_run(
+@pytest.mark.parametrize(
+    "value",
+    ["", "new/", ".", "sub", "afile/report.json", "x" * 300],
+    ids=["empty", "slash", "here", "directory", "under a file", "too long"],
+)
+def test_a_path_that_cannot_be_written_is_refused_before_the_run(
     pytester: pytest.Pytester, value: str
 ) -> None:
     pytester.mkdir("sub")
+    (pytester.path / "afile").write_text("")
     pytester.makepyfile("def test_it(): pass\n")
     result = pytester.runpytest(*ARGS, f"--spec-report={value}")
     assert result.ret == pytest.ExitCode.USAGE_ERROR
-    result.stderr.fnmatch_lines(
-        ["*--spec-report needs a file path, not the directory*"]
-    )
+    result.stderr.fnmatch_lines(["ERROR: --spec-report*"])
     result.stdout.no_fnmatch_line("*passed*")
+
+
+def test_a_run_that_dies_leaves_no_earlier_report(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (pytester.path / "report.json").write_text('{"format": 1, "tests": {}}')
+    pytester.makepyfile("import os\n\ndef test_dies(): os._exit(3)\n")
+    monkeypatch.setenv("PYTHONPATH", str(ROOT))
+    result = pytester.runpytest_subprocess(*ARGS, "--spec-report=report.json")
+    assert result.ret == 3
+    assert (pytester.path / "report.json").read_text() == ""
 
 
 @pytest.mark.parametrize(
@@ -250,7 +264,8 @@ def test_the_option_works_when_the_report_already_exists(
     )
     report = (tmp_path if outside else project) / "spec-report.json"
     args = [arg.format(report if outside else report.name) for arg in option]
-    env = {name: value for name, value in os.environ.items() if name != "PYTHONPATH"}
+    # Only this process's pytest on PYTHONPATH, so the project is not.
+    env = {**os.environ, "PYTHONPATH": str(Path(pytest.__file__).parents[1])}
     for _ in range(2):
         result = subprocess.run(  # noqa: S603
             [sys.executable, "-P", "-m", "pytest", *args],
@@ -262,6 +277,7 @@ def test_the_option_works_when_the_report_already_exists(
             check=False,
         )
         assert result.returncode == pytest.ExitCode.OK, result.stdout + result.stderr
+        assert f"pytest-{pytest.__version__}," in result.stdout
         assert json.loads(report.read_text())["tests"] == {
             "tests/test_cited.py::test_it": {"ids": ["CON-1"], "outcome": "passed"}
         }

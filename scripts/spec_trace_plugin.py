@@ -13,7 +13,9 @@ configuration file the same way, before it loads any plugin, so write
 ``--spec-report=PATH``. With a space, an existing report outside the project is
 still taken for a path. As for ``--junitxml``, the plugin expands ``~`` and
 environment variables in PATH itself, since a shell does not expand ``~``
-after ``=``.
+after ``=``. It empties the report before the first test, so a PATH that cannot
+be written is refused at once, and a run that dies before the end leaves no
+earlier report behind.
 
 Outcomes:
 
@@ -53,14 +55,20 @@ def pytest_configure(config: pytest.Config) -> None:
 
 
 def _report_path(value: str | None) -> Path | None:
-    """The report's path, read as pytest reads ``--junitxml`` (junitxml.py)."""
+    """The report's absolute path, emptied; a usage error if it can't be written."""
     if value is None:
         return None
-    path = Path(os.path.abspath(os.path.expanduser(os.path.expandvars(value))))
-    if path.is_dir():
+    expanded = os.path.expanduser(os.path.expandvars(value))
+    if not expanded or expanded.endswith(("/", os.sep)):
+        raise pytest.UsageError(f"--spec-report needs a file path, not {value!r}")
+    path = Path(os.path.abspath(expanded))
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("")
+    except OSError as error:
         raise pytest.UsageError(
-            f"--spec-report needs a file path, not the directory {path}"
-        )
+            f"--spec-report cannot write {path}: {error.strerror or error}"
+        ) from error
     return path
 
 
@@ -118,5 +126,4 @@ class _Recorder:
         if self.path is None:
             return
         report = {"format": FORMAT, "tests": self.tests}
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(report, indent=1, sort_keys=True) + "\n")
