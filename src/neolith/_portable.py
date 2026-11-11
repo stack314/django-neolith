@@ -17,9 +17,11 @@ are described once each under ``$defs``, by class name; ``type`` aliases are
 written out where they are used.
 """
 
+import inspect
 import json
 import math
 import re
+import types
 from collections.abc import Iterator, Mapping
 from typing import Any, Literal, cast
 
@@ -930,13 +932,35 @@ class _InheritsPrivate(_Private):
     pass
 
 
+def _closure(function: object) -> list[object]:
+    """What a function's closure cells hold (None for an empty one)."""
+    if type(function) is not types.FunctionType:
+        return []
+    held: list[object] = []
+    for cell in function.__closure__ or ():
+        try:
+            held.append(cell.cell_contents)
+        except ValueError:
+            held.append(None)
+    return held
+
+
 # Pydantic's own model_post_init for a record with private attributes, and the
-# code of the wrapper it puts around an existing one (here, the inherited one).
-# Both are taken from records built here, not imported from pydantic._internal,
-# whose names a minor release may change.
-_INIT_PRIVATE_ATTRIBUTES = _Private.model_post_init
-_POST_INIT_WRAPPER: object = getattr(
-    _InheritsPrivate.model_post_init, "__code__", object()
+# wrapper it puts around an existing one (here, the inherited one), with the
+# closure cell that holds the function it wraps. They are taken from records
+# built here, not imported from pydantic._internal, whose names a minor release
+# may change.
+_INIT_PRIVATE_ATTRIBUTES = inspect.getattr_static(_Private, "model_post_init")
+_WRAPPER = inspect.getattr_static(_InheritsPrivate, "model_post_init")
+_WRAPPER_CODE = getattr(_WRAPPER, "__code__", object())
+_WRAPPER_GLOBALS = getattr(_WRAPPER, "__globals__", object())
+_WRAPPED_CELL = next(
+    (
+        index
+        for index, held in enumerate(_closure(_WRAPPER))
+        if held is _INIT_PRIVATE_ATTRIBUTES
+    ),
+    None,
 )
 
 
@@ -944,25 +968,28 @@ def _only_initialises_private_attributes(cls: type[Any]) -> bool:
     """True if the record's model_post_init is Pydantic's own, for private attributes.
 
     Pydantic sets ``model_post_init`` to ``init_private_attributes`` when a
-    record has private attributes, and wraps it, keeping ``__wrapped__``, when
-    a model_post_init already exists, such as one inherited from a record that
-    has private attributes too (pydantic/_internal/_model_construction.py,
-    ``ModelMetaclass.__new__``, at 2.12 and 2.14). Following ``__wrapped__``
-    through Pydantic's wrappers must end at ``init_private_attributes``;
-    anything an author wrote ends elsewhere.
+    record has private attributes. When a model_post_init already exists, such
+    as one inherited from a record that has private attributes too, it sets a
+    wrapper that runs ``init_private_attributes`` and then the existing one,
+    held in a closure cell (pydantic/_internal/_model_construction.py,
+    ``ModelMetaclass.__new__``, at 2.12 and 2.14). The walk follows what runs:
+    through functions with the wrapper's code and globals, to the function each
+    holds, it must end at ``init_private_attributes``. It never reads
+    ``__wrapped__``, which anyone can set, and reads the class with
+    ``inspect.getattr_static``, so no code of the author's runs.
     """
-    function = getattr(cls, "model_post_init", None)
+    function = inspect.getattr_static(cls, "model_post_init", None)
     for _ in range(64):
         if function is _INIT_PRIVATE_ATTRIBUTES:
             return True
-        wrapped = getattr(function, "__wrapped__", None)
-        # functools.wraps copies the name, so the wrapper is known by its code.
         if (
-            wrapped is None
-            or getattr(function, "__code__", None) is not _POST_INIT_WRAPPER
+            _WRAPPED_CELL is None
+            or type(function) is not types.FunctionType
+            or function.__code__ is not _WRAPPER_CODE
+            or function.__globals__ is not _WRAPPER_GLOBALS
         ):
             return False
-        function = wrapped
+        function = _closure(function)[_WRAPPED_CELL]
     return False
 
 

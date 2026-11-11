@@ -16,6 +16,7 @@ from decimal import Decimal
 from typing import (
     Annotated,
     Any,
+    ClassVar,
     Literal,
     Optional,
     Protocol,
@@ -1890,6 +1891,70 @@ class NamedLikePydantics(BaseModel):
     model_post_init = wrapped_model_post_init
 
 
+class Retargeted(OwnPostInit):
+    pass
+
+
+# Pydantic's wrapper now says it wraps Pydantic's own function; it still runs
+# the author's.
+setattr(Retargeted.model_post_init, "__wrapped__", WithPrivate.model_post_init)  # noqa: B010
+
+
+class PostInitObject:
+    """A callable with the code of Pydantic's wrapper, whose __wrapped__ raises."""
+
+    __code__ = InheritsPrivate.model_post_init.__code__
+
+    @property
+    def __wrapped__(self) -> object:
+        raise RuntimeError("__wrapped__ was read")
+
+    def __call__(self, context: object, /) -> None:
+        pass
+
+
+class ObjectPostInit(BaseModel):
+    x: int
+
+    model_post_init: ClassVar[Any] = PostInitObject()
+
+
+class PrivateObjectPostInit(ObjectPostInit):
+    _cache: int = PrivateAttr(0)
+
+
+def _forged(globals_: dict[str, Any], held: object) -> types.FunctionType:
+    """A function with the code of Pydantic's wrapper."""
+    wrapper = InheritsPrivate.model_post_init
+    return types.FunctionType(
+        wrapper.__code__, globals_, None, None, (types.CellType(held),)
+    )
+
+
+class ForgedClosure(BaseModel):
+    x: int
+    _cache: int = PrivateAttr(0)
+
+    # Pydantic's wrapper code and globals, holding the author's function.
+    model_post_init = _forged(
+        InheritsPrivate.model_post_init.__globals__, wrapped_model_post_init
+    )
+
+
+class ForgedGlobals(BaseModel):
+    x: int
+    _cache: int = PrivateAttr(0)
+
+    # Holding Pydantic's function, but calling the author's first.
+    model_post_init = _forged(
+        {
+            **InheritsPrivate.model_post_init.__globals__,
+            "init_private_attributes": wrapped_model_post_init,
+        },
+        WithPrivate.model_post_init,
+    )
+
+
 @pytest.mark.spec("CON-13", "CON-16")
 @pytest.mark.parametrize(
     "record", [WithPrivate, WithPlainPrivate, InheritsPrivate, InheritsPrivateTwice]
@@ -1903,7 +1968,17 @@ def test_private_attributes_are_accepted(record: type[BaseModel]) -> None:
 
 @pytest.mark.spec("CON-13", "CON-17")
 @pytest.mark.parametrize(
-    "record", [OwnPostInit, InheritsOwnPostInit, NamedLikePydantics]
+    "record",
+    [
+        OwnPostInit,
+        InheritsOwnPostInit,
+        NamedLikePydantics,
+        Retargeted,
+        ObjectPostInit,
+        PrivateObjectPostInit,
+        ForgedClosure,
+        ForgedGlobals,
+    ],
 )
 def test_own_model_post_init_is_refused(record: type[BaseModel]) -> None:
     with pytest.raises(ContractDefinitionError, match="defines model_post_init"):

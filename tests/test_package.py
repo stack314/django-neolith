@@ -32,10 +32,12 @@ _PRIVATE_IN_PYDANTIC = re.compile(r"pydantic(_core)?(\.\w+)*\._(?!_)\w*(\.\w+)*"
 
 
 def _dotted_names(source: str) -> set[str]:
-    """Every dotted name the source imports, reads or spells out as a string.
+    """The dotted names a module's source spells out.
 
-    A read such as ``pydantic._internal.x`` is resolved through the names the
-    module's imports bind.
+    That is what it imports, the attribute chains on names its imports bind
+    (``pydantic._internal.x``), ``getattr`` and ``getattr_static`` calls with
+    a literal name on them, and string constants (``import_module(...)``). A
+    name built at run time is out of reach of this check.
     """
     tree = ast.parse(source)
     names: set[str] = set()
@@ -52,13 +54,30 @@ def _dotted_names(source: str) -> set[str]:
                 bound[alias.asname or alias.name] = f"{node.module}.{alias.name}"
         elif isinstance(node, ast.Constant) and isinstance(node.value, str):
             names.add(node.value)
+
+    def resolve(node: ast.expr) -> str | None:
+        if isinstance(node, ast.Name):
+            return bound.get(node.id)
+        if isinstance(node, ast.Attribute):
+            base = resolve(node.value)
+            return None if base is None else f"{base}.{node.attr}"
+        return None
+
     for node in ast.walk(tree):
-        parts: list[str] = []
-        while isinstance(node, ast.Attribute):
-            parts.append(node.attr)
-            node = node.value
-        if parts and isinstance(node, ast.Name) and node.id in bound:
-            names.add(".".join([bound[node.id], *reversed(parts)]))
+        if isinstance(node, ast.Attribute):
+            base, attr = resolve(node.value), node.attr
+        elif (
+            isinstance(node, ast.Call)
+            and ast.unparse(node.func).split(".")[-1] in ("getattr", "getattr_static")
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and isinstance(node.args[1].value, str)
+        ):
+            base, attr = resolve(node.args[0]), node.args[1].value
+        else:
+            continue
+        if base is not None:
+            names.add(f"{base}.{attr}")
     return names
 
 
@@ -87,6 +106,8 @@ def test_nothing_private_in_pydantic_is_used() -> None:
         "from pydantic import main\nmain._object_setattr",
         "import importlib\nimportlib.import_module('pydantic._internal._utils')",
         "from pydantic_core import _pydantic_core",
+        "import pydantic\ngetattr(pydantic, '_internal')",
+        "import inspect\nfrom pydantic import main\ninspect.getattr_static(main, '_x')",
     ],
 )
 def test_private_use_of_pydantic_is_found(source: str) -> None:
