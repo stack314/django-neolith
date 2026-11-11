@@ -480,25 +480,28 @@ class Portable:
         )
         description = self.describe(node["schema"], path, ())
         if "default" in node:
-            problem = _default_problem(node["default"])
+            default = node["default"]
+            problem = _default_problem(default)
             if problem is not None:
                 raise self.fail(
                     f"field {path} has a default holding {problem}, which "
                     "pydantic-core might not copy for each value read without "
-                    "the field"
+                    "the field; build it from plain lists, dicts and sets, "
+                    "immutable values and records that keep Pydantic's own "
+                    "methods"
                 )
-        if issubclass(type(node.get("default")), BaseModel) and _hashable(
-            node["default"]
-        ):
             # pydantic-core copies a default only when it cannot be hashed
-            # (src/validators/with_default.rs), so it hands a hashable record,
-            # such as a frozen one, to every value read without the field as
-            # the same object.
-            raise self.fail(
-                f"field {path} has a hashable record as its default, which "
-                "every value read without the field would share; give it a "
-                "default_factory"
-            )
+            # (src/validators/with_default.rs), so it hands a hashable one to
+            # every value read without the field as the same object. That is
+            # safe only when nothing in it can change.
+            if _hashable(default) and not _unchanging(default):
+                raise self.fail(
+                    f"field {path} has a default that every value read without "
+                    "the field would share, since it can be hashed, and that "
+                    "can change; make its record frozen, holding only values "
+                    "that cannot change, or give the record no __hash__, so "
+                    "each value gets a copy"
+                )
         if "default_factory" in node:
             if node.get("default_factory_takes_data"):
                 raise self.fail(
@@ -1273,6 +1276,26 @@ def _default_problem(default: object) -> str | None:
         else:
             return f"a {kind.__qualname__}"
     return None
+
+
+def _unchanging(value: object) -> bool:
+    """Whether nothing in a default can change: immutable scalars, enum
+    members, tuples and frozensets of them, and frozen records holding only
+    such values."""
+    pending = [value]
+    instance_dict = type.__dict__["__dict__"].__get__(BaseModel)["__dict__"]
+    while pending:
+        item = pending.pop()
+        kind = type(item)
+        if kind in _IMMUTABLE or issubclass(kind, enum.Enum):
+            continue
+        if kind in (tuple, frozenset):
+            pending.extend(cast("tuple[object, ...]", item))
+        elif issubclass(kind, BaseModel) and kind.model_config.get("frozen") is True:
+            pending.extend(instance_dict.__get__(item).values())
+        else:
+            return False
+    return True
 
 
 def _hashable(value: object) -> bool:

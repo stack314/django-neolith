@@ -883,17 +883,67 @@ class FrozenWithList(BaseModel):
     ns: list[int] = []
 
 
+class Hashed(BaseModel):
+    """Not frozen, so it can change, but hashable all the same."""
+
+    n: int = 0
+
+    def __hash__(self) -> int:
+        return 0
+
+
+class FrozenHoldingHashed(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    inner: Hashed = Field(default_factory=Hashed)
+
+
+class Policy(BaseModel):
+    """A frozen value record with a required field, as a contract uses one."""
+
+    model_config = ConfigDict(frozen=True)
+    retries: int
+    status: str | None = None
+
+
 @pytest.mark.spec("TRN-12", "CON-17")
+@pytest.mark.parametrize(
+    ("annotation", "default"),
+    [
+        (Hashed, Hashed(n=1)),
+        (FrozenHoldingHashed, FrozenHoldingHashed(inner=Hashed(n=1))),
+    ],
+    ids=["hashable-record", "frozen-record-holding-a-hashable-one"],
+)
 @pytest.mark.parametrize("nested", [False, True], ids=["field", "nested-field"])
-def test_a_record_default_every_read_would_share_is_refused(nested: bool) -> None:
+def test_a_shared_default_that_can_change_is_refused(
+    annotation: Any,  # noqa: ANN401
+    default: object,
+    nested: bool,
+) -> None:
     # pydantic-core copies a default only when it cannot be hashed, so a
-    # frozen record default would be the same object in every value read
-    # without the field.
-    record = create_model(_name("Sharing"), frozen=(Frozen, Frozen(n=1)))
+    # hashable default is the same object in every value read without the
+    # field; that is refused when something in it can change.
+    record = create_model(_name("Sharing"), value=(annotation, default))
     with pytest.raises(
-        ContractDefinitionError, match="has a hashable record as its default"
+        ContractDefinitionError, match="would share, since it can be hashed"
     ):
         _declare(_holding(record) if nested else record)
+
+
+@pytest.mark.spec("TRN-12")
+@pytest.mark.parametrize("nested", [False, True], ids=["field", "nested-field"])
+def test_a_shared_default_that_cannot_change_is_admitted(nested: bool) -> None:
+    # A frozen record holding only values that cannot change is safe to share.
+    record = create_model(
+        _name("Sharing"),
+        policy=(Policy, Policy(retries=3)),
+        frozen=(Frozen, Frozen(n=1)),
+    )
+    declared_record = _holding(record) if nested else record
+    reader = codec(_declare(declared_record), declared_record)
+    assert reader.read(b'{"inner": {}}' if nested else b"{}") == reader.read(
+        b'{"inner": {}}' if nested else b"{}"
+    )
 
 
 @pytest.mark.spec("TRN-12")
@@ -1270,3 +1320,77 @@ def test_generated_values_cross_equal_and_unshared(data: st.DataObject) -> None:
 def test_every_portable_form_crosses_equal_and_unshared(data: st.DataObject) -> None:
     found, schema = _declare_request(Reference)
     _crosses(found, Reference, schema, data.draw(from_schema(schema)))
+
+
+class Settable(BaseModel):
+    """A record with a required field, used by value."""
+
+    retries: int
+
+
+def _refusal_and_advice() -> list[
+    tuple[str, Callable[[], type[BaseModel]], str, list[Callable[[], type[BaseModel]]]]
+]:
+    """Each refusal on the default path, and each fix its message advises."""
+
+    def field(annotation: Any, value: Any) -> Callable[[], type[BaseModel]]:  # noqa: ANN401
+        return lambda: create_model(_name("Advised"), value=(annotation, value))
+
+    return [
+        (
+            "frozen record default, by factory",
+            field(Policy, Field(default_factory=lambda: Policy(retries=1))),
+            "default factory must be list, dict, set or the record class itself; "
+            "or give it a default= value",
+            [field(Policy, Policy(retries=1))],
+        ),
+        (
+            "unfrozen record default, by factory",
+            field(Settable, Field(default_factory=lambda: Settable(retries=1))),
+            "or give it a default= value",
+            [field(Settable, Settable(retries=1))],
+        ),
+        (
+            "list default, by factory",
+            field(list[int], Field(default_factory=lambda: [1])),
+            "default factory must be list, dict, set",
+            [field(list[int], Field(default_factory=list)), field(list[int], [1])],
+        ),
+        (
+            "hashable record that can change",
+            field(Hashed, Hashed(n=1)),
+            "make its record frozen, holding only values that cannot change, or "
+            "give the record no __hash__",
+            [field(Frozen, Frozen(n=1)), field(Plain, Plain(ns=[1]))],
+        ),
+        (
+            "list subclass in a default",
+            field(list[int], SubList([1])),
+            "build it from plain lists, dicts and sets",
+            [field(list[int], [1])],
+        ),
+        (
+            "record that replaces its deep copy, in a default",
+            field(Plain, SelfishPlain()),
+            "records that keep Pydantic's own methods",
+            [field(Plain, Plain())],
+        ),
+    ]
+
+
+@pytest.mark.spec("TRN-12", "CON-17")
+@pytest.mark.parametrize(
+    ("refused", "advice", "fixes"),
+    [case[1:] for case in _refusal_and_advice()],
+    ids=[case[0] for case in _refusal_and_advice()],
+)
+def test_every_refusal_on_the_default_path_advises_a_declaration_that_is_admitted(
+    refused: Callable[[], type[BaseModel]],
+    advice: str,
+    fixes: list[Callable[[], type[BaseModel]]],
+) -> None:
+    # A refusal's advice is part of the rule: following it must declare.
+    with pytest.raises(ContractDefinitionError, match=re.escape(advice)):
+        _declare(refused())
+    for fix in fixes:
+        _declare(fix())
