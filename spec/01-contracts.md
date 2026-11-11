@@ -1,6 +1,6 @@
 # 01. Contracts
 
-**Status:** draft. Identity, actions, the portable type system, publication and checking are specified. Errors are an outline of [ADR 0008](../docs/adr/0008-typed-contract-errors-in-both-modes.md). They become requirements, with their tests, in roadmap steps 2 to 5.
+**Status:** draft. Identity, actions, the portable type system, publication and checking are specified. Errors are an outline of [ADR 0008](../docs/adr/0008-typed-contract-errors-in-both-modes.md). They become requirements, with their tests, in roadmap steps 2 to 5 (#9 to #12).
 
 ## Identity and versioning
 
