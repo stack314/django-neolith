@@ -52,7 +52,7 @@ The portable forms are the types that every transport can represent, JSON Schema
 
 **CON-14.** A reply type MUST be either a record built only from the portable forms, or empty. An empty reply carries no value.
 
-The encoding of decimal is settled by the in-process transport (step 3 of the [roadmap](../docs/roadmap.md), issue #10). **CON-21.** Until that encoding is settled, an implementation MUST reject a contract whose request or reply type uses decimal, before it serves the contract or calls any of its actions. The rejection names the contract, the action and the field.
+The encoding of decimal is settled by the in-process transport (step 3 of the [roadmap](../docs/roadmap.md), issue #10). **CON-21.** Until that encoding is settled, an implementation MUST reject a contract whose request type, reply type or detail record (CON-8) uses decimal, before it serves the contract or calls any of its actions. The rejection names the contract, the action and the field.
 
 Records are nominal within a contract and structural across the wire. **CON-15.** Two different records or enums used by one contract MUST NOT have the same name. Generated code for other languages names each record and enum once, so two with one name would collide.
 
@@ -79,17 +79,19 @@ An action's *error set* is the standard kinds below, which every action has whet
 
 **CON-22.** An error kind MUST match the rule `segment` of the grammar under "Identity and versioning". Every standard kind does.
 
-**CON-23.** A declared error kind MUST NOT have the name of a standard kind.
+**CON-23.** A declared error kind MUST NOT have the name of a standard kind or a reserved name. The reserved names are `cancelled`, `unknown`, `deadline_exceeded`, `already_exists`, `resource_exhausted`, `failed_precondition`, `aborted`, `out_of_range`, `unimplemented` and `data_loss`, the remaining status codes of gRPC. A later version of this specification adds standard kinds only from the reserved names, so an added standard kind never has the name of a kind a contract declares.
 
 **CON-24.** A detail record MUST be a record built only from the portable forms. Its records and enums share the contract's names with those of the request and reply types (CON-15, CON-20).
 
-**CON-25.** An error that crosses a contract MUST carry its kind and a message.
+**CON-25.** An error that crosses a contract MUST carry its kind and a message of Unicode text, which holds no lone surrogate, since JSON text cannot carry one.
 
 **CON-26.** An error of a standard kind MUST NOT carry a detail.
 
-**CON-27.** An error of any other kind MUST carry a detail: the kind's detail record, or, where the receiver's version of the contract does not declare the kind, an untyped map from the record's field names to their values (CON-28).
+**CON-27.** An error of a declared kind MUST carry the kind's detail record.
 
-**CON-28.** A caller whose version of the contract does not declare an error's kind MUST receive the error with that kind, and with its detail as an untyped map, not as `internal`. Adding an error kind to an action is a compatible change (CON-1), so an older caller can receive a kind it does not know.
+**CON-28.** A caller MUST receive an error whose kind is neither a standard kind it knows nor a kind its version of the contract declares with that kind, not as `internal`, and with its detail, if there is one, as an untyped map from the detail's field names to their values. Adding an error kind to an action is a compatible change (CON-1), and a later version of this specification can add a standard kind (CON-23), so a caller can receive a kind it does not know.
+
+**CON-30.** An untyped map MUST hold only text keys and values that are untyped maps, lists, text, booleans, null, integers in the 64-bit range or finite numbers, nested at most 32 levels deep, the outermost map being the first. Its text is Unicode text, as in CON-25.
 
 **CON-29.** A mistake in the calling code, such as a call to an action the contract does not have, MUST NOT be reported as a contract error. It reports a bug in the calling code, not the outcome of a call, so code that handles contract errors does not swallow it.
 
