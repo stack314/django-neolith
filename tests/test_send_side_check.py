@@ -28,7 +28,13 @@ from hypothesis import strategies as st
 from hypothesis_jsonschema import from_schema
 from jsonschema import Draft202012Validator, FormatChecker, validators
 from jsonschema.exceptions import ValidationError as SchemaValidationError
-from pydantic import AwareDatetime, BaseModel, Field, StringConstraints
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    BeforeValidator,
+    Field,
+    StringConstraints,
+)
 
 from neolith import (
     Binary,
@@ -331,6 +337,9 @@ _KINDS = [
     pytest.param("few", (1, 2), _NOT_WRITTEN, id="tuple-for-a-list"),
     pytest.param("few", [True], _NOT_HELD, id="boolean-in-a-list"),
     pytest.param("named", {"a": True}, _NOT_HELD, id="boolean-in-a-map"),
+    pytest.param(
+        "named", {"a": 2**60 + 1}, _NOT_HELD, id="integer-no-double-equals-in-a-map"
+    ),
     pytest.param("named", {1: 1.0}, _NOT_WRITTEN, id="integer-for-a-key"),
     pytest.param("named", {Marked("a"): 1.0}, _NOT_HELD, id="text-subclass-for-a-key"),
     pytest.param("named", {Colour.RED: 1.0}, _NOT_HELD, id="enum-member-for-a-key"),
@@ -925,6 +934,129 @@ def test_a_deep_value_is_sent_from_a_deep_call_stack() -> None:
     text = _descend(room, send)
     assert text == send()
     assert b"-0" not in text
+
+
+# A decimal's digits.
+
+
+def _without_trailing_zeros(value: object) -> object:
+    """A reader's own before validator: it keeps a decimal's value and drops
+    its trailing zeros."""
+    return Decimal(cast("str", value)).normalize()
+
+
+class Rounded(BaseModel):
+    amount: Annotated[Decimal128, BeforeValidator(_without_trailing_zeros)] = Decimal(
+        "1.5"
+    )
+
+
+@pytest.mark.spec("TRN-11")
+def test_a_decimal_that_reads_back_with_other_digits_is_refused() -> None:
+    # Trailing zeros are kept on the wire (spec 01), so 1.50 and 1.5 are two
+    # values, although Python calls them equal. Here the record's own reader
+    # drops the zeros, so a sender that holds 1.50 would be read as 1.5.
+    declared, _ = _contract_for(Rounded)
+    held = Rounded()
+    held.amount = Decimal("1.50")
+    with pytest.raises(ValueError, match=r"holds Decimal\('1.50'\) \(Decimal\) at "):
+        check_request(declared, declared.actions["send"], held)
+    # The nearest legitimate values: one without trailing zeros, and one the
+    # sender's own writer respells (CON-37), which is the same value.
+    for amount, written in [(Decimal("2.5"), b'"2.5"'), (Decimal("1E+2"), b'"100"')]:
+        held.amount = amount
+        assert written in check_request(declared, declared.actions["send"], held)
+
+
+# A tool that freezes time for a test.
+
+
+class _Frozen(type):
+    """As the fakes of freezegun are: an instance of the real class counts
+    as an instance of the fake."""
+
+    def __instancecheck__(cls, instance: object) -> bool:
+        return type.__instancecheck__(cls.__mro__[1], instance)
+
+
+class FrozenDatetime(datetime, metaclass=_Frozen):
+    pass
+
+
+class FrozenDate(date, metaclass=_Frozen):
+    pass
+
+
+@pytest.fixture
+def frozen(monkeypatch: pytest.MonkeyPatch) -> int:
+    """Swap every name in neolith's modules that is bound to ``datetime`` or
+    ``date`` for a fake, as freezegun does in every loaded module while it
+    freezes time. Returns how many names were swapped."""
+    fakes = {id(datetime): FrozenDatetime, id(date): FrozenDate}
+    swapped = 0
+    for name, module in list(sys.modules.items()):
+        if name == "neolith" or name.startswith("neolith."):
+            for attribute, held in list(vars(module).items()):
+                if id(held) in fakes:
+                    monkeypatch.setattr(module, attribute, fakes[id(held)])
+                    swapped += 1
+    return swapped
+
+
+@pytest.mark.spec("TRN-10", "TRN-11", "TRN-15", "CON-36")
+def test_timestamps_and_dates_cross_while_a_tool_freezes_time(frozen: int) -> None:
+    # The sender's own code must not read ``datetime`` or ``date`` through a
+    # module-level name while it runs, since such a tool rebinds those.
+    assert frozen >= 2
+    whole = datetime(2026, 1, 1, 12, tzinfo=timezone(timedelta(hours=1)))
+    odd = datetime(1930, 1, 1, 12, tzinfo=_AMSTERDAM_1930)
+    fake = FrozenDatetime(2026, 3, 1, tzinfo=UTC)
+    for when, written in [
+        (whole, "2026-01-01T12:00:00+01:00"),
+        (odd, "1930-01-01T11:40:28Z"),
+        (fake, "2026-03-01T00:00:00Z"),
+    ]:
+        sent = Leaves(when=when, day=date(2026, 1, 1))
+        assert type(sent.when) is type(when)
+        text = _send(sent)
+        assert json.loads(text)["when"] == written
+        read = _read(sent, text)
+        assert (read.when, read.day) == (when, date(2026, 1, 1))
+        assert (type(read.when), type(read.day)) == (datetime, date)
+    assert _read(Leaves(), _send(Leaves(day=FrozenDate(2026, 3, 1)))).day == date(
+        2026, 3, 1
+    )
+    # What was refused is still refused.
+    for field, value, refusal in [
+        ("when", date(2026, 1, 1), _NOT_WRITTEN),
+        ("day", whole, _NOT_WRITTEN),
+        ("when", datetime(2026, 1, 1), _NOT_DESCRIBED),
+        (
+            "when",
+            datetime(1, 1, 1, tzinfo=timezone(timedelta(hours=1))),
+            _NOT_DESCRIBED,
+        ),
+        ("when", datetime(1, 1, 1, tzinfo=timezone(timedelta(seconds=1))), "outside"),
+        ("count", True, _NOT_HELD),
+    ]:
+        with pytest.raises(ValueError, match=re.escape(refusal)):
+            _send(_built(field, value))
+
+
+@pytest.mark.spec("TRN-15")
+def test_the_check_reads_days_and_instants_while_a_tool_freezes_time(
+    frozen: int,
+) -> None:
+    assert frozen >= 2
+    checker = _checker(_WORDED_SCHEMA)
+    for value, admitted in [
+        ({"day": "2028-02-29"}, True),
+        ({"day": "2027-02-29"}, False),
+        ({"when": "0001-01-01T00:00:00Z"}, True),
+        ({"when": "0001-01-01T00:00:00+00:01"}, False),
+        ({"when": "2027-02-29T00:00:00Z"}, False),
+    ]:
+        assert _admits(checker, {"inner": {"sku": "a"}, **value}) is admitted
 
 
 # The sender's copy is written as the value itself would be.
