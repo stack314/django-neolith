@@ -16,5 +16,5 @@ CON-1 = "Binds contract authors. Breaking-change detection is deferred past 0.1.
 CON-4 = "Binds connectors, which arrive in roadmap step 3; the no-retry and no-fallback rule is tested there and with failover in step 6."
 CON-5 = "Binds app authors. The conformance suite checks it for the reference contract, roadmap step 6."
 CON-27 = "Binds the provider's host, roadmap step 3: the error type does not know which action raised it, so the host checks that a declared kind carries the record the action declares for it."
-CON-28 = "Binds connectors, which arrive in roadmap step 3 (in-process) and step 5 (HTTP); each tests that a kind its contract does not declare reaches the caller as that kind. Step 2 tests the error type that carries such a kind, under CON-27."
+CON-28 = "Binds connectors, which arrive in roadmap step 3 (in-process) and step 5 (HTTP); each tests that a kind its contract does not declare reaches the caller as that kind. Step 2 tests how the error type holds such a kind's detail, under CON-30."
 CON-12 = "Holds by construction in this implementation: a contract's actions are the methods of one class, where a name occurs once. A redefined method replaces the earlier one before neolith sees the class, and linters report it (pyflakes F811)."

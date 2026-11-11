@@ -81,7 +81,7 @@ An action's *error set* is the standard kinds below, which every action has whet
 
 **CON-23.** A declared error kind MUST NOT have the name of a standard kind or a reserved name. The reserved names are `cancelled`, `unknown`, `deadline_exceeded`, `already_exists`, `resource_exhausted`, `failed_precondition`, `aborted`, `out_of_range`, `unimplemented` and `data_loss`, the remaining status codes of gRPC. A later version of this specification adds standard kinds only from the reserved names, so an added standard kind never has the name of a kind a contract declares.
 
-**CON-24.** A detail record MUST be a record built only from the portable forms. Its records and enums share the contract's names with those of the request and reply types (CON-15, CON-20).
+**CON-24.** A detail record MUST be a record built only from the portable forms whose values nest at most 32 levels deep in records, maps and lists, the detail record being the first, so that a caller that does not know its kind can hold it as an untyped map (CON-30). A record that contains itself can nest without limit. Its records and enums share the contract's names with those of the request and reply types (CON-15, CON-20).
 
 **CON-25.** An error that crosses a contract MUST carry its kind and a message of Unicode text, which holds no lone surrogate, since JSON text cannot carry one.
 
@@ -89,9 +89,9 @@ An action's *error set* is the standard kinds below, which every action has whet
 
 **CON-27.** An error of a declared kind MUST carry the kind's detail record.
 
-**CON-28.** A caller MUST receive an error whose kind is neither a standard kind it knows nor a kind its version of the contract declares with that kind, not as `internal`, and with its detail, if there is one, as an untyped map from the detail's field names to their values. Adding an error kind to an action is a compatible change (CON-1), and a later version of this specification can add a standard kind (CON-23), so a caller can receive a kind it does not know.
+**CON-28.** When an error's kind is neither a standard kind the caller knows nor a kind its version of the contract declares, the caller MUST receive the error with that kind, not as `internal`, and with its detail, if there is one, as an untyped map from the detail's field names to their values. Adding an error kind to an action is a compatible change (CON-1), and a later version of this specification can add a standard kind (CON-23), so a caller can receive a kind it does not know.
 
-**CON-30.** An untyped map MUST hold only text keys and values that are untyped maps, lists, text, booleans, null, integers in the 64-bit range or finite numbers, nested at most 32 levels deep, the outermost map being the first. Its text is Unicode text, as in CON-25.
+**CON-30.** An untyped map MUST hold only text keys and values that are untyped maps, lists, text, booleans, null, integers in the 64-bit range or finite numbers, nested at most 32 levels deep, the outermost map being the first, and holding at most 10,000 values in all, counting every map value and list item at every depth, with each occurrence of a repeated value counted separately. Its text is Unicode text, as in CON-25.
 
 **CON-29.** A mistake in the calling code, such as a call to an action the contract does not have, MUST NOT be reported as a contract error. It reports a bug in the calling code, not the outcome of a call, so code that handles contract errors does not swallow it.
 

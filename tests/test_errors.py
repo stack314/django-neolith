@@ -8,6 +8,7 @@ provider's host produce errors is tested with them, in roadmap steps 3 to 5.
 import copy
 import dataclasses
 import enum
+import functools
 import json
 import pickle
 import re
@@ -21,9 +22,11 @@ from uuid import UUID
 
 import pydantic_core
 import pytest
+from django.utils.functional import SimpleLazyObject
 from pydantic import AwareDatetime, BaseModel, ConfigDict, RootModel
 
 from neolith import (
+    Action,
     Contract,
     ContractDefinitionError,
     ContractError,
@@ -31,6 +34,7 @@ from neolith import (
     contract,
     implements,
 )
+from neolith._portable import json_value_problem
 
 STANDARD_KINDS = [
     "invalid_argument",
@@ -864,3 +868,263 @@ def test_unmarked_implementation_is_accepted() -> None:
 
     impl = type("InventoryImpl", (), {"reserve": reserve})
     assert implements(Inventory)(impl) is impl
+
+
+# Second red-team pass
+
+
+def test_untyped_detail_is_copied_before_it_is_checked() -> None:
+    # Stands in for another thread: from the moment the check starts, change
+    # the caller's value at every call and return. What is held is what was
+    # copied, and the copy is what was checked.
+    inner: list[Any] = [1, 2, 3]
+    data: dict[str, Any] = {"n": inner, "m": {"k": "v"}}
+    changes = 0
+    checking = False
+
+    def meddle(frame: Any, event: str, arg: object) -> None:  # noqa: ANN401
+        nonlocal changes, checking
+        if frame.f_code is json_value_problem.__code__:
+            checking = True
+        if checking and event in ("return", "c_return"):
+            changes += 1
+            inner.append(float("nan"))
+            data["m"]["deep"] = _nest(40)
+
+    previous = sys.getprofile()
+    sys.setprofile(meddle)
+    try:
+        error = ContractError("out_of_stock", "text", data)
+    finally:
+        sys.setprofile(previous)
+    assert changes > 0
+    assert error.data == {"n": [1, 2, 3], "m": {"k": "v"}}
+    copy.copy(error)
+
+
+@pytest.mark.spec("CON-30")
+@pytest.mark.parametrize(
+    "reuse",
+    [
+        lambda data: data,
+        lambda data: {"inner": data},
+        lambda data: {"tags": data["tags"]},
+        lambda data: copy.copy(data),
+        lambda data: dict(data),
+    ],
+    ids=["held-map", "nested-map", "held-list", "copied", "plain-copy"],
+)
+def test_received_detail_can_be_passed_on(reuse: Callable[[Any], Any]) -> None:
+    received = ContractError("out_of_stock", "text", {"sku": "A1", "tags": ["x"]})
+    again = ContractError("out_of_stock", "passed on", reuse(received.data))
+    assert again.data == reuse(received.data)
+
+
+@pytest.mark.spec("CON-29")
+def test_other_mappings_are_not_an_untyped_detail() -> None:
+    with pytest.raises(TypeError, match="detail"):
+        ContractError(
+            "out_of_stock",
+            "text",
+            types.MappingProxyType({"sku": "A1"}),  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.spec("CON-30")
+def test_untyped_detail_holds_at_most_ten_thousand_values() -> None:
+    ContractError("out_of_stock", "text", {"items": list(range(9_999))})
+    with pytest.raises(TypeError, match="more than 10000 values"):
+        ContractError("out_of_stock", "text", {"items": list(range(10_000))})
+
+
+@pytest.mark.spec("CON-30")
+def test_shared_values_count_once_per_occurrence() -> None:
+    # 21 small lists that stand for 2**20 values.
+    value: object = 0
+    for _ in range(20):
+        value = [value, value]
+    with pytest.raises(TypeError, match="more than 10000 values"):
+        ContractError("out_of_stock", "text", {"v": value})
+
+
+def test_subclass_cannot_get_around_the_refusal() -> None:
+    class Quiet:
+        def __init_subclass__(cls, **kwargs: object) -> None:
+            pass  # does not call super(), so ContractError's hook never runs
+
+    class Mine(Quiet, ContractError):  # type: ignore[misc]
+        pass
+
+    with pytest.raises(TypeError, match="subclassed"):
+        Mine("conflict", "text")
+
+
+def test_repr_of_a_record_detail_never_raises() -> None:
+    class Huge(BaseModel):
+        n: int
+
+    error = ContractError("too_big", "text", Huge(n=10**5000))
+    assert repr(error).startswith("ContractError('too_big', 'text', data=<")
+    assert repr(error).endswith("Huge that cannot be shown>)")
+    assert len(repr(error)) < 1100
+
+
+def test_unbuilt_error_has_a_safe_str_and_repr() -> None:
+    unbuilt = ContractError.__new__(ContractError, "conflict", "text")
+    assert str(unbuilt) == repr(unbuilt) == "<unbuilt ContractError>"
+
+
+@pytest.mark.spec("CON-24", "CON-17")
+def test_detail_record_too_deep_to_hold_untyped_is_rejected() -> None:
+    nested: Any = int
+    for _ in range(32):
+        nested = list[nested]
+    deep = type("Deep", (BaseModel,), {"__annotations__": {"v": nested}})
+    with pytest.raises(ContractDefinitionError, match="more than 32 levels"):
+        _declare({"too_deep": deep})
+
+
+@pytest.mark.spec("CON-24", "CON-30")
+def test_detail_record_at_the_depth_limit_is_held_untyped() -> None:
+    nested: Any = int
+    for _ in range(31):
+        nested = list[nested]
+    deep = type("Deep", (BaseModel,), {"__annotations__": {"v": nested}})
+    declared = _declare({"deep": deep})
+    value: object = 1
+    for _ in range(31):
+        value = [value]
+    record = declared.actions["place"].errors["deep"].model_validate({"v": value})
+    ContractError("deep", "text", record.model_dump(mode="json"))
+
+
+class TreeNode(BaseModel):
+    name: str
+    children: list["TreeNode"] = []
+
+
+@pytest.mark.spec("CON-24", "CON-17")
+def test_recursive_detail_record_is_rejected() -> None:
+    with pytest.raises(ContractDefinitionError, match="recursive record"):
+        _declare({"loop": TreeNode})
+
+
+def test_action_defaults_to_no_declared_kinds() -> None:
+    held = Action("get", True, Ping, None)
+    assert dict(held.errors) == {}
+    hash(held)
+
+
+def test_action_freezes_a_plain_dict_of_kinds() -> None:
+    held = Action("get", True, Ping, None, {"out_of_stock": OutOfStock})
+    hash(held)
+    with pytest.raises(TypeError, match="read-only"):
+        cast("dict[str, Any]", held.errors)["expired"] = Expired
+    assert held == Action("get", True, Ping, None, {"out_of_stock": OutOfStock})
+
+
+# Implementations read statically
+
+
+def test_lazy_attributes_are_never_evaluated() -> None:
+    calls: list[int] = []
+
+    def setup() -> object:
+        calls.append(1)
+        raise RuntimeError("settings are not configured yet")
+
+    def reserve(self: object, request: Ping) -> None: ...
+
+    impl = type(
+        "InventoryImpl",
+        (),
+        {
+            "reserve": reserve,
+            "_storage": SimpleLazyObject(setup),
+            "storage": SimpleLazyObject(setup),
+        },
+    )
+    implements(Inventory)(impl)
+    assert calls == []
+
+
+def test_implementation_may_inherit_another_versions_implementation() -> None:
+    @contract("stock.v1")
+    class StockV1(Protocol):
+        @action(idempotent=True)
+        def get(self, request: Ping) -> None: ...
+
+    @contract("stock.v2")
+    class StockV2(Protocol):
+        @action(idempotent=True)
+        def get(self, request: Ping) -> None: ...
+
+    @implements(StockV1)
+    class StockV1Impl(StockV1):
+        def get(self, request: Ping) -> None: ...
+
+    @implements(StockV2)
+    class StockV2Impl(StockV1Impl):
+        pass
+
+    class Stub(StockV1):  # inherits only the v1 declaration's stub
+        pass
+
+    with pytest.raises(ContractDefinitionError, match="'get' is missing"):
+        implements(StockV2)(cast("type[Any]", Stub))
+
+
+def _marked_helper(self: object, request: Ping) -> None: ...
+
+
+def _wraps(function: Callable[..., Any]) -> Callable[..., Any]:
+    @functools.wraps(function)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        return function(*args, **kwargs)
+
+    return wrapper
+
+
+@pytest.mark.parametrize(
+    "wrap",
+    [
+        functools.cache,
+        _wraps,
+        property,
+        functools.partialmethod,
+        functools.singledispatchmethod,
+        functools.cached_property,
+        staticmethod,
+        classmethod,
+        lambda f: staticmethod(functools.cache(f)),
+        lambda f: property(_wraps(f)),
+    ],
+    ids=[
+        "cache",
+        "wraps",
+        "property",
+        "partialmethod",
+        "singledispatchmethod",
+        "cached_property",
+        "staticmethod",
+        "classmethod",
+        "staticmethod-cache",
+        "property-wraps",
+    ],
+)
+def test_marks_are_found_through_wrappers(wrap: Callable[[Any], Any]) -> None:
+    def reserve(self: object, request: Ping) -> None: ...
+
+    marked = wrap(action(idempotent=True)(_copy_function(_marked_helper)))
+    impl = type("InventoryImpl", (), {"reserve": reserve, "_helper": marked})
+    with pytest.raises(ContractDefinitionError, match="'_helper' is marked"):
+        implements(Inventory)(impl)
+
+
+def _copy_function(function: Callable[..., Any]) -> Callable[..., Any]:
+    """A fresh function object, so each case can mark its own."""
+    copied = types.FunctionType(
+        function.__code__, function.__globals__, function.__name__
+    )
+    copied.__annotations__ = dict(function.__annotations__)
+    return copied
