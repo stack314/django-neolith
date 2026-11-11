@@ -36,28 +36,19 @@ from pydantic_core import (
     core_schema,
 )
 
+from neolith._forms import FORM_FOR_KIND, form_of
+
 # A record or enum name, as other languages' generated code will use it
 # (CON-20).
 _TYPE_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_]*")
 
-# The wire encodings of spec 01 (ADR 0019). Each pattern is ASCII-only and
-# anchored with ^...$, and matches the same strings under ECMA-262, Rust regex
-# and Python's re.fullmatch. Integers are those every JSON reader holds
-# exactly; numbers are finite doubles.
+# The wire encodings of spec 01 (ADR 0019) that Pydantic's own types write.
+# Integers are those every JSON reader holds exactly; numbers are finite
+# doubles. Each pattern is ASCII-only and anchored with ^...$, and matches the
+# same strings under ECMA-262, Rust regex and Python's re.fullmatch. Durations,
+# decimals and bytes are neolith's own types (neolith._forms).
 SAFE_INTEGER_MAX = 2**53 - 1
 DOUBLE_MAX = sys.float_info.max
-BYTES_PATTERN = (
-    r"^([A-Za-z0-9_\-]{4})*"
-    r"([A-Za-z0-9_\-][AQgw]==|[A-Za-z0-9_\-]{2}[AEIMQUYcgkosw048]=)?$"
-)
-DECIMAL_PATTERN = r"^(0(\.[0-9]+)?|-?[1-9][0-9]*(\.[0-9]+)?|-?0\.0*[1-9][0-9]*)$"
-DECIMAL_DIGITS_PATTERN = r"^-?[0-9](\.?[0-9]){0,33}$"
-# Pydantic writes a decimal as Python's str(Decimal) does
-# (pydantic-core src/serializers/type_serializers/decimal.rs, with no setting),
-# which uses an exponent for a nonzero value below 10**-6 in magnitude and for a
-# zero with more than 6 fractional digits ("1E-7", "0E-7"). Until a type that
-# writes them is settled, spec 01 leaves them out.
-DECIMAL_SMALL_PATTERN = r"^-?([1-9][0-9.]*|0|0\.[0-9]{1,6}|0\.0{0,5}[1-9][0-9]*)$"
 _DATE = (
     r"(000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3})"
     r"-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])"
@@ -103,10 +94,9 @@ _ENTRY_BOUNDS = {"min_length": "minProperties", "max_length": "maxProperties"}
 # decimal's max_digits, is not admitted, so that the description states every
 # rule the provider enforces.
 #
-# Each description states the form's wire encoding. A decimal admits no
-# constraint: it travels as text, where JSON Schema's bounds do not apply.
-# A duration is not admitted yet: Pydantic writes it as ISO 8601 text
-# ("PT1.5S"), not in its wire form ("1.500s"), and no setting changes that.
+# Each description states the form's wire encoding. A duration, a decimal and
+# bytes are not among them: Pydantic writes them otherwise, so they are
+# neolith's own types (neolith._forms), and the plain types are refused.
 _SCALARS: dict[str, tuple[dict[str, Any], Mapping[str, str], frozenset[str]]] = {
     "bool": ({"type": "boolean"}, {}, frozenset()),
     "int": (
@@ -129,25 +119,6 @@ _SCALARS: dict[str, tuple[dict[str, Any], Mapping[str, str], frozenset[str]]] = 
         _STRING_BOUNDS,
         frozenset({"strip_whitespace", "to_lower", "to_upper"}),
     ),
-    # Pydantic writes and reads base64url only under the record's settings
-    # (see Portable.bytes_settings).
-    "bytes": (
-        {"type": "string", "contentEncoding": "base64url", "pattern": BYTES_PATTERN},
-        {},
-        frozenset(),
-    ),
-    "decimal": (
-        {
-            "type": "string",
-            "pattern": DECIMAL_PATTERN,
-            "allOf": [
-                {"pattern": DECIMAL_DIGITS_PATTERN},
-                {"pattern": DECIMAL_SMALL_PATTERN},
-            ],
-        },
-        {},
-        frozenset(),
-    ),
     "date": (
         {"type": "string", "format": "date", "pattern": DATE_PATTERN},
         {},
@@ -159,12 +130,6 @@ _SCALARS: dict[str, tuple[dict[str, Any], Mapping[str, str], frozenset[str]]] = 
         frozenset({"tz_constraint", "microseconds_precision"}),
     ),
 }
-
-# The record settings that make Pydantic write bytes as padded base64url, and
-# read them from base64 (pydantic-core src/serializers/type_serializers/bytes.rs
-# and src/validators/bytes.rs read them from the record's config). A record
-# whose fields reach bytes sets both; any other value is refused.
-_BYTES_SETTINGS = {"ser_json_bytes": "base64", "val_json_bytes": "base64"}
 
 # A before validator runs on the input, and the schema it wraps then checks
 # what it returns, so the value that travels is still one the description
@@ -191,8 +156,7 @@ _VALIDATOR_KEYS = frozenset({"function", "schema", "json_schema_input_schema"})
 _CHILDREN = ("schema", "items_schema", "keys_schema", "values_schema")
 
 # Model settings that change validation only. Anything else that reaches the
-# core config, such as ser_json_timedelta, changes the wire; the bytes settings
-# are admitted on their own terms (_BYTES_SETTINGS).
+# core config, such as ser_json_timedelta or val_json_bytes, changes the wire.
 _SETTINGS = frozenset(
     {
         "title",
@@ -259,7 +223,6 @@ class Portable:
         # record's settings to every node of its fields, so a node is judged
         # together with it, not by its own keys alone.
         self.config: Mapping[str, Any] = {}
-        self.record_name = ""
 
     def fail(self, message: str) -> Exception:
         return self.error(f"{self.where}: {message}")
@@ -425,12 +388,6 @@ class Portable:
                         f"{subject} sets extra={value!r}; a record must ignore "
                         "unknown fields so that adding a field stays compatible"
                     )
-            elif key in _BYTES_SETTINGS:
-                if value != _BYTES_SETTINGS[key]:
-                    raise self.fail(
-                        f"{subject} sets {key}={value!r}; bytes travel as base64url, "
-                        f"so set {_bytes_settings()}"
-                    )
             elif key in _KEY_MEANINGS:
                 raise self.fail(f"{subject} {_KEY_MEANINGS[key]}")
             elif key not in _SETTINGS:
@@ -441,12 +398,11 @@ class Portable:
         if not self.register(cls, "record", path):
             return reference
         self.defs[cls.__name__] = {}
-        outer = self.config, self.record_name
-        self.config, self.record_name = node.get("config", {}), cls.__name__
+        outer, self.config = self.config, node.get("config", {})
         try:
             return self.fields(node, cls, path, subject, reference)
         finally:
-            self.config, self.record_name = outer
+            self.config = outer
 
     def fields(
         self,
@@ -535,9 +491,8 @@ class Portable:
         So the default must already be in the form its type reads back,
         exactly, as JSON text: ``Decimal`` for a decimal, not ``0``, and
         ``1.0`` rather than ``1`` wherever ``1`` would not read back as ``1``.
-        It must also be in its wire encoding as Pydantic writes it, which
-        ``description`` states: ``Decimal("100")``, not ``Decimal("1E+2")``,
-        and ``0.0``, not ``-0.0``.
+        What Pydantic writes must also be in its wire encoding, which
+        ``description`` states: ``0.0``, not ``-0.0``.
         """
         if self.definitions:
             schema = core_schema.definitions_schema(
@@ -658,25 +613,18 @@ class Portable:
             return self.record(node, path)
         if kind == "enum":
             return self.enum(node, path)
-        if kind == "timedelta":
+        form = form_of(node)
+        if form is not None:
+            return form.description()
+        if kind in FORM_FOR_KIND:
+            named = FORM_FOR_KIND[kind]
             raise self.fail(
-                f"{subject} is a duration, which this version does not admit yet: "
-                "its wire form is seconds with an 's' suffix, such as \"1.500s\", "
-                "and Pydantic writes a duration as ISO 8601 text, such as "
-                '"PT1.5S", with no setting that changes it'
-            )
-        constraints = sorted(set(node) - _ANY_NODE - {"strict", "serialization"})
-        if kind == "decimal" and constraints:
-            raise self.fail(
-                f"{subject} is a decimal with a constraint ({constraints[0]}), "
-                "which the description cannot state, since a decimal travels as "
-                "text"
+                f"{subject} is a plain {named.python_type.__name__}, which Pydantic "
+                f"does not write in its wire form; declare it as neolith.{named.name}"
             )
         if kind in _SCALARS:
             base, bounds, other = _SCALARS[kind]
             self.keys(node, frozenset(bounds) | other, subject)
-            if kind == "bytes":
-                self.bytes_settings(subject)
             if kind == "str":
                 self.transforms(node, subject)
             if kind == "float" and "multiple_of" in node:
@@ -740,7 +688,7 @@ class Portable:
             key = self.describe(node["keys_schema"], f"{path} key", aliases)
             # A map's keys are strings (map<string, T>): plain text, maybe
             # with lengths, or a literal. A key of another form, such as a
-            # date or a decimal, is refused.
+            # date or a duration, is refused.
             if key.get("type") != "string" or not set(key) <= _KEY_DESCRIPTION:
                 raise self.fail(
                     f"{subject} is a map whose keys are not strings, "
@@ -773,21 +721,6 @@ class Portable:
                 "which is not a portable form"
             )
         raise self.fail(f"{subject} has type {kind}, which is not a portable form")
-
-    def bytes_settings(self, subject: str) -> None:
-        """Refuse bytes in a record that does not write and read them as base64.
-
-        By default Pydantic writes bytes as UTF-8 text, which fails on other
-        bytes, and reads text as its UTF-8 bytes. Under the record's settings
-        it writes padded base64url and reads base64 (both alphabets, padded or
-        not); the description's pattern refuses the other spellings.
-        """
-        if any(self.config.get(key) != value for key, value in _BYTES_SETTINGS.items()):
-            raise self.fail(
-                f"{subject} is bytes, which travel as base64url; set "
-                f"{_bytes_settings()} in the model_config of record "
-                f"{self.record_name}"
-            )
 
     def converts(self, node: Mapping[str, Any]) -> list[str]:
         """The conversions pydantic-core applies to a string node, with settings."""
@@ -931,7 +864,7 @@ def portable_constructs() -> Mapping[str, frozenset[str]]:
 
 def portable_settings() -> frozenset[str]:
     """The admitted record settings, for the property test's generator."""
-    return _SETTINGS | frozenset(_BYTES_SETTINGS)
+    return _SETTINGS
 
 
 # The portable integers (spec 01), and those of an untyped detail (CON-30):
@@ -1195,10 +1128,6 @@ def _only_initialises_private_attributes(cls: type[Any]) -> bool:
             return False
         function = held[_WRAPPED_CELL]
     return False
-
-
-def _bytes_settings() -> str:
-    return " and ".join(f"{key}={value!r}" for key, value in _BYTES_SETTINGS.items())
 
 
 def _narrowed(base: Mapping[str, Any], bounds: Mapping[str, Any]) -> dict[str, Any]:

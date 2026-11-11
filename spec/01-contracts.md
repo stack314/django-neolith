@@ -54,7 +54,7 @@ The portable forms are the types that every transport can represent, JSON Schema
 
 How each form is written in JSON is under [Wire encodings](#wire-encodings).
 
-~~**CON-21.** Until the encodings of ADR 0019 are implemented (#10 task 1), an implementation MUST reject a contract whose request type, reply type or detail record (CON-8) uses decimal, before it serves the contract or calls any of its actions. The rejection names the contract, the action and the field.~~ Withdrawn in spec 0.1: decimals travel in the form under [Wire encodings](#wire-encodings), with the restriction of CON-42 (ADR 0019).
+~~**CON-21.** Until the encodings of ADR 0019 are implemented (#10 task 1), an implementation MUST reject a contract whose request type, reply type or detail record (CON-8) uses decimal, before it serves the contract or calls any of its actions. The rejection names the contract, the action and the field.~~ Withdrawn in spec 0.1: decimals travel in the form under [Wire encodings](#wire-encodings) (ADR 0019).
 
 **CON-33.** A field of a record MUST travel under its own name, with no alias.
 
@@ -79,23 +79,23 @@ Values travel as JSON text (RFC 8259), with each form written as below ([ADR 001
 
 **CON-34.** The description (CON-16) MUST state each form's range or pattern above: an integer's and a number's range as `minimum` and `maximum`, and a pattern as `pattern`, with a decimal's further patterns under `allOf`. It also marks bytes with `contentEncoding: base64url`, a timestamp with `format: date-time` and a date with `format: date`.
 
-**CON-35.** Before it writes a value, a sender MUST write a number's `-0` as `0`, a timestamp whose offset is not a whole number of minutes in UTC, with `Z`, and a decimal with a positive exponent at exponent 0 with its value kept (`1E+2` as `100`). RFC 3339 writes an offset in hours and minutes only, and RFC 9557 (section 2.2) reads `Z` as "local offset unknown".
+**CON-35.** A sender MUST write a number's `-0` as `0`, as RFC 8785 does.
 
-**CON-36.** A sender MUST NOT send a value that does not then meet its form, such as an infinite or NaN number.
+**CON-36.** A sender MUST write a timestamp whose offset is not a whole number of minutes in UTC, with `Z`. RFC 3339 writes an offset in hours and minutes only, and RFC 9557 (section 2.2) reads `Z` as "local offset unknown".
 
-**CON-37.** A receiver MUST refuse a value that its form's range or pattern refuses.
+**CON-37.** A sender MUST write a decimal with a positive exponent at exponent 0, and a decimal zero without its sign, with the value and, for a zero, the scale kept: `1E+2` as `100`, and `-0.00` as `0.00`.
 
-**CON-38.** A receiver MUST also refuse a value that breaks a rule the description cannot state: a date or timestamp whose day does not exist (`2027-02-29`), a timestamp whose instant falls outside years 0001 to 9999 in UTC, and an integer written with a fraction or an exponent (`1.0`), which JSON Schema counts as an integer.
+**CON-38.** A sender MUST NOT send a value that does not meet its form after those conversions, such as an infinite or NaN number.
 
-**CON-39.** A sender MUST NOT send a body that holds a duplicate member name, a lone surrogate or a number outside the range of a double, which RFC 8785 (section 3.1) excludes from its input.
+**CON-39.** A receiver MUST refuse a value that its form's range or pattern refuses.
 
-**CON-40.** A receiver MUST refuse a body that holds a duplicate member name, a lone surrogate or a number outside the range of a double.
+**CON-40.** A receiver MUST also refuse a value that breaks a rule the description cannot state: a date or timestamp whose day does not exist (`2027-02-29`), a timestamp whose instant falls outside years 0001 to 9999 in UTC, and an integer written with a fraction or an exponent (`1.0`), which JSON Schema counts as an integer.
+
+**CON-41.** A sender MUST NOT send a body that holds a duplicate member name, a lone surrogate or a number outside the range of a double, which RFC 8785 (section 3.1) excludes from its input.
+
+**CON-42.** A receiver MUST refuse a body that holds a duplicate member name, a lone surrogate or a number outside the range of a double.
 
 Text may hold a noncharacter, such as U+FFFF, as CON-25 and CON-30 allow, although I-JSON (RFC 7493, section 2.1) excludes it.
-
-**CON-41.** Until #10 settles the type that writes durations in their form, an implementation MUST reject a contract whose request type, reply type or detail record uses duration, before it serves the contract or calls any of its actions. The rejection names the contract, the action and the field.
-
-**CON-42.** Until #10 settles how such decimals are written, a decimal MUST NOT be nonzero and below 10^−6 in magnitude, or zero with more than 6 fractional digits, such as `0.0000001` or `0.0000000`. The description states this with a third pattern under `allOf`: `^-?([1-9][0-9.]*|0|0\.[0-9]{1,6}|0\.0{0,5}[1-9][0-9]*)$`. A later version can admit them, as a compatible change.
 
 ## Errors
 

@@ -62,8 +62,11 @@ from pydantic_core import CoreSchema, core_schema
 
 from neolith import (
     Action,
+    Binary,
     Contract,
     ContractDefinitionError,
+    Decimal128,
+    Duration,
     action,
     contract,
     implements,
@@ -417,7 +420,9 @@ def test_action_is_synchronous() -> None:
         int,
         float,
         str,
-        Decimal,
+        Binary,
+        Decimal128,
+        Duration,
         AwareDatetime,
         date,
         list[int],
@@ -446,6 +451,9 @@ def test_portable_forms_are_accepted(annotation: object) -> None:
         Any,
         object,
         complex,
+        bytes,
+        Decimal,
+        timedelta,
         UUID,
         type(None),
         tuple[int, ...],
@@ -663,6 +671,7 @@ _SERIALIZING = [
             ("ser_json_temporal", "milliseconds"),
             ("ser_json_timedelta", "float"),
             ("ser_json_inf_nan", "strings"),
+            ("ser_json_bytes", "base64"),
         ]
     ),
 ]
@@ -1002,6 +1011,7 @@ def test_plain_validator_is_rejected() -> None:
 @pytest.mark.parametrize(
     "config",
     [
+        pytest.param(ConfigDict(val_json_bytes="base64"), id="val_json_bytes"),
         pytest.param(ConfigDict(str_max_length=3), id="str_max_length"),
     ],
 )
@@ -1106,13 +1116,12 @@ def test_default_that_does_not_read_back_as_itself_is_rejected(
 @pytest.mark.spec("CON-13", "CON-16")
 def test_defaults_of_the_field_type_are_allowed() -> None:
     class Defaults(BaseModel):
-        model_config = ConfigDict(ser_json_bytes="base64", val_json_bytes="base64")
-
         maybe: int | None = None
         colour: Colour = Colour.RED
         size: Literal["s", "m"] = "s"
-        amount: Decimal = Decimal("1.50")
-        raw: bytes = b"\xff"
+        amount: Decimal128 = Decimal("1.50")
+        raw: Binary = b"\xff"
+        span: Duration = timedelta(seconds=90)
         ratio: float = 1
         lines: list[Line] = []
         counts: dict[str, int] = {"a": 1}
@@ -1536,8 +1545,8 @@ class _WrapValidated(BaseModel):
             id="literal with None",
         ),
         pytest.param(
-            Annotated[bytes, Field(max_length=5)],
-            "field Shape.value sets 'max_length', which is outside the portable forms",
+            Annotated[date, Field(gt=date(2026, 1, 1))],
+            "field Shape.value sets 'gt', which is outside the portable forms",
             id="constraint the description cannot state",
         ),
         pytest.param(
@@ -1737,9 +1746,9 @@ def test_integer_multiple_of_is_accepted() -> None:
         pytest.param(int, {"strict": True}, id="strict record"),
         pytest.param(str, {"strict": True}, id="strict record without integers"),
         pytest.param(
-            Annotated[bytes, Strict(), BeforeValidator(_identity)],
+            Annotated[date, Strict(), BeforeValidator(_identity)],
             {},
-            id="strict bytes behind a before validator",
+            id="strict date behind a before validator",
         ),
     ],
 )

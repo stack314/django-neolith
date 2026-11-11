@@ -9,12 +9,16 @@ from neolith._contracts import (
     contract,
     implements,
 )
+from neolith._forms import Binary, Decimal128, Duration
 
 __all__ = [
     "Action",
+    "Binary",
     "Contract",
     "ContractDefinitionError",
     "ContractError",
+    "Decimal128",
+    "Duration",
     "__version__",
     "action",
     "contract",

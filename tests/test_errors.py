@@ -15,7 +15,7 @@ import re
 import sys
 import types
 from collections.abc import Callable
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Protocol, TypedDict, cast
 from uuid import UUID
@@ -27,9 +27,12 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, RootModel
 
 from neolith import (
     Action,
+    Binary,
     Contract,
     ContractDefinitionError,
     ContractError,
+    Decimal128,
+    Duration,
     action,
     contract,
     implements,
@@ -709,7 +712,9 @@ def test_detail_fields_use_the_portable_forms(annotation: object) -> None:
 
 
 @pytest.mark.spec("CON-24")
-@pytest.mark.parametrize("annotation", [Decimal, list[Decimal], Decimal | None])
+@pytest.mark.parametrize(
+    "annotation", [Decimal128, list[Decimal128], Decimal128 | None], ids=repr
+)
 def test_decimal_in_a_detail_record_is_accepted(annotation: object) -> None:
     detail = type("Money", (BaseModel,), {"__annotations__": {"amount": annotation}})
     _declare({"over_limit": detail})
@@ -1168,8 +1173,9 @@ _EDGES: list[tuple[str, object, object]] = [
     ("str", str, "\U0001f600"),
     ("timestamp", AwareDatetime, datetime(1, 1, 1, tzinfo=UTC)),
     ("date", date, date.max),
-    ("decimal", Decimal, Decimal("-" + "9" * 34)),
-    ("bytes", bytes, b"\xff" * 3),
+    ("decimal", Decimal128, Decimal("-" + "9" * 34)),
+    ("bytes", Binary, b"\xff" * 3),
+    ("duration", Duration, timedelta(seconds=10**11 - 1)),
 ]
 
 
@@ -1184,31 +1190,25 @@ def test_every_admitted_scalar_builds_at_its_edges(
     edge = type(
         "Edge",
         (BaseModel,),
-        {"__annotations__": {"v": annotation}, "model_config": _BASE64},
+        {"__annotations__": {"v": annotation}},
     )
     declared = _declare({"edge": edge})
     record = declared.actions["place"].errors["edge"](v=value)
     ContractError("edge", "text", record)
 
 
-_BASE64 = ConfigDict(ser_json_bytes="base64", val_json_bytes="base64")
-
-
 @pytest.mark.spec("CON-24")
 @pytest.mark.parametrize(
     "annotation",
-    [bytes, list[bytes], dict[str, bytes], bytes | None, "Nested"],
+    [Binary, list[Binary], dict[str, Binary], Binary | None, "Nested"],
     ids=["bytes", "list", "map", "optional", "nested-record"],
 )
 def test_bytes_in_a_detail_record_is_accepted(annotation: object) -> None:
     # Bytes travel as base64url text, which an untyped map holds (CON-30), so
     # the refusal of CON-32 is withdrawn.
-    namespace = {"model_config": _BASE64}
-    inner = type("Blob", (BaseModel,), {"__annotations__": {"raw": bytes}, **namespace})
+    inner = type("Blob", (BaseModel,), {"__annotations__": {"raw": Binary}})
     field = inner if annotation == "Nested" else annotation
-    detail = type(
-        "Checksum", (BaseModel,), {"__annotations__": {"v": field}, **namespace}
-    )
+    detail = type("Checksum", (BaseModel,), {"__annotations__": {"v": field}})
     _declare({"bad_checksum": detail})
 
 

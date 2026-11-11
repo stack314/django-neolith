@@ -38,7 +38,16 @@ from pydantic import (
     create_model,
 )
 
-from neolith import Contract, ContractDefinitionError, action, contract
+from neolith import (
+    Binary,
+    Contract,
+    ContractDefinitionError,
+    Decimal128,
+    Duration,
+    action,
+    contract,
+)
+from neolith._forms import FORMS
 from neolith._portable import (
     portable_constructs,
     portable_scalars,
@@ -93,6 +102,10 @@ _KEYS: dict[str, dict[str, st.SearchStrategy[object]]] = {
     "date": {},
     # Set by Pydantic on every timestamp and duration, not by authors.
     "timedelta": {"microseconds_precision": st.just("truncate")},
+    # neolith's own forms, which admit no constraint.
+    "Binary": {},
+    "Decimal128": {},
+    "Duration": {},
     "datetime": {
         "tz_constraint": st.just("aware"),
         "microseconds_precision": st.just("truncate"),
@@ -108,7 +121,11 @@ _TYPES_BY_KEY: dict[str, object] = {
     "date": date,
     "timedelta": timedelta,
     "datetime": AwareDatetime,
+    "Binary": Binary,
+    "Decimal128": Decimal128,
+    "Duration": Duration,
 }
+_FORM_KEYS = {"Binary", "Decimal128", "Duration"}
 _STRING_KEYS = {
     "strip_whitespace",
     "to_lower",
@@ -128,9 +145,6 @@ _SETTING_VALUES: dict[str, st.SearchStrategy[object]] = {
     "str_strip_whitespace": st.booleans(),
     "str_to_lower": st.booleans(),
     "str_to_upper": st.booleans(),
-    # Bytes are admitted only with both set to "base64"; see _records.
-    "ser_json_bytes": st.sampled_from(["base64", "utf8"]),
-    "val_json_bytes": st.sampled_from(["base64", "utf8"]),
 }
 # Defaults authors write, in form and out of it. The checker must refuse a
 # default that does not read back as itself, so every pick is fair game.
@@ -148,6 +162,15 @@ _DEFAULTS: dict[str, list[object]] = {
         datetime(2026, 1, 1),
         datetime(1, 1, 1, tzinfo=timezone(timedelta(hours=1))),
     ],
+    "Binary": [b"", b"\xff", "_w==", "/w=="],
+    "Decimal128": [
+        Decimal("1.50"),
+        Decimal("1E+2"),
+        Decimal("-0"),
+        Decimal("1E-7"),
+        "2",
+    ],
+    "Duration": [timedelta(seconds=90), "1.500s", timedelta(seconds=10**11), 1.5],
 }
 
 
@@ -167,7 +190,8 @@ def _scalars(draw: st.DrawFn) -> tuple[object, list[object]]:
     markers: list[object] = []
     # Strict mode is refused, so it is drawn rarely. Hypothesis favours small
     # integers, so the rare value is one from the middle of the range.
-    if draw(st.integers(0, 19)) == 13:
+    # Pydantic itself refuses Strict() on neolith's forms.
+    if draw(st.integers(0, 19)) == 13 and kind not in _FORM_KEYS:
         markers.append(Strict())
     if kind == "str":
         markers.append(StringConstraints(**cast("Any", values)))
@@ -228,10 +252,6 @@ def _records(
             definitions[f"f{i}"] = (cast("Any", annotation), default)
         chosen = draw(st.sets(st.sampled_from(sorted(_SETTING_VALUES))))
         config: dict[str, object] = {k: draw(_SETTING_VALUES[k]) for k in chosen}
-        if draw(st.booleans()):
-            # Most records that reach bytes need both settings, so they are
-            # set together often, to leave such records for the round trip.
-            config.update(ser_json_bytes="base64", val_json_bytes="base64")
         if draw(st.integers(0, 19)) == 13:
             config["strict"] = True  # refused; drawn rarely
         config["extra"] = "ignore"
@@ -329,8 +349,10 @@ def test_generator_covers_the_allowlist() -> None:
     for kind, (_, bounds, other) in portable_scalars().items():
         assert set(bounds) | set(other) <= set(_KEYS[kind]), kind
     assert set(portable_settings()) <= set(_SETTING_VALUES)
-    # The generator also draws decimals, which the checker refuses.
+    # The generator also draws plain bytes, decimals and durations, which the
+    # checker refuses, and neolith's own forms.
     assert set(portable_scalars()) <= set(_KEYS)
+    assert {form.name for form in FORMS} <= set(_KEYS)
     drawn = {
         "list": set(_LENGTHS),
         "dict": set(_LENGTHS),
@@ -434,14 +456,13 @@ class RefPart(BaseModel):
 class Reference(BaseModel):
     """Every admitted portable form, with defaults as authors write them."""
 
-    model_config = ConfigDict(ser_json_bytes="base64", val_json_bytes="base64")
-
     flag: bool = False
     count: int = 0
     ratio: float = 1.0
     name: str = ""
-    raw: bytes = b"\xff"
-    amount: Decimal = Decimal("1.50")
+    raw: Binary = b"\xff"
+    amount: Decimal128 = Decimal("1.50")
+    span: Duration = timedelta(seconds=90)
     when: AwareDatetime
     day: date
     parts: list[RefPart] = []
@@ -451,7 +472,7 @@ class Reference(BaseModel):
     note: str | None = None
 
 
-@pytest.mark.spec("CON-16", "CON-34", "CON-42")
+@pytest.mark.spec("CON-16", "CON-34")
 @_HYPOTHESIS
 @given(st.data())
 def test_reference_contract_round_trips_through_its_description(

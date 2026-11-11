@@ -1,15 +1,19 @@
-"""The wire encodings of spec 01 (ADR 0019), as the description states them.
+"""The wire encodings of spec 01 (ADR 0019), in the description and the types.
 
 Each portable form carries a pattern or a range in the published description,
 so a JSON Schema validator in any language checks it without format
-extensions (CON-34). Defaults are part of the description, so a default that
-Pydantic would write outside its form is refused when the contract is
-declared. Sending and receiving are checked by the transports (#10).
+extensions (CON-34). Pydantic writes a duration, a decimal and bytes in other
+forms, so those are neolith's own types, Duration, Decimal128 and Binary,
+which read and write exactly their forms; the plain types are refused. A
+default is part of the description, so one that would travel outside its form
+is refused when the contract is declared. Sending and receiving are checked by
+the transports (#10).
 """
 
 import json
 import re
 import types
+from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -20,20 +24,37 @@ from hypothesis import HealthCheck, assume, given, settings
 from hypothesis import strategies as st
 from hypothesis_jsonschema import from_schema
 from jsonschema import Draft202012Validator, FormatChecker
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, create_model
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    BeforeValidator,
+    Field,
+    GetCoreSchemaHandler,
+    PlainSerializer,
+    PlainValidator,
+    ValidationError,
+    create_model,
+)
+from pydantic_core import CoreSchema, PydanticSerializationError, core_schema
 
-from neolith import Contract, ContractDefinitionError, action, contract
-from neolith._portable import (
+from neolith import (
+    Binary,
+    Contract,
+    ContractDefinitionError,
+    Decimal128,
+    Duration,
+    action,
+    contract,
+)
+from neolith._forms import (
     BYTES_PATTERN,
-    DATE_PATTERN,
     DECIMAL_DIGITS_PATTERN,
     DECIMAL_PATTERN,
-    DECIMAL_SMALL_PATTERN,
-    TIMESTAMP_PATTERN,
+    DURATION_PATTERN,
 )
+from neolith._portable import DATE_PATTERN, TIMESTAMP_PATTERN
 
 SPEC = Path(__file__).resolve().parent.parent / "spec" / "01-contracts.md"
-BASE64 = ConfigDict(ser_json_bytes="base64", val_json_bytes="base64")
 SAFE = 2**53 - 1
 DOUBLE_MAX = 1.7976931348623157e308
 INTEGER = {"type": "integer", "minimum": -SAFE, "maximum": SAFE}
@@ -42,8 +63,9 @@ BYTES = {"type": "string", "contentEncoding": "base64url", "pattern": BYTES_PATT
 DECIMAL = {
     "type": "string",
     "pattern": DECIMAL_PATTERN,
-    "allOf": [{"pattern": DECIMAL_DIGITS_PATTERN}, {"pattern": DECIMAL_SMALL_PATTERN}],
+    "allOf": [{"pattern": DECIMAL_DIGITS_PATTERN}],
 }
+DURATION = {"type": "string", "pattern": DURATION_PATTERN}
 TIMESTAMP = {"type": "string", "format": "date-time", "pattern": TIMESTAMP_PATTERN}
 DATE = {"type": "string", "format": "date", "pattern": DATE_PATTERN}
 _FORMATS = FormatChecker(formats=("date", "date-time"))
@@ -54,6 +76,10 @@ _HYPOTHESIS = settings(
     deadline=None,
     suppress_health_check=[HealthCheck.too_slow],
 )
+
+
+class Carrier(BaseModel):
+    """The request of a contract whose record under test is a detail record."""
 
 
 def _declare(record: type[BaseModel], role: str = "request") -> dict[str, Any]:
@@ -71,26 +97,29 @@ def _declare(record: type[BaseModel], role: str = "request") -> dict[str, Any]:
     return Contract.of(declared).describe()
 
 
-def _field(
-    annotation: object, default: object = ..., **config: object
-) -> dict[str, Any]:
-    """The description of field ``v`` of a record built with ``config``."""
-    record = create_model(
-        "Holder",
-        __config__=cast("ConfigDict", config or None),
-        v=(cast("Any", annotation), default),
-    )
-    return cast(
-        "dict[str, Any]", _declare(record)["$defs"]["Holder"]["properties"]["v"]
-    )
+def _record(annotation: object, default: object = ...) -> type[BaseModel]:
+    return create_model("Holder", v=(cast("Any", annotation), default))
 
 
-class Carrier(BaseModel):
-    """The request of a contract whose record under test is a detail record."""
+def _field(annotation: object, default: object = ...) -> dict[str, Any]:
+    """The description of field ``v`` of a record."""
+    described = _declare(_record(annotation, default))
+    return cast("dict[str, Any]", described["$defs"]["Holder"]["properties"]["v"])
 
 
 def _is_valid(schema: dict[str, Any], value: object) -> bool:
     return Draft202012Validator(schema, format_checker=_FORMATS).is_valid(value)
+
+
+def _written(annotation: object, value: object) -> object:
+    """What a record writes for ``value`` in its field ``v``."""
+    return json.loads(_record(annotation)(v=value).model_dump_json())["v"]
+
+
+def _read(annotation: object, text: object) -> object:
+    """What a record reads from JSON ``{"v": text}``."""
+    read: Any = _record(annotation).model_validate_json(json.dumps({"v": text}))
+    return read.v
 
 
 # The spec and the code state the same patterns.
@@ -103,12 +132,12 @@ def _is_valid(schema: dict[str, Any], value: object) -> bool:
         BYTES_PATTERN,
         DECIMAL_PATTERN,
         DECIMAL_DIGITS_PATTERN,
-        DECIMAL_SMALL_PATTERN,
+        DURATION_PATTERN,
         TIMESTAMP_PATTERN,
         DATE_PATTERN,
     ],
 )
-def test_spec_states_each_pattern_the_description_uses(pattern: str) -> None:
+def test_spec_states_each_pattern_the_code_uses(pattern: str) -> None:
     assert f"`{pattern}`" in SPEC.read_text(encoding="utf-8")
 
 
@@ -121,27 +150,44 @@ def test_spec_states_each_pattern_the_description_uses(pattern: str) -> None:
     [
         pytest.param(int, INTEGER, id="integer"),
         pytest.param(float, NUMBER, id="number"),
-        pytest.param(bytes, BYTES, id="bytes"),
-        pytest.param(Decimal, DECIMAL, id="decimal"),
+        pytest.param(Binary, BYTES, id="bytes"),
+        pytest.param(Decimal128, DECIMAL, id="decimal"),
+        pytest.param(Duration, DURATION, id="duration"),
         pytest.param(AwareDatetime, TIMESTAMP, id="timestamp"),
         pytest.param(date, DATE, id="date"),
-        pytest.param(list[bytes], {"type": "array", "items": BYTES}, id="list"),
+        pytest.param(list[Binary], {"type": "array", "items": BYTES}, id="list"),
         pytest.param(
-            dict[str, Decimal],
+            dict[str, Decimal128],
             {"type": "object", "additionalProperties": DECIMAL},
             id="map",
         ),
         pytest.param(
-            AwareDatetime | None,
-            {"anyOf": [TIMESTAMP, {"type": "null"}]},
-            id="optional",
+            Duration | None, {"anyOf": [DURATION, {"type": "null"}]}, id="optional"
+        ),
+        pytest.param(
+            Annotated[Duration, BeforeValidator(lambda v: v)],
+            DURATION,
+            id="behind a before validator",
         ),
     ],
 )
 def test_description_states_each_forms_encoding(
     annotation: object, described: dict[str, Any]
 ) -> None:
-    assert _field(annotation, **BASE64) == described
+    assert _field(annotation) == described
+
+
+@pytest.mark.spec("CON-34")
+@pytest.mark.parametrize("annotation", [Binary, Decimal128, Duration])
+def test_pydantics_own_schema_of_a_neolith_form_states_its_pattern(
+    annotation: object,
+) -> None:
+    # model_json_schema, and anything built on it, agrees with the wire.
+    record = _record(annotation)
+    expected = _field(annotation)
+    for mode in ("validation", "serialization"):
+        own = record.model_json_schema(mode=mode)["properties"]["v"]
+        assert {key: value for key, value in own.items() if key != "title"} == expected
 
 
 @pytest.mark.spec("CON-34")
@@ -190,22 +236,25 @@ def test_description_keeps_the_narrower_bound(
         ),
         pytest.param(
             DECIMAL,
-            ["0", "0.00", "1.50", "-12.5", "100", "0.000001", "-" + "9" * 34],
-            [
-                "-0",
-                "-0.00",
-                "1E+2",
-                "1e2",
-                "01",
-                ".5",
-                "1.",
-                "+1",
-                "0.0000001",
-                "0.0000000",
-                "9" * 35,
-                "NaN",
-            ],
+            ["0", "0.00", "1.50", "-12.5", "100", "0.0000001", "-" + "9" * 34],
+            ["-0", "-0.00", "1E+2", "1e2", "01", ".5", "1.", "+1", "9" * 35, "NaN"],
             id="decimal",
+        ),
+        pytest.param(
+            DURATION,
+            ["0s", "-2s", "1.500s", "0.000001s", "-0.100001s", "99999999999.999999s"],
+            [
+                "-0s",
+                "1.5s",
+                "1.000s",
+                "1.500000s",
+                "0.0000001s",
+                "100000000000s",
+                "PT1.5S",
+                "01s",
+                "1",
+            ],
+            id="duration",
         ),
         pytest.param(
             TIMESTAMP,
@@ -252,7 +301,7 @@ def test_description_admits_each_form_and_refuses_the_rest(
         (BYTES_PATTERN, "_w=="),
         (DECIMAL_PATTERN, "1.5"),
         (DECIMAL_DIGITS_PATTERN, "1.5"),
-        (DECIMAL_SMALL_PATTERN, "1.5"),
+        (DURATION_PATTERN, "1.500s"),
         (TIMESTAMP_PATTERN, "2026-01-01T00:00:00Z"),
         (DATE_PATTERN, "2026-01-01"),
     ],
@@ -262,183 +311,45 @@ def test_patterns_matched_over_the_whole_string_refuse_a_final_newline(
 ) -> None:
     # "$" matches before a final newline in Python, so a validator that
     # matches with re.search, as python-jsonschema does, admits one; spec 01
-    # matches over the whole string.
+    # matches over the whole string, as neolith's types do.
     assert re.fullmatch(pattern, value)
     assert not re.fullmatch(pattern, value + "\n")
     assert re.search(pattern, value + "\n")
 
 
-# Bytes travel as base64url only under the record's own settings.
+# The plain types are refused, naming neolith's.
 
 
-@pytest.mark.spec("CON-16", "CON-34")
+@pytest.mark.spec("CON-13", "CON-17")
 @pytest.mark.parametrize(
-    "config",
-    [
-        pytest.param({}, id="no setting"),
-        pytest.param({"ser_json_bytes": "base64"}, id="writing only"),
-        pytest.param({"val_json_bytes": "base64"}, id="reading only"),
-    ],
+    ("plain", "named"),
+    [(bytes, "Binary"), (Decimal, "Decimal128"), (timedelta, "Duration")],
 )
-def test_bytes_without_both_base64_settings_are_refused(config: ConfigDict) -> None:
-    with pytest.raises(
-        ContractDefinitionError,
-        match=re.escape(
-            "wire.v1, action 'send': field Holder.v is bytes, which travel as "
-            "base64url; set ser_json_bytes='base64' and val_json_bytes='base64' "
-            "in the model_config of record Holder"
-        ),
-    ):
-        _field(bytes, **config)
-
-
-@pytest.mark.spec("CON-16", "CON-34")
 @pytest.mark.parametrize(
-    ("key", "value"),
+    "wrap",
     [
-        ("ser_json_bytes", "utf8"),
-        ("ser_json_bytes", "hex"),
-        ("val_json_bytes", "utf8"),
-        ("val_json_bytes", "hex"),
+        pytest.param(lambda t: t, id="field"),
+        pytest.param(lambda t: list[t], id="list"),  # type: ignore[valid-type]
+        pytest.param(lambda t: t | None, id="optional"),
+        pytest.param(lambda t: dict[str, t], id="map"),  # type: ignore[valid-type]
     ],
-)
-def test_other_bytes_settings_are_refused_even_without_bytes(
-    key: str, value: str
-) -> None:
-    with pytest.raises(
-        ContractDefinitionError,
-        match=re.escape(f"record Holder sets {key}={value!r}; bytes travel as"),
-    ):
-        _field(int, **{**BASE64, key: value})
-
-
-@pytest.mark.spec("CON-16", "CON-34")
-def test_a_records_bytes_follow_its_own_settings_not_its_containers() -> None:
-    # pydantic-core builds each record's fields with that record's settings, so
-    # an inner record without them writes its bytes as UTF-8 text.
-    inner = create_model("Inner", raw=(bytes, ...))
-    outer = create_model("Outer", __config__=BASE64, inner=(inner, ...))
-    with pytest.raises(
-        ContractDefinitionError,
-        match=re.escape("field Outer.inner.raw is bytes, which travel as base64url"),
-    ):
-        _declare(outer)
-    assert outer(inner=inner(raw=b"ok")).model_dump_json() == '{"inner":{"raw":"ok"}}'
-
-
-@pytest.mark.spec("CON-34")
-def test_bytes_settings_without_bytes_are_accepted() -> None:
-    assert _field(int, **BASE64) == INTEGER
-
-
-@pytest.mark.spec("CON-34")
-def test_bytes_as_map_keys_are_refused() -> None:
-    with pytest.raises(ContractDefinitionError, match="keys are not strings"):
-        _field(dict[bytes, int], **BASE64)
-
-
-@pytest.mark.spec("CON-16", "CON-34")
-@_HYPOTHESIS
-@given(st.binary(max_size=64))
-def test_bytes_travel_in_the_form_the_description_states(raw: bytes) -> None:
-    record = create_model("Blob", __config__=BASE64, raw=(bytes, ...))
-    sent = json.loads(record(raw=raw).model_dump_json())["raw"]
-    assert _is_valid(BYTES, sent)
-    assert record.model_validate_json(json.dumps({"raw": sent})) == record(raw=raw)
-
-
-# Decimals are admitted, without constraints, in their form.
-
-
-@pytest.mark.spec("CON-34")
-@pytest.mark.parametrize(
-    "field",
-    [
-        pytest.param(Field(max_digits=5), id="max_digits"),
-        pytest.param(Field(decimal_places=2), id="decimal_places"),
-        pytest.param(Field(ge=Decimal(0)), id="ge"),
-        pytest.param(Field(multiple_of=cast("Any", Decimal("0.5"))), id="multiple_of"),
-        pytest.param(Field(allow_inf_nan=True), id="allow_inf_nan"),
-    ],
-)
-def test_decimal_constraints_are_refused(field: object) -> None:
-    with pytest.raises(
-        ContractDefinitionError,
-        match=r"field Holder\.v is a decimal with a constraint \(\w+\), which the "
-        "description cannot state",
-    ):
-        _field(Annotated[Decimal, cast("Any", field)])
-
-
-@pytest.mark.spec("CON-34", "CON-42")
-@pytest.mark.parametrize(
-    ("default", "written"),
-    [
-        pytest.param(Decimal("1.50"), "1.50", id="trailing zero kept"),
-        pytest.param(Decimal("100"), "100", id="integer"),
-        pytest.param(Decimal("0.000001"), "0.000001", id="smallest admitted"),
-        pytest.param(Decimal("0.000000"), "0.000000", id="zero at scale 6"),
-        pytest.param(Decimal("-" + "9" * 34), "-" + "9" * 34, id="34 digits"),
-    ],
-)
-def test_decimal_default_in_its_form_is_described(
-    default: Decimal, written: str
-) -> None:
-    assert _field(Decimal, default)["default"] == written
-
-
-@pytest.mark.spec("CON-34", "CON-42")
-@pytest.mark.parametrize(
-    "default",
-    [
-        pytest.param(Decimal("1E+2"), id="positive exponent"),
-        pytest.param(Decimal("-0"), id="negative zero"),
-        pytest.param(Decimal("-0.00"), id="negative zero at a scale"),
-        pytest.param(Decimal("1E-7"), id="below 10**-6"),
-        pytest.param(Decimal("0E-7"), id="zero beyond scale 6"),
-        pytest.param(Decimal("9" * 35), id="35 digits"),
-    ],
-)
-def test_decimal_default_outside_its_form_is_refused(default: Decimal) -> None:
-    with pytest.raises(
-        ContractDefinitionError,
-        match=r"field Holder\.v has the default .*, which Pydantic writes outside "
-        "its wire encoding",
-    ):
-        _field(Decimal, default)
-
-
-@pytest.mark.spec("CON-34", "CON-42")
-@pytest.mark.parametrize("role", ["request", "detail"])
-def test_decimals_are_admitted_in_requests_replies_and_details(role: str) -> None:
-    record = create_model("Money", amount=(Decimal, ...), parts=(list[Decimal], []))
-    assert _declare(record, role)["$defs"]["Money"]["properties"]["amount"] == DECIMAL
-
-
-# Durations wait for a type that writes their form (CON-41).
-
-
-@pytest.mark.spec("CON-41")
-@pytest.mark.parametrize(
-    "annotation",
-    [timedelta, list[timedelta], timedelta | None, dict[str, timedelta]],
-    ids=repr,
 )
 @pytest.mark.parametrize("role", ["request", "detail"])
-def test_duration_is_refused_until_its_type_is_settled(
-    annotation: object, role: str
+def test_plain_type_is_refused_naming_neoliths(
+    plain: type, named: str, wrap: Callable[[type], object], role: str
 ) -> None:
     where = "wire.v1, action 'send'" + (", error 'e'" if role == "detail" else "")
     with pytest.raises(
         ContractDefinitionError,
-        match=re.escape(where) + r": field Holder\.v\S* is a duration, which this "
-        "version does not admit yet",
+        match=re.escape(where)
+        + rf": field Holder\.v\S* is a plain {plain.__name__}, which Pydantic does "
+        rf"not write in its wire form; declare it as neolith\.{named}$",
     ):
-        _declare(create_model("Holder", v=(cast("Any", annotation), ...)), role)
+        _declare(_record(wrap(plain)), role)
 
 
-@pytest.mark.spec("CON-41")
-def test_duration_in_a_reply_is_refused() -> None:
+@pytest.mark.spec("CON-13", "CON-17")
+def test_plain_duration_in_a_reply_is_refused() -> None:
     reply = create_model("Waited", span=(timedelta, ...))
 
     def wait(self: object, request: Carrier) -> reply: ...  # type: ignore[valid-type]
@@ -448,12 +359,339 @@ def test_duration_in_a_reply_is_refused() -> None:
     )
     with pytest.raises(
         ContractDefinitionError,
-        match=r"^waits\.v1, action 'wait': field Waited\.span is a duration",
+        match=r"^waits\.v1, action 'wait': field Waited\.span is a plain timedelta",
     ):
         contract("waits.v1")(declared)
 
 
+def _look_alike(value: object) -> object:
+    return value
+
+
+_LOOK_ALIKE = Annotated[
+    timedelta,
+    PlainValidator(_look_alike),
+    PlainSerializer(lambda value: "1s", when_used="json"),
+]
+
+
+@pytest.mark.spec("CON-13", "CON-17")
+@pytest.mark.parametrize(
+    ("annotation", "message"),
+    [
+        pytest.param(_LOOK_ALIKE, "has type function-plain", id="own plain validator"),
+        pytest.param(
+            Annotated[Duration, PlainSerializer(str, when_used="json")],
+            "has type function-plain",
+            id="neolith form with another serializer",
+        ),
+        pytest.param(
+            Annotated[Binary, Field(max_length=4)],
+            "has an after or wrap validator",
+            id="constraint on a neolith form",
+        ),
+        pytest.param(
+            Annotated[Decimal128, Field(ge=Decimal(0))],
+            "has an after or wrap validator",
+            id="bound on a neolith form",
+        ),
+    ],
+)
+def test_only_neolith_forms_own_schema_is_admitted(
+    annotation: object, message: str
+) -> None:
+    with pytest.raises(ContractDefinitionError, match=re.escape(message)):
+        _field(annotation)
+
+
+@pytest.mark.spec("CON-13", "CON-17")
+def test_a_copy_of_a_forms_schema_with_other_functions_is_refused() -> None:
+    class Twin:
+        @classmethod
+        def __get_pydantic_core_schema__(
+            cls, source: object, handler: GetCoreSchemaHandler
+        ) -> CoreSchema:
+            return core_schema.no_info_plain_validator_function(
+                _look_alike,
+                serialization=core_schema.plain_serializer_function_ser_schema(
+                    str, when_used="json"
+                ),
+            )
+
+    with pytest.raises(ContractDefinitionError, match="has type function-plain"):
+        _field(Annotated[timedelta, Twin])
+
+
+def test_a_forms_marker_on_another_type_is_refused() -> None:
+    marker = Duration.__metadata__[0]  # type: ignore[attr-defined]
+    with pytest.raises(TypeError, match=r"neolith\.Duration annotates timedelta"):
+        _record(Annotated[int, marker])
+
+
+# Each type reads only its form from JSON, and writes it exactly.
+
+
+@pytest.mark.spec("CON-37")
+@pytest.mark.parametrize(
+    ("annotation", "value", "written"),
+    [
+        pytest.param(Duration, timedelta(0), "0s", id="zero duration"),
+        pytest.param(Duration, timedelta(seconds=-2), "-2s", id="whole seconds"),
+        pytest.param(Duration, timedelta(seconds=1.5), "1.500s", id="milliseconds"),
+        pytest.param(
+            Duration, timedelta(microseconds=-100001), "-0.100001s", id="micros"
+        ),
+        pytest.param(Decimal128, Decimal("1.50"), "1.50", id="trailing zero kept"),
+        pytest.param(Decimal128, Decimal("1E+2"), "100", id="positive exponent"),
+        pytest.param(Decimal128, Decimal("-0.00"), "0.00", id="negative zero"),
+        pytest.param(Decimal128, Decimal("0E+5"), "0", id="zero, positive exponent"),
+        pytest.param(Decimal128, Decimal("1E-7"), "0.0000001", id="small"),
+        pytest.param(Decimal128, Decimal("0E-7"), "0.0000000", id="small zero"),
+        pytest.param(Decimal128, Decimal("1E+33"), "1" + "0" * 33, id="34 digits"),
+        pytest.param(Binary, b"\xff", "_w==", id="bytes"),
+        pytest.param(Binary, b"\xfb\xff", "-_8=", id="url alphabet"),
+    ],
+)
+def test_each_form_is_written_in_its_one_spelling(
+    annotation: object, value: object, written: str
+) -> None:
+    assert _written(annotation, value) == written
+    assert _read(annotation, written) == value
+
+
+@pytest.mark.spec("CON-34")
+@pytest.mark.parametrize(
+    ("annotation", "text"),
+    [
+        *((Duration, t) for t in ["PT1.5S", "1.5s", "1.000s", "-0s", "1", "1e3s"]),
+        *((Decimal128, t) for t in ["1E+2", "-0", "01", "1.", " 1", "1.5\n", "NaN"]),
+        (Decimal128, "9" * 35),
+        *((Binary, t) for t in ["_w", "/w==", "_x==", "_w==\n", " _w==", "ok"]),
+        (Duration, 1.5),
+        (Decimal128, 1.5),
+        (Decimal128, 1),
+        (Binary, None),
+    ],
+)
+def test_each_form_reads_only_its_form_from_json(
+    annotation: object, text: object
+) -> None:
+    with pytest.raises(ValidationError):
+        _read(annotation, text)
+
+
+@pytest.mark.spec("CON-34")
+@pytest.mark.parametrize(
+    ("annotation", "value"),
+    [
+        (Duration, timedelta(seconds=10**11)),
+        (Duration, -timedelta(seconds=10**11)),
+        (Duration, 1.5),
+        (Decimal128, Decimal("NaN")),
+        (Decimal128, Decimal("-Infinity")),
+        (Decimal128, Decimal("9" * 35)),
+        (Decimal128, Decimal("1E+34")),
+        (Decimal128, Decimal("1E-34")),
+        (Decimal128, Decimal("1E+999999999")),
+        (Decimal128, Decimal("1E-999999999")),
+        (Decimal128, 3),
+        (Decimal128, 1.5),
+        (Binary, bytearray(b"x")),
+        (Binary, "not base64"),
+    ],
+    ids=repr,
+)
+def test_each_form_refuses_a_python_value_outside_it(
+    annotation: object, value: object
+) -> None:
+    with pytest.raises(ValidationError):
+        _record(annotation)(v=value)
+
+
+@pytest.mark.spec("CON-34")
+@pytest.mark.parametrize(
+    ("annotation", "text", "value"),
+    [
+        (Duration, "1.500s", timedelta(seconds=1.5)),
+        (Decimal128, "-12.50", Decimal("-12.50")),
+        (Binary, "_w==", b"\xff"),
+    ],
+)
+def test_each_form_takes_its_text_from_python(
+    annotation: object, text: str, value: object
+) -> None:
+    record: Any = _record(annotation)(v=text)
+    held = record.v
+    assert held == value
+    assert type(held) is type(value)
+
+
+# Part of CON-38, whose send-side check comes with #10 task 3.
+@pytest.mark.spec("CON-34")
+@pytest.mark.parametrize(
+    ("annotation", "value"),
+    [
+        (Duration, timedelta(seconds=10**11)),
+        (Decimal128, Decimal("NaN")),
+        (Decimal128, Decimal("9" * 35)),
+        (Binary, "_w=="),
+    ],
+    ids=repr,
+)
+def test_a_value_set_after_validation_outside_its_form_is_not_written(
+    annotation: object, value: object
+) -> None:
+    record = _record(annotation).model_construct(v=value)
+    with pytest.raises(PydanticSerializationError):
+        record.model_dump_json()
+
+
+@pytest.mark.spec("CON-34", "CON-37")
+@_HYPOTHESIS
+@given(
+    st.timedeltas(
+        min_value=timedelta(seconds=1 - 10**11), max_value=timedelta(seconds=10**11 - 1)
+    )
+)
+def test_durations_round_trip_in_their_form(value: timedelta) -> None:
+    written = _written(Duration, value)
+    assert _is_valid(DURATION, written)
+    assert _read(Duration, written) == value
+
+
+@pytest.mark.spec("CON-34", "CON-37")
+@_HYPOTHESIS
+@given(st.decimals(allow_nan=False, allow_infinity=False))
+def test_decimals_round_trip_in_their_form(value: Decimal) -> None:
+    _, digits, exponent = value.as_tuple()
+    assert isinstance(exponent, int)
+    fixed = (
+        len(digits) + max(exponent, 0)
+        if exponent >= 0
+        else max(len(digits), -exponent + 1)
+    )
+    assume(fixed <= 34)
+    written = _written(Decimal128, value)
+    assert _is_valid(DECIMAL, written)
+    assert _read(Decimal128, written) == value
+
+
+@pytest.mark.spec("CON-34")
+@_HYPOTHESIS
+@given(st.binary(max_size=64))
+def test_bytes_round_trip_in_their_form(value: bytes) -> None:
+    written = _written(Binary, value)
+    assert _is_valid(BYTES, written)
+    assert _read(Binary, written) == value
+
+
+@pytest.mark.spec("CON-16", "CON-34")
+@_HYPOTHESIS
+@given(
+    st.datetimes(
+        min_value=datetime(1, 1, 2),
+        max_value=datetime(9999, 12, 30),
+        timezones=st.just(UTC),
+    ),
+    st.integers(-(24 * 60 - 1), 24 * 60 - 1),
+)
+def test_timestamps_travel_in_the_form_the_description_states(
+    instant: datetime, offset_minutes: int
+) -> None:
+    # Offsets in whole minutes travel unchanged; the sender converts the rest
+    # to UTC (CON-36), with the send-side check of #10.
+    value = instant.astimezone(timezone(timedelta(minutes=offset_minutes)))
+    record = create_model("Stamped", at=(AwareDatetime, ...), day=(date, ...))
+    sent = json.loads(record(at=value, day=value.date()).model_dump_json())
+    assert _is_valid(TIMESTAMP, sent["at"])
+    assert _is_valid(DATE, sent["day"])
+    assert record.model_validate_json(json.dumps(sent)) == record(
+        at=value, day=value.date()
+    )
+
+
+@pytest.mark.spec("CON-16", "CON-34")
+@_HYPOTHESIS
+@given(st.floats(allow_nan=False, allow_infinity=False))
+def test_finite_numbers_travel_in_the_range_the_description_states(
+    number: float,
+) -> None:
+    # -0.0 is written as 0 by the sender (CON-35), with the send-side check.
+    assume(not (number == 0 and str(number).startswith("-")))
+    sent = _written(float, number)
+    assert _is_valid(NUMBER, sent)
+    assert sent == number
+
+
+@pytest.mark.spec("CON-16", "CON-34")
+@pytest.mark.parametrize(
+    ("annotation", "described"),
+    [
+        pytest.param(int, INTEGER, id="integer"),
+        pytest.param(float, NUMBER, id="number"),
+        pytest.param(Binary, BYTES, id="bytes"),
+        pytest.param(Decimal128, DECIMAL, id="decimal"),
+        pytest.param(Duration, DURATION, id="duration"),
+        pytest.param(AwareDatetime, TIMESTAMP, id="timestamp"),
+        pytest.param(date, DATE, id="date"),
+    ],
+)
+@settings(_HYPOTHESIS, max_examples=100)
+@given(data=st.data())
+def test_each_form_round_trips_from_its_description(
+    annotation: object, described: dict[str, Any], data: st.DataObject
+) -> None:
+    value = data.draw(from_schema(described))
+    # python-jsonschema and hypothesis read "$" as Python does, so a final
+    # newline can be drawn; spec 01 refuses it (see above).
+    assume(not (isinstance(value, str) and value.endswith("\n")))
+    read = _read(annotation, value)
+    sent = _written(annotation, read)
+    assert _is_valid(described, sent)
+    assert _read(annotation, sent) == read
+    if annotation in (Binary, Decimal128, Duration):
+        # One spelling per value: what was read is written back unchanged.
+        assert sent == value
+
+
 # Defaults travel as written, so they must already be in their form.
+
+
+@pytest.mark.spec("CON-34", "CON-37")
+@pytest.mark.parametrize(
+    ("annotation", "default", "described"),
+    [
+        pytest.param(Decimal128, Decimal("1.50"), "1.50", id="decimal"),
+        pytest.param(Decimal128, Decimal("1E+2"), "100", id="decimal, exponent"),
+        pytest.param(Decimal128, Decimal("1E-7"), "0.0000001", id="small decimal"),
+        pytest.param(Duration, timedelta(seconds=90), "90s", id="duration"),
+        pytest.param(Binary, b"\xff", "_w==", id="bytes"),
+    ],
+)
+def test_default_of_a_neolith_form_is_described_in_its_form(
+    annotation: object, default: object, described: str
+) -> None:
+    assert _field(annotation, default)["default"] == described
+
+
+@pytest.mark.spec("CON-34")
+@pytest.mark.parametrize(
+    ("annotation", "default"),
+    [
+        pytest.param(Decimal128, "2", id="decimal as text"),
+        pytest.param(Decimal128, 2, id="decimal as int"),
+        pytest.param(Duration, "90s", id="duration as text"),
+        pytest.param(Duration, timedelta(seconds=10**11), id="duration too long"),
+        pytest.param(Binary, "_w==", id="bytes as text"),
+    ],
+)
+def test_default_of_a_neolith_form_not_of_its_type_is_refused(
+    annotation: object, default: object
+) -> None:
+    with pytest.raises(
+        ContractDefinitionError, match=r"field Holder\.v has the default"
+    ):
+        _field(annotation, default)
 
 
 @pytest.mark.spec("CON-34")
@@ -534,71 +772,7 @@ def test_timestamp_default_at_the_utc_range_edges_is_accepted(
     assert _is_valid(TIMESTAMP, _field(AwareDatetime, default)["default"])
 
 
-@pytest.mark.spec("CON-16", "CON-34")
-@_HYPOTHESIS
-@given(
-    st.datetimes(
-        min_value=datetime(1, 1, 2),
-        max_value=datetime(9999, 12, 30),
-        timezones=st.just(UTC),
-    ),
-    st.integers(-(24 * 60 - 1), 24 * 60 - 1),
-)
-def test_timestamps_travel_in_the_form_the_description_states(
-    instant: datetime, offset_minutes: int
-) -> None:
-    # Offsets in whole minutes travel unchanged; the sender converts the rest
-    # to UTC (CON-35), with the send-side check of #10.
-    value = instant.astimezone(timezone(timedelta(minutes=offset_minutes)))
-    record = create_model("Stamped", at=(AwareDatetime, ...), day=(date, ...))
-    sent = json.loads(record(at=value, day=value.date()).model_dump_json())
-    assert _is_valid(TIMESTAMP, sent["at"])
-    assert _is_valid(DATE, sent["day"])
-    assert record.model_validate_json(json.dumps(sent)) == record(
-        at=value, day=value.date()
-    )
-
-
-@pytest.mark.spec("CON-16", "CON-34")
-@_HYPOTHESIS
-@given(st.floats(allow_nan=False, allow_infinity=False))
-def test_finite_numbers_travel_in_the_range_the_description_states(
-    number: float,
-) -> None:
-    # -0.0 is written as 0 by the sender (CON-35), with the send-side check.
-    assume(not (number == 0 and str(number).startswith("-")))
-    record = create_model("Measured", x=(float, ...))
-    sent = json.loads(record(x=number).model_dump_json())["x"]
-    assert _is_valid(NUMBER, sent)
-    assert sent == number
-
-
-@pytest.mark.spec("CON-16", "CON-34", "CON-42")
-@pytest.mark.parametrize(
-    ("annotation", "described"),
-    [
-        pytest.param(int, INTEGER, id="integer"),
-        pytest.param(float, NUMBER, id="number"),
-        pytest.param(bytes, BYTES, id="bytes"),
-        pytest.param(Decimal, DECIMAL, id="decimal"),
-        pytest.param(AwareDatetime, TIMESTAMP, id="timestamp"),
-        pytest.param(date, DATE, id="date"),
-    ],
-)
-@settings(_HYPOTHESIS, max_examples=100)
-@given(data=st.data())
-def test_each_form_round_trips_from_its_description(
-    annotation: object, described: dict[str, Any], data: st.DataObject
-) -> None:
-    value = data.draw(from_schema(described))
-    # python-jsonschema and hypothesis read "$" as Python does, so a final
-    # newline can be drawn; spec 01 refuses it (see above).
-    assume(not (isinstance(value, str) and value.endswith("\n")))
-    record = create_model("One", __config__=BASE64, v=(cast("Any", annotation), ...))
-    read = record.model_validate_json(json.dumps({"v": value}))
-    sent = json.loads(read.model_dump_json())["v"]
-    assert _is_valid(described, sent)
-    assert record.model_validate_json(json.dumps({"v": sent})) == read
-    if annotation is Decimal:
-        # A decimal keeps its digits, trailing zeros too.
-        assert sent == value
+@pytest.mark.spec("CON-34")
+def test_a_neolith_form_as_a_map_key_is_refused() -> None:
+    with pytest.raises(ContractDefinitionError, match="keys are not strings"):
+        _field(dict[Duration, int])

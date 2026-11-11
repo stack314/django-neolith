@@ -34,7 +34,14 @@ from pydantic import (
 )
 from pydantic_core import core_schema
 
-from neolith import Contract, ContractDefinitionError, action, contract, implements
+from neolith import (
+    Contract,
+    ContractDefinitionError,
+    Decimal128,
+    action,
+    contract,
+    implements,
+)
 
 
 def _declare(record: object) -> dict[str, Any]:
@@ -394,9 +401,9 @@ class FloatInt64(BaseModel):
 
 
 class Price(BaseModel):
-    """p04: a decimal, admitted once its wire form is fixed (ADR 0019)."""
+    """p04: a decimal, admitted as neolith.Decimal128 (ADR 0019)."""
 
-    amount: Decimal
+    amount: Decimal128
 
 
 class Precise(BaseModel):
