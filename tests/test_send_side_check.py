@@ -15,6 +15,7 @@ import json
 import math
 import re
 import sys
+import traceback
 import types
 from collections import OrderedDict
 from collections.abc import Callable, Iterator
@@ -32,6 +33,7 @@ from pydantic import (
     AwareDatetime,
     BaseModel,
     BeforeValidator,
+    ConfigDict,
     Field,
     StringConstraints,
 )
@@ -294,6 +296,26 @@ class Items(list[int]):
     pass
 
 
+class _ClocksGoBack(tzinfo):
+    """A zone two hours ahead of UTC until 03:00 on 2025-10-26, and one hour
+    ahead from then on, so each time from 02:00 to 03:00 that day comes twice
+    (PEP 495), as in a zone with daylight saving time."""
+
+    def utcoffset(self, moment: datetime | None) -> timedelta:
+        assert moment is not None
+        local = moment.replace(tzinfo=None)
+        if datetime(2025, 10, 26, 2) <= local < datetime(2025, 10, 26, 3):
+            return timedelta(hours=1 if moment.fold else 2)
+        return timedelta(hours=2 if local < datetime(2025, 10, 26, 2) else 1)
+
+    def dst(self, moment: datetime | None) -> None:
+        return None
+
+    def tzname(self, moment: datetime | None) -> str:
+        return "local"
+
+
+_LOCAL = _ClocksGoBack()
 _NAN, _INF = float("nan"), float("inf")
 _AMSTERDAM_1930 = timezone(timedelta(minutes=19, seconds=32))
 
@@ -316,6 +338,7 @@ _KINDS = [
     pytest.param("ratio", True, _NOT_HELD, id="boolean-for-a-number"),
     pytest.param("ratio", 2**53 + 1, _NOT_HELD, id="integer-no-double-equals"),
     pytest.param("ratio", Ratio(1.5), _NOT_HELD, id="number-subclass"),
+    pytest.param("ratio", Ratio(-0.0), _NOT_HELD, id="negative-zero-of-a-subclass"),
     pytest.param("ratio", Decimal("1.5"), _NOT_WRITTEN, id="decimal-for-a-number"),
     pytest.param("flag", 1, _NOT_WRITTEN, id="integer-for-a-boolean"),
     pytest.param("name", Marked("ab"), _NOT_HELD, id="text-subclass"),
@@ -495,6 +518,24 @@ _HELD = [
         Moment(2026, 1, 1, 12, 0, 0, 5, tzinfo=timezone(timedelta(hours=-3))),
         datetime(2026, 1, 1, 12, 0, 0, 5, tzinfo=timezone(timedelta(hours=-3))),
         id="timestamp-of-a-subclass",
+    ),
+    pytest.param(
+        "when",
+        datetime(2025, 10, 26, 2, 30, tzinfo=_LOCAL),
+        datetime(2025, 10, 26, 2, 30, tzinfo=timezone(timedelta(hours=2))),
+        id="timestamp-the-first-time-its-hour-comes",
+    ),
+    pytest.param(
+        "when",
+        datetime(2025, 10, 26, 2, 30, fold=1, tzinfo=_LOCAL),
+        datetime(2025, 10, 26, 2, 30, tzinfo=timezone(timedelta(hours=1))),
+        id="timestamp-the-second-time-its-hour-comes",
+    ),
+    pytest.param(
+        "when",
+        datetime(2025, 10, 26, 3, 30, tzinfo=_LOCAL),
+        datetime(2025, 10, 26, 3, 30, tzinfo=timezone(timedelta(hours=1))),
+        id="timestamp-in-a-zone-with-two-offsets",
     ),
     pytest.param("raw", b"\xff\x00", b"\xff\x00", id="bytes"),
     pytest.param("amount", Decimal("1.50"), Decimal("1.50"), id="decimal"),
@@ -721,17 +762,29 @@ def test_a_reply_and_an_error_detail_get_the_same_conversions() -> None:
         (
             "count",
             True,
-            "holds True (bool) at Leaves.count, which reads back as 1 (int)",
+            "the request holds a value of type bool at Leaves.count, which reads "
+            "back as one of type int, so it is not sent",
         ),
-        ("name", Marked("ab"), "holds 'ab' (Marked) at Leaves.name, which reads back "),
+        (
+            "name",
+            Marked("ab"),
+            "holds a value of type Marked at Leaves.name, which reads back as one "
+            "of type str",
+        ),
         (
             "ratio",
             2**53 + 1,
-            "(int) at Leaves.ratio, which reads back as 9007199254740",
+            "holds a value of type int at Leaves.ratio, which reads back as one of "
+            "type float",
         ),
-        ("few", [1, True], "holds True (bool) at Leaves.few[1], which reads back as 1"),
-        ("named", {"a": True}, "holds True (bool) at Leaves.named['a'], which reads "),
-        ("named", {Marked("a"): 1.0}, "holds the key 'a' (Marked) at Leaves.named,"),
+        ("few", [1, True], "holds a value of type bool at Leaves.few[1], which reads"),
+        ("named", {"a": True}, "of type bool at Leaves.named['a'], which reads back"),
+        (
+            "named",
+            {Marked("a"): 1.0},
+            "holds a key of type Marked at Leaves.named, which reads back as one "
+            "of type str",
+        ),
     ],
 )
 def test_a_refusal_names_the_place_and_both_kinds(
@@ -739,6 +792,54 @@ def test_a_refusal_names_the_place_and_both_kinds(
 ) -> None:
     with pytest.raises(ValueError, match=re.escape(said)):
         _send(_built(field, value))
+
+
+_PRIVATE = "sk_live_51HxQ7cS3cr3tT0k3n"
+
+
+class Login(BaseModel):
+    """A record whose author keeps its values out of errors."""
+
+    model_config = ConfigDict(hide_input_in_errors=True)
+
+    token: Annotated[str, BeforeValidator(str.strip)] = ""
+    few: list[str] = Field(default_factory=list, max_length=1)
+    tokens: dict[str, str] = Field(default_factory=dict)
+    pin: int = Field(default=0, lt=10**12)
+    issued: AwareDatetime | None = None
+
+
+@pytest.mark.spec("TRN-11", "TRN-15")
+@pytest.mark.parametrize(
+    ("field", "value", "refusal"),
+    [
+        ("token", _PRIVATE + "\n", "which reads back as another value of type str"),
+        ("token", Marked(_PRIVATE), _NOT_HELD),
+        ("few", [_PRIVATE, _PRIVATE], _NOT_DESCRIBED),
+        ("tokens", {Marked(_PRIVATE): "a"}, _NOT_HELD),
+        ("tokens", {"a": Marked(_PRIVATE)}, _NOT_HELD),
+        ("pin", 5111111111111, _NOT_DESCRIBED),
+        (
+            "issued",
+            datetime(1, 1, 1, tzinfo=timezone(timedelta(seconds=51))),
+            "a timestamp outside years 0001 to 9999 in UTC",
+        ),
+    ],
+)
+def test_a_refusal_shows_no_value_the_record_holds(
+    field: str, value: object, refusal: str
+) -> None:
+    # A value held at send time can be a secret, and an exception's text is
+    # logged, so a refusal names the place and the types and shows no value,
+    # in its own words or in those of the exception behind it.
+    declared, _ = _contract_for(Login)
+    held = Login()
+    setattr(held, field, value)
+    with pytest.raises(ValueError, match=refusal) as refused:
+        check_request(declared, declared.actions["send"], held)
+    said = "".join(traceback.format_exception(refused.value))
+    for shown in (_PRIVATE, "5111111111111", "0001-01-01", "datetime(1, 1, 1"):
+        assert shown not in said
 
 
 @pytest.mark.spec("TRN-11")
@@ -864,7 +965,8 @@ class _Meddling(tzinfo):
         if self.request is not None:
             self.request.count = True
             self.request.name = "changed"
-        return timedelta(0)
+        # A later answer than the first: an hour more each time it is asked.
+        return timedelta(hours=self.asked)
 
     def dst(self, moment: datetime | None) -> None:
         return None
@@ -878,14 +980,16 @@ def test_a_change_made_while_a_value_is_sent_does_not_reach_the_text() -> None:
     # The serializer reads the value once, into the sender's copy, and the
     # copy is what is converted, written, checked and compared. Asking a
     # timestamp for its offset runs the caller's code, which here changes the
-    # request after it was read; the text holds what was read.
+    # request after it was read, and answers differently each time. The sender
+    # asks once, while it makes its copy, so the text holds what was read and
+    # the first answer.
     zone = _Meddling()
     request = Leaves(count=7, name="read", when=datetime(2026, 1, 1, tzinfo=zone))
     zone.request, zone.asked = request, 0
     sent = json.loads(_send(request))
-    assert zone.asked > 0
+    assert zone.asked == 1
     assert (sent["count"], sent["name"]) == (7, "read")
-    assert sent["when"] == "2026-01-01T00:00:00Z"
+    assert sent["when"] == "2026-01-01T00:00:00+01:00"
     assert (request.count, request.name) == (True, "changed")
     # Sent again, the changed value is refused.
     with pytest.raises(ValueError, match=_NOT_HELD):
@@ -936,6 +1040,60 @@ def test_a_deep_value_is_sent_from_a_deep_call_stack() -> None:
     assert b"-0" not in text
 
 
+# What the reader's own validator makes another value of the same type.
+
+
+class Clamped(BaseModel):
+    name: Annotated[str, BeforeValidator(str.lower)] = ""
+    level: Annotated[int, BeforeValidator(lambda level: min(level, 9))] = 0
+    flag: Annotated[bool, BeforeValidator(lambda flag: False)] = False
+
+
+@pytest.mark.spec("TRN-11")
+@pytest.mark.parametrize(
+    ("field", "value", "kept"),
+    [
+        ("name", "ABC", "abc"),
+        ("level", 10, 9),
+        ("flag", True, False),
+    ],
+)
+def test_a_value_read_back_as_another_of_its_type_is_refused(
+    field: str, value: object, kept: object
+) -> None:
+    # The text fits the description, and what is read back has the type of
+    # what was held, so only comparing the two values shows the change.
+    declared, _ = _contract_for(Clamped)
+    held = Clamped()
+    setattr(held, field, value)
+    with pytest.raises(ValueError, match="which reads back as another value of type"):
+        check_request(declared, declared.actions["send"], held)
+    setattr(held, field, kept)
+    assert check_request(declared, declared.actions["send"], held)
+
+
+class _Unnamed(type):
+    def __getattribute__(cls, name: str) -> object:
+        if name == "__qualname__":
+            raise RuntimeError("no name")
+        return super().__getattribute__(name)
+
+
+class Nameless(str, metaclass=_Unnamed):
+    __slots__ = ()
+
+
+@pytest.mark.spec("TRN-11")
+def test_a_comparison_that_fails_refuses_the_value() -> None:
+    # Whatever goes wrong while the copy is compared with what was read
+    # refuses the value, as every failure of a send does (ValueError).
+    with pytest.raises(ValueError, match="cannot be compared with what it reads") as (
+        refused
+    ):
+        _send(_built("name", Nameless("ab")))
+    assert type(refused.value.__cause__) is RuntimeError
+
+
 # A decimal's digits.
 
 
@@ -959,7 +1117,10 @@ def test_a_decimal_that_reads_back_with_other_digits_is_refused() -> None:
     declared, _ = _contract_for(Rounded)
     held = Rounded()
     held.amount = Decimal("1.50")
-    with pytest.raises(ValueError, match=r"holds Decimal\('1.50'\) \(Decimal\) at "):
+    with pytest.raises(
+        ValueError,
+        match=r"at Rounded\.amount, which reads back as another value of type Dec",
+    ):
         check_request(declared, declared.actions["send"], held)
     # The nearest legitimate values: one without trailing zeros, and one the
     # sender's own writer respells (CON-37), which is the same value.
@@ -1232,6 +1393,7 @@ def _leaf_values() -> list[object]:
         datetime(1930, 1, 1, tzinfo=_AMSTERDAM_1930),
         datetime(1, 1, 1, tzinfo=timezone(timedelta(hours=1))),
         Moment(2026, 1, 1, tzinfo=timezone(timedelta(hours=2))),
+        datetime(2025, 10, 26, 2, 30, fold=1, tzinfo=_LOCAL),
     ]
 
 
@@ -1313,7 +1475,9 @@ def _held_as(sent: object, read: object) -> bool:
         if not isinstance(sent, datetime):
             return False
         offset = sent.utcoffset()
-        if offset is None or sent != read:
+        # By subtraction: ``==`` is False across zones for a time that comes
+        # twice (PEP 495).
+        if offset is None or sent - read != timedelta(0):
             return False
         # An offset in whole minutes is kept; any other is written in UTC.
         kept = timedelta(0) if offset % timedelta(minutes=1) else offset
@@ -1405,6 +1569,7 @@ class Worded(BaseModel):
 
     whole: int = Field(default=2, gt=0, lt=10, multiple_of=2)
     part: float = Field(default=0.5, ge=0, le=1)
+    open: float = Field(default=0.5, gt=0.25, lt=1)
     code: str = Field(default="ab", min_length=1, max_length=3)
     flag: bool = False
     day: date | None = None
@@ -1424,91 +1589,129 @@ class Worded(BaseModel):
 
 _WORDED, _WORDED_SCHEMA = _contract_for(Worded)
 
-# For each keyword: what breaks it, and the nearest value that keeps it, each
-# laid over a value that fits. A default and a content encoding only annotate.
+# For each keyword, on each type of schema that carries it: what breaks it,
+# and the nearest value that keeps it, each laid over a value that fits. A
+# schema without a type is a reference, an ``anyOf``, a further pattern or
+# what a map's keys fit. A default and a content encoding only annotate.
 _BASE: dict[str, Any] = {"inner": {"sku": "a"}}
 _ANNOTATIONS = {"default", "contentEncoding"}
-_KEYWORDS: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
-    "type": ({"flag": 1}, {"flag": True}),
-    "properties": ({"inner": {"sku": 1}}, {"inner": {"sku": "b"}}),
-    "required": ({"inner": {}}, {"inner": {"sku": "b", "added_later": 1}}),
-    "$ref": ({"colour": "blue"}, {"colour": "red"}),
-    "anyOf": ({"day": 1}, {"day": None}),
-    "enum": ({"size": "l"}, {"size": "m"}),
-    "minimum": ({"part": -0.5}, {"part": 0}),
-    "maximum": ({"part": 1.5}, {"part": 1}),
-    "exclusiveMinimum": ({"whole": 0}, {"whole": 2}),
-    "exclusiveMaximum": ({"whole": 10}, {"whole": 8}),
-    "multipleOf": ({"whole": 3}, {"whole": 4}),
-    "minLength": ({"code": ""}, {"code": "a"}),
-    "maxLength": ({"code": "abcd"}, {"code": "abc"}),
-    "pattern": ({"span": "1.5s"}, {"span": "1.500s"}),
-    "allOf": ({"amount": "1" * 35}, {"amount": "1" * 34}),
-    "format": ({"day": "2027-02-29"}, {"day": "2027-02-28"}),
-    "items": ({"pair": [1, "2"]}, {"pair": [1, 2]}),
-    "minItems": ({"pair": [1]}, {"pair": [1, 2]}),
-    "maxItems": ({"pair": [1, 2, 3, 4]}, {"pair": [1, 2, 3]}),
-    "additionalProperties": ({"sized": {"ab": "1"}}, {"sized": {"ab": 1}}),
-    "propertyNames": ({"sized": {"a": 1}}, {"sized": {"ab": 1}}),
-    "minProperties": ({"sized": {}}, {"sized": {"ab": 1}}),
-    "maxProperties": (
+_SAFE = 2**53 - 1
+_KEYWORDS: dict[tuple[str, str], tuple[dict[str, Any], dict[str, Any]]] = {
+    ("type", "boolean"): ({"flag": 1}, {"flag": True}),
+    ("type", "integer"): ({"whole": "2"}, {"whole": 2}),
+    ("type", "number"): ({"part": "0.5"}, {"part": 0.5}),
+    ("type", "string"): ({"code": 1}, {"code": "a"}),
+    ("type", "array"): ({"pair": 1}, {"pair": [1, 2]}),
+    ("type", "object"): ({"inner": 1}, {"inner": {"sku": "b"}}),
+    ("type", "null"): ({"day": 1}, {"day": None}),
+    ("properties", "object"): ({"inner": {"sku": 1}}, {"inner": {"sku": "b"}}),
+    ("required", "object"): ({"inner": {}}, {"inner": {"sku": "b", "later": 1}}),
+    ("$ref", ""): ({"colour": "blue"}, {"colour": "red"}),
+    ("anyOf", ""): ({"day": 1}, {"day": None}),
+    ("enum", "string"): ({"size": "l"}, {"size": "m"}),
+    ("enum", ""): ({"keyed": {"c": 1}}, {"keyed": {"a": 1}}),
+    ("minimum", "number"): ({"part": -0.5}, {"part": 0}),
+    ("maximum", "number"): ({"part": 1.5}, {"part": 1}),
+    ("exclusiveMinimum", "number"): ({"open": 0.25}, {"open": 0.5}),
+    ("exclusiveMaximum", "number"): ({"open": 1}, {"open": 0.75}),
+    ("minimum", "integer"): ({"pair": [1, -_SAFE - 1]}, {"pair": [1, -_SAFE]}),
+    ("maximum", "integer"): ({"pair": [1, _SAFE + 1]}, {"pair": [1, _SAFE]}),
+    ("exclusiveMinimum", "integer"): ({"whole": 0}, {"whole": 2}),
+    ("exclusiveMaximum", "integer"): ({"whole": 10}, {"whole": 8}),
+    ("multipleOf", "integer"): ({"whole": 3}, {"whole": 4}),
+    ("minLength", "string"): ({"code": ""}, {"code": "a"}),
+    ("maxLength", "string"): ({"code": "abcd"}, {"code": "abc"}),
+    ("minLength", ""): ({"sized": {"a": 1}}, {"sized": {"ab": 1}}),
+    ("maxLength", ""): ({"sized": {"abcd": 1}}, {"sized": {"abc": 1}}),
+    ("pattern", "string"): ({"span": "1.5s"}, {"span": "1.500s"}),
+    ("pattern", ""): ({"amount": "1" * 35}, {"amount": "1" * 34}),
+    ("allOf", "string"): ({"amount": "1" * 35}, {"amount": "1" * 34}),
+    ("format", "string"): ({"day": "2027-02-29"}, {"day": "2027-02-28"}),
+    ("items", "array"): ({"pair": [1, "2"]}, {"pair": [1, 2]}),
+    ("minItems", "array"): ({"pair": [1]}, {"pair": [1, 2]}),
+    ("maxItems", "array"): ({"pair": [1, 2, 3, 4]}, {"pair": [1, 2, 3]}),
+    ("additionalProperties", "object"): (
+        {"sized": {"ab": "1"}},
+        {"sized": {"ab": 1}},
+    ),
+    ("propertyNames", "object"): ({"sized": {"a": 1}}, {"sized": {"ab": 1}}),
+    ("minProperties", "object"): ({"sized": {}}, {"sized": {"ab": 1}}),
+    ("maxProperties", "object"): (
         {"sized": {"ab": 1, "cd": 2, "ef": 3}},
         {"sized": {"ab": 1, "cd": 2}},
     ),
 }
 
 
-def _keywords(schema: dict[str, Any]) -> set[str]:
-    """Every keyword a description uses, at any depth."""
-    found = set(schema)
+def _schemas(schema: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    """Every schema in a description, at any depth."""
+    yield schema
     for keyword, part in schema.items():
         if keyword in ("properties", "$defs"):
-            found.update(*(_keywords(inner) for inner in part.values()))
+            for inner in part.values():
+                yield from _schemas(inner)
         elif keyword in ("items", "additionalProperties", "propertyNames"):
-            found |= _keywords(part)
+            yield from _schemas(part)
         elif keyword in ("anyOf", "allOf"):
-            found.update(*(_keywords(inner) for inner in part))
-    return found - {"$defs"}
+            for inner in part:
+                yield from _schemas(inner)
 
 
-def _without(schema: dict[str, Any], keyword: str) -> dict[str, Any]:
-    """A description with one keyword taken out of every schema in it."""
+def _keywords(schema: dict[str, Any]) -> set[tuple[str, str]]:
+    """Every keyword a description uses, with the type of the schema it is
+    on, apart from the annotations."""
+    return {
+        (keyword, inner.get("type", ""))
+        for inner in _schemas(schema)
+        for keyword in inner
+        if keyword not in _ANNOTATIONS and keyword != "$defs"
+    }
+
+
+def _without(schema: dict[str, Any], keyword: str, kind: str) -> dict[str, Any]:
+    """A description with one keyword taken out of every schema of one type."""
     kept: dict[str, Any] = {}
     for key, part in schema.items():
-        if key == keyword:
+        if key == keyword and schema.get("type", "") == kind:
             continue
         if key in ("properties", "$defs"):
-            kept[key] = {name: _without(inner, keyword) for name, inner in part.items()}
+            kept[key] = {
+                name: _without(inner, keyword, kind) for name, inner in part.items()
+            }
         elif key in ("items", "additionalProperties", "propertyNames"):
-            kept[key] = _without(part, keyword)
+            kept[key] = _without(part, keyword, kind)
         elif key in ("anyOf", "allOf"):
-            kept[key] = [_without(inner, keyword) for inner in part]
+            kept[key] = [_without(inner, keyword, kind) for inner in part]
         else:
             kept[key] = part
     return kept
 
 
 @pytest.mark.spec("TRN-15", "CON-16")
-@pytest.mark.parametrize("keyword", _KEYWORDS)
-def test_the_check_enforces_every_keyword_the_description_writes(keyword: str) -> None:
-    # Each keyword is enforced with JSON Schema's meaning. The check refuses
-    # a value that the reference validator refuses for that keyword alone,
-    # since it passes once the keyword is taken out of the description, and
-    # admits the nearest value that keeps the keyword.
+@pytest.mark.parametrize(("keyword", "kind"), _KEYWORDS)
+def test_the_check_enforces_every_keyword_the_description_writes(
+    keyword: str, kind: str
+) -> None:
+    # Each keyword is enforced with JSON Schema's meaning, on each type of
+    # schema that carries it. The check refuses a value that the reference
+    # validator refuses for that keyword alone, since it passes once the
+    # keyword is taken out of the schemas of that type, and admits the nearest
+    # value that keeps the keyword.
     checker = _checker(_WORDED_SCHEMA)
-    breaks, keeps = ({**_BASE, **value} for value in _KEYWORDS[keyword])
+    breaks, keeps = ({**_BASE, **value} for value in _KEYWORDS[keyword, kind])
     assert _admits(checker, _BASE)
     assert not _admits(checker, breaks)
     assert not _fits(_WORDED_SCHEMA, breaks)
-    assert _fits(_without(_WORDED_SCHEMA, keyword), breaks)
+    assert _fits(_without(_WORDED_SCHEMA, keyword, kind), breaks)
     assert _admits(checker, keeps)
     assert _fits(_WORDED_SCHEMA, keeps)
 
 
 def test_the_keywords_tested_are_the_keywords_written() -> None:
-    """Fails when a description uses a keyword the table above does not break."""
+    """Fails when a description uses a keyword, on some type of schema, that
+    the table above does not break."""
     written = _keywords(_WORDED_SCHEMA)
-    assert written == set(_KEYWORDS) | _ANNOTATIONS
+    assert written == set(_KEYWORDS)
     for schema in (_REFERENCE_SCHEMA, _LEAVES_SCHEMA):
         assert _keywords(schema) <= written
 
@@ -1596,6 +1799,8 @@ _BOOLEAN = {"type": "boolean"}
         {"type": "integer", "maximum": True},
         {"type": "integer", "minimum": 1.5},
         {"type": "number", "maximum": float("inf")},
+        {"type": "number", "maximum": 2**53 + 1},
+        {"type": "number", "exclusiveMinimum": True},
         {"type": "number", "multipleOf": 0.5},
         {"type": "array"},
         {"type": "array", "items": _BOOLEAN, "uniqueItems": True},
@@ -1617,6 +1822,9 @@ _BOOLEAN = {"type": "boolean"}
             "additionalProperties": _BOOLEAN,
         },
         {"$ref": "#/definitions/R"},
+        {"$ref": "R"},
+        {"anyOf": [_BOOLEAN, {"type": "string"}]},
+        {"anyOf": [_BOOLEAN, {"type": "null"}], "type": "boolean"},
         {"$ref": "#/$defs/Missing"},
         {"$ref": "#/$defs/R", "type": "object"},
         {"anyOf": [_BOOLEAN]},
@@ -1768,7 +1976,7 @@ def _agrees(schema: dict[str, Any], data: st.DataObject) -> None:
     reference only where a bound lies between an integer and its double; the
     bounds drawn here are far below 2**53.
     """
-    assert _keywords(schema) <= set(_KEYWORDS) | _ANNOTATIONS
+    assert _keywords(schema) <= set(_KEYWORDS)
     checker = _checker(schema)
     reference = _Reference(schema, format_checker=_FORMATS)
     valid = data.draw(from_schema(_every_field(schema)))

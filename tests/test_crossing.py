@@ -1248,11 +1248,14 @@ def test_a_value_json_cannot_hold_is_a_value_error(value: Tree) -> None:
 def test_a_value_written_deeper_than_the_reader_goes_is_a_value_error() -> None:
     # Each level of the tree is two levels of JSON, an object and a list. The
     # serializer writes this one, and pydantic-core's JSON reader refuses it,
-    # in the description check first, so it is never sent.
+    # so it is never sent. The description states no depth, so the refusal
+    # names the reader's limit and not the description.
     declared = Contract.of(Trees)
-    with pytest.raises(ValueError, match="does not fit the contract's") as raised:
+    with pytest.raises(ValueError, match="is nested too deeply to be read") as raised:
         check_request(declared, declared.actions["plant"], _deep(150))
+    assert "description" not in str(raised.value)
     assert isinstance(raised.value.__cause__, ValidationError)
+    assert "recursion limit" in str(raised.value.__cause__)
 
 
 @pytest.mark.spec("TRN-11", "TRN-13")
