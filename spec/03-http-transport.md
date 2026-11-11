@@ -61,7 +61,7 @@ A host with several backends tries them in a configured order. The first that re
 
 Base64url-encoded values here use the base64url alphabet only (RFC 4648, section 5), with no padding, no whitespace and zero unused bits. JSON objects here are I-JSON (RFC 7493), so a duplicate member name or a lone surrogate makes one invalid, and integers are JSON numbers with no fraction or exponent, within ±(2^53 − 1).
 
-On a contract path, the provider's host authenticates the calling app before it reads the request body or any call-context header. A call on a contract path whose credential is missing, is recognized by no backend or does not resolve, or that reaches a host with no backend, fails with `unauthenticated`. It then checks the principal, as below, before it validates the request body. A request on any other path is answered as the Errors section says. In-process there are no credentials: the calling app is the app the call context names. A call made from no app fails with `unauthenticated` on every transport.
+On a contract path, the provider's host authenticates the calling app before it reads the request body or any call-context header. A call on a contract path whose credential is missing, is recognized by no backend or does not resolve, or that reaches a host with no backend, fails with `unauthenticated`. It then checks the principal, as below, before it validates the request body. A request on any other path is answered as the Errors section says. In-process there are no credentials: the calling app is the app the call is made from. A call made from no app fails with `unauthenticated` on every transport.
 
 ### The principal
 
