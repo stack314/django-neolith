@@ -41,7 +41,7 @@ Follows principles 8 (*one test suite over many code paths*) and 11 (*specificat
 - Until #10 task 1, spec 01 describes the encodings as future, and the implementation keeps refusing decimals under CON-21.
 - The idempotency-key derivation of [0017](0017-call-context-explicit-at-the-action-ambient-for-propagation.md) hashes a request's wire form, so it relies on these encodings, I-JSON bodies especially.
 - A duration written by a Python program in its default ISO 8601 form is not accepted; the implementation writes the ProtoJSON form.
-- Writing a duration in the `1.5s` form needs a neolith-provided type or serializer, which changes the public API. It is an open design point on #10.
+- Pydantic's default serializer writes bytes as UTF-8 text, a duration as `PT1.5S` and some decimals with an exponent or as `-0`. No conversion of a value before the dump can change that, so these forms come from the schema the serializer is built from, through a type or setting neolith provides. Which one changes the public API, and is an open design point on #10.
 
 ## References
 
