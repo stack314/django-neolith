@@ -61,13 +61,13 @@ A host with several backends tries them in a configured order. The first that re
 
 Base64url-encoded values here use the base64url alphabet only (RFC 4648, section 5), with no padding, no whitespace and zero unused bits. JSON objects here are I-JSON (RFC 7493), so a duplicate member name or a lone surrogate makes one invalid, and integers are JSON numbers with no fraction or exponent, within ±(2^53 − 1).
 
-On a contract path, the provider's host authenticates the calling app before it reads the request body or any call-context header. A call on a contract path whose credential is missing, is recognized by no backend or does not resolve, or that reaches a host with no backend, fails with `unauthenticated`. It then checks the principal, as below, before it validates the request body. A request on any other path is answered as the Errors section says. In-process there are no credentials: the calling app is the app the call is made from, and a call made from no app fails with `unauthenticated` too.
+On a contract path, the provider's host authenticates the calling app before it reads the request body or any call-context header. A call on a contract path whose credential is missing, is recognized by no backend or does not resolve, or that reaches a host with no backend, fails with `unauthenticated`. It then checks the principal, as below, before it validates the request body. A request on any other path is answered as the Errors section says. In-process there are no credentials: the calling app is the app the call context names. A call made from no app fails with `unauthenticated` on every transport.
 
 ### The principal
 
 A *principal object* is a JSON object with exactly the members `issuer` and `subject`, both non-empty strings, and optionally `claims`, an object whose values are strings, integers, booleans or lists of strings. An absent `claims` is the same as an empty one. Two principals are equal when their members are equal, with strings compared code point by code point and without Unicode normalization, and lists compared in order. A subject is unique only within its issuer, so code that stores a principal stores both.
 
-With the shared-secret backend, `Neolith-Principal` is present exactly when the call has a principal, and carries it as a bare assertion: a principal object, base64url-encoded, in at most 4096 bytes. A bare assertion that is not a principal object, encoded as above, fails the call with `invalid_argument`, once the calling app has been authenticated and found on the allow-list below.
+With the shared-secret backend, `Neolith-Principal` is present exactly when the call has a principal, and carries it as a bare assertion: a principal object, base64url-encoded, in at most 4096 bytes. A header with an empty value counts as present. A bare assertion that is not a principal object, encoded as above, fails the call with `invalid_argument`, once the calling app has been authenticated and found on the allow-list below.
 
 The principal is not signed: the authenticated calling app asserts it, and it never goes inside the shared-secret token. A provider accepts `Neolith-Principal` only from a calling app on its allow-list of apps that may assert a principal. A call from any other calling app that carries the header fails with `permission_denied`, whatever the header holds. A later backend can carry a signed delegation token in this header instead of the bare assertion, under its own format.
 
@@ -95,7 +95,7 @@ The token travels as `Authorization: Bearer <token>`. It is a JSON Web Token (RF
 | `iat` | claims | When the token was issued |
 | `exp` | claims | When the token expires, at most 300 seconds after `iat` |
 
-The shared-secret backend recognizes a call whose `Authorization` uses the `Bearer` scheme (compared ignoring ASCII case) with a token whose first part is a base64url-encoded JSON object whose `typ` is `neolith+jwt` or `application/neolith+jwt`, ignoring ASCII case. It abstains on any other credentials, so a later backend can try them. A recognized token is valid only when all of these hold, with *now* the provider host's current time in seconds since the epoch:
+The shared-secret backend recognizes a call whose `Authorization` uses the `Bearer` scheme (compared ignoring ASCII case) with a token whose first part decodes, under the encoding rules above, to a JSON object whose `typ` is `neolith+jwt` or `application/neolith+jwt`, ignoring ASCII case. It abstains on any other credentials, including a token whose first part breaks those rules, so a later backend can try them. A recognized token is valid only when all of these hold, with *now* the provider host's current time in seconds since the epoch:
 
 - it is at most 4096 bytes, and its three parts are base64url-encoded, the first two as JSON objects;
 - the header has exactly the members `alg`, `typ` and `kid`, and the claims exactly `iss`, `aud`, `iat` and `exp`, each of the type in the table;
