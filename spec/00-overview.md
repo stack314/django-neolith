@@ -40,7 +40,7 @@ A call is the invocation of one action on one contract.
 The call context travels with every call and is separate from the request. **OVR-6.** Transports MUST carry the context. **OVR-7.** Apps MUST NOT smuggle it inside request types. It has two kinds of field:
 
 - **Propagated fields**, which a call passes on to the calls it makes: the principal on whose behalf the call is made, the trace identifier, and the deadline. A nested call's deadline is never later than its parent's.
-- **Per-call fields**, which belong to one outbound call: the idempotency key and the calling app. Each outbound call gets a fresh key. The key stays the same only across retries of that same call and, when the parent has a key of its own, across retries of the parent that make the call again ([02](02-transports.md)), so a provider never mistakes two different nested calls for a repeat.
+- **Per-call fields**, which belong to one outbound call: the idempotency key and the calling app. Each outbound call gets a fresh key. The key stays the same only across retries of that same call and, when the parent has a key of its own, across retries of the parent that make the call again ([02](02-transports.md)), so a provider never mistakes two different nested calls for a repeat, unless a caller replays its parent's key.
 
 Every call is synchronous from the caller's point of view: it ends in a reply or an error. Asynchronous communication is done with events ([04](04-events.md)).
 
