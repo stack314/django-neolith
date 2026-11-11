@@ -23,7 +23,7 @@ import re
 from collections.abc import Iterator, Mapping
 from typing import Any, Literal, cast
 
-from pydantic import BaseModel, PrivateAttr
+from pydantic import BaseModel, ConfigDict, PrivateAttr
 from pydantic.errors import PydanticUndefinedAnnotation, PydanticUserError
 from pydantic_core import (
     SchemaSerializer,
@@ -919,6 +919,10 @@ def _unchanged(held: object, written: object) -> bool:
 
 
 class _Private(BaseModel):
+    # Nothing validates with these records, so no schema is built for them and
+    # no Pydantic plugin is called when neolith is imported.
+    model_config = ConfigDict(defer_build=True)
+
     _x: int = PrivateAttr(0)
 
 
