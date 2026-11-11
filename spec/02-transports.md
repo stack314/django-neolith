@@ -19,11 +19,11 @@ A transport MUST:
 - **TRN-3.** map every failure it can observe onto a standard error kind ([01](01-contracts.md)); a transport MUST NOT surface its own exception types to the caller;
 - **TRN-4.** enforce a deadline: a call whose deadline passes before the call ends fails with `timeout`.
 
-Which kinds a transport produces is set by [ADR 0008](../docs/adr/0008-typed-contract-errors-in-both-modes.md): `unavailable` or `timeout` for a failure of its own in carrying a call, and `internal` for a reply or error from the provider that does not validate against the contract, apart from an error of a kind the caller does not know. An error the provider's host delivers otherwise passes through unchanged.
+Which kinds a transport produces is set by [ADR 0008](../docs/adr/0008-typed-contract-errors-in-both-modes.md): `unavailable` or `timeout` for a failure of its own in carrying a call, and `internal` for a reply or error from the provider that does not validate against the contract, apart from an error of a kind the caller does not know. A request that does not validate against the contract fails with `invalid_argument` before the call is dispatched, in every mode ([ADR 0007](../docs/adr/0007-in-process-transport-serializes.md)). An error the provider's host delivers otherwise passes through unchanged.
 
 ## In-process transport
 
-**TRN-5.** Defined by this specification and REQUIRED in every implementation. Caller and provider share a process. The transport still serializes and deserializes ([ADR 0007](../docs/adr/0007-in-process-transport-serializes.md)), so that a provider cannot leak a live object and a caller cannot depend on one.
+**TRN-5.** Defined by this specification and REQUIRED in every implementation. Caller and provider share a process. The transport still serializes and deserializes ([ADR 0007](../docs/adr/0007-in-process-transport-serializes.md)), so that a provider cannot leak a live object and a caller cannot depend on one. Values cross as JSON text and are checked against the contract's published description (CON-16), as they are over a network.
 
 **TRN-6.** The in-process transport MUST run the provider's action in the caller's thread of control, so that attached mode has no hidden concurrency.
 

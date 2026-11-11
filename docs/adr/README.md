@@ -21,7 +21,7 @@ Questions not yet decided are in [open-questions.md](../open-questions.md).
 | [0004](0004-each-app-owns-its-data.md) | Each app owns its data | Accepted |
 | [0005](0005-small-required-core.md) | Small required core; no bundled shared-service apps | Proposed |
 | [0006](0006-contracts-are-typed-and-published-as-openapi.md) | Contracts are typed and published as OpenAPI | Accepted |
-| [0007](0007-in-process-transport-serializes.md) | The in-process transport serializes, like the network ones | Proposed |
+| [0007](0007-in-process-transport-serializes.md) | The in-process transport serializes, like the network ones | Accepted |
 | [0008](0008-typed-contract-errors-in-both-modes.md) | Contract errors are typed and identical in both modes | Accepted |
 | [0009](0009-one-database-alias-per-app.md) | One database alias per app | Proposed |
 | [0010](0010-pluggable-principal-resolution.md) | Pluggable principal resolution in core | Accepted |
