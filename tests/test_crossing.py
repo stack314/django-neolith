@@ -930,20 +930,48 @@ def test_a_shared_default_that_can_change_is_refused(
         _declare(_holding(record) if nested else record)
 
 
-@pytest.mark.spec("TRN-12")
+class FrozenWithPrivate(BaseModel):
+    """Frozen, but its private attributes and its set of fields given stay open."""
+
+    model_config = ConfigDict(frozen=True)
+    a: int
+    _note: str = PrivateAttr(default="")
+
+
+@pytest.mark.spec("TRN-12", "CON-17")
+@pytest.mark.parametrize(
+    ("annotation", "default"),
+    [
+        (Policy, Policy(retries=3)),
+        (Frozen, Frozen(n=1)),
+        (FrozenWithPrivate, FrozenWithPrivate(a=1)),
+    ],
+    ids=["frozen-with-a-required-field", "frozen", "frozen-with-a-private-attribute"],
+)
 @pytest.mark.parametrize("nested", [False, True], ids=["field", "nested-field"])
-def test_a_shared_default_that_cannot_change_is_admitted(nested: bool) -> None:
-    # A frozen record holding only values that cannot change is safe to share.
-    record = create_model(
-        _name("Sharing"),
-        policy=(Policy, Policy(retries=3)),
-        frozen=(Frozen, Frozen(n=1)),
+def test_a_frozen_record_default_is_refused_and_its_factory_admitted(
+    annotation: Any,  # noqa: ANN401
+    default: BaseModel,
+    nested: bool,
+) -> None:
+    # A frozen record is hashable, so pydantic-core would share it, and its
+    # private attributes and set of fields given can still change. A factory
+    # that builds it gives each read its own.
+    record = create_model(_name("Sharing"), value=(annotation, default))
+    with pytest.raises(
+        ContractDefinitionError, match="default_factory that builds the record"
+    ):
+        _declare(_holding(record) if nested else record)
+    built = create_model(
+        _name("Built"),
+        value=(annotation, Field(default_factory=lambda: default.model_copy())),
     )
-    declared_record = _holding(record) if nested else record
+    declared_record = _holding(built) if nested else built
     reader = codec(_declare(declared_record), declared_record)
-    assert reader.read(b'{"inner": {}}' if nested else b"{}") == reader.read(
-        b'{"inner": {}}' if nested else b"{}"
-    )
+    text = b'{"inner": {}}' if nested else b"{}"
+    first, second = reader.read(text), reader.read(text)
+    assert first == second
+    assert _reachable(first).isdisjoint(_reachable(second))
 
 
 @pytest.mark.spec("TRN-12")
@@ -988,45 +1016,57 @@ def _new_list() -> list[int]:
     return []
 
 
+class WithCache(BaseModel):
+    n: int = 0
+    _cache: list[int] = PrivateAttr(default_factory=list)
+
+
+_SHARED_CACHE: list[int] = []
+
+
+def _sharing_private() -> WithCache:
+    built = WithCache()
+    built._cache = _SHARED_CACHE
+    return built
+
+
 @pytest.mark.spec("TRN-12", "CON-17")
 @pytest.mark.parametrize(
-    ("annotation", "factory"),
+    ("annotation", "factory", "refusal"),
     [
-        (Plain, lambda: _SHARED_PLAIN),
-        (list[Plain], lambda: [_SHARED_PLAIN]),
-        (Counts, _template().model_copy),
-        (Plain, lambda: Plain.model_construct(ns=SubList())),
-        (list[int], _new_list),
-        (list[int], SubList),
-        (list[int], functools.partial(list)),
-        (Plain, SelfishPlain),
-        (dict[str, list[int]], lambda: {"a": []}),
+        (Plain, lambda: _SHARED_PLAIN, "returns the same Plain on every call"),
+        (list[Plain], lambda: [_SHARED_PLAIN], "returns the same Plain on every"),
+        (WithCache, _sharing_private, "returns the same list on every call"),
+        (Counts, _template().model_copy, "builds a value holding a defaultdict"),
+        (
+            Plain,
+            lambda: Plain.model_construct(ns=SubList()),
+            "builds a value holding a SubList",
+        ),
+        (list[int], SubList, "builds a value holding a SubList"),
+        (Plain, SelfishPlain, "which defines __deepcopy__"),
     ],
     ids=[
         "shared-record",
         "shared-record-in-a-list",
+        "shared-private-attribute",
         "bound-method-copying-a-defaultdict",
         "record-holding-a-list-subclass",
-        "function-building-a-new-list",
         "list-subclass",
-        "partial",
         "record-subclass",
-        "lambda-building-a-new-map",
     ],
 )
-def test_a_default_factory_other_than_the_fields_own_type_is_refused(
+def test_a_default_factory_whose_values_could_be_shared_is_refused(
     annotation: Any,  # noqa: ANN401
     factory: Callable[[], object],
+    refusal: str,
 ) -> None:
     # pydantic-core calls the factory for each value read without the field,
-    # and only the type itself is sure to build new objects each time.
+    # so two calls must build values that share nothing that can change.
     record = create_model(
         _name("Factory"), value=(annotation, Field(default_factory=factory))
     )
-    with pytest.raises(
-        ContractDefinitionError,
-        match="default factory must be list, dict, set or the record class itself",
-    ):
+    with pytest.raises(ContractDefinitionError, match=re.escape(refusal)):
         _declare(record)
 
 
@@ -1036,14 +1076,31 @@ def test_a_default_factory_other_than_the_fields_own_type_is_refused(
     [
         (Plain, Plain),
         (Plain | None, Plain),
+        (Plain | None, lambda: None),
+        (Policy, lambda: Policy(retries=1)),
         (list[Plain], list),
-        (dict[str, list[int]], dict),
+        (list[int], _new_list),
+        (list[int], functools.partial(list)),
+        (dict[str, list[int]], lambda: {"a": []}),
+        (WithCache, WithCache),
         (int, lambda: 5),
         (str, lambda: "same text"),
     ],
-    ids=["record", "optional-record", "list", "map", "integer", "text"],
+    ids=[
+        "record",
+        "optional-record",
+        "none",
+        "frozen-record-with-a-required-field",
+        "list",
+        "function-building-a-new-list",
+        "partial",
+        "lambda-building-a-new-map",
+        "record-with-a-private-attribute",
+        "integer",
+        "text",
+    ],
 )
-def test_a_default_factory_that_is_the_fields_own_type_is_admitted(
+def test_a_default_factory_that_builds_new_values_is_admitted(
     annotation: Any,  # noqa: ANN401
     factory: Callable[[], object],
 ) -> None:
@@ -1053,11 +1110,7 @@ def test_a_default_factory_that_is_the_fields_own_type_is_admitted(
     reader = codec(_declare(record), record)
     first, second = reader.read(b"{}"), reader.read(b"{}")
     assert first == second
-    assert not any(
-        part is other
-        for part in _mutable(first.value)  # type: ignore[attr-defined]
-        for other in _mutable(second.value)  # type: ignore[attr-defined]
-    )
+    assert _reachable(first).isdisjoint(_reachable(second))
 
 
 @pytest.mark.spec("TRN-12", "CON-17")
@@ -1089,8 +1142,61 @@ def test_a_default_holding_an_object_deepcopy_may_not_copy_is_refused(
         _declare(record)
 
 
-def _mutable(value: object) -> list[object]:
-    return [c for c in _containers(value)]
+def _parts(value: object) -> list[object]:
+    """Everything reachable from a value that can change: records with their
+    private attributes and set of fields given, lists, maps and sets."""
+    found: list[object] = []
+    pending = [value]
+    seen: set[int] = set()
+    while pending:
+        item = pending.pop()
+        if id(item) in seen or not isinstance(item, BaseModel | list | dict | set):
+            continue
+        seen.add(id(item))
+        found.append(item)
+        if isinstance(item, BaseModel):
+            pending.extend(vars(item).values())
+            pending.append(item.__pydantic_fields_set__)
+            if item.__pydantic_private__ is not None:
+                pending.append(item.__pydantic_private__)
+        elif isinstance(item, dict):
+            pending.extend(item.values())
+        else:
+            pending.extend(item)
+    return found
+
+
+def _reachable(value: object) -> set[int]:
+    return {id(part) for part in _parts(value)}
+
+
+def _state(value: object) -> object:
+    """A plain picture of a value, its private attributes and fields given."""
+    if isinstance(value, BaseModel):
+        return (
+            type(value).__name__,
+            {key: _state(item) for key, item in vars(value).items()},
+            sorted(value.__pydantic_fields_set__),
+            _state(value.__pydantic_private__),
+        )
+    if isinstance(value, dict):
+        return {key: _state(item) for key, item in value.items()}
+    if isinstance(value, list | set):
+        return [_state(item) for item in value]
+    return value
+
+
+def _mutate_everything(value: object) -> None:
+    """Change every part of a value that can change, through ordinary means."""
+    for part in _parts(value):
+        if isinstance(part, BaseModel):
+            vars(part)["mutated"] = True
+        elif isinstance(part, list):
+            part.append("mutated")
+        elif isinstance(part, dict):
+            part["mutated"] = "mutated"
+        elif isinstance(part, set):
+            part.add("mutated")
 
 
 class Tree(BaseModel):
@@ -1338,30 +1444,28 @@ def _refusal_and_advice() -> list[
 
     return [
         (
-            "frozen record default, by factory",
-            field(Policy, Field(default_factory=lambda: Policy(retries=1))),
-            "default factory must be list, dict, set or the record class itself; "
-            "or give it a default= value",
-            [field(Policy, Policy(retries=1))],
+            "frozen record default",
+            field(Policy, Policy(retries=1)),
+            "give the field a default_factory that builds the record, such as a lambda",
+            [field(Policy, Field(default_factory=lambda: Policy(retries=1)))],
         ),
         (
-            "unfrozen record default, by factory",
-            field(Settable, Field(default_factory=lambda: Settable(retries=1))),
-            "or give it a default= value",
-            [field(Settable, Settable(retries=1))],
-        ),
-        (
-            "list default, by factory",
-            field(list[int], Field(default_factory=lambda: [1])),
-            "default factory must be list, dict, set",
-            [field(list[int], Field(default_factory=list)), field(list[int], [1])],
-        ),
-        (
-            "hashable record that can change",
+            "hashable record default",
             field(Hashed, Hashed(n=1)),
-            "make its record frozen, holding only values that cannot change, or "
-            "give the record no __hash__",
-            [field(Frozen, Frozen(n=1)), field(Plain, Plain(ns=[1]))],
+            "give the field a default_factory that builds the record",
+            [field(Hashed, Field(default_factory=lambda: Hashed(n=1)))],
+        ),
+        (
+            "factory returning one record",
+            field(Plain, Field(default_factory=lambda: _SHARED_PLAIN)),
+            "make it build a new one on each call",
+            [field(Plain, Field(default_factory=lambda: Plain()))],
+        ),
+        (
+            "factory building a list subclass",
+            field(list[int], Field(default_factory=SubList)),
+            "build it from plain lists, dicts and sets",
+            [field(list[int], Field(default_factory=list))],
         ),
         (
             "list subclass in a default",
@@ -1394,3 +1498,54 @@ def test_every_refusal_on_the_default_path_advises_a_declaration_that_is_admitte
         _declare(refused())
     for fix in fixes:
         _declare(fix())
+
+
+class Defaulted(BaseModel):
+    """A field of every kind with a default, read without them."""
+
+    plain: Plain = Plain(ns=[1])
+    built: FrozenWithPrivate = Field(default_factory=lambda: FrozenWithPrivate(a=1))
+    cache: WithCache = Field(default_factory=WithCache)
+    many: list[Plain] = [Plain()]
+    counts: dict[str, list[int]] = {"a": [1]}
+    maybe: Plain | None = Field(default_factory=Plain)
+
+
+@pytest.mark.spec("TRN-12")
+@_HYPOTHESIS
+@given(st.data())
+def test_changing_everything_in_one_read_changes_nothing_in_another(
+    data: st.DataObject,
+) -> None:
+    # Two reads of the same text, one changed in every part that can change,
+    # including private attributes and the set of fields given; the other
+    # read, a third read and the class's defaults stay as they were.
+    record = cast("type[BaseModel]", data.draw(_records(_TYPES))[0])
+    try:
+        found, schema = _declare_request(record)
+    except ContractDefinitionError:
+        record, found = Defaulted, _declare(Defaulted)
+        text = b"{}"
+    else:
+        text = json.dumps(data.draw(from_schema(schema))).encode()
+    reader = codec(found, record)
+    first, second = reader.read(text), reader.read(text)
+    before = _state(second)
+    defaults = _state(record()) if record is Defaulted else None
+    _mutate_everything(first)
+    assert _state(second) == before
+    assert _state(reader.read(text)) == before
+    if defaults is not None:
+        assert _state(record()) == defaults
+
+
+@pytest.mark.spec("TRN-12")
+def test_changing_everything_in_a_read_of_defaults_changes_nothing_in_another() -> None:
+    reader = codec(_declare(Defaulted), Defaulted)
+    first, second = reader.read(b"{}"), reader.read(b"{}")
+    assert _reachable(first).isdisjoint(_reachable(second))
+    before, defaults = _state(second), _state(Defaulted())
+    _mutate_everything(first)
+    assert _state(second) == before
+    assert _state(reader.read(b"{}")) == before
+    assert _state(Defaulted()) == defaults

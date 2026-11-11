@@ -493,14 +493,15 @@ class Portable:
             # pydantic-core copies a default only when it cannot be hashed
             # (src/validators/with_default.rs), so it hands a hashable one to
             # every value read without the field as the same object. That is
-            # safe only when nothing in it can change.
+            # safe only for values that cannot change, and a record always
+            # can: freezing it leaves its private attributes and its set of
+            # fields given open.
             if _hashable(default) and not _unchanging(default):
                 raise self.fail(
                     f"field {path} has a default that every value read without "
                     "the field would share, since it can be hashed, and that "
-                    "can change; make its record frozen, holding only values "
-                    "that cannot change, or give the record no __hash__, so "
-                    "each value gets a copy"
+                    "holds a record, which can change; give the field a "
+                    "default_factory that builds the record, such as a lambda"
                 )
         if "default_factory" in node:
             if node.get("default_factory_takes_data"):
@@ -508,27 +509,32 @@ class Portable:
                     f"field {path} has a default factory that takes the other fields"
                 )
             factory = node["default_factory"]
-            holds, records = self.mutable_parts(node["schema"])
-            if (
-                holds
-                and not any(factory is made for made in (list, dict, set))
-                and not any(factory is record for record in records)
-            ):
-                # pydantic-core calls the factory for each value read
-                # without the field, and only a new list, map, set or
-                # record keeps those values apart.
-                raise self.fail(
-                    f"field {path} holds lists, maps or records, so its "
-                    "default factory must be list, dict, set or the record "
-                    "class itself; or give it a default= value"
-                )
             try:
+                # pydantic-core calls the factory once for each value read
+                # without the field, so two calls must build values that
+                # share nothing that can change.
                 made = factory()
+                again = factory()
             except Exception as error:  # the author's factory may raise anything
                 raise self.fail(
                     f"field {path} has a default factory that raised "
                     f"{type(error).__name__}: {error}"
                 ) from error
+            problem = _default_problem(made)
+            if problem is not None:
+                raise self.fail(
+                    f"field {path} has a default factory that builds a value "
+                    f"holding {problem}; build it from plain lists, dicts and "
+                    "sets, immutable values and records that keep Pydantic's "
+                    "own methods"
+                )
+            shared = _shared_between(made, again)
+            if shared is not None:
+                raise self.fail(
+                    f"field {path} has a default factory that returns the same "
+                    f"{shared} on every call, which every value read without "
+                    "the field would share; make it build a new one on each call"
+                )
             self.round_trip(node["schema"], made, path, description)
             return description, True
         return {
@@ -537,32 +543,6 @@ class Portable:
                 node["schema"], node["default"], path, description
             ),
         }, True
-
-    def mutable_parts(self, schema: Mapping[str, Any]) -> tuple[bool, list[type[Any]]]:
-        """Whether a field's values can hold a list, map, set or record, and
-        the records its schema names."""
-        holds = False
-        records: list[type[Any]] = []
-        pending: list[object] = [schema]
-        seen: set[int] = set()
-        while pending:
-            item = pending.pop()
-            if id(item) in seen:
-                continue
-            seen.add(id(item))
-            if type(item) is dict:
-                kind = item.get("type")
-                if kind == "definition-ref":
-                    pending.append(self.definitions.get(str(item.get("schema_ref"))))
-                elif kind in ("list", "dict", "set", "frozenset", "tuple", "any"):
-                    holds = True
-                elif kind == "model":
-                    holds = True
-                    records.append(cast("type[Any]", item.get("cls")))
-                pending.extend(item.values())
-            elif type(item) is list:
-                pending.extend(item)
-        return holds, records
 
     def round_trip(
         self,
@@ -1280,10 +1260,8 @@ def _default_problem(default: object) -> str | None:
 
 def _unchanging(value: object) -> bool:
     """Whether nothing in a default can change: immutable scalars, enum
-    members, tuples and frozensets of them, and frozen records holding only
-    such values."""
+    members, and tuples and frozensets of them. Never a record."""
     pending = [value]
-    instance_dict = type.__dict__["__dict__"].__get__(BaseModel)["__dict__"]
     while pending:
         item = pending.pop()
         kind = type(item)
@@ -1291,11 +1269,56 @@ def _unchanging(value: object) -> bool:
             continue
         if kind in (tuple, frozenset):
             pending.extend(cast("tuple[object, ...]", item))
-        elif issubclass(kind, BaseModel) and kind.model_config.get("frozen") is True:
-            pending.extend(instance_dict.__get__(item).values())
         else:
             return False
     return True
+
+
+def _changeable_parts(value: object) -> Iterator[object]:
+    """Every object reachable from a value that is not an immutable scalar or
+    an enum member, each once.
+
+    A record is walked through its fields, its private attributes and its
+    set of fields given, which Pydantic keeps beside them; tuples and
+    frozensets are walked through; any other object is yielded as it is.
+    """
+    pending = [value]
+    seen: set[int] = set()
+    slots = type.__dict__["__dict__"].__get__(BaseModel)
+    fields, private, given = (
+        slots["__dict__"],
+        slots["__pydantic_private__"],
+        slots["__pydantic_fields_set__"],
+    )
+    while pending:
+        item = pending.pop()
+        kind = type(item)
+        if kind in _IMMUTABLE or issubclass(kind, enum.Enum) or id(item) in seen:
+            continue
+        seen.add(id(item))
+        if kind in (tuple, frozenset):
+            pending.extend(cast("tuple[object, ...]", item))
+            continue
+        yield item
+        if issubclass(kind, BaseModel):
+            pending.extend(fields.__get__(item).values())
+            pending.append(given.__get__(item))
+            held = private.__get__(item)
+            if held is not None:
+                pending.append(held)
+        elif kind in (list, set):
+            pending.extend(cast("list[object]", item))
+        elif kind is dict:
+            pending.extend(cast("dict[object, object]", item).values())
+
+
+def _shared_between(first: object, second: object) -> str | None:
+    """Name an object two values can both reach that can change, or None."""
+    held = {id(part): part for part in _changeable_parts(first)}
+    for part in _changeable_parts(second):
+        if held.get(id(part)) is part:
+            return type(part).__qualname__
+    return None
 
 
 def _hashable(value: object) -> bool:
