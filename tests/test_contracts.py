@@ -1955,9 +1955,58 @@ class ForgedGlobals(BaseModel):
     )
 
 
+class HidesNamespace(type(BaseModel)):  # type: ignore[misc]
+    """A metaclass whose __dict__ is a property, which getattr_static skips."""
+
+    @property
+    def __dict__(cls) -> Mapping[str, Any]:  # type: ignore[override]
+        return cast("Mapping[str, Any]", type.__dict__["__dict__"].__get__(cls))
+
+
+class PostInitBehindMetaclass(InheritsPrivate, metaclass=HidesNamespace):
+    def model_post_init(self, context: object, /) -> None:
+        self.x = 2
+
+
+class UnhashableMeta(type):
+    def __hash__(cls) -> int:
+        raise RuntimeError("hashed")
+
+
+class UnhashableMetaclass(type(BaseModel), metaclass=UnhashableMeta):  # type: ignore[misc]
+    pass
+
+
+class PrivateUnderUnhashableMetaclass(WithPrivate, metaclass=UnhashableMetaclass):
+    pass
+
+
+class RenamedPostInit(BaseModel):
+    x: int
+    _cache: int = PrivateAttr(0)
+
+    def other_hook(self, context: object, /) -> None:
+        self.x = 2
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls, source: type[BaseModel], handler: GetCoreSchemaHandler
+    ) -> CoreSchema:
+        schema = handler(source)
+        cast("dict[str, Any]", schema)["post_init"] = "other_hook"
+        return schema
+
+
 @pytest.mark.spec("CON-13", "CON-16")
 @pytest.mark.parametrize(
-    "record", [WithPrivate, WithPlainPrivate, InheritsPrivate, InheritsPrivateTwice]
+    "record",
+    [
+        WithPrivate,
+        WithPlainPrivate,
+        InheritsPrivate,
+        InheritsPrivateTwice,
+        PrivateUnderUnhashableMetaclass,
+    ],
 )
 def test_private_attributes_are_accepted(record: type[BaseModel]) -> None:
     # Pydantic generated a model_post_init, so the record's post_init was checked.
@@ -1978,6 +2027,8 @@ def test_private_attributes_are_accepted(record: type[BaseModel]) -> None:
         PrivateObjectPostInit,
         ForgedClosure,
         ForgedGlobals,
+        PostInitBehindMetaclass,
+        RenamedPostInit,
     ],
 )
 def test_own_model_post_init_is_refused(record: type[BaseModel]) -> None:

@@ -17,7 +17,6 @@ are described once each under ``$defs``, by class name; ``type`` aliases are
 written out where they are used.
 """
 
-import inspect
 import json
 import math
 import re
@@ -320,7 +319,12 @@ class Portable:
         cls = node["cls"]
         subject = f"record {path}"
         admitted = {"cls", "schema", "config", "custom_init", "root_model"}
-        if _only_initialises_private_attributes(cls):
+        post_init = node.get("post_init")
+        if (
+            type(post_init) is str
+            and post_init == "model_post_init"
+            and _only_initialises_private_attributes(cls)
+        ):
             # Private attributes never travel; Pydantic sets post_init to
             # initialise them when the record has any.
             admitted.add("post_init")
@@ -920,16 +924,18 @@ def _unchanged(held: object, written: object) -> bool:
     return type(held) is type(written) and held == written
 
 
-class _Private(BaseModel):
-    # Nothing validates with these records, so no schema is built for them and
-    # no Pydantic plugin is called when neolith is imported.
-    model_config = ConfigDict(defer_build=True)
+def _from_classes(cls: type[Any], name: str) -> object:
+    """What an instance of ``cls`` finds for ``name`` in its classes, or None.
 
-    _x: int = PrivateAttr(0)
-
-
-class _InheritsPrivate(_Private):
-    pass
+    The method resolution order and each class's namespace are read through
+    ``type``'s own descriptors, as an instance lookup reads them, so a
+    metaclass can neither run code here nor hide an entry.
+    """
+    for klass in type.__dict__["__mro__"].__get__(cls):
+        namespace = type.__dict__["__dict__"].__get__(klass)
+        if name in namespace:
+            return namespace[name]
+    return None
 
 
 def _closure(function: object) -> list[object]:
@@ -945,23 +951,35 @@ def _closure(function: object) -> list[object]:
     return held
 
 
+class _Private(BaseModel):
+    # Nothing validates with these records, so no schema is built for them and
+    # no Pydantic plugin is called when neolith is imported.
+    model_config = ConfigDict(defer_build=True)
+
+    _x: int = PrivateAttr(0)
+
+
+def _post_init(self: BaseModel, context: object, /) -> None:
+    """Stands for an author's model_post_init, which Pydantic wraps."""
+
+
+class _Wrapped(_Private):
+    model_post_init = _post_init
+
+
 # Pydantic's own model_post_init for a record with private attributes, and the
-# wrapper it puts around an existing one (here, the inherited one), with the
-# closure cell that holds the function it wraps. They are taken from records
-# built here, not imported from pydantic._internal, whose names a minor release
-# may change.
-_INIT_PRIVATE_ATTRIBUTES = inspect.getattr_static(_Private, "model_post_init")
-_WRAPPER = inspect.getattr_static(_InheritsPrivate, "model_post_init")
+# wrapper it puts around an existing one, with the closure cell that holds the
+# function it wraps. They are taken from records built here, not imported from
+# pydantic._internal, whose names a minor release may change.
+_INIT_PRIVATE_ATTRIBUTES = _from_classes(_Private, "model_post_init")
+_WRAPPER = _from_classes(_Wrapped, "model_post_init")
 _WRAPPER_CODE = getattr(_WRAPPER, "__code__", object())
 _WRAPPER_GLOBALS = getattr(_WRAPPER, "__globals__", object())
-_WRAPPED_CELL = next(
-    (
-        index
-        for index, held in enumerate(_closure(_WRAPPER))
-        if held is _INIT_PRIVATE_ATTRIBUTES
-    ),
-    None,
-)
+_WRAPPER_CLOSURE = _closure(_WRAPPER)
+_WRAPPED_CELLS = [
+    index for index, held in enumerate(_WRAPPER_CLOSURE) if held is _post_init
+]
+_WRAPPED_CELL = _WRAPPED_CELLS[0] if len(_WRAPPED_CELLS) == 1 else None
 
 
 def _only_initialises_private_attributes(cls: type[Any]) -> bool:
@@ -972,24 +990,30 @@ def _only_initialises_private_attributes(cls: type[Any]) -> bool:
     as one inherited from a record that has private attributes too, it sets a
     wrapper that runs ``init_private_attributes`` and then the existing one,
     held in a closure cell (pydantic/_internal/_model_construction.py,
-    ``ModelMetaclass.__new__``, at 2.12 and 2.14). The walk follows what runs:
-    through functions with the wrapper's code and globals, to the function each
-    holds, it must end at ``init_private_attributes``. It never reads
-    ``__wrapped__``, which anyone can set, and reads the class with
-    ``inspect.getattr_static``, so no code of the author's runs.
+    ``ModelMetaclass.__new__``, at 2.12 and 2.14). The walk follows what the
+    wrapper runs: through functions with its code, globals and other cells, to
+    the function each holds, it must end at ``init_private_attributes``. It
+    never reads ``__wrapped__``, which anyone can set.
     """
-    function = inspect.getattr_static(cls, "model_post_init", None)
+    function = _from_classes(cls, "model_post_init")
     for _ in range(64):
         if function is _INIT_PRIVATE_ATTRIBUTES:
             return True
+        held = _closure(function)
         if (
             _WRAPPED_CELL is None
             or type(function) is not types.FunctionType
             or function.__code__ is not _WRAPPER_CODE
             or function.__globals__ is not _WRAPPER_GLOBALS
+            or len(held) != len(_WRAPPER_CLOSURE)
+            or any(
+                held[index] is not _WRAPPER_CLOSURE[index]
+                for index in range(len(held))
+                if index != _WRAPPED_CELL
+            )
         ):
             return False
-        function = _closure(function)[_WRAPPED_CELL]
+        function = held[_WRAPPED_CELL]
     return False
 
 
