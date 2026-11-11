@@ -10,7 +10,7 @@ Every call carries a **call context**, separate from the request. The draft spec
 - **Propagated fields** pass from a call to the calls it makes: the principal on whose behalf the call is made, the trace identifier and the deadline.
 - **Per-call fields** belong to one outbound call: the idempotency key. Each outbound call gets a fresh key, kept only across retries of that same call.
 
-Over HTTP the context travels in headers (`Authorization`, `traceparent`, `Neolith-Timeout`, `Idempotency-Key`). The deadline crosses as a relative budget, and the receiving host computes its own local deadline from it (spec 03). Apps must not put it inside request types. The question, recorded as open question 6, is how it reaches the code that implements an action, and how it reaches the calls that code makes in turn.
+Over HTTP the context travels in headers (`Authorization`, `Neolith-Principal`, `traceparent`, `Neolith-Timeout`, `Idempotency-Key`). The deadline crosses as a relative budget, and the receiving host computes its own local deadline from it (spec 03). Apps must not put it inside request types. The question, recorded as open question 6, is how it reaches the code that implements an action, and how it reaches the calls that code makes in turn.
 
 Two directions have to work, and they pull different ways:
 
@@ -39,7 +39,7 @@ class InventoryImpl:
     def reserve(self, request: ReserveRequest, ctx: CallContext) -> ReserveReply:
         if ctx.principal is None:
             raise ContractError(kind="permission_denied", message="reserving needs a principal")
-        owner = ctx.principal.subject
+        owner = (ctx.principal.issuer, ctx.principal.subject)
         quote = connect("pricing.v1").quote(QuoteRequest(sku=request.sku), context=ctx)
         ...
 ```
@@ -60,7 +60,7 @@ from neolith import current_context
 @Inventory.implement
 class InventoryImpl:
     def reserve(self, request: ReserveRequest) -> ReserveReply:
-        owner = current_context().principal.subject   # raises outside a call
+        owner = (current_context().principal.issuer, current_context().principal.subject)   # raises outside a call
         quote = connect("pricing.v1").quote(QuoteRequest(sku=request.sku))  # inherits automatically
         ...
 ```
@@ -81,7 +81,7 @@ The transport sets a `contextvars.ContextVar` for the duration of the action and
 @Inventory.implement
 class InventoryImpl:
     def reserve(self, call: Call[ReserveRequest]) -> ReserveReply:
-        owner = call.principal.subject
+        owner = (call.principal.issuer, call.principal.subject)
         sku = call.request.sku
         quote = connect("pricing.v1").quote(QuoteRequest(sku=sku), parent=call)
         ...
@@ -105,7 +105,7 @@ class InventoryImpl:
     def reserve(self, request: ReserveRequest, ctx: CallContext) -> ReserveReply:
         if ctx.principal is None:
             raise ContractError(kind="permission_denied", message="reserving needs a principal")
-        owner = ctx.principal.subject
+        owner = (ctx.principal.issuer, ctx.principal.subject)
         quote = connect("pricing.v1").quote(QuoteRequest(sku=request.sku))  # child context derived by the host
         ...
 
