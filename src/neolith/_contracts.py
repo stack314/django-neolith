@@ -31,6 +31,7 @@ from typing import Annotated, Any, NoReturn, Protocol, final, overload
 
 from pydantic import BaseModel
 
+from neolith._crossing import Codec
 from neolith._portable import (
     Portable,
     json_value_problem,
@@ -396,7 +397,15 @@ class Contract:
     Read it with ``Contract.of(Declaration)``.
     """
 
-    __slots__ = ("_actions", "_description", "declaration", "identity", "major", "name")
+    __slots__ = (
+        "_actions",
+        "_codecs",
+        "_description",
+        "declaration",
+        "identity",
+        "major",
+        "name",
+    )
 
     def __init__(
         self,
@@ -404,12 +413,17 @@ class Contract:
         declaration: type[Any],
         actions: Mapping[str, Action],
         description: Mapping[str, Any],
+        codecs: Mapping[type[BaseModel], Codec[Any]],
     ) -> None:
         self.identity = identity
         self.name, self.major = _parse_identity(identity)
         self.declaration = declaration
         self._actions = types.MappingProxyType(dict(actions))
         self._description = description
+        # The serializer and validator of each request, reply and detail
+        # record, captured from the build the description was written from
+        # (spec 02, Values across a call).
+        self._codecs = types.MappingProxyType(dict(codecs))
 
     @property
     def actions(self) -> Mapping[str, Action]:
@@ -531,6 +545,15 @@ def contract[T](identity: str, /) -> Callable[[type[T]], type[T]]:
         portable = Portable(ContractDefinitionError)
         actions: dict[str, Action] = {}
         described: dict[str, Any] = {}
+        codecs: dict[type[BaseModel], Codec[Any]] = {}
+
+        def capture(record: type[BaseModel]) -> None:
+            if record not in codecs:
+                try:
+                    codecs[record] = Codec(record)
+                except TypeError as error:
+                    raise portable.fail(str(error)) from error
+
         for attr, value in vars(declaration).items():
             marked = (
                 vars(value).get(_ACTION_ATTR) if inspect.isfunction(value) else None
@@ -551,9 +574,12 @@ def contract[T](identity: str, /) -> Callable[[type[T]], type[T]]:
             portable.where = f"{identity}, action {attr!r}"
             request, reply = _signature(portable.where, value)
             request_type, request_ref = portable.root(request, "request")
+            capture(request_type)
             reply_type, reply_ref = (
                 (None, None) if reply is None else portable.root(reply, "reply")
             )
+            if reply_type is not None:
+                capture(reply_type)
             idempotent, declared = marked
             where = f"{identity}, action {attr!r}"
             errors: dict[str, type[BaseModel]] = {}
@@ -561,6 +587,7 @@ def contract[T](identity: str, /) -> Callable[[type[T]], type[T]]:
             for kind, detail in _declared_kinds(where, declared):
                 portable.where = f"{where}, error {kind!r}"
                 errors[kind], error_refs[kind] = portable.root(detail, "detail")
+                capture(errors[kind])
                 if _nests_deeper(portable.defs, error_refs[kind], _UNTYPED_DEPTH):
                     raise portable.fail(
                         f"detail record {errors[kind].__name__} can nest maps and "
@@ -590,7 +617,7 @@ def contract[T](identity: str, /) -> Callable[[type[T]], type[T]]:
         setattr(
             declaration,
             _CONTRACT_ATTR,
-            Contract(identity, declaration, actions, description),
+            Contract(identity, declaration, actions, description, codecs),
         )
         return declaration
 
