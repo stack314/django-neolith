@@ -183,14 +183,38 @@ class InProcess:
     """The in-process transport to one implementation of a contract.
 
     ``app`` names the app the implementation belongs to, which is the caller
-    of the calls its actions make. Until the host declares apps (roadmap step
-    4, #11) it is optional, and an action of no app calls with no caller.
+    of the calls its actions make, and ``requires`` the identities that app's
+    declaration requires, or ``None`` when it has none. ``principal_from`` is
+    the contract's allow-list: the calling apps that may assert a principal
+    on a call to it. The host builds each from the providing app's
+    declaration; left out, they fail closed: an action of no app, which every
+    call it makes is refused from, and an empty list.
+
+    The provider's side first checks the calling app (ADR 0017 Decision 9,
+    steps 1 and 2): a call from no app fails with ``unauthenticated``, and
+    one that carries a principal from an app the list does not name with
+    ``permission_denied``, before the deadline is checked or the request
+    read, so the action never runs.
     """
 
-    __slots__ = ("_app", "_contract", "_functions", "_implementation", "_reads")
+    __slots__ = (
+        "_allowed",
+        "_app",
+        "_contract",
+        "_functions",
+        "_implementation",
+        "_reads",
+        "_requires",
+    )
 
     def __init__(
-        self, declaration: type[Any], implementation: object, *, app: str | None = None
+        self,
+        declaration: type[Any],
+        implementation: object,
+        *,
+        app: str | None = None,
+        requires: tuple[str, ...] | None = None,
+        principal_from: tuple[str, ...] = (),
     ) -> None:
         """Check the implementation's class against the contract, as
         ``@implements`` does, and keep the function of each action.
@@ -200,6 +224,11 @@ class InProcess:
         contract._check_implementation(cls)
         if app is not None and type(app) is not str:
             raise TypeError(f"an app is named by a str, not {type(app).__qualname__}")
+        self._requires = _context.requires_option(requires)
+        try:
+            self._allowed = frozenset(_context.names(principal_from, "app names"))
+        except TypeError as error:
+            raise TypeError(f"principal_from {error}") from None
         # The class's own functions, read statically: an attribute set on the
         # instance, or a __getattr__, never stands in for an action.
         self._functions: Mapping[str, Callable[..., object]] = types.MappingProxyType(
@@ -242,6 +271,11 @@ class InProcess:
             raise TypeError(
                 f"a call's context is sent as Sent, not {type(context).__qualname__}"
             )
+        # The calling app comes first: a call it refuses is refused before
+        # anything else is read, and its action never runs.
+        refusal = self._refusal(context)
+        if refusal is not None:
+            raise refusal
         # The budget is counted from when the call arrived (spec 03).
         deadline = None if context.budget is None else arrived + context.budget / 1000
         outcome = self._serve(action, request, context, deadline)
@@ -267,6 +301,29 @@ class InProcess:
             raise Failure(*outcome)
         return outcome
 
+    def _refusal(self, context: Sent) -> Failure | None:
+        """The provider's checks of the calling app, or ``None`` when it passes.
+
+        In-process the calling app is not authenticated but known: the app
+        the call's parent scope belongs to. A principal is judged by its
+        presence alone, whatever its form holds.
+        """
+        identity = self._contract.identity
+        caller = context.caller
+        if caller is None:
+            return Failure(
+                "unauthenticated",
+                f"a call to {identity} has no calling app; a call is made from a "
+                "scope that belongs to an app",
+            )
+        if context.principal is not None and caller not in self._allowed:
+            return Failure(
+                "permission_denied",
+                f"app {caller} may not assert a principal on a call to {identity}: "
+                "the contract's allow-list does not name it",
+            )
+        return None
+
     def _serve(
         self, action: Action, request: bytes, context: Sent, deadline: float | None
     ) -> bytes | tuple[str, str, bytes | None] | _Ended | None:
@@ -280,7 +337,7 @@ class InProcess:
         frame holds the provider's values.
         """
         try:
-            scope = _context.received(context, deadline, self._app)
+            scope = _context.received(context, deadline, self._app, self._requires)
         except Exception as error:  # a failure of the host, whatever it is
             failure: BaseException = error
         else:
@@ -385,7 +442,8 @@ class Connector:
     thread the action started.
 
     A call made in no open scope and naming none, or naming one that has
-    closed, raises ``RuntimeError``. Any other mistake in the calling code
+    closed, raises ``neolith.UsageError``, as does a call from a scope whose
+    app does not require the contract. Any other mistake in the calling code
     raises ``AttributeError``, ``TypeError`` or ``ValueError`` (a request
     that fails the request check). None of these is a ``ContractError``. A
     ``ContractError`` the caller gets is a new one, raised from the
@@ -499,6 +557,8 @@ class Connector:
         seconds = _context.timeout_option(timeout)
         # Step 1: the context, and its principal's sent form.
         scope = _context.parent(context)
+        # Step 1a: the calling app requires the contract (ADR 0021 Decision 9).
+        _context.check_required(scope, self._contract.identity)
         trace_id = scope.held.trace_id
         problem: Exception | None = None
         try:

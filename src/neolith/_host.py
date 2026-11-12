@@ -43,6 +43,7 @@ from pydantic import BaseModel
 
 from neolith._connector import Connector as Bound
 from neolith._connector import InProcess
+from neolith._context import UsageError
 from neolith._contracts import _IDENTITY, Contract
 from neolith._declaration import (
     Declaration,
@@ -53,20 +54,12 @@ from neolith._declaration import (
     declaration_of,
 )
 
-__all__ = ["HostConfig", "UsageError", "connect"]
+__all__ = ["HostConfig", "connect"]
 
 _log = logging.getLogger("neolith.host")
 
 _LABEL: Final = "neolith"
 _HOST_ATTR: Final = "_neolith_host"
-
-
-class UsageError(RuntimeError):
-    """A mistake in the calling code about the host: its state or what it holds.
-
-    Raised for a call made before the host is set up, and for a contract the
-    host does not know. It is not a ``ContractError`` (spec 01, CON-29).
-    """
 
 
 @final
@@ -250,6 +243,10 @@ def build(registry: Apps) -> tuple[Host, list[str]]:
                             provision.contract.declaration,
                             instance,
                             app=declaration.label,
+                            requires=tuple(
+                                required.identity for required in declaration.requires
+                            ),
+                            principal_from=provision.principal_from,
                         ),
                     ),
                 )

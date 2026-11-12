@@ -1,6 +1,6 @@
 """Neolith: deploy Django apps, not Django projects."""
 
-from neolith._context import CallContext, Principal
+from neolith._context import CallContext, Principal, UsageError
 from neolith._contracts import (
     Action,
     Contract,
@@ -12,7 +12,7 @@ from neolith._contracts import (
 )
 from neolith._declaration import DeclarationError, NeolithAppConfig, Provided
 from neolith._forms import Binary, Decimal128, Duration
-from neolith._host import Connector, UsageError, connect
+from neolith._host import Connector, connect
 
 __all__ = [
     "Action",

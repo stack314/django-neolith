@@ -107,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
             functools.partial(check_request, Contract.of(Orders), place, request),
             args.runs,
         )
-        with _context.root("bench"):
+        with _context.root("bench", requires=("bench.v1",)):
             through = _median_ms(functools.partial(connector.place, request), args.runs)
         with _context.opened(
             principal=None,
@@ -117,6 +117,7 @@ def main(argv: list[str] | None = None) -> int:
             idempotency_key="bench",
             caller=None,
             app="bench",
+            requires=frozenset({"bench.v1"}),
         ):
             keyed = _median_ms(functools.partial(connector.place, request), args.runs)
         print(

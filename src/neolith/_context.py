@@ -37,7 +37,7 @@ from typing import Any, NoReturn, final
 from neolith._jcs import canonical, canonical_text
 from neolith._portable import SAFE_INTEGER_MAX, text_problem
 
-__all__ = ["CallContext", "Principal"]
+__all__ = ["CallContext", "Principal", "UsageError"]
 
 # Spec 03: a principal's base64url encoding is at most 4096 bytes.
 PRINCIPAL_LIMIT = 4096
@@ -48,6 +48,17 @@ BUDGET_CAP = 9_999_999_999
 KEY_LIMIT = 255
 
 type _Claim = str | int | bool | tuple[str, ...]
+
+
+class UsageError(RuntimeError):
+    """A mistake in the calling code about the host: its state or what it holds.
+
+    Raised for a connector call made in no open scope, or naming a scope that
+    has closed; for a call to a contract the calling app's declaration does
+    not require; for a call made before the host is set up; and for a
+    contract the host does not know. It is not a ``ContractError`` (spec 01,
+    CON-29), so code that handles contract errors does not swallow it.
+    """
 
 
 def now() -> float:
@@ -318,9 +329,9 @@ class CallContext:
         idempotency_key: This call's key; ``None`` on a root that is not
             itself a call.
         caller: The app that made the call, the app its parent scope belongs
-            to (TRN-31). ``None`` on a root that is not itself a call, and on
-            a call made from a scope of no app; ADR 0010 Decision 7 refuses
-            such a call, which this version does not do yet.
+            to. ``None`` on a root that is not itself a call; a call made from
+            a scope of no app is refused with ``unauthenticated`` before its
+            action runs.
         scope_id: Names the scope on this host that issued the value.
     """
 
@@ -375,21 +386,38 @@ class Scope:
     """A scope this host opened: the context it issued, and what it counts.
 
     ``app`` is the app the scope belongs to, the caller of the calls made from
-    it. ``context`` is the value the scope hands out, and ``held`` its own
+    it, and ``requires`` the identities of the contracts that app's
+    declaration requires, or ``None`` when the app has no declaration.
+    ``context`` is the value the scope hands out, and ``held`` its own
     copy of the same fields, which calls are derived from, so nothing done to
     a value that was handed out reaches them. The occurrence counts and the
     principal's sent form belong to the scope, behind its lock, so every call
     made from it, in any thread, shares them.
     """
 
-    __slots__ = ("_counts", "_form", "_lock", "app", "closed", "context", "held")
+    __slots__ = (
+        "_counts",
+        "_form",
+        "_lock",
+        "app",
+        "closed",
+        "context",
+        "held",
+        "requires",
+    )
 
-    def __init__(self, context: CallContext, app: str | None) -> None:
+    def __init__(
+        self,
+        context: CallContext,
+        app: str | None,
+        requires: frozenset[str] | None = None,
+    ) -> None:
         # The value handed to code that asks for the context, and the scope's
         # own copy of its fields, which is all a call is ever derived from.
         self.context = context
         self.held = dataclasses.replace(context)
         self.app = app
+        self.requires = requires
         self.closed = False
         self._lock = threading.Lock()
         self._counts: dict[tuple[str, str, str], int] = {}
@@ -486,6 +514,7 @@ def opened(
     idempotency_key: str | None,
     caller: str | None,
     app: str | None,
+    requires: frozenset[str] | None,
 ) -> Iterator[Scope]:
     """Open a scope, make it the ambient one, and close it on the way out.
 
@@ -506,6 +535,7 @@ def opened(
             scope_id=scope_id,
         ),
         app,
+        requires,
     )
     with _OPEN_LOCK:
         _OPEN[scope_id] = scope
@@ -526,6 +556,34 @@ def _app(app: object) -> str | None:
     if app is not None and type(app) is not str:
         raise TypeError(f"an app is named by a str, not {type(app).__qualname__}")
     return app
+
+
+def names(value: object, what: str) -> tuple[str, ...]:
+    """Check a tuple of names, such as identities or app names, and return it.
+
+    Exactly a ``tuple`` whose items are exactly ``str``; ``what`` says what the
+    names are in the message.
+    """
+    if type(value) is not tuple:
+        raise TypeError(f"takes a tuple of {what}, not {type(value).__qualname__}")
+    for item in typing.cast("tuple[object, ...]", value):
+        if type(item) is not str:
+            raise TypeError(
+                f"takes a tuple of {what}, each a str, not {type(item).__qualname__}"
+            )
+    return typing.cast("tuple[str, ...]", value)
+
+
+def requires_option(requires: object) -> frozenset[str] | None:
+    """Check what an app requires: a tuple of contract identities, or ``None``
+    for an app with no declaration.
+    """
+    if requires is None:
+        return None
+    try:
+        return frozenset(names(requires, "contract identities"))
+    except TypeError as error:
+        raise TypeError(f"requires {error}") from None
 
 
 def timeout_option(timeout: object) -> float | None:
@@ -551,6 +609,7 @@ def timeout_option(timeout: object) -> float | None:
 def root(
     app: str | None = None,
     *,
+    requires: tuple[str, ...] | None = None,
     principal: Principal | None = None,
     timeout: float | None = None,
 ) -> contextlib.AbstractContextManager[Scope]:
@@ -558,8 +617,9 @@ def root(
 
     Private until the host opens roots (roadmap step 4, #11). It starts a new
     trace and has no key and no caller. ``app`` is the app it runs for, the
-    caller of the calls made from it. It has no deadline unless ``timeout``
-    gives one, in seconds from now.
+    caller of the calls made from it, and ``requires`` the identities its
+    declaration requires, or ``None`` for an app with no declaration. It has
+    no deadline unless ``timeout`` gives one, in seconds from now.
     """
     if principal is not None and type(principal) is not Principal:
         raise TypeError(
@@ -574,18 +634,23 @@ def root(
         idempotency_key=None,
         caller=None,
         app=_app(app),
+        requires=requires_option(requires),
     )
 
 
 def received(
-    sent: Sent, deadline: float | None, app: str | None
+    sent: Sent,
+    deadline: float | None,
+    app: str | None,
+    requires: frozenset[str] | None,
 ) -> contextlib.AbstractContextManager[Scope]:
     """The scope a provider's side runs an action in (ADR 0017 Decision 4).
 
     It holds the principal read from its sent form, the caller's trace with a
     span of its own, the call's key and caller, and ``deadline``, which the
     transport counts from when the call arrived. ``app`` is the app the
-    provider belongs to. The principal is read here; the scope opens when the
+    provider belongs to, and ``requires`` what its declaration requires. The
+    principal is read here; the scope opens when the
     result is entered.
     """
     return opened(
@@ -596,6 +661,7 @@ def received(
         idempotency_key=sent.idempotency_key,
         caller=sent.caller,
         app=app,
+        requires=requires,
     )
 
 
@@ -606,7 +672,7 @@ def parent(context: object) -> Scope:
     ambient scope. A value only names its scope, by its scope id, so a copy
     matches and its other fields are never read. A missing or closed scope is
     a mistake in the calling code (spec 01, CON-29): it raises
-    ``RuntimeError``, never a contract error, and never starts a context.
+    ``UsageError``, never a contract error, and never starts a context.
     """
     if context is not None:
         if type(context) is not CallContext:
@@ -617,7 +683,7 @@ def parent(context: object) -> Scope:
         with _OPEN_LOCK:
             found = _OPEN.get(scope_id) if type(scope_id) is str else None
         if found is None or found.closed:
-            raise RuntimeError(
+            raise UsageError(
                 "the call context passed as context= names no open scope on "
                 "this host: its call or scope has ended, or it was not issued "
                 "here. Work that outlives its call opens a scope of its own"
@@ -625,15 +691,44 @@ def parent(context: object) -> Scope:
         return found
     ambient = _CURRENT.get()
     if ambient is None:
-        raise RuntimeError(
+        raise UsageError(
             "a connector call needs a call context, and none is active here. "
             "Make the call from inside an action or another scope the host "
             "opened, or pass context=; a thread the app starts does not "
             "inherit the context"
         )
     if ambient.closed:
-        raise RuntimeError(
+        raise UsageError(
             "the call context active here belongs to a call or scope that has "
             "ended. Work that outlives its call opens a scope of its own"
         )
     return ambient
+
+
+def check_required(scope: Scope, identity: str) -> None:
+    """Refuse a call outside the calling app's ``requires`` (ADR 0021
+    Decision 9, step 1a).
+
+    A scope of no app has nothing to check; an app with no declaration
+    requires nothing. Raises ``UsageError``, which names the app, the
+    identity and what the app requires.
+    """
+    app, requires = scope.app, scope.requires
+    if app is None or (requires is not None and identity in requires):
+        return
+    elsewhere = (
+        "code that runs in another app's scope on its own app's account opens "
+        "a scope that names its own app"
+    )
+    if requires is None:
+        raise UsageError(
+            f"app {app} calls {identity}, but it has no declaration, so it "
+            "requires nothing. An app becomes a caller with a declaring class, "
+            "a NeolithAppConfig subclass that holds name, label and requires; "
+            + elsewhere
+        )
+    raise UsageError(
+        f"app {app} calls {identity}, which its declaration does not require; "
+        f"it requires {', '.join(sorted(requires)) or 'no contract'}. Add the "
+        "contract's class to the app's requires; " + elsewhere
+    )
