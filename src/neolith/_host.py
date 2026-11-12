@@ -98,29 +98,37 @@ class HostConfig(AppConfig):
 
 
 def _current() -> Host | None:
-    """The table of the set-up Django's global registry holds now, if any.
-
-    Read from the registry each time, so nothing outside a set-up keeps it.
-    Calls use this table only.
-    """
-    return _host_of(global_apps.app_configs.get(_LABEL))
+    """The table calls run on: the published table of the set-up that
+    Django's global registry holds now, if any."""
+    host, installed = _table()
+    return host if installed else None
 
 
-def _existing() -> Host | None:
-    """The table that exists for ``connect()`` to check against, if any.
+def _table() -> tuple[Host | None, bool]:
+    """The table that exists now, and whether neolith's app is installed.
 
-    The registry's own when it holds neolith's app, set up or not. While an
-    override leaves neolith's app out, the table of the registry Django
-    restores when the override ends: it still exists, and calls resume on it.
+    Judged from the state found, the same way for ``connect()`` and calls:
+
+    - the registry holds neolith's app and its set-up has published a table:
+      that table;
+    - the registry holds neolith's app without a table, or is still loading
+      (``ready`` is false, so a set-up has not ended): no table yet, so
+      ``connect()`` records and the set-up checks;
+    - the loaded registry leaves neolith's app out, as an override or
+      ``set_available_apps`` can: the table of the registry Django restores
+      when that ends, which ``connect()`` checks against; calls wait for it.
     """
     config = global_apps.app_configs.get(_LABEL)
-    if config is not None:
-        return _host_of(config)
+    host = _host_of(config)
+    if host is not None:
+        return host, True
+    if config is not None or not global_apps.ready:
+        return None, config is not None
     for stored in reversed(global_apps.stored_app_configs):
         config = stored.get(_LABEL)
         if config is not None:
-            return _host_of(config)
-    return None
+            return _host_of(config), False
+    return None, False
 
 
 def _host_of(config: object) -> Host | None:
@@ -147,6 +155,11 @@ def set_up(config: AppConfig) -> None:
         for identity, places in sorted(_RECORDED.items()):
             if identity not in host.known:
                 refusals.extend(_unknown_at(identity, place, host) for place in places)
+        # This set-up has checked every record. Those its table knows are
+        # done with, whatever it decides below; an unknown one stays, so a
+        # later set-up reports it again.
+        for identity in [i for i in _RECORDED if i in host.known]:
+            del _RECORDED[identity]
         if refusals:
             _refuse(DeclarationError("\n".join(sorted(refusals))))
         if _first is not None and _first != hosted:
@@ -156,7 +169,6 @@ def set_up(config: AppConfig) -> None:
                     f"{_difference(_first, hosted)}; a process hosts one set of apps"
                 )
             )
-        _RECORDED.clear()
         if _first is None:
             _first = types.MappingProxyType(dict(hosted))
         setattr(config, _HOST_ATTR, host)
@@ -214,7 +226,14 @@ def build(registry: Apps) -> tuple[Host, list[str]]:
     connectors: dict[str, Connector] = {}
     for config, declaration in hosted:
         for provision in declaration.provides:
-            instance = validate(registry, config, provision, refusals)
+            try:
+                instance = validate(registry, config, provision, refusals)
+            except Exception as error:  # a read validate() did not foresee
+                refusals.append(
+                    f"app {config.label}: provides: {provision.contract.identity}: "
+                    f"the implementation cannot be checked: {_cause(error)}"
+                )
+                instance = None
             if instance is not None:
                 connectors.setdefault(
                     provision.contract.identity,
@@ -309,6 +328,15 @@ def validate(
         # nothing outside it is imported or built.
         return None
     module_name, _, attribute = path.rpartition(".")
+    container = registry.get_containing_app_config(module_name)
+    if container is not config:
+        owner = "no app" if container is None else f"app {container.label}"
+        refusals.append(
+            f"{where}: {_long(module_name)} belongs to {owner}; an "
+            f"implementation belongs to the app that provides it, {config.name}"
+        )
+        # Another app's module, such as a nested app's, is not imported.
+        return None
     try:
         module = importlib.import_module(module_name)
     except Exception as error:
@@ -316,7 +344,14 @@ def validate(
         _log_cause(where, error)
         # Nothing of the implementation can be read.
         return None
-    found = vars(module).get(attribute, _NOTHING)
+    try:
+        found = vars(module).get(attribute, _NOTHING)
+    except Exception as error:  # what the import left has no names to read
+        refusals.append(
+            f"{where} does not import: {_long(module_name)} is not a module "
+            f"whose names can be read ({_cause(error)})"
+        )
+        return None
     if found is _NOTHING:
         refusals.append(
             f"{where} does not import: {_long(module_name)} defines no "
@@ -356,13 +391,8 @@ def validate(
     if type(own_module) is str:
         foreign = _outside(registry, config, own_module, where, refusals)
         problem |= foreign or _declared_with(config, own_module, where, refusals)
-    try:
-        found_problems = provision.contract._implementation_problems(cls)
-    except Exception as error:  # the check could not read the class at all
-        found_problems = [
-            f"{provision.contract.identity}, implementation: the class cannot "
-            f"be read: {_cause(error)}"
-        ]
+    # The check adds one problem for any step that raises, so it returns.
+    found_problems = provision.contract._implementation_problems(cls)
     for found_problem in found_problems:
         refusals.append(f"app {app}: provides: {found_problem}")
         problem = True
@@ -461,7 +491,7 @@ def connect(identity: str, /) -> "Connected":
             "for example 'inventory.v1'"
         )
     with _LOCK:
-        host = _existing()
+        host, _ = _table()
         if host is None:
             _RECORDED.setdefault(identity, {})[_place()] = None
         elif identity not in host.known:
@@ -551,9 +581,15 @@ class Connected:
 
 
 def _connector(identity: str) -> Connector:
-    host = _current()
+    host, installed = _table()
     if host is None:
         raise _not_set_up(identity)
+    if not installed:
+        raise UsageError(
+            f"connector to {_long(identity)}: neolith's app is not in Django's "
+            "registry while an override or set_available_apps leaves it out; "
+            "calls resume when that ends"
+        )
     found = host.connectors.get(identity)
     if found is None:
         # Known identities all have a provider once set-up passed; this is a

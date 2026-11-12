@@ -512,79 +512,109 @@ class Contract:
         Only the implementation's own classes are read, never a contract
         declaration it inherits from, and only statically: no attribute is
         looked up through its descriptor or its __getattr__, so a lazy object
-        on the class is never evaluated. A problem with one action does not
-        stop the check of the next.
+        on the class is never evaluated. Each step adds to one list, and a
+        step that raises adds one problem for itself: the problems found
+        before it stay, and the steps after it run.
         """
-        where = f"{self.identity}, implementation {impl.__qualname__}"
+        where = f"{self.identity}, implementation {_qualname(impl)}"
         problems: list[str] = []
-        own = [
-            klass
-            for klass in impl.__mro__
-            if klass is not object and _CONTRACT_ATTR not in vars(klass)
-        ]
+        own: list[type] = []
+        try:
+            own = [
+                klass
+                for klass in impl.__mro__
+                if klass is not object and _CONTRACT_ATTR not in vars(klass)
+            ]
+        except Exception as error:  # an __mro__ or __dict__ it cannot read
+            problems.append(f"{where}: its classes cannot be read ({_cause(error)})")
         for klass in own:
-            for attr, value in vars(klass).items():
-                if _carries_mark(value):
-                    problems.append(
-                        f"{where}: {attr!r} is marked with @action; the contract "
-                        "declares each action, its idempotency and its error "
-                        "kinds, so implementation methods are not marked"
-                    )
-        for name, item in self._actions.items():
-            member = inspect.getattr_static(impl, name, None)
-            # A declaration's own method, inherited from this contract or
-            # another one, is a stub, not an implementation.
-            if member is None or _carries_mark(member):
-                problems.append(f"{where}: action {name!r} is missing")
-                # Nothing of this action is left to read.
-                continue
-            if type(member) is not types.FunctionType:
-                problems.append(
-                    f"{where}: action {name!r} must be an instance method taking "
-                    "(self, request) or (self, request, ctx: CallContext), not "
-                    f"a {type(member).__name__}"
-                )
-                # Only a function has the signature the checks below read.
-                continue
             try:
-                request, reply, _ = _signature(f"{where}, action {name!r}", member)
-            except ContractDefinitionError as error:
-                problems.append(str(error))
-                # The checks below compare the types this read did not give.
-                continue
-            except Exception as error:  # any other failure to read it
+                self._marks(where, klass, problems)
+            except Exception as error:
                 problems.append(
-                    f"{where}: action {name!r} cannot be read "
-                    f"({type(error).__name__}: {error})"
+                    f"{where}: {_qualname(klass)} cannot be read ({_cause(error)})"
                 )
-                # As above: no types were read.
-                continue
-            if request is not item.request:
+        for name, item in self._actions.items():
+            try:
+                self._action_problems(where, impl, name, item, problems)
+            except Exception as error:
                 problems.append(
-                    f"{where}: action {name!r} takes {_name(request)}, but "
-                    f"{self.identity} declares {_name(item.request)}"
-                )
-            if item.reply is None and reply is not None:
-                problems.append(
-                    f"{where}: action {name!r} returns {_name(reply)}, but "
-                    f"{self.identity} declares an empty reply; annotate it -> None"
-                )
-            elif reply is not item.reply:
-                problems.append(
-                    f"{where}: action {name!r} returns {_name(reply)}, but "
-                    f"{self.identity} declares {_name(item.reply)}"
+                    f"{where}: action {name!r} cannot be read ({_cause(error)})"
                 )
         for klass in own:
-            for attr, value in vars(klass).items():
-                if attr.startswith("_") or attr in self._actions:
-                    continue
-                if _is_method(value):
-                    problems.append(
-                        f"{where}: public method {attr!r} is not an action of "
-                        f"{self.identity}; make it private (prefix it with '_') or "
-                        "move it out of the class"
-                    )
+            try:
+                self._public_methods(where, klass, problems)
+            except Exception as error:
+                problems.append(
+                    f"{where}: {_qualname(klass)} cannot be read ({_cause(error)})"
+                )
         return problems
+
+    def _marks(self, where: str, klass: type, problems: list[str]) -> None:
+        for attr, value in vars(klass).items():
+            if _carries_mark(value):
+                problems.append(
+                    f"{where}: {attr!r} is marked with @action; the contract "
+                    "declares each action, its idempotency and its error "
+                    "kinds, so implementation methods are not marked"
+                )
+
+    def _action_problems(
+        self,
+        where: str,
+        impl: type[Any],
+        name: str,
+        item: "Action",
+        problems: list[str],
+    ) -> None:
+        """Add the problems of one action; may raise, keeping what it added."""
+        member = inspect.getattr_static(impl, name, None)
+        # A declaration's own method, inherited from this contract or another
+        # one, is a stub, not an implementation.
+        if member is None or _carries_mark(member):
+            problems.append(f"{where}: action {name!r} is missing")
+            # Nothing of this action is left to read.
+            return
+        if type(member) is not types.FunctionType:
+            problems.append(
+                f"{where}: action {name!r} must be an instance method taking "
+                "(self, request) or (self, request, ctx: CallContext), not "
+                f"a {type(member).__name__}"
+            )
+            # Only a function has the signature the checks below read.
+            return
+        try:
+            request, reply, _ = _signature(f"{where}, action {name!r}", member)
+        except ContractDefinitionError as error:
+            problems.append(str(error))
+            # The checks below compare the types this read did not give.
+            return
+        if request is not item.request:
+            problems.append(
+                f"{where}: action {name!r} takes {_name(request)}, but "
+                f"{self.identity} declares {_name(item.request)}"
+            )
+        if item.reply is None and reply is not None:
+            problems.append(
+                f"{where}: action {name!r} returns {_name(reply)}, but "
+                f"{self.identity} declares an empty reply; annotate it -> None"
+            )
+        elif reply is not item.reply:
+            problems.append(
+                f"{where}: action {name!r} returns {_name(reply)}, but "
+                f"{self.identity} declares {_name(item.reply)}"
+            )
+
+    def _public_methods(self, where: str, klass: type, problems: list[str]) -> None:
+        for attr, value in vars(klass).items():
+            if attr.startswith("_") or attr in self._actions:
+                continue
+            if _is_method(value):
+                problems.append(
+                    f"{where}: public method {attr!r} is not an action of "
+                    f"{self.identity}; make it private (prefix it with '_') or "
+                    "move it out of the class"
+                )
 
     def __repr__(self) -> str:
         return f"<Contract {self.identity}>"
@@ -945,7 +975,7 @@ def _signature(
         signature = inspect.signature(function)
     except Exception as error:  # a __signature__ or __wrapped__ it cannot read
         raise ContractDefinitionError(
-            f"{where}: cannot read its signature ({type(error).__name__}: {error})"
+            f"{where}: cannot read its signature ({_cause(error)})"
         ) from error
     parameters = list(signature.parameters.values())
     if len(parameters) not in ((2,) if declared else (2, 3)) or any(
@@ -973,7 +1003,7 @@ def _signature(
         ) from error
     except Exception as error:  # a malformed string annotation, such as "R["
         raise ContractDefinitionError(
-            f"{where}: cannot read its annotations ({type(error).__name__}: {error})"
+            f"{where}: cannot read its annotations ({_cause(error)})"
         ) from error
     request = hints.get(parameters[1].name)
     if request is None:
@@ -1005,5 +1035,26 @@ def _name(annotation: object) -> str:
     if origin is not None and arguments:
         return f"{_name(origin)}[{', '.join(_name(a) for a in arguments)}]"
     if inspect.isclass(annotation):
-        return annotation.__qualname__
-    return repr(annotation)
+        return _qualname(annotation)
+    try:
+        return repr(annotation)
+    except Exception:  # a repr that raises still names the value's type
+        return f"<{type(annotation).__name__}>"
+
+
+def _qualname(cls: type) -> str:
+    """A class's own qualified name, read statically, never raising."""
+    try:
+        found = type.__dict__["__qualname__"].__get__(cls)
+    except Exception:
+        found = None
+    return found if type(found) is str else "<a class>"
+
+
+def _cause(error: BaseException) -> str:
+    """An error's class and message, never raising."""
+    try:
+        text = str(error)
+    except Exception:
+        text = "<the message cannot be read>"
+    return f"{type(error).__name__}: {text}"
