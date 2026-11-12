@@ -295,6 +295,10 @@ def _check(cls: type[NeolithAppConfig]) -> tuple[list[str], Declaration | None]:
 
     own = dict(vars(cls))
     declares = "name" in own
+    # A part of the declaration written in a base class or a mixin is refused
+    # for where it is, and its value is checked all the same, so that moving
+    # it shows no new refusal.
+    written: dict[str, Any] = {}
     for klass in extras:
         body = own if klass is cls else dict(vars(klass))
         whole = klass is cls and declares
@@ -328,16 +332,16 @@ def _check(cls: type[NeolithAppConfig]) -> tuple[list[str], Declaration | None]:
                     "sets name, and a base class or a mixin holds only "
                     f"{_listed(SHARED_NAMES)}"
                 )
-    if not declares:
-        return refusals, None
+                written.setdefault(attribute, body[attribute])
+    written.update(own)
 
-    name = _check_name(own["name"], refusals)
-    label = _check_label(own, refusals)
-    provides, provided = _check_provides(own, refusals)
-    requires = _check_requires(own, provided, refusals)
-    resources = _check_resources(own, refusals)
-    batteries = _check_batteries(own, name, refusals)
-    if refusals or name is None or label is None:
+    name = _check_name(written["name"], refusals) if "name" in written else None
+    label = _check_label(written, refusals) if declares or "label" in written else None
+    provides, provided = _check_provides(written, refusals)
+    requires = _check_requires(written, provided, refusals)
+    resources = _check_resources(written, refusals)
+    batteries = _check_batteries(written, name, refusals)
+    if refusals or not declares or name is None or label is None:
         return refusals, None
     return refusals, Declaration(
         config=cls,
@@ -377,7 +381,14 @@ def _check_label(own: dict[str, Any], refusals: list[str]) -> str | None:
 
 
 def _entries(field: str, own: dict[str, Any], refusals: list[str]) -> tuple[Any, ...]:
-    """Return a field's entries, or ``()`` when it is absent or refused."""
+    """Return a field's entries, as far as they can be read.
+
+    A refused container does not hide its entries. A value that is the one
+    entry of a tuple that lost its comma is checked as that entry, and the
+    items of a list are checked as entries. Any other container gives none:
+    reading it could run the author's code, or gives no order to name an
+    entry's position by.
+    """
     if field not in own:
         return ()
     value = own[field]
@@ -391,12 +402,13 @@ def _entries(field: str, own: dict[str, Any], refusals: list[str]) -> tuple[Any,
             f"{field}: got {_show(value)}; the trailing comma of a one-element "
             f"tuple is missing, write {_EXAMPLES[field]}"
         )
-        return ()
+        meant = {"provides": kind is Provided, "requires": issubclass(kind, type)}
+        return (value,) if meant.get(field, kind is str) else ()
     if kind is not tuple:
         refusals.append(
             f"{field}: got {_show(value)}; write a tuple, {_EXAMPLES[field]}"
         )
-        return ()
+        return tuple(value) if kind is list else ()
     if not value:
         refusals.append(
             f"{field}: an empty tuple; remove the line, a field with no entry "
@@ -498,18 +510,21 @@ def _check_principal_from(
     if value is _MISSING:
         refusals.append(f"{where} is missing; {advice}")
         return None
+    admitted = True
     if type(value) is str:
         refusals.append(
             f"{where} is {_show(value)}, not a tuple; the trailing comma of a "
             'one-element tuple is missing, write principal_from=("<app>",)'
         )
-        return None
-    if type(value) is not tuple:
+        value, admitted = (value,), False
+    elif type(value) is list:
+        refusals.append(f"{where} is {_show(value)}, not a tuple; {advice}")
+        value, admitted = tuple(value), False
+    elif type(value) is not tuple:
         refusals.append(f"{where} is {_show(value)}, not a tuple; {advice}")
         return None
-    admitted = True
-    seen: set[str] = set()
-    for position, entry in enumerate(value):
+    entries: tuple[Any, ...] = value
+    for position, entry in enumerate(entries):
         if type(entry) is str and entry == "*":
             refusals.append(
                 f'{where}: entry {position} is "*"; there is no wildcard, '
@@ -522,12 +537,23 @@ def _check_principal_from(
                 f"name: {_APP_NAME_FORM}"
             )
             admitted = False
-        elif entry in seen:
-            refusals.append(f"{where}: {entry!r} is listed twice")
-            admitted = False
-        else:
-            seen.add(entry)
-    return tuple(value) if admitted else None
+    for repeat in _repeats(entries):
+        refusals.append(f"{where}: {_show(repeat)} is listed twice")
+        admitted = False
+    return entries if admitted else None
+
+
+def _repeats(entries: tuple[Any, ...]) -> list[str]:
+    """The exact ``str`` entries that occur again, whatever else is refused."""
+    seen: set[str] = set()
+    again: list[str] = []
+    for entry in entries:
+        if type(entry) is not str:
+            continue
+        if entry in seen and entry not in again:
+            again.append(entry)
+        seen.add(entry)
+    return again
 
 
 def _check_requires(
@@ -545,43 +571,40 @@ def _check_requires(
                 f"{where}: {_twice(seen[found.identity], found)}; a contract "
                 "is required once"
             )
-            continue
-        seen[found.identity] = found
-        other = provided.get(found.identity)
-        if other is not None and other is not found:
+        else:
+            seen[found.identity] = found
+        other = provided.get(found.identity, found)
+        if other is not found:
             refusals.append(
                 f"{where}: {_class_name(found.declaration)} here and "
                 f"{_class_name(other.declaration)} in provides; one identity "
                 "has one contract class"
             )
-            continue
         required.append(found)
     return required
 
 
 def _check_resources(own: dict[str, Any], refusals: list[str]) -> tuple[str, ...]:
     kinds = ", ".join(f'"{kind}"' for kind in RESOURCE_KINDS)
-    admitted: list[str] = []
-    for position, entry in enumerate(_entries("resources", own, refusals)):
+    entries = _entries("resources", own, refusals)
+    for position, entry in enumerate(entries):
         if type(entry) is not str or entry not in RESOURCE_KINDS:
             refusals.append(
                 f"resources: entry {position}, {_show(entry)}, is not a "
                 f"resource kind; the kinds admitted are {kinds}"
             )
-        elif entry in admitted:
-            refusals.append(
-                f"resources: {entry!r} is listed twice; a kind is listed once"
-            )
-        else:
-            admitted.append(entry)
-    return tuple(admitted)
+    for repeat in _repeats(entries):
+        refusals.append(
+            f"resources: {_show(repeat)} is listed twice; a kind is listed once"
+        )
+    return entries
 
 
 def _check_batteries(
     own: dict[str, Any], name: str | None, refusals: list[str]
 ) -> tuple[str, ...]:
-    admitted: list[str] = []
-    for position, entry in enumerate(_entries("batteries", own, refusals)):
+    entries = _entries("batteries", own, refusals)
+    for position, entry in enumerate(entries):
         if type(entry) is not str or not _is_dotted_path(entry):
             refusals.append(
                 f"batteries: entry {position}, {_show(entry)}, is not a Django "
@@ -589,13 +612,12 @@ def _check_batteries(
             )
         elif entry == name:
             refusals.append(
-                f"batteries: {entry!r} is the app itself; an app does not list itself"
+                f"batteries: entry {position}, {entry!r}, is the app itself; "
+                "an app does not list itself"
             )
-        elif entry in admitted:
-            refusals.append(f"batteries: {entry!r} is listed twice")
-        else:
-            admitted.append(entry)
-    return tuple(admitted)
+    for repeat in _repeats(entries):
+        refusals.append(f"batteries: {_show(repeat)} is listed twice")
+    return entries
 
 
 def _is_dotted_path(value: str) -> bool:
@@ -632,6 +654,5 @@ def _show(value: object) -> str:
         return f"the class {_class_name(shown)}"
     if kind is tuple and not value:
         return "()"
-    if kind.__module__ == "builtins":
-        return f"a {kind.__qualname__}"
-    return f"a {_class_name(kind)}"
+    name = kind.__qualname__ if kind.__module__ == "builtins" else _class_name(kind)
+    return f"{'an' if name[:1] in 'aeiou' else 'a'} {name}"

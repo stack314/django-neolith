@@ -388,12 +388,12 @@ def test_a_mixin_holds_no_part_of_the_declaration(name: str) -> None:
 @pytest.mark.parametrize("name", sorted(ADMITTED_NAMES - SHARED_NAMES - {"name"}))
 def test_a_base_class_holds_no_part_of_the_declaration(name: str) -> None:
     # Without ``name`` in its body a class is a base class.
-    with pytest.raises(DeclarationError) as raised:
-        _declare({name: ("database",)}, name="Base")
-    assert str(raised.value).startswith(
-        f"app {__name__}.Base: {name}: {__name__}.Base holds it; "
-    )
-    assert "the class whose own body sets name" in str(raised.value)
+    refusals = _refusals({name: ("database",)}, name="Base")
+    held = [text for field, text in refusals if "holds it; " in text]
+    assert {field for field, _ in refusals} == {name}
+    assert len(held) == 1
+    assert held[0].startswith(f"{__name__}.Base holds it; ")
+    assert "the class whose own body sets name" in held[0]
 
 
 def test_a_base_class_is_not_a_default_and_its_declaring_subclass_is() -> None:
@@ -557,9 +557,14 @@ def test_each_field_is_admitted_as_a_tuple_and_may_be_left_out(field: str) -> No
 def test_a_field_that_is_a_str_or_a_class_misses_its_trailing_comma(
     field: str, value: object
 ) -> None:
-    found, text = _refusal(_valid(**{field: value}))
-    assert found == field
-    assert "trailing comma" in text
+    refusals = _refusals(_valid(**{field: value}))
+    assert {found for found, _ in refusals} == {field}
+    assert sum("trailing comma" in text for _, text in refusals) == 1
+    # A value of the entry's kind is also checked as the entry that was meant.
+    meant = (field == "resources" and value == "django.contrib.humanize") or (
+        field == "requires" and value in (Unmarked, int)
+    )
+    assert len(refusals) == (2 if meant else 1)
 
 
 class _Pair(tuple[Any, ...]):
@@ -602,9 +607,13 @@ def test_a_field_that_is_not_exactly_a_tuple_is_refused(
     field: str, wrap: Callable[[tuple[object, ...]], object]
 ) -> None:
     entries = (_EXAMPLE_ENTRY[field],) if field != "provides" else ("x",)
-    found, text = _refusal(_valid(**{field: wrap(entries)}))
-    assert found == field
-    assert "write a tuple, (" in text
+    value = wrap(entries)
+    refusals = _refusals(_valid(**{field: value}))
+    assert {found for found, _ in refusals} == {field}
+    assert sum("write a tuple, (" in text for _, text in refusals) == 1
+    # The items of a list are checked as entries, and "x" is not a Provided.
+    listed = type(value) is list and field == "provides"
+    assert len(refusals) == (2 if listed else 1)
 
 
 @pytest.mark.spec("APP-6")
@@ -969,6 +978,188 @@ def test_a_battery_in_another_form_is_refused(
 
 
 # One error for one class.
+
+_REACHES: dict[str, tuple[Namespace, dict[str, object], list[str]]] = {
+    "name, then label": (
+        _valid(name="shop.", label="Stock"),
+        {},
+        ["name: 'shop.' is not", "label: 'Stock' is not"],
+    ),
+    "name, then a battery twice": (
+        _valid(name=5, batteries=("sites", "sites")),
+        {},
+        ["name: an int is not", "batteries: 'sites' is listed twice"],
+    ),
+    "provides without a comma, then its allow-list without one": (
+        _valid(provides=_provided(principal_from="orders")),
+        {},
+        ["provides: got a neolith", "provides: stock.v1: principal_from is 'orders'"],
+    ),
+    "an allow-list without a comma, then the wildcard": (
+        _valid(provides=(_provided(principal_from="*"),)),
+        {},
+        ["principal_from is '*', not a tuple", "there is no wildcard"],
+    ),
+    "an allow-list as a list, then its entries": (
+        _valid(provides=(_provided(principal_from=["Web", "Web", "*"]),)),
+        {},
+        [
+            "principal_from is a list",
+            "entry 0, 'Web', is not",
+            "entry 1, 'Web', is not",
+            'entry 2 is "*"',
+            "'Web' is listed twice",
+        ],
+    ),
+    "an allow-list entry refused, then repeated": (
+        _valid(provides=(_provided(principal_from=("*", "ok", "*")),)),
+        {},
+        ['entry 0 is "*"', 'entry 2 is "*"', "'*' is listed twice"],
+    ),
+    "requires as a list, then an identity twice": (
+        _valid(requires=[Stock, Stock]),
+        {},
+        ["requires: got a list", "requires: stock.v1: "],
+    ),
+    "requires without a comma, then an unmarked class": (
+        _valid(requires=Unmarked),
+        {},
+        ["requires: got the class", "requires: entry 0: "],
+    ),
+    "an identity twice in requires, then another class than provides": (
+        _valid(provides=(_provided(Stock),), requires=(Stock, StockTwin)),
+        {},
+        [".Stock and as ", "StockTwin here and"],
+    ),
+    "batteries without a comma, then the app itself": (
+        _valid(name="shop.c", batteries="shop.c"),
+        {},
+        ["batteries: got 'shop.c'", "batteries: entry 0, 'shop.c', is the app itself"],
+    ),
+    "the app itself, then twice": (
+        _valid(batteries=("shop.stock", "shop.stock")),
+        {},
+        [
+            "entry 0, 'shop.stock', is the app",
+            "entry 1, 'shop.stock', is the app",
+            "'shop.stock' is listed twice",
+        ],
+    ),
+    "a battery that is no path, then twice": (
+        _valid(batteries=("a..b", "a..b")),
+        {},
+        ["entry 0, 'a..b', is not", "entry 1, 'a..b', is not", "'a..b' is listed"],
+    ),
+    "resources as a list, then a kind no host supplies": (
+        _valid(resources=["cache"]),
+        {},
+        ["resources: got a list", "resources: entry 0, 'cache', is not"],
+    ),
+    "a kind no host supplies, then twice": (
+        _valid(resources=("cache", "cache")),
+        {},
+        ["entry 0, 'cache', is not", "entry 1, 'cache', is not", "'cache' is listed"],
+    ),
+    "provides as a list, then every argument of its entry": (
+        _valid(provides=[Provided(Unmarked)]),
+        {},
+        [
+            "provides: got a list",
+            "provides: entry 0: Unmarked is not a contract",
+            "provides: entry 0: implementation is missing",
+            "provides: entry 0: principal_from is missing",
+        ],
+    ),
+    "a contract, then its implementation, then its allow-list": (
+        _valid(provides=(_provided(5, "Service", ("*",)),)),
+        {},
+        [
+            "entry 0: an int is not a contract class",
+            "entry 0: implementation 'Service'",
+            "entry 0: principal_from: entry 0 is",
+        ],
+    ),
+    "an identity twice in provides, then its implementation": (
+        _valid(provides=(_provided(), _provided(implementation="Service"))),
+        {},
+        ["Stock is listed twice", "stock.v1: implementation 'Service'"],
+    ),
+    "a field in a mixin, then its form and its entries": (
+        _valid(),
+        {"requires": [Stock, Stock]},
+        [
+            "requires: tests.test_declaration.Mixin holds it",
+            "requires: got a list",
+            "requires: stock.v1: ",
+        ],
+    ),
+    "a label in a mixin, then its form": (
+        {"name": "shop.stock"},
+        {"label": "Other"},
+        ["label: tests.test_declaration.Mixin holds it", "label: 'Other' is not"],
+    ),
+    "a name in a mixin, then its form": (
+        {"label": "stock"},
+        {"name": "shop."},
+        [
+            "label: tests.test_declaration.StockConfig holds it",
+            "name: tests.test_declaration.Mixin holds it",
+            "name: 'shop.' is not",
+        ],
+    ),
+    "a base class with parts of a declaration, then their forms": (
+        {"label": "Stock", "resources": ("cache",), "batteries": "a..b"},
+        {},
+        [
+            "label: tests.test_declaration.StockConfig holds it",
+            "label: 'Stock' is not",
+            "resources: tests.test_declaration.StockConfig holds it",
+            "resources: entry 0, 'cache', is not",
+            "batteries: tests.test_declaration.StockConfig holds it",
+            "batteries: got 'a..b'",
+            "batteries: entry 0, 'a..b', is not",
+        ],
+    ),
+}
+
+
+@pytest.mark.spec("APP-7")
+@pytest.mark.parametrize("case", sorted(_REACHES))
+def test_every_refusal_reaches_the_diagnostic(case: str) -> None:
+    # A refusal ends the walk only where the next check cannot read the
+    # value. Each case has a second mistake behind the first.
+    namespace, mixed_in, expected = _REACHES[case]
+    bases = (
+        (type("Mixin", (), {"__module__": __name__, **mixed_in}),) if mixed_in else ()
+    )
+    lines = [f"{field}: {text}" for field, text in _refusals(namespace, *bases)]
+    for fragment in expected:
+        assert sum(fragment in line for line in lines) == 1, (fragment, lines)
+    assert len(lines) == len(expected), lines
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {"cache"},
+        frozenset({"cache"}),
+        {"cache": True},
+        iter(["cache"]),
+        _Pair(("cache",)),
+    ],
+    ids=["set", "frozenset", "dict", "iterator", "tuple subclass"],
+)
+def test_a_container_that_cannot_be_read_in_order_gets_its_one_refusal(
+    value: object,
+) -> None:
+    # Reading these could run the author's code, or gives no position to
+    # name an entry by, so the walk stops at the container.
+    for namespace in (
+        _valid(resources=value),
+        _valid(provides=(_provided(principal_from=value),)),
+    ):
+        _field, text = _refusal(namespace)
+        assert "cache" not in text
 
 
 @pytest.mark.spec("APP-7")
@@ -1420,6 +1611,18 @@ def test_an_instance_built_with_another_name_or_label_is_refused(
     with pytest.raises(DeclarationError) as raised:
         Apps([both])
     assert [line.split(": ")[1] for line in str(raised.value).split("\n")] == [
+        "label",
+        "name",
+    ]
+
+    # In the global registry, a missing neolith is reported beside them.
+    with (
+        pytest.raises(DeclarationError) as raised,
+        override_settings(INSTALLED_APPS=[both]),
+    ):
+        pytest.fail("the override was admitted")
+    assert [line.split(": ")[1] for line in str(raised.value).split("\n")] == [
+        "INSTALLED_APPS",
         "label",
         "name",
     ]
