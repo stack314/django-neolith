@@ -103,7 +103,7 @@ The name of the deployer's mapping (`NEOLITH["DATABASES"]`), the checks' identif
    - *Weighed: the first hosted app takes `default`.* The meaning of app code would then depend on the order of a list.
    - *The cost, stated plainly:* in a host with a real `default`, a hosted app that writes a bare `transaction.atomic()` opens a transaction on `default` that does not cover its own writes, and nothing fails (run: one row kept after the rollback). The same app booted alone has the dummy `default`, where the line raises. So the boot-alone run that principle 7 already requires is what catches it, wherever the app's tests reach that line. Django's message there does not name the cause (fact 1); the documentation has to.
 
-4. **The router answers every question itself.** It is a pure function of the label and never returns `None`.
+4. **The router answers every question itself.** Each answer depends only on what the question names, a label or two and an alias, and on the fixed set of hosted labels; it reads no hint and no state, and it is never `None`.
    - `db_for_read`, `db_for_write`: the label's alias for a hosted app with a database; `default` for every other label. Hints are ignored.
    - `allow_migrate(db, app_label)`: true only when `db` is that label's home. A hosted app's tables are never created on `default` or on another app's alias, and nothing else is created on an app alias.
    - `allow_relation`: true only when both models have the same home.
