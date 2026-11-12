@@ -1,21 +1,28 @@
 """Connectors and the in-process transport (spec 02).
 
 A connector mirrors the actions of one contract version. It runs the caller's
-request check (ADR 0017 Decision 9, step 2) and hands the request's JSON text
-to a transport, which returns the reply's JSON text or raises a ``Failure``:
-the error's kind, message and detail as JSON text. With the ``single`` routing
-policy a connector has one provider and never sends a call twice: it never
-retries and never falls back.
+checks in the order of ADR 0017 Decision 9: the call context and its
+principal, the request, the idempotency key, and the deadline. It then hands
+the request's JSON text and the context to a transport, which returns the
+reply's JSON text or raises a ``Failure``: the error's kind, message and
+detail as JSON text. With the ``single`` routing policy a connector has one
+provider and never sends a call twice: it never retries and never falls back.
 
 The in-process transport runs the provider's action in the caller's thread, in
 a copy of the caller's context, so that what it sets in a context variable
 stays on its side. What the process shares, such as thread-local state, the
 warnings filters, logging and the exception the caller is handling, the action
-shares too, as a direct call would; the call context's own scope arrives with
-#10 task 6. It
+shares too, as a direct call would. It opens a scope around the action, which
+holds the context that arrived and closes when the action ends, so the
+action's own calls derive from it. It
 reads the request text with the declared request type, so the action gets a new
 value, and writes the reply with the declared reply type; the connector reads
 that text back, so caller and provider never share an object (ADR 0007).
+
+The deadline crosses as a budget and is counted from when the call arrives. It
+is checked before the request is read and again when the action's outcome is
+ready to return; an outcome that is late is discarded, and the call fails with
+``timeout``. The action is never interrupted (ADR 0008 Decision 2).
 
 The provider's side, the provider's host in-process, delivers only an error
 the action raised itself, of a kind it may raise: a standard kind other than
@@ -33,6 +40,7 @@ anything it cannot read as ``internal``.
 
 import contextlib
 import contextvars
+import enum
 import inspect
 import json
 import logging
@@ -43,6 +51,8 @@ from typing import Any, NoReturn, Protocol, final
 
 from pydantic import BaseModel
 
+from neolith import _context
+from neolith._context import Sent
 from neolith._contracts import (
     _STANDARD_KINDS,
     Action,
@@ -58,8 +68,10 @@ __all__ = ["Connector", "Failure", "InProcess", "Transport"]
 
 _log = logging.getLogger("neolith")
 
-# The message of an internal error says nothing of the failure behind it.
-_INTERNAL = "the provider failed, or its reply could not be read"
+# The messages of a timeout: where the deadline was found to have passed.
+_NOT_SENT = "the deadline passed before the call was sent"
+_NOT_RUN = "the deadline passed before the action was run"
+_LATE = "the deadline passed before the call ended; the action might have run"
 # Kinds that only hosts and transports produce, never an action.
 _TRANSPORT_KINDS = frozenset({"unavailable", "timeout"})
 
@@ -79,14 +91,26 @@ class Failure(Exception):
         self.detail = detail
 
 
+def internal_message(trace_id: str) -> str:
+    """The message of an ``internal`` error that stands for another failure.
+
+    Fixed text and the call's trace identifier, under which the host that
+    failed logs the cause; nothing of the failure itself (ADR 0008).
+    """
+    return (
+        f"the call failed inside a host, which logged the cause under trace {trace_id}"
+    )
+
+
 class Transport(Protocol):
     """Carries one call of a connector to its provider.
 
-    ``call`` takes an action of ``contract`` and the request's JSON text,
-    which passed the caller's request check, and returns the reply's JSON
-    text, or ``None`` for an action whose reply is empty. Every outcome of the
-    call that is not a reply is a ``Failure``; an action of another
-    contract is a ``TypeError``, a mistake in the code that called it.
+    ``call`` takes an action of ``contract``, the request's JSON text and the
+    call's context as it is sent, all of which passed the caller's checks,
+    and returns the reply's JSON text, or ``None`` for an action whose reply
+    is empty. Every outcome of the call that is not a reply is a ``Failure``;
+    an action of another contract is a ``TypeError``, a mistake in the code
+    that called it.
     """
 
     @property
@@ -94,16 +118,16 @@ class Transport(Protocol):
         """The contract version whose calls this transport carries."""
         ...
 
-    def call(self, action: Action, request: bytes) -> bytes | None:
+    def call(self, action: Action, request: bytes, context: Sent) -> bytes | None:
         """Carry the call and return the reply's text."""
         ...
 
 
-class _Failed:
-    """The outcome of a call that failed on the provider's side."""
+class _Ended(enum.Enum):
+    """How a call ended on the provider's side without an outcome to send."""
 
-
-_FAILED = _Failed()
+    FAILED = enum.auto()  # the provider failed: internal
+    EXPIRED = enum.auto()  # the deadline had passed before the action was run
 
 
 def _untyped(detail: bytes) -> dict[str, Any]:
@@ -131,6 +155,21 @@ def _untyped(detail: bytes) -> dict[str, Any]:
     return typing.cast(dict[str, Any], value)
 
 
+def mark(error: ContractError) -> ContractError:
+    """Mark an error as one a connector raised, and return it.
+
+    A provider's host that sees a marked error end an action knows the action
+    received it rather than raised it (ADR 0008 Decision 4).
+    """
+    mark_received(error)
+    return error
+
+
+def _received(kind: str, message: str) -> ContractError:
+    """A new error of a standard kind that a connector raises."""
+    return mark(ContractError(kind, message))
+
+
 def _report(message: str, error: BaseException) -> None:
     """Log a failure, never raising: a failing log must not carry it on."""
     with contextlib.suppress(Exception):
@@ -139,98 +178,162 @@ def _report(message: str, error: BaseException) -> None:
 
 @final
 class InProcess:
-    """The in-process transport to one implementation of a contract."""
+    """The in-process transport to one implementation of a contract.
 
-    __slots__ = ("_contract", "_functions", "_implementation")
+    ``app`` names the app the implementation belongs to, which is the caller
+    of the calls its actions make. Until the host declares apps (roadmap step
+    4, #11) it is optional, and an action of no app calls with no caller.
+    """
 
-    def __init__(self, declaration: type[Any], implementation: object) -> None:
+    __slots__ = ("_app", "_contract", "_functions", "_implementation", "_reads")
+
+    def __init__(
+        self, declaration: type[Any], implementation: object, *, app: str | None = None
+    ) -> None:
         """Check the implementation's class against the contract, as
         ``@implements`` does, and keep the function of each action."""
         contract = Contract.of(declaration)
         cls = type(implementation)
         contract._check_implementation(cls)
+        if app is not None and type(app) is not str:
+            raise TypeError(f"an app is named by a str, not {type(app).__qualname__}")
         # The class's own functions, read statically: an attribute set on the
         # instance, or a __getattr__, never stands in for an action.
         self._functions: Mapping[str, Callable[..., object]] = types.MappingProxyType(
             {
                 name: typing.cast(
-                    Callable[..., object], inspect.getattr_static(cls, name)
+                    "Callable[..., object]", inspect.getattr_static(cls, name)
                 )
                 for name in contract.actions
             }
         )
+        # The actions that take the call context after the request; the
+        # check above admitted that shape and (self, request) only.
+        self._reads = frozenset(
+            name
+            for name, function in self._functions.items()
+            if len(inspect.signature(function).parameters) == 3
+        )
         self._contract = contract
         self._implementation = implementation
+        self._app = app
 
     @property
     def contract(self) -> Contract:
         """The contract version the implementation provides."""
         return self._contract
 
-    def call(self, action: Action, request: bytes) -> bytes | None:
+    def call(self, action: Action, request: bytes, context: Sent) -> bytes | None:
         """Run the action in the caller's thread and return the reply's text.
 
         An action of another contract is a ``TypeError``: a connector never
         passes one, since it is built for this transport's contract.
         """
+        arrived = _context.now()
         if self._contract.actions.get(action.name) is not action:
             raise TypeError(
                 f"{self._contract.identity} has no action {action.name!r} of "
                 "this declaration"
             )
-        outcome = self._serve(action, request)
-        if isinstance(outcome, _Failed):
-            raise Failure("internal", _INTERNAL)
+        if type(context) is not Sent:
+            raise TypeError(
+                f"a call's context is sent as Sent, not {type(context).__qualname__}"
+            )
+        # The budget is counted from when the call arrived (spec 03).
+        deadline = None if context.budget is None else arrived + context.budget / 1000
+        outcome = self._serve(action, request, context, deadline)
+        if outcome is _Ended.EXPIRED:
+            raise Failure("timeout", _NOT_RUN)
+        if deadline is not None and _context.now() >= deadline:
+            # Whatever the action ended with is discarded: the caller's
+            # deadline has passed, as it would have over a network.
+            if isinstance(outcome, tuple):
+                with contextlib.suppress(Exception):
+                    _log.error(
+                        "%s, action %r: the deadline passed, so the action's %s "
+                        "error was discarded (trace %s)",
+                        self._contract.identity,
+                        action.name,
+                        outcome[0],
+                        context.trace_id,
+                    )
+            raise Failure("timeout", _LATE)
+        if outcome is _Ended.FAILED:
+            raise Failure("internal", internal_message(context.trace_id))
         if isinstance(outcome, tuple):
             raise Failure(*outcome)
         return outcome
 
     def _serve(
-        self, action: Action, request: bytes
-    ) -> bytes | tuple[str, str, bytes | None] | _Failed | None:
+        self, action: Action, request: bytes, context: Sent, deadline: float | None
+    ) -> bytes | tuple[str, str, bytes | None] | _Ended | None:
         """Read the request, run the action and write its reply, or the error
         it delivers as kind, message and detail text.
 
-        Never raises an ``Exception``: a failure is logged and returned as
-        ``_FAILED``, so that once this returns, no frame holds the provider's
-        values.
+        The steps follow the provider's order (ADR 0017 Decision 9): the
+        context, the deadline, the request, then the action, in a scope that
+        closes when the action ends. Never raises an ``Exception``: a failure
+        is logged and returned as ``FAILED``, so that once this returns, no
+        frame holds the provider's values.
         """
         try:
-            value = codec(self._contract, action.request).read(request)
+            scope = _context.received(context, deadline, self._app)
         except Exception as error:  # a failure of the host, whatever it is
             failure: BaseException = error
         else:
+            if deadline is not None and _context.now() >= deadline:
+                return _Ended.EXPIRED
             try:
-                # In a copy of the caller's context, so that what the action
-                # sets in a context variable stays on the provider's side.
-                reply = contextvars.copy_context().run(
-                    self._functions[action.name], self._implementation, value
-                )
-            except ContractError as error:
-                # Only an error the action itself ends with is delivered.
-                try:
-                    delivered = self._deliver(action, error)
-                except Exception as problem:  # the detail cannot be sent
-                    failure = problem
-                else:
-                    if delivered is not None:
-                        return delivered
-                    failure = error
+                value = codec(self._contract, action.request).read(request)
             except Exception as error:
                 failure = error
             else:
                 try:
-                    return self._write(action, reply)
+                    # In a copy of the caller's context, so that what the
+                    # action sets in a context variable, and the scope it runs
+                    # in, stay on the provider's side.
+                    reply = contextvars.copy_context().run(
+                        self._run, scope, action.name, value
+                    )
+                except ContractError as error:
+                    # Only an error the action itself ends with is delivered.
+                    try:
+                        delivered = self._deliver(action, error)
+                    except Exception as problem:  # the detail cannot be sent
+                        failure = problem
+                    else:
+                        if delivered is not None:
+                            return delivered
+                        failure = error
                 except Exception as error:
                     failure = error
+                else:
+                    try:
+                        return self._write(action, reply)
+                    except Exception as error:
+                        failure = error
         # Logged outside the handler, so a failing log does not chain to it,
         # then dropped, so its traceback does not keep the provider's frames.
         _report(
-            f"{self._contract.identity}, action {action.name!r}: the provider failed",
+            f"{self._contract.identity}, action {action.name!r}: the provider "
+            f"failed (trace {context.trace_id})",
             failure,
         )
         del failure
-        return _FAILED
+        return _Ended.FAILED
+
+    def _run(
+        self,
+        scope: contextlib.AbstractContextManager[_context.Scope],
+        name: str,
+        value: BaseModel,
+    ) -> object:
+        """Run the action inside its scope, which closes however it ends."""
+        with scope as opened:
+            function = self._functions[name]
+            if name in self._reads:
+                return function(self._implementation, value, opened.context)
+            return function(self._implementation, value)
 
     def _write(self, action: Action, reply: object) -> bytes | None:
         """The reply's text, or ``None`` for an empty reply."""
@@ -270,11 +373,19 @@ class Connector:
 
     Each action of the contract is an attribute taking one request, by
     position or by the name the declaration gives it, and returning the
-    reply, or ``None`` for an empty reply. Anything else is a mistake in the
-    calling code, so it raises ``AttributeError``, ``TypeError`` or
-    ``ValueError`` (a request that fails the request check), never a
-    ``ContractError``. A ``ContractError`` the caller gets is a new one,
-    raised from the connector, so nothing else of the transport's crosses.
+    reply, or ``None`` for an empty reply. A call takes two options (ADR 0017
+    Decision 3). ``timeout=`` is a number of seconds from the call's start,
+    which can bring the call's deadline forward and never puts it back.
+    ``context=`` is a ``CallContext`` that names the scope to derive the
+    call's context from, in place of the one the call is made in, as in a
+    thread the action started.
+
+    A call made in no open scope and naming none, or naming one that has
+    closed, raises ``RuntimeError``. Any other mistake in the calling code
+    raises ``AttributeError``, ``TypeError`` or ``ValueError`` (a request
+    that fails the request check). None of these is a ``ContractError``. A
+    ``ContractError`` the caller gets is a new one, raised from the
+    connector, so nothing else of the transport's crosses.
     """
 
     __slots__ = ("_contract", "_parameters", "_transport")
@@ -352,29 +463,75 @@ class Connector:
     def _bound(self, action: Action) -> Callable[..., BaseModel | None]:
         parameter = self._parameters[action.name]
 
-        def call(*args: object, **kwargs: object) -> BaseModel | None:
+        def call(
+            *args: object,
+            context: object = None,
+            timeout: object = None,
+            **kwargs: object,
+        ) -> BaseModel | None:
             if len(args) + len(kwargs) != 1 or (kwargs and parameter not in kwargs):
                 raise TypeError(
                     f"{self._contract.identity}, action {action.name!r} takes one "
-                    f"request, by position or as {parameter}=; got {len(args)} "
-                    f"positional and {sorted(kwargs) or 'no'} keyword"
+                    f"request, by position or as {parameter}=, and the options "
+                    f"context= and timeout=; got {len(args)} positional and "
+                    f"{sorted(kwargs) or 'no'} other keyword"
                 )
-            return self._call(action, args[0] if args else kwargs[parameter])
+            return self._call(
+                action, args[0] if args else kwargs[parameter], context, timeout
+            )
 
         call.__name__ = call.__qualname__ = action.name
         return call
 
-    def _call(self, action: Action, request: object) -> BaseModel | None:
+    def _call(
+        self, action: Action, request: object, context: object, timeout: object
+    ) -> BaseModel | None:
+        """Run the caller's checks in order, then send the call once."""
+        started = _context.now()
+        seconds = _context.timeout_option(timeout)
+        # Step 1: the context, and its principal's sent form.
+        scope = _context.parent(context)
+        trace_id = scope.held.trace_id
+        problem: Exception | None = None
+        try:
+            principal = scope.principal()
+        except ValueError as error:
+            problem = error
+        if problem is not None:
+            # A failure of this host, not of the calling code: the principal
+            # comes from the end user's data. Raised outside the handler, so
+            # the cause is logged and nothing of it is chained.
+            _report(
+                f"{self._contract.identity}, action {action.name!r}: the call's "
+                f"principal is not valid (trace {trace_id})",
+                problem,
+            )
+            del problem
+            raise _received("internal", internal_message(trace_id))
+        # Step 2: the request.
         text = check_request(self._contract, action, request)
-        outcome = self._carry(action, text)
+        # Step 3: the key. The call counts as made from here on.
+        key = scope.child_key(self._contract.identity, action.name, text)
+        # Step 4: the deadline, the earlier of the scope's and the call's own.
+        budget = scope.budget(seconds, started)
+        if budget is not None and budget < 1:
+            raise _received("timeout", _NOT_SENT)
+        sent = Sent(
+            principal=principal,
+            trace_id=trace_id,
+            tracestate=scope.held.tracestate,
+            budget=budget,
+            idempotency_key=key,
+            caller=scope.app,
+        )
+        outcome = self._carry(action, text, sent)
         if isinstance(outcome, ContractError):
-            # Marked, so a provider's host that sees it end an action knows
-            # the action received it rather than raised it.
-            mark_received(outcome)
             raise outcome
         return outcome
 
-    def _carry(self, action: Action, text: bytes) -> BaseModel | ContractError | None:
+    def _carry(
+        self, action: Action, text: bytes, sent: Sent
+    ) -> BaseModel | ContractError | None:
         """Send the call and return its reply, or the error the caller gets.
 
         Never raises an ``Exception``, so the error the caller gets is built
@@ -382,10 +539,12 @@ class Connector:
         """
         what = "the transport failed"
         try:
-            reply = self._transport.call(action, text)
+            reply = self._transport.call(action, text, sent)
         except Failure as failed:
             try:
-                return self._error(action, failed.kind, failed.message, failed.detail)
+                return mark(
+                    self._error(action, failed.kind, failed.message, failed.detail)
+                )
             except Exception as error:
                 failure: BaseException = error
                 what = "the error could not be read"
@@ -397,9 +556,13 @@ class Connector:
             except Exception as error:
                 failure = error
                 what = "the reply could not be read"
-        _report(f"{self._contract.identity}, action {action.name!r}: {what}", failure)
+        _report(
+            f"{self._contract.identity}, action {action.name!r}: {what} "
+            f"(trace {sent.trace_id})",
+            failure,
+        )
         del failure
-        return ContractError("internal", _INTERNAL)
+        return _received("internal", internal_message(sent.trace_id))
 
     def _error(
         self, action: Action, kind: object, message: object, detail: object

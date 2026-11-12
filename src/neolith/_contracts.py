@@ -31,6 +31,7 @@ from typing import Annotated, Any, NoReturn, Protocol, final, overload
 
 from pydantic import BaseModel
 
+from neolith._context import CallContext
 from neolith._crossing import Codec
 from neolith._portable import (
     Portable,
@@ -527,9 +528,10 @@ class Contract:
             if type(member) is not types.FunctionType:
                 raise ContractDefinitionError(
                     f"{where}: action {name!r} must be an instance method taking "
-                    f"(self, request), not a {type(member).__name__}"
+                    "(self, request) or (self, request, ctx: CallContext), not "
+                    f"a {type(member).__name__}"
                 )
-            request, reply = _signature(f"{where}, action {name!r}", member)
+            request, reply, _ = _signature(f"{where}, action {name!r}", member)
             if request is not item.request:
                 raise ContractDefinitionError(
                     f"{where}: action {name!r} takes {_name(request)}, but "
@@ -616,7 +618,7 @@ def contract[T](identity: str, /) -> Callable[[type[T]], type[T]]:
                     "underscores"
                 )
             portable.where = f"{identity}, action {attr!r}"
-            request, reply = _signature(portable.where, value, declared=True)
+            request, reply, _ = _signature(portable.where, value, declared=True)
             request_type, request_ref = portable.root(request, "request")
             capture(request_type)
             reply_type, reply_ref = (
@@ -725,8 +727,9 @@ def implements[T](declaration: type[Any], /) -> Callable[[type[T]], type[T]]:
 
     The class has one instance method per action, taking ``(self, request)``
     annotated with the action's request type and returning its reply type
-    (``None`` for an empty reply). Any other public method is an error; helpers
-    start with ``_``.
+    (``None`` for an empty reply). An action that reads the call context takes
+    it after the request, as ``(self, request, ctx: CallContext)``. Any other
+    public method is an error; helpers start with ``_``.
     """
     spec = Contract.of(declaration)
 
@@ -897,25 +900,29 @@ _RESERVED_PARAMETERS = frozenset({"context", "timeout"})
 
 def _signature(
     where: str, function: Callable[..., Any], *, declared: bool = False
-) -> tuple[object, object]:
-    """Return the request and reply annotations; ``None`` for an empty reply.
+) -> tuple[object, object, bool]:
+    """Return the request and reply annotations, and whether the function
+    takes the call context; the reply is ``None`` when it is empty.
 
-    ``declared`` marks an action's declaration, whose request may not take a
-    name a connector call keeps for its options.
+    ``declared`` marks an action's declaration, which takes the request alone
+    and may not name it as a connector call names its options. An
+    implementation may take the call context after the request, as a
+    parameter annotated ``CallContext`` (ADR 0017 Decision 2).
     """
     if inspect.iscoroutinefunction(function) or inspect.isasyncgenfunction(function):
         raise ContractDefinitionError(
             f"{where}: actions are synchronous in this version"
         )
     parameters = list(inspect.signature(function).parameters.values())
-    if len(parameters) != 2 or any(
+    if len(parameters) not in ((2,) if declared else (2, 3)) or any(
         p.kind is not inspect.Parameter.POSITIONAL_OR_KEYWORD
         or p.default is not inspect.Parameter.empty
         for p in parameters
     ):
         raise ContractDefinitionError(
-            f"{where}: an action takes exactly (self, request), "
-            f"not {inspect.signature(function)}"
+            f"{where}: an action takes exactly (self, request)"
+            + ("" if declared else " or (self, request, ctx: CallContext)")
+            + f", not {inspect.signature(function)}"
         )
     if declared and parameters[1].name in _RESERVED_PARAMETERS:
         raise ContractDefinitionError(
@@ -937,12 +944,19 @@ def _signature(
     request = hints.get(parameters[1].name)
     if request is None:
         raise ContractDefinitionError(f"{where}: annotate its request type")
+    takes_context = len(parameters) == 3
+    if takes_context and hints.get(parameters[2].name) is not CallContext:
+        raise ContractDefinitionError(
+            f"{where}: its third parameter, {parameters[2].name!r}, is not "
+            "annotated CallContext; an action takes (self, request) or "
+            "(self, request, ctx: CallContext)"
+        )
     if "return" not in hints:
         raise ContractDefinitionError(
             f"{where}: annotate its reply type, or -> None for an empty reply"
         )
     reply = hints["return"]
-    return request, (None if reply is type(None) else reply)
+    return request, (None if reply is type(None) else reply), takes_context
 
 
 def _name(annotation: object) -> str:

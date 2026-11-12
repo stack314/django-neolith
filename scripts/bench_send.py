@@ -7,6 +7,11 @@ through a connector and the in-process transport against calling the
 implementation's method directly, for requests of a few sizes, and prints the
 median of several runs.
 
+A call made from a scope that has an idempotency key, as every call an action
+makes has, also derives its own key from the request's canonical form (ADR
+0017 Decision 3). The last column times a call from such a scope; the one
+before it, a call from a root with no key.
+
 Not run in CI. Run it from the repository root, with the package importable:
 
     python scripts/bench_send.py [--runs N]
@@ -27,7 +32,7 @@ from typing import Any, Protocol
 import pydantic
 from pydantic import BaseModel
 
-from neolith import Contract, action, contract
+from neolith import Contract, _context, action, contract
 from neolith._connector import Connector, InProcess
 from neolith._crossing import check_request
 
@@ -91,7 +96,9 @@ def main(argv: list[str] | None = None) -> int:
         f"Python {platform.python_version()}, Pydantic {pydantic.VERSION}, "
         f"{platform.machine()}, median of {args.runs} runs"
     )
-    print(f"{'request':>10} {'direct':>10} {'check':>10} {'connector':>10}")
+    print(
+        f"{'request':>10} {'direct':>10} {'check':>10} {'connector':>10} {'keyed':>10}"
+    )
     for lines in (10, 1_000, 15_000):
         request = _order(lines)
         size = len(check_request(Contract.of(Orders), place, request))
@@ -100,10 +107,21 @@ def main(argv: list[str] | None = None) -> int:
             functools.partial(check_request, Contract.of(Orders), place, request),
             args.runs,
         )
-        through = _median_ms(functools.partial(connector.place, request), args.runs)
+        with _context.root("bench"):
+            through = _median_ms(functools.partial(connector.place, request), args.runs)
+        with _context.opened(
+            principal=None,
+            trace_id="1" * 32,
+            tracestate="",
+            deadline=None,
+            idempotency_key="bench",
+            caller=None,
+            app="bench",
+        ):
+            keyed = _median_ms(functools.partial(connector.place, request), args.runs)
         print(
             f"{size / 1024:>8.0f}KB {direct:>8.3f}ms {checked:>8.3f}ms "
-            f"{through:>8.3f}ms"
+            f"{through:>8.3f}ms {keyed:>8.3f}ms"
         )
     return 0
 
