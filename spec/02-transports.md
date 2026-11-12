@@ -85,7 +85,7 @@ Decision records: [0014](../docs/adr/0014-pluggable-connector-transports.md), [0
 
 How the call context of [00](00-overview.md) moves from call to call follows [ADR 0017](../docs/adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md).
 
-A host opens a *scope* for each root and around each action it runs. A scope holds a context, and the calls made in it derive theirs from it. A *root* is a scope that starts a context: the provider side of a transport, a request the host serves, a scope opened explicitly for a command or background work, or a test harness. A transport never fabricates a context. A request root for an ordinary request the host serves gets the host's default deadline, 30 seconds unless the host is configured otherwise, or none if it is configured so. A call that arrives over a transport without a deadline has none. A command or background scope, and a test harness, have no deadline unless they are given one. The request root and the command scope become requirements with the host, in roadmap step 4 (#11).
+A host opens a *scope* for each root and around each action it runs. A scope holds a context, and the calls made in it derive theirs from it. A *root* is a scope that starts a context: the provider side of a transport, a request the host serves, a scope opened explicitly for a command or background work, or a test harness. A transport never fabricates a context. A request root for an ordinary request the host serves gets the host's default deadline, 30 seconds unless the host is configured otherwise, or none if it is configured so. A call that arrives over a transport without a deadline has none. A command or background scope, and a test harness, have no deadline unless they are given one. The request root becomes a requirement with the host, in roadmap step 4 (#11); the explicit root for commands and background work is under [Explicit roots](#explicit-roots).
 
 ### The parent scope
 
@@ -98,6 +98,30 @@ A host opens a *scope* for each root and around each action it runs. A scope hol
 **TRN-25.** A call made in a closed scope, or naming one, MUST be refused as TRN-23 refuses a call made in none, so work that outlives its call cannot go on calling under that call's principal and deadline.
 
 **TRN-26.** When calling code names the parent by a context value, the connector MUST use the value only to find the open scope that issued it. The call's context comes from what that scope holds. So a copy of the value names the same scope, a copy changed to carry a later deadline, another principal or another key derives the same call, and a value this host did not issue names no scope.
+
+### Explicit roots
+
+Commands and background work run outside any request or call, so their code opens a root of its own, naming the app it runs for ([ADR 0017](../docs/adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md) Decision 4, [ADR 0022](../docs/adr/0022-the-app-host-builds-settings-and-checks-before-it-serves.md) Decision 8). Work that outlives its call, which TRN-25 refuses, continues this way.
+
+**TRN-44.** A host MUST let code open an explicit root that names the app it runs for, with a principal and a timeout that are each optional.
+
+**TRN-45.** A host MUST refuse to open an explicit root that names an app the host does not host, or that is opened before Validate has ended. The refusal is a mistake in the calling code (CON-29), and no root opens.
+
+**TRN-46.** An explicit root MUST belong to the app it names, so the calls made in it carry that app as their calling app (TRN-31) and are checked against that app's declaration (TRN-39).
+
+**TRN-47.** An explicit root MUST hold the principal it is given, and no principal when it is given none.
+
+**TRN-48.** An explicit root MUST have a deadline only when it is given a timeout, and that deadline is the timeout counted from when the root opens. A timeout of zero or less gives a root whose deadline has passed (TRN-28); a budget above the cap counts as the cap (TRN-29).
+
+**TRN-49.** An explicit root MUST start a new trace. It has no idempotency key, so the keys of its calls are random (TRN-33).
+
+**TRN-50.** An explicit root opened inside another scope MUST NOT take anything from that scope: not its app, its principal, its deadline or its trace.
+
+**TRN-51.** When an explicit root opened inside another scope closes, calls MUST be made in that enclosing scope again.
+
+**TRN-52.** A host MUST refuse to open one explicit root a second time, while it is open or after it has closed, as TRN-45 refuses.
+
+An explicit root closes when the code it was opened for ends, by return or by an error (TRN-24), and a call made in it afterwards is refused (TRN-25).
 
 ### The context of a call
 
