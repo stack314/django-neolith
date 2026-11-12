@@ -50,15 +50,26 @@ ROOT = Path(__file__).resolve().parents[1]
 PUBLIC = sorted(set(neolith.__all__) - {"__version__"})
 
 _SECTIONS = {"text", "parameters", "attributes", "returns", "raises"}
-# What joins the two ends of a range: a hyphen, an en or em dash, "to" or
-# "through".
-_RANGE = r"(?:\s*[-\u2013\u2014]\s*|\s+(?:to|through)\s+)"
+# The one set of joins between cited numbers, in a list or a range: each
+# pattern, with the spellings of it the tests write. Every citation rule reads
+# _JOIN, and every variant the tests try is drawn from these spellings.
+_JOINS = {
+    r",\s*": (", ", ","),
+    r",?\s+and\s+": (" and ", ", and "),
+    r",?\s+or\s+": (" or ", ", or "),
+    r"\s+(?:to|through)\s+": (" to ", " through "),
+    r"\s*[-\u2013\u2014]\s*": ("-", "\u2013", "\u2014", " \u2013 ", " - "),
+}
+_JOIN = "(?:" + "|".join(_JOINS) + ")"
+_JOIN_SPELLINGS = tuple(
+    spelling for spellings in _JOINS.values() for spelling in spellings
+)
 # A word shaped like a requirement ID: capital letters, a hyphen, digits; and
-# the end of a range that starts with it, as in "CON-30-33", "CON-30 to 33" or
-# "CON-30 through CON-33".
+# the numbers joined to it, as in "CON-30 and 31", "CON-30-33" or
+# "CON-30 through CON-33". A number of another area starts a word of its own.
 _ID_SHAPED = re.compile(
     r"(?<![\w-])(?P<area>[A-Z]+)-(?P<number>\d+)"
-    rf"(?:{_RANGE}(?:(?P=area)-)?(?P<end>\d+))?(?!\w)"
+    rf"(?P<ends>(?:{_JOIN}(?:(?P=area)-)?\d+(?!\w))*)(?!\w)"
 )
 # Words of that shape that are names of other things, not requirement IDs.
 _NOT_IDS = frozenset({"UTF-8", "ECMA-262"})
@@ -69,11 +80,10 @@ _ADMITTED_DEFAULTS = {
     # it with the app's name; its public form is open in #63.
     ("neolith.Provided", "_MISSING"),
 }
-# The numbers after a citing word: "0017", "0017 and 0019", "01, 02 or 03",
-# "0017, 0019, and 0021", and a range, "0017 to 0019", "0017 through 0019",
-# "0017-0019" or "0017\u20130019". A number followed by a point and a digit is
-# a version, such as "spec 0.1", and ends the list.
-_NUMBERS = r"(?P<rest>(?:(?:\s+(?:and\s+|or\s+)?|" + _RANGE + r")\d+(?!\.\d),?)*)"
+# The numbers after a citing word, joined as above: "0017", "0017 and 0019",
+# "01, 02 or 03", "0017 through 0019", "0017\u20130019". A number followed by
+# a point and a digit is a version, such as "spec 0.1", and ends the list.
+_NUMBERS = rf"(?P<rest>(?:\s+\d+(?!\.\d)(?:{_JOIN}\d+(?!\.\d))*)?)"
 # "ADR", "ADRs", "decision record", "Decision records"; "spec", "Spec",
 # "specs", "specification", "Specifications".
 _ADR = re.compile(r"\b(?:ADRs?|[Dd]ecision records?)\b" + _NUMBERS)
@@ -101,8 +111,8 @@ class Records:
         words = []
         for match in _ID_SHAPED.finditer(text):
             words.append(f"{match['area']}-{match['number']}")
-            if match["end"] is not None:
-                words.append(f"{match['area']}-{match['end']}")
+            for end in re.findall(r"\d+", match["ends"]):
+                words.append(f"{match['area']}-{end}")
         for word in words:
             if word in self.withdrawn:
                 yield f"cites withdrawn requirement {word}"
@@ -1099,6 +1109,10 @@ def test_each_rule_refuses_its_nearest_wrong_shape(
         pytest.param(", spec 01)", ", specs 01 through 03)", id="through-range"),
         pytest.param("as CON-30 says", "as CON-23 to CON-24 say", id="id-range"),
         pytest.param("as CON-30 says", "as CON-23-24 say", id="id-hyphen-range"),
+        pytest.param("as CON-30 says", "as CON-23, 24 and 30 say", id="id-list"),
+        pytest.param("as CON-30 says", "as CON-30 and CON-31 say", id="id-and-id"),
+        pytest.param("as CON-30 says", "as CON-30, TRN-1 say", id="two-areas"),
+        pytest.param("as CON-30 says", "as CON-30-alpha says", id="id-then-word"),
         *(
             pytest.param("        The new object.\n", f"        {prose}\n", id=name)
             for name, prose in (
@@ -1188,17 +1202,6 @@ _TYPE_PLACES = (
         "sample.make: Returns: writes the type",
     ),
 )
-_JOINS = (
-    ", ",
-    " and ",
-    " or ",
-    " to ",
-    " through ",
-    "-",
-    "\u2013",
-    "\u2014",
-    " \u2013 ",
-)
 _CITATIONS = (
     ("ADR", "0017", "9999", "cites unknown ADR 9999"),
     ("ADRs", "0017", "9999", "cites unknown ADR 9999"),
@@ -1208,7 +1211,8 @@ _CITATIONS = (
     ("specs", "01", "99", "cites unknown spec document 99"),
     ("specification", "01", "99", "cites unknown spec document 99"),
 )
-_RANGE_JOINS = (" to ", " through ", "-", "\u2013", "\u2014", " \u2013 ")
+# The ends a list or range after a requirement ID is written with.
+_ID_ENDS = ("9999", "CON-9999")
 
 
 def _variants() -> Iterator[tuple[str, str, str]]:
@@ -1218,12 +1222,14 @@ def _variants() -> Iterator[tuple[str, str, str]]:
     cite = "as CON-30 says"
     for word, good, bad, problem in _CITATIONS:
         yield cite, f"as ``{word} {bad}`` says", problem
-        for join in _JOINS:
+        for join in _JOIN_SPELLINGS:
             yield cite, f"as {word} {good}{join}{bad} says", problem
     yield cite, "as ``CON-9999`` says", "cites unknown requirement CON-9999"
-    for join in _RANGE_JOINS:
-        for end in ("9999", "CON-9999"):
+    for join in _JOIN_SPELLINGS:
+        for end in _ID_ENDS:
             yield cite, f"as CON-30{join}{end} say", "unknown requirement CON-9999"
+        # A list of three, whose last number alone is unknown.
+        yield cite, f"as CON-30{join}31{join}9999 say", "unknown requirement CON-9999"
 
 
 @pytest.mark.parametrize(("old", "new", "problem"), list(_variants()))
@@ -1233,6 +1239,24 @@ def test_each_refused_form_is_refused_in_every_variant(
     assert _GOOD.count(old) == 1
     found = _sample(tmp_path, _GOOD.replace(old, new), records)
     assert any(problem in said for said in found), found
+
+
+def test_every_citation_rule_and_variant_uses_the_one_set_of_joins() -> None:
+    # Each spelling is one of its own pattern's, and of the shared one.
+    for pattern, spellings in _JOINS.items():
+        for spelling in spellings:
+            assert re.fullmatch(pattern, spelling), spelling
+            assert re.fullmatch(_JOIN, spelling), spelling
+    # Both citation rules read the shared pattern.
+    assert _JOIN in _NUMBERS
+    assert _JOIN in _ID_SHAPED.pattern
+    # Every citation form is tried with every spelling, so that no form is
+    # tried with a reduced set.
+    tried = [new for _, new, _ in _variants()]
+    forms = [f"{word} {good}" for word, good, _, _ in _CITATIONS] + ["CON-30"]
+    for form in forms:
+        for join in _JOIN_SPELLINGS:
+            assert any(f"{form}{join}" in new for new in tried), (form, join)
 
 
 def test_a_withdrawn_requirement_is_refused(tmp_path: Path) -> None:
