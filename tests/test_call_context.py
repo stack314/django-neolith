@@ -933,7 +933,7 @@ def _ending(clock: Clock, spent: float, ending: str) -> Callable[..., object]:
     return then
 
 
-@pytest.mark.spec("TRN-19", "TRN-20", "TRN-4", "CON-43", "CON-44", "CON-48")
+@pytest.mark.spec("TRN-19", "TRN-20", "TRN-4", "CON-43", "CON-44", "CON-48", "TRN-18")
 @pytest.mark.parametrize("ending", list(_ENDINGS), ids=list(_ENDINGS))
 def test_the_transport_discards_an_outcome_after_its_deadline(
     clock: Clock, caplog: pytest.LogCaptureFixture, ending: str
@@ -976,15 +976,27 @@ def test_the_transport_delivers_an_outcome_just_inside_its_deadline(
     assert raised.value.kind == delivered.get(ending, "internal")
 
 
-@pytest.mark.spec("TRN-19", "TRN-20")
-@pytest.mark.parametrize("ending", ["a reply", "a standard error", "a failure"])
+@pytest.mark.spec("TRN-19", "TRN-20", "CON-43", "CON-44", "CON-48", "TRN-18")
+@pytest.mark.parametrize("ending", list(_ENDINGS), ids=list(_ENDINGS))
 def test_the_providers_check_holds_where_the_callers_cannot_fire(
     clock: Clock, caplog: pytest.LogCaptureFixture, ending: str
 ) -> None:
     # The budget is rounded down to 1000 ms, so the provider's deadline, at
     # 1001, is earlier than the caller's, at 1001 and 1/2048. An outcome
     # between the two is late for the provider's side alone.
+    # In time, each ending is what the rules for it say: the reply, the error
+    # the action produced (CON-43), or internal (CON-44, CON-48, TRN-18).
+    in_time = {"a standard error": "not_found", "a declared error": "gone"}
+    early, _, _ = _desk(_ending(clock, 0.5, ending))
     connector, provider, carrying = _desk(_ending(clock, 1 + 2**-12, ending))
+    with _context.root("shop"), caplog.at_level(logging.CRITICAL, "neolith"):
+        if ending == "a reply":
+            assert early.ask(Ask(), timeout=1 + 2**-11) == Told(n=1)
+        else:
+            with pytest.raises(ContractError) as raised:
+                early.ask(Ask(), timeout=1 + 2**-11)
+            assert raised.value.kind == in_time.get(ending, "internal")
+    clock.time = 1000.0
     with (
         _context.root("shop"),
         caplog.at_level(logging.ERROR, "neolith"),
@@ -1075,8 +1087,10 @@ class Answering:
         self._clock = clock
         self._takes = takes
         self._answer = answer
+        self.calls = 0
 
     def call(self, action: Action, request: bytes, context: Sent) -> bytes | None:
+        self.calls += 1
         self._clock.time += self._takes
         if isinstance(self._answer, Failure):
             raise self._answer
@@ -1100,19 +1114,90 @@ def test_a_late_outcome_is_timeout_whatever_it_would_have_been_in_time(
 
 
 @pytest.mark.spec("TRN-38", "CON-48")
-def test_a_nested_error_that_ends_an_action_late_is_timeout(clock: Clock) -> None:
-    def calling(spent: float) -> Any:  # noqa: ANN401
-        missing: Any = Connector(Desk, Slow(clock, spent, Failure("not_found", "x")))
-        # The action lets the error of its own call end it.
-        return _desk(lambda request, ctx: missing.ask(Ask()))[0]
-
-    with _context.root("shop"):
+def test_a_nested_error_is_timeout_once_the_callers_deadline_has_passed(
+    clock: Clock, caplog: pytest.LogCaptureFixture
+) -> None:
+    missing: Any = Connector(Desk, Slow(clock, 0.75, Failure("not_found", "x")))
+    # The action lets the error of its own call end it.
+    connector = _desk(lambda request, ctx: missing.ask(Ask()))[0]
+    with _context.root("shop"), caplog.at_level(logging.ERROR, "neolith"):
         with pytest.raises(ContractError) as raised:
-            calling(0.5).ask(Ask(), timeout=1)
+            connector.ask(Ask(), timeout=1)
         assert raised.value.kind == "internal"
+        caplog.clear()
+        # Half a second passes before the call arrives, so the provider's
+        # side is in time at 0.75 s of its second and delivers internal, as
+        # CON-48 says; only the caller's deadline has passed.
+        clock.steps = [0, 0, 0.5]
         with pytest.raises(ContractError) as raised:
-            calling(1).ask(Ask(), timeout=1)
+            connector.ask(Ask(), timeout=1)
     assert (raised.value.kind, raised.value.message) == ("timeout", _LATE)
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "the caller's deadline passed" in m and "internal" in m for m in messages
+    )
+    assert not any("the action's" in message for message in messages)
+
+
+# A call that fails one of the caller's checks is never sent, so nothing comes
+# back for the rules about what arrives to apply to (TRN-34).
+_UNSENT: dict[str, tuple[Callable[[Any, Scope], object], type[Exception], str]] = {
+    "no scope": (
+        lambda c, s: contextvars.Context().run(c.ask, Ask()),
+        RuntimeError,
+        "needs a call context",
+    ),
+    "a principal with no sent form": (
+        lambda c, s: _in_root(lambda: c.ask(Ask()), principal=Principal("i", "")),
+        ContractError,
+        "internal",
+    ),
+    "a request that fails its check": (
+        lambda c, s: c.ask(Told()),
+        TypeError,
+        "the request",
+    ),
+    "no budget left": (
+        lambda c, s: c.ask(Ask(), timeout=0),
+        ContractError,
+        "timeout: the deadline passed before the call was sent",
+    ),
+}
+
+
+def _in_root(call: Callable[[], object], **given: Any) -> object:  # noqa: ANN401
+    with _context.root("shop", **given):
+        return call()
+
+
+@pytest.mark.spec(
+    "TRN-34", "TRN-23", "TRN-28", "CON-51", "TRN-18", "CON-28", "CON-48", "CON-49"
+)
+@pytest.mark.parametrize("answer", list(_ARRIVING), ids=list(_ARRIVING))
+@pytest.mark.parametrize("cause", list(_UNSENT), ids=list(_UNSENT))
+def test_a_call_that_fails_a_callers_check_is_never_sent(
+    clock: Clock, caplog: pytest.LogCaptureFixture, cause: str, answer: str
+) -> None:
+    transport = Answering(clock, 0, _ARRIVING[answer][0])
+    connector: Any = Connector(Desk, transport)
+    call, error, message = _UNSENT[cause]
+    with (
+        _context.root("shop") as scope,
+        caplog.at_level(logging.CRITICAL, "neolith"),
+        pytest.raises(error, match=message) as raised,
+    ):
+        call(connector, scope)
+    assert type(raised.value) is error
+    assert transport.calls == 0
+    # Sent, the same call ends as the rules for what arrives say.
+    with (
+        _context.root("shop"),
+        caplog.at_level(logging.CRITICAL, "neolith"),
+        pytest.raises(ContractError) as arrived,
+    ):
+        connector.ask(Ask())
+    assert arrived.value.kind == _ARRIVING[answer][1]
+    assert transport.calls == 1
 
 
 @pytest.mark.spec("TRN-38", "TRN-27")

@@ -49,7 +49,7 @@ Because the action runs in the caller's thread, the in-process transport cannot 
 
 **TRN-19.** The in-process transport MUST check a call's deadline before it dispatches the call, at the step the provider's order gives it (TRN-35), and again when the action has ended and its outcome is ready to return.
 
-**TRN-20.** A call whose deadline has passed at either check MUST fail with `timeout`. At the second check the action's reply, an error it produced or a failure it ended with is discarded, and the provider's host still records a discarded error or failure. The action might have run, so `timeout` leaves the outcome unknown, as it does over a network. This comes before what CON-43, CON-44 or TRN-18 would have the provider's host deliver.
+**TRN-20.** A call whose deadline has passed at either check MUST fail with `timeout`. At the second check the action's reply, an error it produced or a failure it ended with is discarded, and the provider's host still records a discarded error or failure. The action might have run, so `timeout` leaves the outcome unknown, as it does over a network. This comes before what CON-43, CON-44, CON-48 or TRN-18 would have the provider's host deliver.
 
 **TRN-21.** The in-process transport MUST NOT discard a signal to stop, such as cancellation or the process exiting, whatever the deadline. It is not a failure of the action (CON-45).
 
