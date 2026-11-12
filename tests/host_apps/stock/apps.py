@@ -12,4 +12,5 @@ class StockConfig(NeolithAppConfig):
             principal_from=("web",),
         ),
     )
-    requires = (Couriers,)
+    # It calls its own contract too, which it lists like any other.
+    requires = (Couriers, Stock)

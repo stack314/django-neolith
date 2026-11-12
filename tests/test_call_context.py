@@ -154,6 +154,14 @@ def _desk(
     return Connector(Desk, carrying), provider, carrying
 
 
+@contextlib.contextmanager
+def _usage_error(match: str | None = None) -> Iterator[None]:
+    """Expect exactly ``neolith.UsageError``, not merely a ``RuntimeError``."""
+    with pytest.raises(neolith.UsageError, match=match) as raised:
+        yield
+    assert type(raised.value) is neolith.UsageError
+
+
 class Clock:
     """A clock the test sets. ``steps`` move it on before the next readings."""
 
@@ -211,7 +219,7 @@ def test_the_context_and_the_principal_are_public() -> None:
 @pytest.mark.spec("TRN-23", "CON-29")
 def test_a_call_made_in_no_scope_is_a_usage_error_and_is_not_sent() -> None:
     connector, provider, carrying = _desk()
-    with pytest.raises(RuntimeError, match="needs a call context") as raised:
+    with pytest.raises(neolith.UsageError, match="needs a call context") as raised:
         connector.ask(Ask())
     assert type(raised.value) is neolith.UsageError
     assert carrying.sent == []
@@ -230,20 +238,94 @@ def test_a_call_from_a_fresh_empty_context_is_a_usage_error() -> None:
     with _root("shop"):
         # A thread the app starts may not inherit the context; an empty
         # Context gives the same on every build (ADR 0017, Consequences).
-        with pytest.raises(RuntimeError, match="needs a call context"):
+        with _usage_error("needs a call context"):
             contextvars.Context().run(call)
-        refused: list[RuntimeError] = []
+        refused: list[neolith.UsageError] = []
 
         def in_thread() -> None:
             try:
                 contextvars.Context().run(call)
-            except RuntimeError as error:
+            except neolith.UsageError as error:
                 refused.append(error)
 
         thread = threading.Thread(target=in_thread)
         thread.start()
         thread.join()
-        assert len(refused) == 1
+        assert [type(error) for error in refused] == [neolith.UsageError]
+    assert provider.seen == []
+
+
+def _closed_scope() -> Scope:
+    with _root() as scope:
+        return cast("Scope", scope)
+
+
+def _closed_ambient() -> contextvars.Context:
+    """A copy of the context made inside a root, taken out after it closed."""
+    with _root():
+        copied = contextvars.copy_context()
+    return copied
+
+
+def _in_a_thread(call: Callable[[], object]) -> object:
+    """Run ``call`` in a thread and hand back its outcome or its error."""
+    outcome: list[object] = []
+
+    def run() -> None:
+        try:
+            outcome.append(call())
+        except BaseException as error:  # the test reads it
+            outcome.append(error)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    thread.join()
+    if isinstance(outcome[0], BaseException):
+        raise outcome[0]
+    return outcome[0]
+
+
+# Every way a connector call finds no open scope to derive its context from.
+_NO_OPEN_SCOPE: dict[str, tuple[Callable[[Any], object], str]] = {
+    "no scope": (
+        lambda c: contextvars.Context().run(c.ask, Ask()),
+        "needs a call context",
+    ),
+    "no scope, in a thread": (
+        lambda c: _in_a_thread(lambda: contextvars.Context().run(c.ask, Ask())),
+        "needs a call context",
+    ),
+    "context= naming a closed scope": (
+        lambda c: c.ask(Ask(), context=_closed_scope().context),
+        "names no open scope",
+    ),
+    "context= naming a scope this host did not issue": (
+        lambda c: c.ask(
+            Ask(),
+            context=dataclasses.replace(
+                _closed_scope().context, scope_id=secrets.token_hex(16)
+            ),
+        ),
+        "names no open scope",
+    ),
+    "a closed ambient scope copied into a context": (
+        lambda c: _closed_ambient().run(c.ask, Ask()),
+        "has ended",
+    ),
+    "a closed ambient scope copied into a thread": (
+        lambda c: _in_a_thread(lambda: _closed_ambient().run(c.ask, Ask())),
+        "has ended",
+    ),
+}
+
+
+@pytest.mark.spec("TRN-23", "TRN-25", "TRN-26", "CON-29")
+@pytest.mark.parametrize("case", list(_NO_OPEN_SCOPE))
+def test_every_call_with_no_open_scope_is_exactly_a_usage_error(case: str) -> None:
+    connector, provider, _ = _desk()
+    call, message = _NO_OPEN_SCOPE[case]
+    with _usage_error(message):
+        call(connector)
     assert provider.seen == []
 
 
@@ -299,11 +381,11 @@ def test_a_root_closes_however_it_ends(how: str) -> None:
     ((context, held),) = kept
     assert scope.closed is True
     assert _context._OPEN == {}
-    with pytest.raises(RuntimeError, match="names no open scope") as raised:
+    with pytest.raises(neolith.UsageError, match="names no open scope") as raised:
         connector.ask(Ask(), context=context)
     assert type(raised.value) is neolith.UsageError
     # A context copied while the root was open still names it, closed.
-    with pytest.raises(RuntimeError, match="has ended"):
+    with _usage_error("has ended"):
         held.run(connector.ask, Ask())
     assert len(carrying.sent) == 1
     assert len(provider.seen) == 1
@@ -338,10 +420,10 @@ def test_an_actions_scope_closes_however_the_action_ends(
         (kept,) = provider.seen
         # Only the root is open once the call has ended.
         assert list(_context._OPEN) == [scope.context.scope_id]
-        with pytest.raises(RuntimeError, match="names no open scope"):
+        with _usage_error("names no open scope"):
             connector.ask(Ask(), context=kept)
         # Work that kept the action's context, as a thread it started would.
-        with pytest.raises(RuntimeError, match="has ended"):
+        with _usage_error("has ended"):
             held[0].run(connector.ask, Ask())
         # The caller's own scope is the ambient one again.
         assert connector.ask(Ask(n=2)) == Told(n=2)
@@ -417,7 +499,7 @@ def test_a_context_this_host_did_not_issue_names_no_scope() -> None:
     with _root("shop") as scope:
         for scope_id in ("0" * 32, "", scope.context.scope_id.upper(), None, ["x"], 7):
             forged = dataclasses.replace(scope.context, scope_id=cast("str", scope_id))
-            with pytest.raises(RuntimeError, match="names no open scope"):
+            with _usage_error("names no open scope"):
                 connector.ask(Ask(), context=forged)
     assert provider.seen == []
 
@@ -1504,7 +1586,7 @@ def test_only_a_call_that_passes_the_callers_checks_counts(clock: Clock) -> None
                 inner.ask(wrong)
         with pytest.raises(TypeError):
             inner.ask(Ask(n=1), timeout="soon")
-        with pytest.raises(RuntimeError):
+        with _usage_error():
             inner.ask(Ask(n=1), context=dataclasses.replace(ctx, scope_id="none"))
         # Passed the checks and then found late: counted, though never sent.
         with pytest.raises(ContractError, match="timeout"):
@@ -1593,11 +1675,11 @@ def test_a_random_key_comes_from_the_secure_source(
 @pytest.mark.spec("TRN-34", "CON-29")
 def test_the_context_is_checked_before_the_request() -> None:
     connector, _, carrying = _desk()
-    with pytest.raises(RuntimeError, match="needs a call context"):
+    with _usage_error("needs a call context"):
         connector.ask("not a request", timeout=0)
     with _root("shop") as scope:
         pass
-    with pytest.raises(RuntimeError, match="names no open scope"):
+    with _usage_error("names no open scope"):
         connector.ask("not a request", context=scope.context)
     assert carrying.sent == []
 

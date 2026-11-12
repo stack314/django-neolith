@@ -14,6 +14,7 @@ from typing import Any, Protocol
 
 import pytest
 from django.apps import AppConfig
+from django.apps import apps as global_apps
 from django.test import override_settings
 from hypothesis import given
 from hypothesis import strategies as st
@@ -34,6 +35,7 @@ from neolith._connector import Connector, Failure, InProcess
 from neolith._context import Sent
 from neolith._contracts import Action
 from neolith._declaration import declaration_of
+from neolith._host import _current
 from tests import host_apps
 from tests.declaration_contracts import Level, Sku
 from tests.host_apps.couriers import services as courier_services
@@ -550,3 +552,39 @@ def test_in_the_host_a_call_outside_requires_or_from_no_app_is_refused() -> None
         with _context.root(), pytest.raises(ContractError) as raised:
             stock.level(Sku(sku="a"))
         assert raised.value.kind == "unauthenticated"
+
+
+@pytest.mark.spec("TRN-39", "TRN-43")
+def test_each_hosted_transport_holds_exactly_its_apps_declaration() -> None:
+    with override_settings(INSTALLED_APPS=host_apps.INSTALLED):
+        host = _current()
+        assert host is not None
+        checked = []
+        for config in global_apps.get_app_configs():
+            declaration = declaration_of(type(config))
+            if declaration is None:
+                continue
+            for provision in declaration.provides:
+                identity = provision.contract.identity
+                transport = host.connectors[identity]._transport
+                assert type(transport) is InProcess
+                assert transport._app == declaration.label
+                assert transport._allowed == frozenset(provision.principal_from)
+                assert transport._requires == frozenset(
+                    contract.identity for contract in declaration.requires
+                )
+                checked.append(identity)
+    assert sorted(checked) == ["couriers.v3", "stock.v1"]
+
+
+@pytest.mark.spec("TRN-43")
+def test_a_hosted_app_its_own_list_does_not_name_cannot_assert_to_itself() -> None:
+    stock = connect("stock.v1")
+    with override_settings(INSTALLED_APPS=host_apps.INSTALLED):
+        # Stock requires its own contract, but lists only web.
+        with _hosted("stock", principal=ALICE), pytest.raises(ContractError) as raised:
+            stock.level(Sku(sku="ab"))
+        assert raised.value.kind == "permission_denied"
+        assert raised.value.message.startswith("app stock may not assert")
+        with _hosted("stock"):
+            assert stock.level(Sku(sku="ab")) == Level(on_hand=2)
