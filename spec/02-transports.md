@@ -45,7 +45,13 @@ Every value that crosses a call, whether a request, a reply or an error's detail
 
 **TRN-6.** The in-process transport MUST run the provider's action in the caller's thread of control, so that attached mode has no hidden concurrency.
 
-Because the action runs in the caller's thread, the in-process transport checks the deadline before it dispatches the call and again when the action ends. If the deadline has passed by then, the action's reply, or a failure it ends with, is discarded and the call fails with `timeout`; the provider's host still records a discarded failure. A signal to stop, such as cancellation or the process exiting, is not a failure of the action and is not discarded. The action might have run, so `timeout` leaves the outcome unknown, as it does over a network.
+Because the action runs in the caller's thread, the in-process transport cannot stop waiting at the deadline, as a caller does over a network, and it never interrupts an action. It checks the deadline instead ([ADR 0008](../docs/adr/0008-typed-contract-errors-in-both-modes.md), Decision 2).
+
+**TRN-19.** The in-process transport MUST check a call's deadline before it dispatches the call, at the step the provider's order gives it (TRN-35), and again when the action has ended and its outcome is ready to return.
+
+**TRN-20.** A call whose deadline has passed at either check MUST fail with `timeout`. At the second check the action's reply, an error it produced or a failure it ended with is discarded, and the provider's host still records a discarded error or failure. The action might have run, so `timeout` leaves the outcome unknown, as it does over a network.
+
+**TRN-21.** The in-process transport MUST NOT discard a signal to stop, such as cancellation or the process exiting, whatever the deadline. It is not a failure of the action (CON-45).
 
 ## Connectors
 
@@ -77,16 +83,59 @@ Decision records: [0014](../docs/adr/0014-pluggable-connector-transports.md), [0
 
 ## The call context across calls
 
-How the call context of [00](00-overview.md) moves from call to call follows [ADR 0017](../docs/adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md). In outline:
+How the call context of [00](00-overview.md) moves from call to call follows [ADR 0017](../docs/adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md).
 
-- A context starts only at a *root*: the provider side of a transport, a request the host serves, a scope opened explicitly for a command or background work, or a test harness. A transport never fabricates a context. A request root for an ordinary request the host serves gets the host's default deadline, 30 seconds unless the host is configured otherwise, or none if it is configured so. A call that arrives over a transport without a deadline has none. A command or background scope, and a test harness, have no deadline unless they are given one.
-- A child call's deadline is the earlier of its parent's and its own timeout, and its budget is capped as ADR 0017 Decision 9 says, in every mode. The trace continues from the parent, the principal is carried over unchanged, and the calling app is the app making the call.
-- A child call's idempotency key is derived from its parent's key, when the parent has one: `base64url(SHA-256(JCS([parent_key, contract_id, action, base64url(SHA-256(JCS(request))), count])))`. `JCS` is RFC 8785, `base64url` is RFC 4648 section 5 without padding, `contract_id` is the contract identity, such as `inventory.v1`, `request` is the request's JSON wire form under the I-JSON encodings of [ADR 0019](../docs/adr/0019-wire-encodings-of-the-portable-forms.md), and `count` is how many calls with the same contract, action and request hash the parent made before this one. A parent with no key gives its child a random key of 128 bits. A retried parent therefore reproduces its children's keys, under concurrent fan-out too.
-- The caller's checks and the provider's checks run in the order of ADR 0017 Decision 9, in both modes. A call counts as made once it passes the caller's context and request checks.
-- A connector retries only an idempotent action, only on `unavailable` and only within the call's one deadline. It never retries or falls back on `timeout`, whose outcome is unknown (TRN-8).
-- Two contexts are equal when their propagated and per-call fields are equal, leaving out the trace's span identifier, which changes at each hop, its `tracestate`, which each tracing system on the path may update, and the deadline's value, which each host holds on its own clock. Whether a deadline is present is compared.
+A host opens a *scope* for each root and around each action it runs. A scope holds a context, and the calls made in it derive theirs from it. A *root* is a scope that starts a context: the provider side of a transport, a request the host serves, a scope opened explicitly for a command or background work, or a test harness. A transport never fabricates a context. A request root for an ordinary request the host serves gets the host's default deadline, 30 seconds unless the host is configured otherwise, or none if it is configured so. A call that arrives over a transport without a deadline has none. A command or background scope, and a test harness, have no deadline unless they are given one. The request root and the command scope become requirements with the host, in roadmap step 4 (#11).
 
-These become requirements, with their tests, in roadmap step 3 (#10).
+### The parent scope
+
+**TRN-22.** A connector MUST derive each call's context from one open scope of its host, the call's *parent*: the scope the calling code names or, when it names none, the scope the call is made in.
+
+**TRN-23.** A call made in no scope, and naming none, MUST NOT be sent, or given a context of its own. It is a mistake in the calling code (CON-29).
+
+**TRN-24.** A host MUST close a scope when what it was opened for ends, however that ends.
+
+**TRN-25.** A call made in a closed scope, or naming one, MUST be refused as TRN-23 refuses a call made in none, so work that outlives its call cannot go on calling under that call's principal and deadline.
+
+**TRN-26.** When calling code names the parent by a context value, the connector MUST use the value only to find the open scope that issued it. The call's context comes from what that scope holds. So a copy of the value names the same scope, a copy changed to carry a later deadline, another principal or another key derives the same call, and a value this host did not issue names no scope.
+
+### The context of a call
+
+**TRN-27.** A call's deadline MUST be the earlier of its parent's deadline and the call's own timeout, counted from when the call is made, if it is given one. A timeout therefore never extends a deadline. A call with neither has no deadline.
+
+The deadline crosses as a *budget*: the time that remains when the call is sent, in whole milliseconds, rounded down ([03](03-http-transport.md)).
+
+**TRN-28.** A caller MUST fail a call whose budget is less than 1 ms with `timeout`, without sending it.
+
+**TRN-29.** A budget above 9999999999 ms MUST count as 9999999999, in every mode.
+
+**TRN-30.** A call MUST carry its parent's principal, trace identifier and `tracestate`, unchanged.
+
+**TRN-31.** A call's calling app MUST be the app its parent scope belongs to, the app that scope's root was opened for or whose action it runs. A call from a scope that belongs to no app carries none.
+
+**TRN-32.** When its parent has an idempotency key, a call's key MUST be derived from it, as the value of this expression.
+
+```
+base64url(SHA-256(JCS([parent_key, contract_id, action, base64url(SHA-256(JCS(request))), count])))
+```
+
+`JCS` is RFC 8785, `base64url` is RFC 4648 section 5 without padding, `contract_id` is the contract identity, such as `inventory.v1`, `request` is the request's JSON wire form under the I-JSON encodings of [ADR 0019](../docs/adr/0019-wire-encodings-of-the-portable-forms.md), and `count` is how many calls with the same contract, action and request hash the parent made before this one. A call counts as made once it passes the caller's context and request checks, whatever becomes of it then. The key does not depend on the order in which the parent's calls are made, so a retried parent reproduces its children's keys, under concurrent fan-out too.
+
+**TRN-33.** When its parent has no key, a call's key MUST be random: 128 bits from a cryptographically secure source, base64url-encoded. A retry of such a parent does not reproduce its children's keys.
+
+**TRN-34.** A caller MUST run its checks in the order ADR 0017 Decision 9 gives the caller, so a call that would fail two of them fails at the earlier one, in every mode.
+
+### The provider's side
+
+**TRN-35.** A provider's host MUST run its checks in the order ADR 0017 Decision 9 gives the provider. Its checks of the calling app join them with the host, in roadmap step 4 (#11).
+
+**TRN-36.** The provider's side of a transport MUST run the action in a scope that holds the context of the call as it arrived: the principal read from its sent form ([03](03-http-transport.md)), the trace identifier and `tracestate`, a deadline counted from the budget when the call arrived, the call's idempotency key and the calling app.
+
+**TRN-37.** An action that takes the call context MUST receive the context of that scope.
+
+Two contexts are equal when their propagated and per-call fields are equal, leaving out the trace's span identifier, which changes at each hop, its `tracestate`, which each tracing system on the path may update, and the deadline's value, which each host holds on its own clock. Whether a deadline is present is compared. A transport carries the context intact (TRN-2) when the context an action receives is equal, in this sense, to the context its caller derived for the call.
+
+A connector retries only an idempotent action, only on `unavailable` and only within the call's one deadline. It never retries or falls back on `timeout`, whose outcome is unknown (TRN-8).
 
 ## Other transports
 

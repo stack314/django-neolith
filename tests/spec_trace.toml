@@ -18,5 +18,3 @@ CON-12 = "Holds by construction in this implementation: a contract's actions are
 CON-39 = "Binds receivers that read text from a network: the receive check, roadmap step 5 (#12), which reuses the description check that senders run (TRN-15). In-process, a receiver reads only text that a sender's check passed (ADR 0007 Decision 3)."
 CON-40 = "Binds receivers that read text from a network: the receive check, roadmap step 5 (#12). Senders meet the same rules, tested under TRN-15."
 CON-42 = "Binds receivers that read text from a network: the receive check, roadmap step 5 (#12). In-process, a receiver reads only text that a sender wrote (CON-41)."
-TRN-2 = "Binds transports: the call context arrives with roadmap step 3 (#10 task 6), which tests it across the in-process transport."
-TRN-4 = "Binds transports: the deadline arrives with roadmap step 3 (#10 task 6), which tests it before dispatch and when the action ends."

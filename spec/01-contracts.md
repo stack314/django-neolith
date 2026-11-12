@@ -146,7 +146,7 @@ The provider's host and the connectors deliver errors as [ADR 0008](../docs/adr/
 
 **CON-45.** A provider's host MUST NOT convert a signal to stop, such as cancellation or the process exiting, which is not a failure of the action.
 
-**CON-46.** An `internal` error that stands for another failure MUST carry nothing of that failure: its message is fixed text. The text gains the trace identifier with the call context (roadmap step 3, #10 task 6).
+**CON-46.** An `internal` error that stands for another failure MUST carry nothing of that failure: its message is fixed text and the call's trace identifier, under which the host that failed records the failure.
 
 **CON-47.** A provider's host MUST record the original failure behind each `internal` error it delivers.
 
@@ -154,7 +154,7 @@ The provider's host and the connectors deliver errors as [ADR 0008](../docs/adr/
 
 **CON-49.** A caller MUST receive as `internal` an error that arrives but cannot be read against its contract: a standard kind with a detail, a declared kind without a detail its record reads, an unknown kind whose detail breaks CON-30, or a kind or a message that breaks CON-22 or CON-25.
 
-A call can also fail with `internal` at the caller, over its principal, at the step [ADR 0017](../docs/adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md) Decision 9 gives. The message is the same fixed text with the trace identifier, and the caller's host records the cause with it. This becomes a requirement with the call context (#10 task 6).
+**CON-51.** A caller's host MUST fail a call whose principal has no valid sent form ([03](03-http-transport.md)) with `internal`, at the step [ADR 0017](../docs/adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md) Decision 9 gives, so the call is never sent, in any mode. The message is that of CON-46, and the caller's host records the cause with the trace identifier. Whether a principal is valid is decided once for a scope, so every call made from it gets the same answer. A principal that cannot be resolved fails the same way; that joins this requirement with the host that resolves principals (roadmap step 4, #11).
 
 Decision record: [0008](../docs/adr/0008-typed-contract-errors-in-both-modes.md).
 
