@@ -392,35 +392,70 @@ def _deep(levels: int) -> bytes:
     return ("[" * (levels - 1) + "]" * (levels - 1)).join(['{"a": ', "}"]).encode()
 
 
-_UNREADABLE: dict[str, tuple[object, object, object]] = {
-    "standard kind with a detail": ("not_found", "x", b"{}"),
-    "declared kind without a detail": ("out_of_stock", "x", None),
-    "declared kind with an unreadable detail": ("out_of_stock", "x", b'{"sku": 1}'),
-    "declared kind with a detail that is not JSON": ("out_of_stock", "x", b"{"),
-    "malformed kind": ("Not-A-Kind", "x", None),
-    "kind not text": (3, "x", None),
-    "message with a lone surrogate": ("not_found", "\ud800", None),
-    "message not text": ("not_found", b"x", None),
-    "detail not bytes": ("gone", "x", '{"a": 1}'),
-    "unknown detail too deep": ("gone", "x", _deep(33)),
-    "unknown detail too large": ("gone", "x", json.dumps({"a": [0] * 10_000}).encode()),
-    "unknown detail with a large integer": ("gone", "x", b'{"a": 9007199254740992}'),
-    "unknown detail with NaN": ("gone", "x", b'{"a": NaN}'),
-    "unknown detail with an infinite number": ("gone", "x", b'{"a": 1e400}'),
-    "unknown detail with a duplicate name": ("gone", "x", b'{"a": 1, "a": 2}'),
-    "unknown detail with a lone surrogate": ("gone", "x", b'{"a": "\\ud800"}'),
-    "unknown detail not UTF-8": ("gone", "x", '{"a": 1}'.encode("utf-16")),
-    "unknown detail not a map": ("gone", "x", b"[1]"),
+# Each case, what arrives, and the requirements it shows: CON-49 for every
+# case, CON-28 where the kind is one the caller does not know, and CON-30
+# where its detail breaks the untyped map's bounds.
+_UNKNOWN = ("CON-49", "CON-28")
+_BEYOND = ("CON-49", "CON-28", "CON-30")
+_UNREADABLE: dict[str, tuple[tuple[object, object, object], tuple[str, ...]]] = {
+    "standard kind with a detail": (("not_found", "x", b"{}"), ("CON-49",)),
+    "declared kind without a detail": (("out_of_stock", "x", None), ("CON-49",)),
+    "declared kind with an unreadable detail": (
+        ("out_of_stock", "x", b'{"sku": 1}'),
+        ("CON-49",),
+    ),
+    "declared kind with a detail that is not JSON": (
+        ("out_of_stock", "x", b"{"),
+        ("CON-49",),
+    ),
+    "standard kind with a lone surrogate in its message": (
+        ("not_found", "\ud800", None),
+        ("CON-49",),
+    ),
+    "standard kind with a message not text": (("not_found", b"x", None), ("CON-49",)),
+    "malformed kind": (("Not-A-Kind", "x", None), _UNKNOWN),
+    "kind not text": ((3, "x", None), _UNKNOWN),
+    "unknown kind with a lone surrogate in its message": (
+        ("brand_new", "\ud800", None),
+        _UNKNOWN,
+    ),
+    "unknown kind with a detail not bytes": (("gone", "x", '{"a": 1}'), _UNKNOWN),
+    "unknown detail too deep": (("gone", "x", _deep(33)), _BEYOND),
+    "unknown detail too large": (
+        ("gone", "x", json.dumps({"a": [0] * 10_000}).encode()),
+        _BEYOND,
+    ),
+    "unknown detail with a large integer": (
+        ("gone", "x", b'{"a": 9007199254740992}'),
+        _BEYOND,
+    ),
+    "unknown detail with NaN": (("gone", "x", b'{"a": NaN}'), _BEYOND),
+    "unknown detail with an infinite number": (("gone", "x", b'{"a": 1e400}'), _BEYOND),
+    "unknown detail with a duplicate name": (
+        ("gone", "x", b'{"a": 1, "a": 2}'),
+        _UNKNOWN,
+    ),
+    "unknown detail with a lone surrogate": (
+        ("gone", "x", b'{"a": "\\ud800"}'),
+        _BEYOND,
+    ),
+    "unknown detail not UTF-8": (("gone", "x", '{"a": 1}'.encode("utf-16")), _UNKNOWN),
+    "unknown detail not a map": (("gone", "x", b"[1]"), _BEYOND),
 }
 
 
-@pytest.mark.spec("CON-49", "CON-28", "CON-30")
-@pytest.mark.parametrize("case", list(_UNREADABLE), ids=list(_UNREADABLE))
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param(case, id=case, marks=pytest.mark.spec(*cited))
+        for case, (_, cited) in _UNREADABLE.items()
+    ],
+)
 def test_an_error_that_cannot_be_read_reaches_the_caller_as_internal(
     case: str, caplog: pytest.LogCaptureFixture
 ) -> None:
     with caplog.at_level(logging.ERROR, logger="neolith"):
-        _assert_internal(_arrives(*_UNREADABLE[case]))
+        _assert_internal(_arrives(*_UNREADABLE[case][0]))
     assert "the error could not be read" in caplog.text
 
 
