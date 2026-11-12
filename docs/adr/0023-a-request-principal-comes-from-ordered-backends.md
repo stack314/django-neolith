@@ -48,7 +48,7 @@ Outside Django: Django REST framework's `Request.user` setter also assigns the u
 
 ## Decision
 
-Option 3, as two things that can be accepted apart. Decisions 1 to 10 are the seam and its Django-user backend; all but Decision 9 hold under option 2 as well. Decision 11 is the narrowing of 0010 that Decision 9 needs, proposed as a decision of its own.
+Option 3, as two things that can be accepted apart. Decisions 1 to 10 are the seam and its Django-user backend. Decision 11 is the narrowing of 0010 that Decision 9 needs, proposed as a decision of its own. Under option 2, Decision 9 is replaced, together with the admitted set's `key field` and `subject` lines and Decision 10's two rows on the key; Decisions 1 to 8 and the rest of 10 stand.
 
 ### The admitted set
 
@@ -111,7 +111,7 @@ The cost: "backend" names two jobs across two steps. Step 5's record has to say 
 
 **One instance, not one per use.** Django's authentication backends and DRF's authentication classes are constructed with no arguments each time they are used. Here a backend has options, and K2 asks that they are checked before the host serves; the union of `request_inputs` (Decision 6) is also fixed then. So the instance is built once, as Django's storage and template handlers are. Unlike those, it is not rebuilt on `setting_changed`. 0022 refuses a change to a key of `NEOLITH` after set-up unless the key's record says it may change, and this key may not: an `override_settings` that changes `PRINCIPAL_BACKENDS` raises, by that rule. A backend's author therefore writes for shared use across threads, which Django's own backends do not have to.
 
-**Three functions without host state.** Reading the setting's shape (in the builder), building backends from checked entries, and running the search of Decision 5 over a list of backends and a request are plain functions of their arguments. The tests of this record call them with built inputs, so no test needs a second set-up in a process (the design gate's "host set up twice") or `override_settings(NEOLITH=...)`.
+**Four functions without host state.** Reading the setting's shape (in the builder), building backends from checked entries, running the search of Decision 5 over a list of backends and a request, and the response phase of Decision 6 (decide whether to search, mark the root, and patch `Vary` with a union it is given) are plain functions of their arguments. One backend's constructor is not: the Django-user backend reads Django's settings and the user model when it is built, so its key-field rule is a function of a model class, which a test can hand any model. The principal middleware is the wiring that hands them the host's backends and union. A test that needs a backend list of its own calls these functions with built inputs. The one test host has one backend list for the whole process, and only the cases that need Django's middleware chain run on it; Consequences says which test runs where. So no test needs a second set-up in a process (the design gate's "host set up twice") or `override_settings(NEOLITH=...)`.
 
 Alternatives weighed:
 
@@ -246,7 +246,7 @@ The cost: on a host with a cookie backend and a header backend, every page that 
 4. A user whose `is_authenticated` is not `True` gives `None`: the backend abstains.
 5. Any other user gives a principal with the issuer of Decision 8, the subject of Decision 9 and no claims.
 
-Step 2 is what keeps a view that calls `alogout` and then a contract from calling as the user who just logged out on Django 5.2, where `auser()` still returns that user (Context, point 2). The host notes in `docs/django-host.md` describe an identity check against an object the host keeps at `process_view`. The type check gives the same result for Django's four functions and needs no host state, so the backend is self-contained; PR 9 updates those notes.
+Step 2 is what keeps a view that calls `alogout` and then a contract from calling as the user who just logged out on Django 5.2, where `auser()` still returns that user (Context, point 2). The host notes in `docs/django-host.md` describe an identity check against an object the host keeps at `process_view`. The type check gives the same result for Django's four functions and needs nothing the host keeps per request; PR 9 updates those notes.
 
 Step 2 also means the backend trusts whoever put a plain user on the request, and does not know which request input that code read. The most common such code is Django REST framework: inside a DRF view, the user that DRF authenticated, from a session, a token or a JWT, is on the Django request, and that is the user the backend resolves.
 
@@ -271,7 +271,7 @@ The cost:
 
 ### 8. The issuer names the user table, and the deployer supplies it
 
-`issuer` is a required option with no default: 1 to 255 visible ASCII characters. It names the set of users the subject is unique in, which for this backend is one user table in one database. Hosts that read the same user table are configured with the same issuer. Hosts with different user tables are configured with different ones. The documentation recommends a URL the project controls, as OpenID Connect uses for `iss`, and the backend does not require one. The bound of 255 and the comparison by code point are the ones OpenID Connect gives `sub` and `iss` (OIDC Core, section 2), and the pair of issuer and subject as one identifier is RFC 9493's `iss_sub` format (section 3.2.3).
+`issuer` is a required option with no default: 1 to 255 visible ASCII characters. It names the set of users the subject is unique in, which for this backend is one user table in one database. Hosts that read the same user table are configured with the same issuer. Hosts with different user tables are configured with different ones. The documentation recommends a URL the project controls, as OpenID Connect uses for `iss`, and the backend does not require one. The bound of 255 is the one OpenID Connect gives `sub` (OIDC Core, section 2), applied here to the issuer as well; OpenID Connect gives `iss` none. Issuers are compared code point by code point (spec 03), and the pair of issuer and subject as one identifier is RFC 9493's `iss_sub` format (section 3.2.3).
 
 The deployer's part, which the host cannot check:
 
@@ -358,7 +358,7 @@ Alternatives weighed:
 
 ### 11. A separate decision: 0010 Decision 2 is narrowed, so that a primary key may be a subject under a deployer-given issuer
 
-This decision stands apart from Decisions 1 to 10. It changes what an Accepted record, [0010](0010-pluggable-principal-resolution.md), says, and how one sentence of Accepted 0004 is read, and it is proposed as that change (D1), not as a reading of 0010.
+This decision can be accepted or declined apart from the rest, and what leans on it is named at the end of this section. It changes what an Accepted record, [0010](0010-pluggable-principal-resolution.md), says, and how one sentence of Accepted 0004 is read, and it is proposed as that change (D1), not as a reading of 0010.
 
 **What 0010 says.** Decision 2: "a primary key on its own is never a subject". Its Consequences: a project that resolves Django users "needs an identifier for each user that is stable across hosts, which the primary key alone is not". "On its own" could be read as satisfied by the issuer. That reading would leave the sentence without effect, since every subject travels with an issuer (spec 03: "A subject is unique only within its issuer"). So Decision 9 does not fit 0010 as written.
 
@@ -367,11 +367,13 @@ This decision stands apart from Decisions 1 to 10. It changes what an Accepted r
 - 0010 Decision 2's sentence is narrowed to: a primary key is admitted as a subject only when the principal's issuer is given by the deployer to name the one table the key belongs to, and when the key's field type is one Decision 9 admits, whose values are not given twice in ordinary use; in every other case it is never a subject;
 - 0010's Consequence is read with it: the identifier that is stable across hosts is the pair of that issuer and the key, and its stability rests on the deployer's part in Decision 8;
 - a Consequence of [0004](0004-each-app-owns-its-data.md) is read with it too: "A database primary key is not a principal ID, because it means nothing outside its database." The key alone is still not a principal ID. The stored principal ID is the pair of issuer and subject, and under this narrowing its subject may be the key's text, with the issuer naming the table that gives the key its meaning;
-- the pull request that marks this record Accepted adds a dated note to 0010 and to 0004, saying that this record narrows those sentences, with a link here. Their own text is otherwise unchanged (D2). Nothing in either is edited before then.
+- the pull request that marks this record Accepted adds one line under the status of 0010 and of 0004, `Narrowed by 0023 (Decision 11)`, with a link here. Nothing else in either changes, and nothing in either is edited before then.
+
+**The rule this relies on.** D2 and the README of the records let an Accepted record change in three ways: a typo, a broken link, and `Superseded by NNNN` for a reversal. A narrowing of one sentence is none of them, and superseding 0010 as a whole is not what is meant. So the pull request that adds this record also amends D2 and the README's status line with a fourth way: "To narrow part of it, the new record quotes the sentences it narrows, and the old record gains a line under its status, `Narrowed by NNNN (Decision k)`; nothing else in it changes." The line stands on its own, not in `Status`, so the template's status values stay as they are. The sentences narrowed are the three quoted above: one in 0010 Decision 2, one in 0010's Consequences and one in 0004's Consequences.
 
 **What is traded.** 0010 as written gives a provider a guarantee from the value alone, that no subject is a bare row number. With the narrowing, the guarantee depends on configuration the host cannot verify. What is gained: a project with `django.contrib.auth`'s own user model can make its first call without a custom user model or a new table.
 
-**Until it is accepted.** 0010 binds as written, and this record, being Proposed, binds nothing. The Django-user backend of PR 9 cannot merge with a key as its subject. If the narrowing is not accepted, the dedicated field of Decision 9's alternatives is the candidate, Decision 9 is replaced, and Decisions 1 to 8 and 10 stand without it.
+**Until it is accepted.** 0010 binds as written, and this record, being Proposed, binds nothing. The Django-user backend of PR 9 cannot merge with a key as its subject. If the narrowing is not accepted, the dedicated field of Decision 9's alternatives is the candidate. Decision 9 is replaced, together with the admitted set's `key field` and `subject` lines and Decision 10's two rows on the key; Decisions 1 to 8 and the rest of 10 stand.
 
 ## Consequences
 
@@ -387,16 +389,21 @@ This decision stands apart from Decisions 1 to 10. It changes what an Accepted r
 - The host does not time a backend. A backend that waits on a remote identity provider holds the first call for as long as it waits (Open question 3). Since no thread waits on another caller's search, such a wait holds only the caller that runs it and the async callers on its loop that chose to await it. The lock on the root is held only to read and write the outcome and the mark, never across a search.
 - Step 4's public surface gains `neolith.middleware.PrincipalMiddleware`, `PrincipalBackend`, `DjangoUserBackend`, the `PRINCIPAL_BACKENDS` key and this record's check ids. The module that holds the two classes is named in PR 9.
 - Specification changes for PR 9, in neutral terms and with new `APP` requirement IDs (the plan's APP-new-j and APP-new-k): a host resolves a request's principal through its configured backends in order, the first to resolve one decides, and a failure is fixed for the request; when a request's principal resolution has started, the host adds the request inputs its backends declare to the response's `Vary` before the response leaves the host, and it adds nothing to any other response. The second is worded as what the host adds, not as what every cache then does, because a cache placed inside the host's patch is outside its reach.
-- Tests for PR 9, beyond cases 9 to 11 of the step's test plan. The shape, build and search functions are called directly with built inputs; the middleware cases run against one test host:
-  - Hypothesis draws settings from the grammar above and mutates one element at a time to produce each builder row and each check row;
-  - for every admitted key value, the principal's sent form passes spec 03's check, and two hosts with one issuer and one user table give equal principals; a user model with a plain `IntegerField` key and one with an inherited key are refused;
-  - `logout`, `login`, `alogout` and `alogin` followed by a call, on both Django versions, on WSGI and ASGI, and on ASGI with a sync-only middleware placed after the principal middleware, so that it runs in sync mode;
-  - two test-only backends in each order, with each outcome of the first (a principal, `None`, a raise, a wrong type), asserting which backends were called and the `Vary` header; one of them declares `("*",)`;
-  - a synchronous first call on the thread-sensitive thread overlapping an asynchronous one: both complete, without a wait on each other, and see one principal; the same for two asynchronous first calls on two event loops, and for a thread's first call that overlaps the response-phase search of a streamed response;
-  - a cancelled first call with a second caller already awaiting it: the second is not cancelled, and resolves; and a cancelled first call followed by a later one;
-  - a first call from the response phase of a middleware outside the principal middleware fails with `internal`, and with a fallback key in use the session's row and key are left as they were;
-  - `UpdateCacheMiddleware` and `FetchFromCacheMiddleware` with a test-only backend that declares a custom header: two principals never share an entry; and the same middleware listed after the principal middleware is refused;
-  - a view that assigns a plain user to `request.user` from `Authorization`, as DRF's setter does: the call carries that user and the response varies on `authorization`. Whether DRF itself joins the development dependencies for this case is PR 9's call, with its one-line reason (K5).
+- Tests for PR 9, beyond cases 9 to 11 of the step's test plan. They run in two places, and each bullet says which.
+  - **As plain functions, with built inputs and no host** (Decision 2's four functions). Any list of backends can be given here, so every case that needs a list other than the test host's is in this group:
+    - Hypothesis draws settings from the grammar above and mutates one element at a time to produce each builder row and each check row; the shape and build functions report them;
+    - for every admitted key value, the principal's sent form passes spec 03's check, and two Django-user backends built with one issuer give equal principals for one user; the key-field rule, called with test model classes, refuses a plain `IntegerField` key and an inherited key;
+    - the search and the response phase with no backend: no backend is called, and the response gains no `Vary`;
+    - the search and the response phase with two test-only backends in each order, with each outcome of the first (a principal, `None`, a raise, a wrong type), asserting which backends were called and the `Vary` header the response phase writes for the union given. A list in which one backend declares `("*",)` is a case of its own, and its one assertion on the header is `Vary: *`;
+    - the search with a synchronous first call on the thread-sensitive thread overlapping an asynchronous one: both complete, without a wait on each other, and see one principal; the same for two asynchronous first calls on two event loops, and for a thread's first call that overlaps the response phase's search for a streamed response;
+    - the search with a cancelled first call and a second caller already awaiting it: the second is not cancelled, and resolves; and a cancelled first call followed by a later one;
+    - the response phase with a test-only backend that declares a custom header, followed by Django's `UpdateCacheMiddleware` and `FetchFromCacheMiddleware` called directly on the same request and response: two principals never share an entry. No backend in this list declares `("*",)`, since Django stores no response with `Vary: *` and the case would then pass without testing anything;
+    - the check for `UpdateCacheMiddleware` listed after the principal middleware, given a built `MIDDLEWARE` list.
+  - **On the one test host**, whose backend list is the Django-user backend alone, so its union is `("authorization", "cookie")` and holds no `*`. These are the cases that need Django's own middleware chain:
+    - `logout`, `login`, `alogout` and `alogin` followed by a call, on both Django versions, on WSGI and ASGI, and on ASGI with a sync-only middleware placed after the principal middleware, so that it runs in sync mode;
+    - a first call from the response phase of a middleware outside the principal middleware fails with `internal`, and with a fallback key in use the session's row and key are left as they were;
+    - a view that assigns a plain user to `request.user` from `Authorization`, as DRF's setter does: the call carries that user, and the response's `Vary` names `authorization` and `cookie`. Whether DRF itself joins the development dependencies for this case is PR 9's call, with its one-line reason (K5);
+    - `UpdateCacheMiddleware` and `FetchFromCacheMiddleware` in the host's list, before the principal middleware: two logged-in users never share an entry.
 
 ## Open questions
 

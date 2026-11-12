@@ -18,7 +18,7 @@ Everyone taking part is expected to follow the [code of conduct](CODE_OF_CONDUCT
 The [vision](VISION.md), the [guiding principles](docs/principles.md) and the Accepted [architecture decision records](docs/adr/README.md) are binding. They are how the project settles arguments once instead of in every review. Proposed records are working assumptions: follow them by default, and challenge them in the pull request or an issue.
 
 - **D1.** A change that contradicts a principle or an Accepted decision record must come with a new decision record that explains why. Use the [template](docs/adr/template.md) and the next free number, with status Proposed. The maintainer accepts or rejects it.
-- **D2.** An Accepted record's decision is never edited. To reverse it, write a new record and mark the old one `Superseded by NNNN`. Typos and broken links in an Accepted record may be fixed.
+- **D2.** An Accepted record's decision is never edited. To reverse it, write a new record and mark the old one `Superseded by NNNN`. To narrow part of it, the new record quotes the sentences it narrows, and the old record gains a line under its status, `Narrowed by NNNN (Decision k)`; nothing else in it changes. Typos and broken links in an Accepted record may be fixed.
 - **D3.** Record numbers are never reused, including for rejected records.
 - **D4.** When an item in [open questions](docs/open-questions.md) is settled, the same pull request records the decision and removes the item.
 

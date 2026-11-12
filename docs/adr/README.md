@@ -6,7 +6,7 @@ An ADR captures one significant decision: the context, the options considered, w
 
 - **When to write one:** a decision is hard to reverse, shapes public API, or will be questioned later. Small, reversible choices do not need one.
 - **Numbering:** sequential, `NNNN-short-title.md`. Numbers are never reused.
-- **Status:** `Proposed` → `Accepted` (or `Rejected`). A later decision that reverses one is a new ADR. It marks the old one `Superseded by NNNN` and links back. We never delete or rewrite an accepted ADR's decision.
+- **Status:** `Proposed` → `Accepted` (or `Rejected`). A later decision that reverses one is a new ADR. It marks the old one `Superseded by NNNN` and links back. To narrow part of it, the new record quotes the sentences it narrows, and the old record gains a line under its status, `Narrowed by NNNN (Decision k)`; nothing else in it changes. We never delete or rewrite an accepted ADR's decision.
 - **Who decides:** anyone can propose. The maintainer accepts.
 
 Questions not yet decided are in [open-questions.md](../open-questions.md).
