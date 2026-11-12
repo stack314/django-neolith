@@ -36,3 +36,4 @@ Questions not yet decided are in [open-questions.md](../open-questions.md).
 | [0019](0019-wire-encodings-of-the-portable-forms.md) | Wire encodings of the portable forms | Accepted |
 | [0020](0020-wire-forms-pydantic-writes-otherwise-are-neolith-annotated-types.md) | A portable form whose wire spelling differs from Pydantic's default is a neolith Annotated type | Accepted |
 | [0021](0021-an-app-declares-itself-on-its-neolithappconfig.md) | An app declares itself in class attributes of its `NeolithAppConfig`, with contracts named by their declaration classes | Proposed |
+| [0022](0022-the-app-host-builds-settings-and-checks-before-it-serves.md) | The app host builds settings from declarations, checks at app loading, and boots when a handler is built | Proposed |
