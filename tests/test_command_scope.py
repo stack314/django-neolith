@@ -8,6 +8,7 @@ sleep.
 """
 
 import asyncio
+import contextlib
 import contextvars
 import copy
 import decimal
@@ -441,10 +442,14 @@ def test_an_async_generator_closed_in_its_task_restores_the_enclosing_scope() ->
 
 @pytest.mark.spec("TRN-53", "TRN-25")
 @pytest.mark.usefixtures("host")
-def test_an_async_generator_broken_out_of_is_reported_and_its_scope_refused() -> None:
+def test_an_async_generator_broken_out_of_is_reported_and_its_scope_refused(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Broken out of, the generator is closed later by the event loop, in
-    another context: its scope closes there and its exit is reported, and the
-    enclosing block, where it was left current, has its calls refused.
+    another context: its scope closes there and its exit is logged (the
+    GeneratorExit that closes it is a signal to stop, which the report never
+    replaces), and the enclosing block, where it was left current, has its
+    calls refused and its own exit reported.
     """
     reported: list[object] = []
 
@@ -472,13 +477,15 @@ def test_an_async_generator_broken_out_of_is_reported_and_its_scope_refused() ->
     with pytest.raises(UsageError) as raised:
         asyncio.run(main())
     assert str(raised.value).startswith(
-        "command_scope('stock'): the scope closed where it is not"
+        "command_scope('stock'): the scope is not the current scope where its "
+        "block ends"
     )
     assert len(refused) == 1
-    [error] = reported
-    assert isinstance(error, UsageError)
-    assert str(error).startswith(
-        "command_scope('web'): the scope closed where it is not"
+    assert reported == []
+    [logged] = [r.getMessage() for r in caplog.records if r.name == "neolith.host"]
+    assert logged.startswith(
+        "command_scope('web'): the scope is current where its block ends, but "
+        "in another context"
     )
 
 
@@ -490,7 +497,7 @@ def test_a_scope_closed_out_of_order_is_reported_and_closes() -> None:
         web.__enter__()
         stock.__enter__()
         web_scope = _context._CURRENT.get()
-        with pytest.raises(UsageError, match="not the current scope") as raised:
+        with pytest.raises(UsageError, match="is not the current scope") as raised:
             web.__exit__(None, None, None)
         assert raised.value.args[0].startswith("command_scope('web'): ")
         # stock is still open and current; web has closed.
@@ -513,28 +520,97 @@ def test_a_scope_left_in_another_context_is_reported_and_refused_where_it_was() 
     scope = command_scope("web")
     entered.run(scope.__enter__)
     elsewhere = entered.copy()  # where web is current, but not entered there
-    with pytest.raises(UsageError, match="not the current scope"):
+    with pytest.raises(
+        UsageError, match="is current where its block ends, but in another context"
+    ):
         elsewhere.run(scope.__exit__, None, None, None)
     with pytest.raises(UsageError, match="has ended"):
         entered.run(couriers.quote, Sku(sku="ab"))
 
 
+def _leaving_a_root_open(block: Callable[[], None]) -> Callable[[], None]:
+    """Run ``block`` in a command scope that a root opened in it outlives,
+    and close that root afterwards."""
+
+    def run() -> None:
+        inner = command_scope("stock")
+        try:
+            with command_scope("web"):
+                inner.__enter__()
+                block()
+        finally:
+            inner.__exit__(None, None, None)
+
+    return run
+
+
 @pytest.mark.spec("TRN-53")
 @pytest.mark.usefixtures("host")
-def test_a_block_that_raises_where_its_scope_is_not_current_reports_both() -> None:
-    def run() -> None:
-        web = command_scope("web")
+def test_an_error_the_block_raises_is_kept_as_the_reports_context() -> None:
+    def fail() -> None:
+        raise KeyError("k")
 
-        def fail() -> None:
-            with web:
-                command_scope("stock").__enter__()
-                raise KeyError("k")
+    with pytest.raises(UsageError) as raised:
+        _isolated(_leaving_a_root_open(fail))
+    assert str(raised.value).startswith(
+        "command_scope('web'): the scope is not the current scope where its block ends"
+    )
+    assert isinstance(raised.value.__context__, KeyError)
+    assert not raised.value.__suppress_context__
 
-        with pytest.raises(UsageError) as raised:
-            fail()
-        assert isinstance(raised.value.__context__, KeyError)
 
-    _isolated(run)
+@pytest.mark.spec("TRN-54", "TRN-53")
+@pytest.mark.usefixtures("host")
+@pytest.mark.parametrize(
+    "signal",
+    [asyncio.CancelledError(), KeyboardInterrupt(), SystemExit(3), GeneratorExit()],
+    ids=["cancelled", "interrupt", "exit", "generator-exit"],
+)
+def test_a_signal_to_stop_is_never_replaced_by_the_report(
+    signal: BaseException, caplog: pytest.LogCaptureFixture
+) -> None:
+    def fail() -> None:
+        raise signal
+
+    with pytest.raises(type(signal)) as raised:
+        _isolated(_leaving_a_root_open(fail))
+    assert raised.value is signal
+    assert len(caplog.records) == 1
+    [note] = getattr(signal, "__notes__", [])
+    assert note.startswith(
+        "neolith.UsageError: command_scope('web'): the scope is not the current"
+    )
+
+
+@pytest.mark.spec("TRN-54")
+@pytest.mark.usefixtures("host")
+def test_a_cancelled_task_and_a_timeout_keep_their_outcome() -> None:
+    async def blocked() -> None:
+        inner = command_scope("stock")
+        try:
+            with command_scope("web"):
+                inner.__enter__()
+                await asyncio.sleep(10)
+        finally:
+            inner.__exit__(None, None, None)
+
+    async def main() -> tuple[bool, BaseException | None]:
+        task = asyncio.ensure_future(blocked())
+        await asyncio.sleep(0)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        timed: BaseException | None = None
+        try:
+            async with asyncio.timeout(0):
+                await blocked()
+        except BaseException as error:
+            timed = error
+        return task.cancelled(), timed
+
+    cancelled, timed = asyncio.run(main())
+    assert cancelled
+    assert type(timed) is TimeoutError
 
 
 # Opened while a set-up runs, where an earlier table exists (TRN-45).
@@ -1019,41 +1095,90 @@ def _second_entry() -> None:
 
 
 def _exit_not_current() -> None:
-    def run() -> None:
-        web = command_scope("web")
-        web.__enter__()
-        command_scope("stock").__enter__()
-        web.__exit__(None, None, None)
+    _isolated(_leaving_a_root_open(lambda: None))
 
-    contextvars.copy_context().run(run)
+
+def _exit_in_another_context() -> None:
+    entered = contextvars.copy_context()
+    scope = command_scope("web")
+    entered.run(scope.__enter__)
+    entered.copy().run(scope.__exit__, None, None, None)
 
 
 @pytest.mark.usefixtures("host")
 @pytest.mark.parametrize(
-    ("trigger", "usage", "on_connect"),
+    ("trigger", "raised", "usage", "on_connect"),
     [
-        (_no_scope, "made in no open scope", "made in no open scope"),
-        (_closed_scope, "in one that has closed", "in one that has closed"),
-        (_closed_context, "a scope that has closed or that this host did", None),
-        (_foreign_context, "that this host did not issue", "did not issue"),
+        (
+            _no_scope,
+            "none is active here",
+            "made in no open scope",
+            "made in no open scope",
+        ),
+        (
+            _closed_scope,
+            "has ended",
+            "in one that has closed",
+            "in one that has closed",
+        ),
+        (
+            _closed_context,
+            "names no open scope",
+            "a scope that has closed or that this host did",
+            "a scope that has closed or that this host did not issue",
+        ),
+        (
+            _foreign_context,
+            "names no open scope",
+            "that this host did not issue",
+            "that this host did not issue",
+        ),
         (
             _not_required,
+            "which its declaration does not require",
             "does not require the contract",
-            "does not require",
+            "does not require the contract",
         ),
-        (_undeclared, "or whose app has no declaration", "or the app has none"),
-        (_not_provided, "contract no app of the host provides", "no app of the host"),
-        (_unknown_identity, "for a contract the host, once set up", None),
-        (_not_hosted, "for an app that is not hosted", None),
-        (_second_entry, "a second time", None),
-        (_exit_not_current, "by its exit when it is not the current", None),
+        (
+            _undeclared,
+            "it has no declaration",
+            "or whose app has no declaration",
+            "or the app has none",
+        ),
+        (
+            _not_provided,
+            "no app of this host provides it",
+            "contract no app of the host provides",
+            "when no app of the host provides the contract",
+        ),
+        (
+            _unknown_identity,
+            "no app of this host provides or requires",
+            "for a contract the host, once set up",
+            None,
+        ),
+        (_not_hosted, "is not a hosted app", "for an app that is not hosted", None),
+        (_second_entry, "is entered once", "a second time", None),
+        (
+            _exit_not_current,
+            "is not the current scope where its block ends",
+            "when it is not the current scope where its block ends",
+            None,
+        ),
+        (
+            _exit_in_another_context,
+            "is current where its block ends, but in another context",
+            "or is current there but in another context than it was entered in",
+            None,
+        ),
     ],
 )
 def test_every_usage_error_is_in_the_docstrings(
-    trigger: Callable[[], None], usage: str, on_connect: str | None
+    trigger: Callable[[], None], raised: str, usage: str, on_connect: str | None
 ) -> None:
-    with pytest.raises(UsageError):
+    with pytest.raises(UsageError) as found:
         trigger()
+    assert raised in str(found.value)
     assert usage in _words(UsageError.__doc__)
     if on_connect is not None:
         assert on_connect in _words(connect.__doc__)
@@ -1068,3 +1193,42 @@ def test_the_states_before_set_up_are_in_the_docstrings() -> None:
         assert phrase in _words(UsageError.__doc__)
     assert "before set-up has finished" in _words(connect.__doc__)
     assert "neolith's app out" in _words(connect.__doc__)
+
+
+@pytest.mark.spec("TRN-53")
+@pytest.mark.usefixtures("host")
+def test_an_out_of_order_exit_is_reported_between_roots_of_one_app() -> None:
+    def run() -> None:
+        outer, inner = command_scope("web"), command_scope("web")
+        outer.__enter__()
+        inner.__enter__()
+        try:
+            with pytest.raises(UsageError, match="is not the current scope"):
+                outer.__exit__(None, None, None)
+        finally:
+            inner.__exit__(None, None, None)
+
+    _isolated(run)
+
+
+@pytest.mark.usefixtures("host")
+def test_an_exit_without_an_open_root_does_nothing() -> None:
+    def run() -> None:
+        never = command_scope("web")
+        assert never.__exit__(None, None, None) is None
+        with command_scope("stock"):
+            once = command_scope("web")
+            with once:
+                pass
+            # A second exit leaves the enclosing root current and open.
+            assert once.__exit__(None, None, None) is None
+            assert _quote().caller == "stock"
+
+    _isolated(run)
+
+
+def test_a_command_scope_is_made_only_by_command_scope() -> None:
+    # The annotation says only "a context manager"; the class is private.
+    made: Any = type(command_scope("web"))
+    with pytest.raises(TypeError, match=r"made by neolith\.command_scope\(\)"):
+        made("web")

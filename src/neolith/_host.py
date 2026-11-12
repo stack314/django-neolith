@@ -671,8 +671,12 @@ def command_scope(
     generator or async generator, and roots opened in it close first. Then
     the enclosing scope is current again on exit. A scope that finds itself
     not current where its block ends, or cannot be reset there, still closes,
-    and its exit raises ``UsageError``; calls in the context it was left
-    current in are refused, since it has closed.
+    and its exit raises ``UsageError``, with the block's own exception, if
+    any, as its context; calls in the context it was left current in are
+    refused, since it has closed. A signal to stop that the block ends with
+    (cancellation, ``KeyboardInterrupt``, ``SystemExit``) is never replaced:
+    it propagates, with the report added to it as a note and logged on the
+    ``neolith.host`` logger.
 
     The arguments are checked when it is called, and the host on entry.
 
@@ -695,8 +699,10 @@ def command_scope(
         ValueError: If ``timeout`` is not finite.
         UsageError: On entry, if the host is not set up, if ``app`` is not
             the label of a hosted app, or if the scope was opened before; a
-            refused entry opens nothing, and can be tried again. On exit, if
-            the scope is not the one current where its block ends.
+            refused entry opens nothing, and can be tried again. On exit,
+            if the scope is not the one current where its block ends, or is
+            current there but in another context than it was entered in;
+            unless the block ends with a signal to stop.
     """
     if type(app) is not str:
         raise TypeError(
@@ -817,20 +823,37 @@ class _CommandScope:
         if current:
             try:
                 _context._CURRENT.reset(token)
-            except ValueError:  # left current in another context
-                pass
+            except ValueError:
+                found = (
+                    "the scope is current where its block ends, but in another "
+                    "context than the one it was entered in"
+                )
             else:
                 return
+        else:
+            found = (
+                "the scope is not the current scope where its block ends: a "
+                "root opened in it is still open, or its block was left in "
+                "another context than it was entered in"
+            )
         # The state found is not the one the block opened: say so, rather
         # than leave a context where calls fail later for no visible reason.
-        raise UsageError(
-            f"{self._where()}: the scope closed where it is not the current "
-            "scope, so the scope it was opened in could not be made current "
-            "again. Its block was left in another context than it was entered "
-            "in, as when a generator or async generator holds it across a "
-            "yield, or a root opened in it is still open. Open and close a "
-            "command scope in one block that does not yield"
+        report = (
+            f"{self._where()}: {found}, so the scope it was opened in cannot be "
+            "made current again there. The scope has closed. Open and close a "
+            "command scope in one block that does not yield, and close the "
+            "roots opened in it first"
         )
+        if error is not None and not isinstance(error, Exception):
+            # A signal to stop, such as cancellation, KeyboardInterrupt or
+            # SystemExit, is never replaced: it goes on, carrying the report.
+            # It is logged too, since a GeneratorExit that closes a generator
+            # is swallowed with its notes.
+            error.add_note(f"neolith.UsageError: {report}")
+            with contextlib.suppress(Exception):
+                _log.error("%s", report)
+            return
+        raise UsageError(report)
 
     def __repr__(self) -> str:
         return f"<command scope for {_quoted(self._app)}>"

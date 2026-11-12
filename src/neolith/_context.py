@@ -68,7 +68,9 @@ class UsageError(RuntimeError):
     - by ``connect()`` for a contract the host, once set up, does not know;
     - by entering a ``command_scope`` before set-up has finished or while an
       override leaves neolith's app out, for an app that is not hosted, or a
-      second time; and by its exit when it is not the current scope there.
+      second time; and by its exit when it is not the current scope where
+      its block ends, or is current there but in another context than it was
+      entered in, unless the block ends with a signal to stop.
     """
 
 
