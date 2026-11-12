@@ -428,20 +428,38 @@ def test_a_declaring_class_keeps_the_default_it_sets() -> None:
     assert _declare(_valid(default=False)).default is False
 
 
-@pytest.mark.spec("APP-6")
+@pytest.mark.spec("APP-6", "APP-7")
 @pytest.mark.parametrize(
-    "body",
-    [{}, {"label": "other"}, {"name": "shop.other", "label": "other"}, {"helper": 1}],
-    ids=["empty", "relabelled", "redeclared", "with a public name"],
+    ("body", "fields"),
+    [
+        ({}, []),
+        ({"label": "other"}, ["label"]),
+        ({"name": "shop.other", "label": "other"}, []),
+        ({"helper": 1}, ["helper"]),
+        (
+            {"name": "shop.child", "label": "Child", "requires": [Stock], "helper": 1},
+            ["helper", "label", "requires"],
+        ),
+    ],
+    ids=["empty", "relabelled", "redeclared", "with a public name", "several"],
 )
-def test_a_subclass_of_a_declaring_class_is_refused(body: Namespace) -> None:
-    parent = _declare(_valid(), name="ParentConfig")
+def test_a_subclass_of_a_declaring_class_is_refused_with_its_other_refusals(
+    body: Namespace, fields: list[str]
+) -> None:
+    # The parent's own body was checked when it was defined, and is not
+    # reported again.
+    parent = _declare(_valid(requires=(Couriers,)), name="ParentConfig")
     with pytest.raises(DeclarationError) as raised:
         _declare(body, parent)
-    assert str(raised.value) == (
-        f"app {__name__}.StockConfig: it extends {__name__}.ParentConfig, which "
-        "holds a declaration; a declaration cannot be extended or relabelled"
+    prefix = f"app {__name__}.StockConfig: "
+    lines = [line.removeprefix(prefix) for line in str(raised.value).split("\n")]
+    extends = (
+        f"it extends {__name__}.ParentConfig, which holds a declaration; a "
+        "declaration cannot be extended or relabelled"
     )
+    assert extends in lines
+    lines.remove(extends)
+    assert [line.split(": ")[0] for line in lines] == fields
 
 
 # The app's name.
@@ -788,6 +806,30 @@ def test_an_allow_list_that_is_not_exactly_a_tuple_is_refused(callers: object) -
     assert field == "provides"
     assert text.startswith("stock.v1: principal_from is ")
     assert "not a tuple" in text
+    # Only a str is the one-element tuple that lost its comma.
+    assert ("trailing comma" in text) == (callers == "web")
+
+
+@pytest.mark.spec("APP-6")
+def test_a_one_element_tuple_without_its_comma_is_named_as_that() -> None:
+    # (Provided(...)) and ("orders") are the entry itself, not a tuple.
+    field, text = _refusal(_valid(provides=_provided()))
+    assert field == "provides"
+    assert "got a neolith._declaration.Provided; the trailing comma" in text
+    assert _snapshot(_declare(_valid(provides=(_provided(),)))).provides
+
+    field, text = _refusal(_valid(provides=(_provided(principal_from="orders"),)))
+    assert field == "provides"
+    assert text.endswith(
+        'comma of a one-element tuple is missing, write principal_from=("<app>",)'
+    )
+    written = _provided(principal_from=("orders",))
+    assert _snapshot(_declare(_valid(provides=(written,)))).provides[0].principal_from
+
+    # A Provided is the missing-comma case in provides only.
+    for other in ("requires", "resources", "batteries"):
+        _field, text = _refusal(_valid(**{other: _provided()}))
+        assert "trailing comma" not in text
 
 
 @pytest.mark.spec("APP-5", "APP-6")

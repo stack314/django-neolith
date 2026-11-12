@@ -281,16 +281,20 @@ class NeolithAppConfig(AppConfig):
 def _check(cls: type[NeolithAppConfig]) -> tuple[list[str], Declaration | None]:
     """Check a new subclass; return its refusals and, if it declares, its snapshot."""
     extras = [k for k in cls.__mro__ if k not in NeolithAppConfig.__mro__]
+    refusals: list[str] = []
+    checked: set[type] = set()
     for parent in extras[1:]:
         if _SNAPSHOT_ATTR in vars(parent):
-            return [
+            refusals.append(
                 f"it extends {_class_name(parent)}, which holds a declaration; "
                 "a declaration cannot be extended or relabelled"
-            ], None
+            )
+            # The parent's own classes were checked when it was defined.
+            checked.update(parent.__mro__)
+    extras = [k for k in extras if k not in checked]
 
     own = dict(vars(cls))
     declares = "name" in own
-    refusals: list[str] = []
     for klass in extras:
         body = own if klass is cls else dict(vars(klass))
         whole = klass is cls and declares
@@ -378,7 +382,11 @@ def _entries(field: str, own: dict[str, Any], refusals: list[str]) -> tuple[Any,
         return ()
     value = own[field]
     kind = type(value)
-    if kind is str or issubclass(kind, type):
+    if (
+        kind is str
+        or issubclass(kind, type)
+        or (field == "provides" and kind is Provided)
+    ):
         refusals.append(
             f"{field}: got {_show(value)}; the trailing comma of a one-element "
             f"tuple is missing, write {_EXAMPLES[field]}"
@@ -489,6 +497,12 @@ def _check_principal_from(
     )
     if value is _MISSING:
         refusals.append(f"{where} is missing; {advice}")
+        return None
+    if type(value) is str:
+        refusals.append(
+            f"{where} is {_show(value)}, not a tuple; the trailing comma of a "
+            'one-element tuple is missing, write principal_from=("<app>",)'
+        )
         return None
     if type(value) is not tuple:
         refusals.append(f"{where} is {_show(value)}, not a tuple; {advice}")
