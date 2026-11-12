@@ -506,4 +506,4 @@ def setup(app: Sphinx) -> dict[str, Any]:
     app.connect("autodoc-process-docstring", _process_docstring)
     app.connect("html-page-context", _page_context)
     app.connect("build-finished", _write_planned)
-    return {"version": "1", "parallel_read_safe": False, "parallel_write_safe": True}
+    return {"version": "1", "parallel_read_safe": False, "parallel_write_safe": False}

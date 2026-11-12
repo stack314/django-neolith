@@ -22,9 +22,10 @@ it, and inside the repository must sit under ``build/``.
 - the repository documents in ``mirror_table``, word for word. Only link
   targets change: a link to a mirrored file points at its page, and a link to
   any other file of the repository points at it on GitHub at the built
-  commit. markdown-it-py parses the source and the staged copy, and every
-  token but a link's target must be equal, or the file is left out. A link
-  to a path that does not exist is a problem;
+  commit. markdown-it-py parses the source and the staged copy: every token
+  but a link's target must be equal, and each staged target must be the one
+  the source's target leads to, or the file is left out. A link to a path
+  that does not exist is a problem;
 - the API reference, one page per group of ``API_GROUPS``, which must name
   each name of ``neolith.__all__`` but ``__version__`` exactly once;
 - the index of requirement IDs, read with ``scripts/spec_trace.py``, whose
@@ -61,6 +62,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import functools
 import hashlib
 import inspect
 import io
@@ -74,7 +76,7 @@ import sys
 import tomllib
 import urllib.parse
 import urllib.request
-from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
@@ -350,7 +352,10 @@ def _destinations(tokens: Sequence[Token]) -> Iterator[str]:
 
 
 def _tokens_differ(
-    old: Sequence[Token], new: Sequence[Token], where: str
+    old: Sequence[Token],
+    new: Sequence[Token],
+    where: str,
+    expected: Callable[[str], str] | None,
 ) -> str | None:
     if len(old) != len(new):
         return f"{where}: {len(old)} tokens became {len(new)}"
@@ -370,21 +375,39 @@ def _tokens_differ(
         attrs_b = {k: v for k, v in b.attrs.items() if k != target}
         if attrs_a != attrs_b:
             return f"{place}: attributes changed"
-        changed = _tokens_differ(a.children or [], b.children or [], place)
+        if target is not None and expected is not None:
+            was, now = str(a.attrs.get(target, "")), str(b.attrs.get(target, ""))
+            should = _MARKDOWN.normalizeLink(expected(was))
+            if now != should:
+                return f"{place}: {was!r} staged as {now!r}, expected {should!r}"
+        changed = _tokens_differ(a.children or [], b.children or [], place, expected)
         if changed:
             return changed
     return None
 
 
-def same_text(original: str, staged: str) -> str | None:
-    """Say how ``staged`` differs from ``original`` beyond link targets, if it does."""
+def same_text(
+    original: str, staged: str, expected: Callable[[str], str] | None = None
+) -> str | None:
+    """Say how ``staged`` differs from ``original``, if it does.
+
+    markdown-it-py parses both: every token but a link's target must be
+    equal, and with ``expected``, each staged target must be the one the
+    source's target leads to, so a link the rewrite missed fails closed.
+
+    Args:
+        original: The source.
+        staged: The staged copy.
+        expected: The staged target of a source target, as ``Links.target``
+            gives it; ``None`` leaves targets unchecked.
+    """
     old_env: dict[str, object] = {}
     new_env: dict[str, object] = {}
     old = _MARKDOWN.parse(original, old_env)
     new = _MARKDOWN.parse(staged, new_env)
     if _definitions(old_env) != _definitions(new_env):
         return "link definitions changed"
-    return _tokens_differ(old, new, "token")
+    return _tokens_differ(old, new, "token", expected)
 
 
 def _definitions(env: Mapping[str, object]) -> dict[str, object]:
@@ -645,13 +668,20 @@ def prepare_out(root: Path, out: Path) -> Path:
 def _mirror(
     root: Path, table: Mapping[str, str], problems: list[str]
 ) -> dict[str, str]:
-    links = Links(root, table, repo_url(root), commit(root))
+    url, ref = repo_url(root), commit(root)
+    # The rewrite edits where its regexes find a link; the proof reads each
+    # link markdown-it-py finds, so its problems are the ones reported, and a
+    # link the regexes missed is still judged.
+    links = Links(root, table, url, ref)
+    proof = Links(root, table, url, ref)
     pages: dict[str, str] = {}
     for repo_path, staged_path in table.items():
         try:
             original = (root / repo_path).read_text(encoding="utf-8")
             staged = rewrite_links(original, repo_path, links)
-            differs = same_text(original, staged)
+            differs = same_text(
+                original, staged, functools.partial(_proved_target, proof, repo_path)
+            )
         except Exception as error:  # reported, and the rest staged
             problems.append(f"{repo_path}: cannot be staged: {error!r}")
             continue
@@ -659,8 +689,12 @@ def _mirror(
             problems.append(f"{repo_path}: staging changed more than links: {differs}")
         else:
             pages[staged_path] = staged
-    problems.extend(links.problems)
+    problems.extend(proof.problems)
     return pages
+
+
+def _proved_target(proof: Links, source: str, target: str) -> str:
+    return proof.target(target, source)
 
 
 def _generated(

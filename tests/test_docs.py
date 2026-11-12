@@ -259,6 +259,56 @@ def test_a_change_markdown_shows_no_text_for_is_refused(
     assert docs.same_text(original, staged) is not None
 
 
+def _proved(text: str, source: str = "CONTRIBUTING.md") -> tuple[str | None, list[str]]:
+    """Stage ``text`` as staging does: what the proof says, and its problems."""
+    links = _links([])
+    proof = _links([])
+    staged = docs.rewrite_links(text, source, links)
+    said = docs.same_text(text, staged, lambda target: proof.target(target, source))
+    return said, proof.problems
+
+
+@pytest.mark.parametrize(
+    ("text", "refusal"),
+    [
+        pytest.param(
+            "~~~\nx = '`'\n~~~\n\n[x](VISION.md)\n\nUse `y`.\n",
+            "'VISION.md' staged as 'VISION.md', expected 'vision.md'",
+            id="backticks-across-blocks",
+        ),
+        pytest.param(
+            "One ` here.\n\n[y](nothere.md)\n\nAnd ` there.\n",
+            "links to nothere.md, which does not exist",
+            id="missing-link-between-backticks",
+        ),
+        pytest.param(
+            "> [v]: VISION.md\n\nSee [the vision][v].\n",
+            "expected 'vision.md'",
+            id="definition-in-a-quote",
+        ),
+        pytest.param(
+            "See [the vision](\nVISION.md).\n",
+            "expected 'vision.md'",
+            id="destination-on-the-next-line",
+        ),
+    ],
+)
+def test_a_link_the_rewrite_misses_fails_closed(text: str, refusal: str) -> None:
+    # Each input is one where a regex of the rewrite reads the Markdown
+    # differently from markdown-it-py; the proof refuses the result.
+    said, problems = _proved(text)
+    assert refusal in " ".join([said or "", *problems]), (said, problems)
+
+
+def test_every_mirrored_target_is_proved() -> None:
+    for repo_path in docs.mirror_table(ROOT):
+        said, problems = _proved(
+            (ROOT / repo_path).read_text(encoding="utf-8"), repo_path
+        )
+        assert said is None, (repo_path, said)
+        assert problems == [], repo_path
+
+
 def test_a_target_with_a_blank_is_written_in_angle_brackets(tmp_path: Path) -> None:
     (tmp_path / "a b.txt").write_text("x", "utf-8")
     problems: list[str] = []
@@ -325,7 +375,11 @@ def test_staging_rewrites_every_link_and_only_links(text: str) -> None:
     links = _links(problems)
     staged = docs.rewrite_links(text, "CONTRIBUTING.md", links)
     assert problems == []
-    assert docs.same_text(text, staged) is None
+    proof = _links([])
+    assert (
+        docs.same_text(text, staged, lambda t: proof.target(t, "CONTRIBUTING.md"))
+        is None
+    )
     markdown = MarkdownIt("commonmark").enable(["table", "strikethrough"])
     before = list(docs._destinations(markdown.parse(text)))
     after = list(docs._destinations(markdown.parse(staged)))
@@ -1435,8 +1489,19 @@ def _run(call: str, setup: str = "") -> list[str]:
 
 @_needs_sphinx
 def test_the_site_builds_and_passes_every_check(tmp_path: Path) -> None:
-    assert _run(f"docs.check(docs.ROOT, Path({str(tmp_path)!r}))") == []
+    extra = {
+        "extra/code.md": "---\norphan: true\n---\n\n# Code\n\n"
+        "The text `CON-1` stays code.\n\n## About CON-1\n\nThis heading stays one.\n"
+    }
+    assert _run(f"docs.check(docs.ROOT, Path({str(tmp_path)!r}), {extra!r})") == []
     built = tmp_path / "html"
+    code = (built / "extra" / "code" / "index.html").read_text(encoding="utf-8")
+    (span,) = re.findall(r"<code[^>]*>.*?</code>", code, re.DOTALL)
+    assert "CON-1" in span
+    assert "<a" not in span, span
+    (heading,) = re.findall(r"<h2[^>]*>.*?</h2>", code, re.DOTALL)
+    assert "CON-1" in heading
+    assert "spec/01-contracts" not in heading, heading
 
     def read(path: str) -> str:
         return (built / path / "index.html").read_text(encoding="utf-8")
