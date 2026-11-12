@@ -308,16 +308,19 @@ class CallContext:
 
     Attributes:
         principal: On whose behalf the call is made, or ``None``.
-        trace_id: The W3C trace identifier.
-        span_id: The span of this call.
+        trace_id: The W3C trace identifier: a new one on a root, the
+            caller's on a call.
+        span_id: The span of this call or root; each has a new one.
         tracestate: The W3C ``tracestate`` that goes with them, empty when
             there is none.
         deadline: A ``time.monotonic()`` reading on this host, or ``None``
             when the call has none.
         idempotency_key: This call's key; ``None`` on a root that is not
             itself a call.
-        caller: The app that made the call; ``None`` on a root that is not
-            itself a call.
+        caller: The app that made the call, the app its parent scope belongs
+            to (TRN-31). ``None`` on a root that is not itself a call, and on
+            a call made from a scope of no app; ADR 0010 Decision 7 refuses
+            such a call, which this version does not do yet.
         scope_id: Names the scope on this host that issued the value.
     """
 

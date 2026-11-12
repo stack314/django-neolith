@@ -17,7 +17,13 @@ in Google sections, and these tests check that:
 - every requirement ID cited is a live requirement of ``spec/``, read by
   ``scripts/spec_trace.py``, and every ``ADR NNNN`` and ``spec NN`` cited has
   its file;
-- no annotation names an object of the package that is not exported.
+- no annotation, base class or parameter default names an object of the
+  package that is not exported, but for the defaults ``_ADMITTED_DEFAULTS``
+  lists with their reasons;
+- a public member a class inherits from a class of the package that is not
+  exported is checked as the class's own; one inherited from an exported
+  class is checked there, and one from outside the package (a builtin,
+  Django) is not checked.
 
 The checks read text someone else writes, so each admits a stated set and
 refuses the rest: a section, a word shaped like a requirement ID or a name in
@@ -25,6 +31,7 @@ an annotation that the check does not know is a problem, not a pass.
 """
 
 import builtins
+import importlib
 import logging
 import re
 from collections.abc import Iterator
@@ -44,6 +51,13 @@ _SECTIONS = {"text", "parameters", "attributes", "returns", "raises"}
 _ID_SHAPED = re.compile(r"(?<![\w-])[A-Z]+-\d+(?![\w-])")
 # Words of that shape that are names of other things, not requirement IDs.
 _NOT_IDS = frozenset({"UTF-8", "ECMA-262"})
+# Parameter defaults that name an object the package does not export, each with
+# its reason. Every other private name in a signature is refused.
+_ADMITTED_DEFAULTS = {
+    # The marker for an argument left out, so that NeolithAppConfig can refuse
+    # it with the app's name; its public form is open in #63.
+    ("neolith.Provided", "_MISSING"),
+}
 _ADR = re.compile(r"\bADRs?\b(?P<rest>(?:\s+(?:and\s+|or\s+)?\d+,?)*)")
 _SPEC = re.compile(r"\bspecs?\b(?P<rest>(?:\s+(?:and\s+|or\s+)?\d+,?)*)")
 
@@ -181,24 +195,51 @@ def _annotations(found: griffe.Object) -> Iterator[str | griffe.Expr | None]:
         yield found.annotation
 
 
-def _private_names(found: griffe.Object, exported: set[str]) -> Iterator[str]:
-    """Names in the object's annotations that the package does not export."""
+def _defaults(found: griffe.Object) -> Iterator[str | griffe.Expr | None]:
+    if isinstance(found, griffe.Class) and "__init__" in found.members:
+        yield from _defaults(_target(found.members["__init__"]))
+    if isinstance(found, griffe.Function):
+        for function in (found, *(found.overloads or ())):
+            for parameter in function.parameters:
+                # griffe gives a literal as its text, which names no object.
+                if isinstance(parameter.default, griffe.Expr):
+                    yield parameter.default
+
+
+def _bases(found: griffe.Object) -> Iterator[str | griffe.Expr | None]:
+    if isinstance(found, griffe.Class):
+        yield from found.bases
+
+
+def _private_names(
+    found: griffe.Object, exported: set[str]
+) -> Iterator[tuple[str, str]]:
+    """Where the object names something the package does not export, and what.
+
+    Its annotations, its base classes and its parameters' defaults are read.
+    """
     package = found.package.name
-    for annotation in _annotations(found):
-        # griffe gives a constant as its text; None is the one an annotation uses.
-        if annotation is None or annotation == "None":
-            continue
-        if isinstance(annotation, str):
-            yield f"{annotation!r}, which griffe could not read"
-            continue
-        for part in annotation.iterate(flat=True):
-            if not isinstance(part, griffe.ExprName):
+    for where, expressions in (
+        ("annotations", _annotations(found)),
+        ("bases", _bases(found)),
+        ("defaults", _defaults(found)),
+    ):
+        for expression in expressions:
+            # griffe gives a constant as its text; None is the one an
+            # annotation uses.
+            if expression is None or expression == "None":
                 continue
-            path = part.canonical_path
-            # A type parameter's path ends "function[T]"; it names no object.
-            own = path == package or path.startswith(f"{package}.")
-            if own and not path.endswith("]") and path not in exported:
-                yield part.name
+            if isinstance(expression, str):
+                yield where, f"{expression!r}, which griffe could not read"
+                continue
+            for part in expression.iterate(flat=True):
+                if not isinstance(part, griffe.ExprName):
+                    continue
+                path = part.canonical_path
+                # A type parameter's path ends "function[T]"; it names no object.
+                own = path == package or path.startswith(f"{package}.")
+                if own and not path.endswith("]") and path not in exported:
+                    yield where, part.name
 
 
 def _raised(name: str, package: griffe.Module, exported: dict[str, str]) -> bool:
@@ -219,7 +260,24 @@ def _raised(name: str, package: griffe.Module, exported: dict[str, str]) -> bool
                 return True
             if path in klass.modules_collection:
                 pending.append(_target(klass.modules_collection[path]))
+            elif _outside_exception(path, package.name):
+                return True
     return False
+
+
+def _outside_exception(path: str, package: str) -> bool:
+    """Whether ``path`` names an exception of another package, such as Django.
+
+    griffe loads only the package, so such a base is imported to be read.
+    """
+    module, _, name = path.rpartition(".")
+    if not module or path.startswith(f"{package}."):
+        return False
+    try:
+        found = getattr(importlib.import_module(module), name, None)
+    except ImportError:
+        return False
+    return isinstance(found, type) and issubclass(found, BaseException)
 
 
 def api_problems(
@@ -245,19 +303,65 @@ def api_problems(
     ]
 
 
-def _members(found: griffe.Object) -> Iterator[tuple[str, griffe.Object]]:
-    if isinstance(found, griffe.Class):
-        for name, member in found.members.items():
-            if not name.startswith("_"):
-                yield name, _target(member)
+def _members(
+    found: griffe.Object, exported: set[str]
+) -> Iterator[tuple[str, griffe.Object]]:
+    """The public members a class shows: its own, and those it inherits.
+
+    An inherited member is shown, and checked, where it is defined, unless
+    that class is in the package and not exported; then the class that
+    inherits it shows it. A member from outside the package, such as one of
+    ``object`` or of Django's ``AppConfig``, is not checked here.
+    """
+    if not isinstance(found, griffe.Class):
+        return
+    package = found.package.name
+    for name, member in found.all_members.items():
+        if name.startswith("_"):
+            continue
+        if not member.inherited:
+            yield name, _target(member)
+            continue
+        target = _target(member)
+        owner = target.parent.path if target.parent is not None else ""
+        inside = owner.startswith(f"{package}.")
+        if inside and owner not in exported:
+            yield name, target
+
+
+def _base_problems(found: griffe.Object) -> Iterator[str]:
+    """Say which base classes of the package griffe cannot follow.
+
+    griffe leaves out, without a word, the members of a base it cannot
+    resolve, and every inherited member when the class has no MRO.
+    """
+    if not isinstance(found, griffe.Class):
+        return
+    package = found.package.name
+    for base in found.bases:
+        path = base if isinstance(base, str) else base.canonical_path
+        # A name with no module is a builtin, or a name griffe could not
+        # place; one of another package is not loaded and is not followed.
+        bare = "." not in path and not hasattr(builtins, path)
+        if not (bare or path.startswith(f"{package}.")):
+            continue
+        try:
+            found.modules_collection.get_member(path)
+        except KeyError:
+            yield f"its base {path} cannot be resolved"
+    try:
+        found.mro()
+    except ValueError as error:
+        yield f"it has no method resolution order: {error}"
 
 
 def _texts(package: griffe.Module, names: list[str]) -> Iterator[tuple[str, str]]:
     """Every docstring and ``#:`` comment of the public API, with its owner."""
+    exported = {_target(package[name]).path for name in names}
     for name in names:
         top = _target(package[name])
         label = f"{package.name}.{name}"
-        for where, found in ((label, top), *_members(top)):
+        for where, found in ((label, top), *_members(top, exported)):
             if where != label:
                 where = f"{label}.{where}"
             if found.docstring is not None:
@@ -274,9 +378,11 @@ def _object_problems(
     label: str, found: griffe.Object, package: griffe.Module, exported: dict[str, str]
 ) -> list[str]:
     problems = [
-        f"{label}: its annotations name {name}, which {package.name} does not export"
-        for name in _private_names(found, set(exported.values()))
+        f"{label}: its {where} name {name}, which {package.name} does not export"
+        for where, name in _private_names(found, set(exported.values()))
+        if where != "defaults" or (label, name) not in _ADMITTED_DEFAULTS
     ]
+    problems += [f"{label}: {problem}" for problem in _base_problems(found)]
     if found.docstring is None:
         if isinstance(found, griffe.Attribute) and _comment(found):
             return problems
@@ -305,7 +411,7 @@ def _object_problems(
                 f"{label}.__init__", constructor, package, exported
             )
     documented = listed.get("attributes", [])
-    members = dict(_members(found))
+    members = dict(_members(found, set(exported.values())))
     for name in documented:
         if not isinstance(members.get(name), griffe.Attribute):
             problems.append(f"{label}: Attributes lists {name}, which it does not have")
@@ -316,9 +422,9 @@ def _object_problems(
                 problems.append(f"{label}.{name}: documented twice")
             continue
         problems += [
-            f"{label}.{name}: its annotations name {private}, which "
+            f"{label}.{name}: its {where} name {private}, which "
             f"{package.name} does not export"
-            for private in _private_names(member, set(exported.values()))
+            for where, private in _private_names(member, set(exported.values()))
         ]
         if not isinstance(member, griffe.Attribute) or name not in documented:
             problems.append(f"{label}.{name}: has no docstring")
@@ -348,6 +454,44 @@ def test_every_exported_name_is_checked() -> None:
     assert "neolith.Principal.claims" in checked
 
 
+# Each alias of a portable form, and the form's name under spec 01's Wire
+# encodings.
+_FORMS = {"Binary": "bytes", "Decimal128": "decimal", "Duration": "duration"}
+# A bound in a form's line: from "below" or "at most" to the end of the clause.
+_BOUND = re.compile(r"\b(?:below|at most) [^:,.;]+")
+
+
+def _wire_encodings() -> dict[str, str]:
+    """Each form's line under spec 01's Wire encodings, by the form's names."""
+    text = (ROOT / "spec" / "01-contracts.md").read_text(encoding="utf-8")
+    section = text.split("\n## Wire encodings\n", 1)[1].split("\n## ", 1)[0]
+    lines: dict[str, str] = {}
+    for line in section.splitlines():
+        if found := re.match(r"- \*\*(.+?):\*\* ", line):
+            for name in re.split(r"\*\* and \*\*", found[1]):
+                lines[name] = line
+    return lines
+
+
+def test_each_alias_states_its_forms_bounds_as_spec_01_words_them() -> None:
+    package = _load("neolith", Path(neolith.__file__).resolve().parents[1])
+    aliases = {
+        name for name in PUBLIC if isinstance(_target(package[name]), griffe.Attribute)
+    }
+    assert aliases == set(_FORMS)
+    lines = _wire_encodings()
+    for alias, form in _FORMS.items():
+        comment = _comment(_target(package[alias]))
+        assert comment is not None
+        bounds = _BOUND.findall(lines[form])
+        missing = [bound for bound in bounds if bound not in comment]
+        assert missing == [], f"{alias}: {comment}"
+    # The bounds the forms have today, so that a change of wording cannot
+    # empty the check.
+    assert _BOUND.findall(lines["duration"]) == ["below 10^11 seconds in magnitude"]
+    assert "at most 34 digits" in _BOUND.findall(lines["decimal"])
+
+
 def test_the_records_are_read(records: Records) -> None:
     assert "CON-30" in records.live
     assert {"01", "03"} <= records.documents
@@ -358,10 +502,11 @@ def test_the_records_are_read(records: Records) -> None:
 
 _GOOD = '''
 """A sample."""
+import json
 from collections.abc import Mapping
 from typing import Annotated
 
-__all__ = ["Limit", "Problem", "Thing", "make"]
+__all__ = ["Bigger", "Limit", "Problem", "Thing", "Unreadable", "make"]
 
 
 class _Hidden:
@@ -370,6 +515,10 @@ class _Hidden:
 
 class Problem(ValueError):
     """What ``make`` raises."""
+
+
+class Unreadable(json.JSONDecodeError):
+    """What ``make`` raises for text it cannot read."""
 
 
 #: The limit (spec 01): at most 32 levels, as CON-30 says, in UTF-8.
@@ -419,6 +568,10 @@ class Thing:
         return None
 
 
+class Bigger(Thing):
+    """A thing with more parts; what it inherits is checked on ``Thing``."""
+
+
 def make[T](kind: type[T], /, *names: str, strict: bool = False, **rest: int) -> T:
     """Make one.
 
@@ -434,6 +587,7 @@ def make[T](kind: type[T], /, *names: str, strict: bool = False, **rest: int) ->
     Raises:
         Problem: If it cannot be made.
         KeyboardInterrupt: If interrupted.
+        Unreadable: If a name cannot be read.
     """
     return kind()
 '''
@@ -574,6 +728,13 @@ def test_a_sample_in_every_admitted_shape_passes(
             id="raises-a-private-class",
         ),
         pytest.param(
+            "class Unreadable(json.JSONDecodeError):",
+            "class Unreadable(json.JSONDecoder):",
+            "sample.make: Raises names Unreadable, which is neither a builtin "
+            "exception nor one that sample exports",
+            id="raises-a-class-of-another-package-that-is-no-exception",
+        ),
+        pytest.param(
             "    Returns:\n        The new object.\n",
             "    Note:\n        The new object.\n",
             "sample.make: has a section the check does not read: Note",
@@ -624,6 +785,52 @@ def test_a_sample_in_every_admitted_shape_passes(
             "sample.Thing.name: its annotations name _Hidden, which sample does "
             "not export",
             id="private-name-on-an-attribute",
+        ),
+        pytest.param(
+            "class Thing:\n",
+            "class Thing(_Hidden):\n",
+            "sample.Thing: its bases name _Hidden, which sample does not export",
+            id="private-base",
+        ),
+        pytest.param(
+            "class Problem(ValueError):",
+            "class Problem(ValueError, list[_Hidden]):",
+            "sample.Problem: its bases name _Hidden, which sample does not export",
+            id="private-name-in-a-generic-base",
+        ),
+        pytest.param(
+            "parts: Mapping[str, object] | None = None",
+            "parts: Mapping[str, object] | None = _Hidden()",
+            "sample.Thing: its defaults name _Hidden, which sample does not export",
+            id="private-default",
+        ),
+        pytest.param(
+            "strict: bool = False, **rest",
+            "strict: bool = _Hidden.flag, **rest",
+            "sample.make: its defaults name _Hidden, which sample does not export",
+            id="private-name-in-a-default-attribute",
+        ),
+        pytest.param(
+            '    """Not exported."""\n\n\nclass Problem(ValueError):',
+            '    """Not exported."""\n\n    def extra(self) -> None:\n'
+            "        return None\n\n\nclass Problem(ValueError, _Hidden):",
+            "sample.Problem.extra: has no docstring",
+            id="inherited-member-without-docstring",
+        ),
+        pytest.param(
+            '    """Not exported."""\n\n\nclass Problem(ValueError):',
+            '    """Not exported."""\n\n    def extra(self) -> "_Hidden":\n'
+            '        """Return it."""\n        return self\n\n\n'
+            "class Problem(ValueError, _Hidden):",
+            "sample.Problem.extra: its annotations name _Hidden, which sample "
+            "does not export",
+            id="inherited-member-naming-a-private-class",
+        ),
+        pytest.param(
+            "class Bigger(Thing):",
+            "class Bigger(Thing, _Gone):",
+            "sample.Bigger: its base _Gone cannot be resolved",
+            id="base-that-cannot-be-resolved",
         ),
         pytest.param(
             "strict: bool = False, **rest: int) -> T:",

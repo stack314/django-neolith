@@ -268,10 +268,11 @@ _BINARY = _Form(
     with_info=True,
 )
 
-#: A duration (spec 01): a ``timedelta`` below 10**11 seconds, written
-#: ``"1.500s"``.
+#: A duration (spec 01): a ``timedelta`` below 10^11 seconds in magnitude,
+#: written ``"1.500s"``.
 Duration = Annotated[timedelta, _DURATION]
-#: A decimal (spec 01): a finite ``Decimal`` of at most 34 digits, written
+#: A decimal (spec 01): a finite ``Decimal`` of at most 34 digits, not
+#: counting the sign and the point, so below 10^34 in magnitude, written
 #: ``"-12.50"``.
 Decimal128 = Annotated[Decimal, _DECIMAL]
 #: Bytes (spec 01): written in base64url with padding, such as ``"_w=="``, and

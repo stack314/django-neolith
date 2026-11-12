@@ -447,7 +447,7 @@ class Action:
     idempotent: bool
     request: type[BaseModel]
     reply: type[BaseModel] | None
-    errors: Mapping[str, type[BaseModel]] = field(default_factory=lambda: _FrozenMap())
+    errors: Mapping[str, type[BaseModel]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         # A frozen dict, however the caller passed it, so Action stays
@@ -745,12 +745,15 @@ def action(
         function: The method, when the decorator is used bare, as ``@action``.
         idempotent: Whether the action is idempotent. An action is
             non-idempotent unless declared idempotent.
-        errors: The action's own error kinds, each with its detail record,
-            for example ``errors={"out_of_stock": OutOfStock}``. A kind is
-            lowercase ASCII letters, digits and underscores, starting with a
-            letter, and is not a standard kind. A detail record follows the
-            rules of a request record. ``@contract`` checks them, naming the
-            contract, the action and the kind.
+        errors: The action's own error kinds, a ``dict`` from each kind to
+            its detail record, for example
+            ``errors={"out_of_stock": OutOfStock}``. A kind is lowercase ASCII
+            letters, digits and underscores, starting with a letter; it is
+            neither a standard kind nor a name reserved for a later standard
+            kind (CON-23). A detail record follows the rules of a request
+            record, and nests maps and lists at most 32 levels deep (CON-30).
+            ``@contract`` checks them, naming the contract, the action and
+            the kind.
 
     Returns:
         The method, marked, when used bare; otherwise a decorator that marks

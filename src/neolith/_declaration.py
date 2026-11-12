@@ -94,7 +94,18 @@ class Provided:
 
     Nothing is checked here: the class body runs before the config class
     exists. ``NeolithAppConfig`` checks every entry with the rest of the
-    declaration, and its error names the app.
+    declaration, and its error names the app. An argument left out is refused
+    there too.
+
+    Args:
+        contract: The contract's class, which carries ``@contract``.
+        implementation: The dotted path of the implementation class.
+        principal_from: The names of the calling apps that may assert a
+            principal on calls to this contract, as a ``tuple``.
+
+    Raises:
+        TypeError: When a subclass is defined; ``Provided`` cannot be
+            subclassed.
     """
 
     __slots__ = ("_contract", "_implementation", "_principal_from")
@@ -215,6 +226,25 @@ class NeolithAppConfig(AppConfig):
 
     A declaration outside this form raises ``DeclarationError`` when the class
     is defined, listing every refusal.
+
+    The four fields are not set on this class. A declaring class sets those
+    it has an entry for, and its snapshot holds an empty tuple for each one
+    left out.
+
+    Attributes:
+        default: Django's option: whether Django picks this config for its
+            app on its own. ``False`` on this class and on a base class;
+            ``True`` on a declaring class unless its own body sets it.
+        provides: The contracts the app provides, one ``Provided`` each.
+        requires: The contract classes the app calls.
+        resources: The kinds of resource the app needs; ``"database"`` is
+            the one kind admitted.
+        batteries: The Django apps the app relies on, each by its dotted
+            name, such as ``"django.contrib.humanize"``.
+
+    Raises:
+        DeclarationError: When a subclass is defined whose declaration is
+            outside this form.
     """
 
     default = False
@@ -249,6 +279,12 @@ class NeolithAppConfig(AppConfig):
         class or a class whose check never ran, is refused as well. In
         Django's global registry a declared app also needs neolith's own app
         installed.
+
+        Raises:
+            DeclarationError: If the config holds no checked declaration, if
+                its ``name`` or ``label`` differs from the snapshot, or if it
+                is in Django's global registry and neolith's own app is not
+                installed.
         """
         config = type(self)
         snapshot = declaration_of(config)
