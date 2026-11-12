@@ -18,8 +18,9 @@ that set-up: a later set-up in the same process builds its own, and when an
 State the host owns (CONTRIBUTING K6), all of it guarded by one lock:
 
 - the identities that ``connect()`` was asked for before a table existed,
-  with the file and line of each ``connect()``, which set-up checks and
-  then empties;
+  with the file and line of each ``connect()``, which set-up checks,
+  dropping those its table knows; an unknown one stays, so the next set-up
+  reports it again;
 - the hosted apps of the first set-up that passed, since a process hosts one
   set of apps (ADR 0022 Decision 5).
 """
@@ -111,19 +112,22 @@ def _table() -> tuple[Host | None, bool]:
 
     - the registry holds neolith's app and its set-up has published a table:
       that table;
-    - the registry holds neolith's app without a table, or is still loading
-      (``ready`` is false, so a set-up has not ended): no table yet, so
-      ``connect()`` records and the set-up checks;
-    - the loaded registry leaves neolith's app out, as an override or
-      ``set_available_apps`` can: the table of the registry Django restores
-      when that ends, which ``connect()`` checks against; calls wait for it.
+    - the registry holds neolith's app without a table: its set-up has not
+      ended, so ``connect()`` records and that set-up checks;
+    - the registry does not hold neolith's app, loaded or still loading: the
+      table of the registry Django restores when the override or
+      ``set_available_apps`` ends, which ``connect()`` checks at once and
+      calls wait for; with none, no set-up has passed, and ``connect()``
+      records. A later set-up's own load reaches this case for a module
+      imported before neolith's app is created, so that ``connect()`` is
+      checked against the table the set-up would restore.
     """
     config = global_apps.app_configs.get(_LABEL)
     host = _host_of(config)
     if host is not None:
         return host, True
-    if config is not None or not global_apps.ready:
-        return None, config is not None
+    if config is not None:
+        return None, True
     for stored in reversed(global_apps.stored_app_configs):
         config = stored.get(_LABEL)
         if config is not None:

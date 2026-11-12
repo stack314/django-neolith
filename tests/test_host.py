@@ -1285,10 +1285,10 @@ connect("nope.v1")
 """
 
 
-@pytest.mark.spec("APP-12", "APP-14")
+@pytest.mark.spec("APP-12", "APP-14", "APP-15")
 @pytest.mark.parametrize("place", ["__init__", "models"])
 @pytest.mark.parametrize("before_neolith", [True, False])
-def test_connect_during_a_later_set_up_is_recorded_wherever_the_app_sits(
+def test_connect_during_a_later_set_up_is_refused_in_either_phase(
     write_app: WriteApp, tmp_path: Path, place: str, before_neolith: bool
 ) -> None:
     # An undeclared app, loaded by a later set-up, asks for an unknown
@@ -1312,12 +1312,26 @@ def test_connect_during_a_later_set_up_is_recorded_wherever_the_app_sits(
         installed,
     )
     where = tmp_path / package / f"{place}.py"
-    assert printed.splitlines() == [
-        "DeclarationError",
-        f"connect: 'nope.v1' at {where}:4 is not a contract this host knows; it "
-        "knows the contracts its apps provide or require, which are couriers.v3, "
-        "stock.v1",
-    ]
+    knows = (
+        "it knows the contracts its apps provide or require, which are "
+        "couriers.v3, stock.v1"
+    )
+    if place == "__init__" and before_neolith:
+        # Imported before neolith's app is created in this load: checked at
+        # once against the table this set-up would restore (APP-15).
+        assert printed.splitlines() == [
+            "UsageError",
+            f"connect('nope.v1'): no app of this host provides or requires "
+            f"nope.v1; {knows}",
+        ]
+    else:
+        # Imported once neolith's app is created: recorded, and this set-up
+        # reports it with its place (APP-14).
+        assert printed.splitlines() == [
+            "DeclarationError",
+            f"connect: 'nope.v1' at {where}:4 is not a contract this host knows; "
+            f"{knows}",
+        ]
 
 
 @pytest.mark.spec("APP-14")
@@ -1359,3 +1373,28 @@ def test_a_refused_later_set_up_leaves_no_record_its_table_knew(
         "DeclarationError",
         "the first apps are admitted",
     ]
+
+
+@pytest.mark.spec("APP-15")
+@pytest.mark.parametrize("place", ["__init__", "models"])
+def test_connect_while_an_override_without_neolith_loads_is_refused_at_once(
+    write_app: WriteApp, place: str
+) -> None:
+    # A module first imported while an override that leaves neolith out is
+    # loading asks for an unknown identity: Validate ended in the set-up the
+    # override will restore, so it is refused at the connect() line.
+    latecomer = write_app(
+        "", **{place: 'from neolith import connect\n\nconnect("stokc.v1")\n'}
+    )
+    with override_settings(INSTALLED_APPS=host_apps.INSTALLED):
+        recorded = dict(_RECORDED)
+        with (
+            pytest.raises(UsageError, match=r"connect\('stokc.v1'\): no app of this"),
+            override_settings(INSTALLED_APPS=[latecomer]),
+        ):
+            pytest.fail("the override was admitted")
+        assert dict(_RECORDED) == recorded
+        # The restored set-up runs cleanly, and so does a later one.
+        assert _current() is not None
+        with override_settings(INSTALLED_APPS=host_apps.INSTALLED):
+            assert _current() is not None
