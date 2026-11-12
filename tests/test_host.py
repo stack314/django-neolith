@@ -797,6 +797,24 @@ def test_a_connector_holds_its_identity_and_nothing_else() -> None:
         assert stock.level.__name__ == "level"
 
 
+@pytest.mark.spec("APP-14", "APP-15")
+def test_a_connector_is_a_neolith_connector_made_only_by_connect() -> None:
+    stock = connect("stock.v1")
+    assert type(stock) is neolith.Connector
+    assert isinstance(stock, neolith.Connector)
+    # Its class cannot build one: that would skip connect()'s checks and the
+    # identity set-up records (APP-14, APP-15).
+    for args in ((), ("stock.v1",), ("nothing.v9",)):
+        with pytest.raises(TypeError, match=r"made by neolith\.connect\(\)"):
+            neolith.Connector(*args)
+    with pytest.raises(TypeError, match=r"made by neolith\.connect\(\)"):
+        neolith.Connector(identity="stock.v1")
+    with pytest.raises(TypeError):
+
+        class Wider(neolith.Connector):  # type: ignore[misc]
+            pass
+
+
 # Set-up in a fresh process: other sets of apps, and set-up's own failures.
 
 

@@ -41,7 +41,8 @@ from django.apps.registry import Apps
 from django.core.exceptions import ImproperlyConfigured
 from pydantic import BaseModel
 
-from neolith._connector import Connector, InProcess
+from neolith._connector import Connector as Bound
+from neolith._connector import InProcess
 from neolith._contracts import _IDENTITY, Contract
 from neolith._declaration import (
     Declaration,
@@ -74,7 +75,7 @@ class Host:
     """The table one set-up built: what the host knows and who provides it."""
 
     known: frozenset[str]
-    connectors: Mapping[str, Connector]
+    connectors: Mapping[str, Bound]
 
 
 _LOCK: Final = threading.Lock()
@@ -100,7 +101,8 @@ class HostConfig(AppConfig):
 
 def _current() -> Host | None:
     """The table calls run on: the published table of the set-up that
-    Django's global registry holds now, if any."""
+    Django's global registry holds now, if any.
+    """
     host, installed = _table()
     return host if installed else None
 
@@ -180,7 +182,8 @@ def set_up(config: AppConfig) -> None:
 
 def _refuse(error: ImproperlyConfigured) -> NoReturn:
     """Log a refusal, then raise it: a server that loads the app again sees
-    Django's "populate() isn't reentrant", and the log still has the cause."""
+    Django's "populate() isn't reentrant", and the log still has the cause.
+    """
     with contextlib.suppress(Exception):
         _log.error("the host cannot be set up:\n%s", error)
     raise error
@@ -227,7 +230,7 @@ def build(registry: Apps) -> tuple[Host, list[str]]:
         if (found := declaration_of(type(config))) is not None
     ]
     contracts, refusals = resolve([declaration for _, declaration in hosted])
-    connectors: dict[str, Connector] = {}
+    connectors: dict[str, Bound] = {}
     for config, declaration in hosted:
         for provision in declaration.provides:
             try:
@@ -241,7 +244,7 @@ def build(registry: Apps) -> tuple[Host, list[str]]:
             if instance is not None:
                 connectors.setdefault(
                     provision.contract.identity,
-                    Connector(
+                    Bound(
                         provision.contract.declaration,
                         InProcess(
                             provision.contract.declaration,
@@ -475,7 +478,7 @@ def _log_cause(where: str, error: Exception) -> None:
         _log.error("%s", where, exc_info=error)
 
 
-def connect(identity: str, /) -> "Connected":
+def connect(identity: str, /) -> "Connector":
     """Return a connector to the contract version ``identity``.
 
     ``identity`` is ``<name>.v<N>``, a contract a hosted app provides or
@@ -503,7 +506,7 @@ def connect(identity: str, /) -> "Connected":
                 f"connect({_quoted(identity)}): no app of this host provides or "
                 f"requires {_long(identity)}; {_knows(host)}"
             )
-    return Connected(identity)
+    return Connector._made(identity)
 
 
 def _place() -> str:
@@ -528,19 +531,36 @@ def _not_set_up(identity: str) -> UsageError:
 
 
 @final
-class Connected:
-    """A connector returned by ``connect()``: it holds its identity, nothing else.
+class Connector:
+    """A connector to one contract version, as ``connect()`` returns it.
 
-    Each action is an attribute, called as on any connector. Every use finds
-    the current host's table by the identity.
+    It holds its identity and nothing else. Each action of the contract is an
+    attribute, called with one request; every use finds the current host's
+    table by the identity. Only ``connect()`` makes one, so that its identity
+    is always checked or recorded for set-up (spec 05).
+
+    Raises:
+        TypeError: The class is called or subclassed.
     """
 
     __slots__ = ("_identity",)
 
     _identity: str
 
-    def __init__(self, identity: str) -> None:
-        object.__setattr__(self, "_identity", identity)
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        raise TypeError(
+            "a connector is made by neolith.connect(), not by its class: "
+            "write connect('<contract>.v<N>')"
+        )
+
+    def __init_subclass__(cls, **kwargs: object) -> NoReturn:
+        raise TypeError("neolith.Connector cannot be subclassed")
+
+    @classmethod
+    def _made(cls, identity: str) -> "Connector":
+        made = object.__new__(cls)
+        object.__setattr__(made, "_identity", identity)
+        return made
 
     def __setattr__(self, name: str, value: object) -> NoReturn:
         raise AttributeError("a connector cannot be changed")
@@ -571,10 +591,10 @@ class Connected:
     def __repr__(self) -> str:
         return f"<connector to {self._identity}>"
 
-    def __copy__(self) -> "Connected":
+    def __copy__(self) -> "Connector":
         return self
 
-    def __deepcopy__(self, memo: object) -> "Connected":
+    def __deepcopy__(self, memo: object) -> "Connector":
         return self
 
     def __reduce_ex__(self, protocol: object) -> NoReturn:
@@ -584,7 +604,7 @@ class Connected:
         )
 
 
-def _connector(identity: str) -> Connector:
+def _connector(identity: str) -> Bound:
     host, installed = _table()
     if host is None:
         raise _not_set_up(identity)
