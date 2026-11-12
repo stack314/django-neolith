@@ -12,6 +12,7 @@ from neolith._contracts import (
 )
 from neolith._declaration import DeclarationError, NeolithAppConfig, Provided
 from neolith._forms import Binary, Decimal128, Duration
+from neolith._host import UsageError, connect
 
 __all__ = [
     "Action",
@@ -26,8 +27,10 @@ __all__ = [
     "NeolithAppConfig",
     "Principal",
     "Provided",
+    "UsageError",
     "__version__",
     "action",
+    "connect",
     "contract",
     "implements",
 ]

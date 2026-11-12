@@ -501,11 +501,22 @@ class Contract:
         return copy.deepcopy(dict(self._description))
 
     def _check_implementation(self, impl: type[Any]) -> None:
-        # Only the implementation's own classes are read, never a contract
-        # declaration it inherits from, and only statically: no attribute is
-        # looked up through its descriptor or its __getattr__, so a lazy object
-        # on the class is never evaluated.
+        """Raise ``ContractDefinitionError`` for the first problem found."""
+        problems = self._implementation_problems(impl)
+        if problems:
+            raise ContractDefinitionError(problems[0])
+
+    def _implementation_problems(self, impl: type[Any]) -> list[str]:
+        """Every problem of an implementation class, in a fixed order.
+
+        Only the implementation's own classes are read, never a contract
+        declaration it inherits from, and only statically: no attribute is
+        looked up through its descriptor or its __getattr__, so a lazy object
+        on the class is never evaluated. A problem with one action does not
+        stop the check of the next.
+        """
         where = f"{self.identity}, implementation {impl.__qualname__}"
+        problems: list[str] = []
         own = [
             klass
             for klass in impl.__mro__
@@ -514,7 +525,7 @@ class Contract:
         for klass in own:
             for attr, value in vars(klass).items():
                 if _carries_mark(value):
-                    raise ContractDefinitionError(
+                    problems.append(
                         f"{where}: {attr!r} is marked with @action; the contract "
                         "declares each action, its idempotency and its error "
                         "kinds, so implementation methods are not marked"
@@ -524,26 +535,35 @@ class Contract:
             # A declaration's own method, inherited from this contract or
             # another one, is a stub, not an implementation.
             if member is None or _carries_mark(member):
-                raise ContractDefinitionError(f"{where}: action {name!r} is missing")
+                problems.append(f"{where}: action {name!r} is missing")
+                # Nothing of this action is left to read.
+                continue
             if type(member) is not types.FunctionType:
-                raise ContractDefinitionError(
+                problems.append(
                     f"{where}: action {name!r} must be an instance method taking "
                     "(self, request) or (self, request, ctx: CallContext), not "
                     f"a {type(member).__name__}"
                 )
-            request, reply, _ = _signature(f"{where}, action {name!r}", member)
+                # Only a function has the signature the checks below read.
+                continue
+            try:
+                request, reply, _ = _signature(f"{where}, action {name!r}", member)
+            except ContractDefinitionError as error:
+                problems.append(str(error))
+                # The checks below compare the types this read did not give.
+                continue
             if request is not item.request:
-                raise ContractDefinitionError(
+                problems.append(
                     f"{where}: action {name!r} takes {_name(request)}, but "
                     f"{self.identity} declares {_name(item.request)}"
                 )
             if item.reply is None and reply is not None:
-                raise ContractDefinitionError(
+                problems.append(
                     f"{where}: action {name!r} returns {_name(reply)}, but "
                     f"{self.identity} declares an empty reply; annotate it -> None"
                 )
-            if reply is not item.reply:
-                raise ContractDefinitionError(
+            elif reply is not item.reply:
+                problems.append(
                     f"{where}: action {name!r} returns {_name(reply)}, but "
                     f"{self.identity} declares {_name(item.reply)}"
                 )
@@ -552,11 +572,12 @@ class Contract:
                 if attr.startswith("_") or attr in self._actions:
                     continue
                 if _is_method(value):
-                    raise ContractDefinitionError(
+                    problems.append(
                         f"{where}: public method {attr!r} is not an action of "
                         f"{self.identity}; make it private (prefix it with '_') or "
                         "move it out of the class"
                     )
+        return problems
 
     def __repr__(self) -> str:
         return f"<Contract {self.identity}>"

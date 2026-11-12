@@ -92,6 +92,15 @@ class Provided:
     implementation. ``principal_from`` lists the calling apps that may assert
     a principal on calls to this contract; an empty tuple means none may.
 
+    The implementation is a class defined at the top level of a module of the
+    providing app, other than its package and the module of its config class,
+    and ``implementation`` is that module's path, a dot and the class's name.
+    The host imports it once Django has loaded models, checks it against the
+    contract, and builds one instance with no arguments, which serves every
+    call from every thread until the next set-up. Its ``__init__`` runs in
+    every process that loads apps, so it reads no database and makes no
+    contract call.
+
     Nothing is checked here: the class body runs before the config class
     exists. ``NeolithAppConfig`` checks every entry with the rest of the
     declaration, and its error names the app.
