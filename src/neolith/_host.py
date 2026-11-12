@@ -667,9 +667,10 @@ def command_scope(
     however the block ends, so a call made in it afterwards, or naming its
     context, is a ``UsageError``.
 
-    The block opens and closes in one context: it holds no ``yield`` of a
-    generator or async generator, and roots opened in it close first. Then
-    the enclosing scope is current again on exit. A scope that finds itself
+    An ``await`` inside the block is fine. A generator that yields inside
+    the block must finish, or be closed, where the scope is still current,
+    in the context that entered it; roots opened in the block close first.
+    Then the enclosing scope is current again on exit. A scope that finds itself
     not current where its block ends, or cannot be reset there, still closes,
     and its exit raises ``UsageError``, with the block's own exception, if
     any, as its context; calls in the context it was left current in are
@@ -833,8 +834,10 @@ class _CommandScope:
         else:
             found = (
                 "the scope is not the current scope where its block ends: a "
-                "root opened in it is still open, or its block was left in "
-                "another context than it was entered in"
+                "root opened in it is still open, its block was left in "
+                "another context than it was entered in, or another scope was "
+                "made current after it was entered, such as around a generator "
+                "suspended inside it"
             )
         # The state found is not the one the block opened: say so, rather
         # than leave a context where calls fail later for no visible reason.

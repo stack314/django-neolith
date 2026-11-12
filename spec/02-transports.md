@@ -119,11 +119,11 @@ Commands and background work run outside any request or call, so their code open
 
 **TRN-51.** When an explicit root opened inside another scope closes where it is the scope calls are made in, calls MUST be made in that enclosing scope again.
 
-An explicit root is opened and closed by one block of code that does not suspend in the middle and closes the roots opened in it first. A root held across a suspension, such as a generator that yields inside it, can close where calls run under another scope, and the enclosing scope cannot be made current again there.
+An explicit root is opened and closed in one flow of execution, such as a thread or an asyncio task, and closes the roots opened in it first; an `await` inside it stays in that flow. A root held across a generator's `yield` can close in another flow, or after the code around the generator has made another scope current, and the enclosing scope cannot then be made current there.
 
 **TRN-53.** A host MUST report an explicit root that closes outside the flow of execution it was opened in, or where it is not the scope calls are made in, as a mistake in the calling code (CON-29). The root still closes (TRN-24), so a call made where it was left current is refused (TRN-25). The report replaces an ordinary error the code ended with, which stays attached to the report, and gives way to TRN-54.
 
-**TRN-54.** The report of TRN-53 MUST NOT replace a signal to stop that the code ends with, such as cancellation or the process exiting. The signal goes on, carrying the report, as TRN-21 and [ADR 0008](../docs/adr/0008-typed-contract-errors-in-both-modes.md) Decision 3 keep such a signal.
+**TRN-54.** The report of TRN-53 MUST NOT replace a signal to stop that the code ends with, such as cancellation or the process exiting. The signal goes on, carrying the report, as TRN-21 and [ADR 0008](../docs/adr/0008-typed-contract-errors-in-both-modes.md) Decision 3 keep such a signal. The host also logs the report, since closing a generator swallows the signal that closes it.
 
 **TRN-52.** A host MUST refuse to open one explicit root a second time, while it is open or after it has closed, as TRN-45 refuses.
 
