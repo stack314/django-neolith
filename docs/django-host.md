@@ -2,7 +2,7 @@
 
 These notes are django-neolith's implementation documentation, not part of any decision. They record how the host meets the request-root rules of [ADR 0017](adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md) Decision 4 on Django 5.2, and the edge cases found in review. The conformance cases at the end are in the test plan of roadmap step 4 (#11). Where these notes and ADR 0017 differ, the record governs.
 
-**Middleware.** The host ships two middleware classes. Both are sync- and async-capable, so Django does not adapt them, and `neolith check` fails at startup if either is missing or out of order (K2).
+**Middleware.** The host ships two middleware classes. Both are sync- and async-capable, and Django runs each in the mode of the handler inside it: under ASGI that is async, unless a sync-only middleware follows in `MIDDLEWARE`, in which case Django runs them in sync mode behind `sync_to_async` (`core/handlers/base.py`, `load_middleware`). They behave the same in both modes. A class that is missing or out of order stops the host at startup (K2); [ADR 0022](adr/0022-the-app-host-builds-settings-and-checks-before-it-serves.md), which is Proposed, puts that check at set-up and in each class's constructor.
 - **The root middleware** is placed outermost. It opens the root when the request starts and keeps a reference to it. Closing always goes through that reference, because on ASGI the middleware runs inside a task with its own copy of the context, so nothing outside it could find the root through the variable.
 - **The principal middleware** is placed after `AuthenticationMiddleware`. Its response phase therefore runs before `SessionMiddleware`'s, and the streamed-body case below relies on that.
 
