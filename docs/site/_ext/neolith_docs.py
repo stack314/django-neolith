@@ -25,16 +25,23 @@
   defined, in a private module, takes that comment as its text.
 - **``{planned}``.** A block for behaviour that does not work yet, naming the
   roadmap step that delivers it; a step the roadmap does not list is a
-  warning. Only this block carries ``PLANNED_MARK``, which the check reads;
-  the class ``planned`` on anything else, and raw HTML that imitates the
-  block, are warnings.
+  warning. Each block with a listed step gets an element id made for this
+  build, and the extension records those ids per page in ``planned.json``
+  beside the HTML; the check exempts only the text of those elements, from
+  the planned-words rule only. The class ``planned`` on anything else is a
+  warning.
+- **No raw HTML in site pages.** Raw HTML in a page the site writes or
+  generates, docstrings included, is a warning, so every element of such a
+  page comes from Sphinx's writer. Mirrored documents keep theirs.
 """
 
 from __future__ import annotations
 
 import functools
+import json
 import re
 import typing
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +55,7 @@ from sphinx.util.docutils import SphinxDirective
 from sphinx.writers.html5 import HTML5Translator
 
 from scripts import citations
+from scripts.docs import PLANNED_RECORD
 
 _log = logging.getLogger(__name__)
 
@@ -73,9 +81,8 @@ _NOT_LINKED = (
     addnodes.toctree,
 )
 _REQUIREMENT_CLASS = "neolith-requirement"
-#: The attribute only a ``{planned}`` block carries; scripts/docs.py reads it.
-PLANNED_MARK = "data-neolith-planned"
-_PLANNED_CLASS = re.compile(r"""class\s*=\s*["']?[^"'>]*\bplanned\b""")
+# Each {planned} block written, by page: the ids of its elements.
+_PLANNED: dict[str, list[str]] = {}
 _ANCHOR = re.compile(r"([a-z]+)-(\d+)")
 # The generated index lists every requirement, withdrawn ones too.
 _INDEX = "reference/requirements"
@@ -218,6 +225,7 @@ def _doctree_read(app: Sphinx, doctree: nodes.document) -> None:
     _drop_alias_values(doctree)
     _public_references(doctree)
     _refuse_planned_lookalikes(doctree)
+    _refuse_raw(app, doctree, docname)
     if not docname.startswith("spec/") or docname == "spec/index":
         return
     site = _site(app)
@@ -402,14 +410,17 @@ def _process_docstring(
 
 
 class planned(nodes.Admonition, nodes.Element):
-    """A ``{planned}`` block; the only element that carries ``PLANNED_MARK``."""
+    """A ``{planned}`` block, with the roadmap step it names."""
 
 
 def _visit_planned(translator: HTML5Translator, node: planned) -> None:
-    marks = {PLANNED_MARK: node["step"]} if node["step"] else {}
-    translator.body.append(
-        translator.starttag(node, "div", CLASS="admonition planned", **marks)
-    )
+    if node["step"]:
+        ident = f"neolith-planned-{uuid.uuid4().hex}"
+        node["ids"] = [ident]
+        page = translator.builder.get_outfilename(translator.builder.current_docname)
+        relative = Path(page).relative_to(translator.builder.outdir).as_posix()
+        _PLANNED.setdefault(relative, []).append(ident)
+    translator.body.append(translator.starttag(node, "div", CLASS="admonition planned"))
 
 
 def _depart_planned(translator: HTML5Translator, node: planned) -> None:
@@ -419,8 +430,9 @@ def _depart_planned(translator: HTML5Translator, node: planned) -> None:
 class Planned(SphinxDirective):
     """Behaviour that does not work yet, with the roadmap step that delivers it.
 
-    The block carries ``PLANNED_MARK`` only when the roadmap lists the step,
-    and nothing else can carry it, so the check exempts only this block.
+    A block whose step the roadmap lists is recorded by the id its element
+    gets, so the check exempts only this block, and only from the
+    planned-words rule.
     """
 
     required_arguments = 1
@@ -443,18 +455,26 @@ class Planned(SphinxDirective):
 
 
 def _refuse_planned_lookalikes(doctree: nodes.document) -> None:
-    """Warn where anything but a ``{planned}`` block claims to be one."""
+    """Warn where anything but a ``{planned}`` block claims its class."""
     for node in doctree.findall(nodes.Element):
-        if isinstance(node, planned):
-            continue
-        if "planned" in node.get("classes", []):
+        if not isinstance(node, planned) and "planned" in node.get("classes", []):
             _log.warning(
                 'the class "planned" belongs to {planned} blocks only', location=node
             )
-        if isinstance(node, nodes.raw) and (
-            PLANNED_MARK in node.astext() or _PLANNED_CLASS.search(node.astext())
-        ):
-            _log.warning("raw HTML may not imitate a {planned} block", location=node)
+
+
+def _refuse_raw(app: Sphinx, doctree: nodes.document, docname: str) -> None:
+    """Warn on raw HTML in a page the site writes or generates."""
+    if docname in app.config.neolith_mirrored:
+        return
+    for node in doctree.findall(nodes.raw):
+        _log.warning("raw HTML is not allowed in a page the site writes", location=node)
+
+
+def _write_planned(app: Sphinx, exception: Exception | None) -> None:
+    record = Path(app.outdir).parent / PLANNED_RECORD
+    record.write_text(json.dumps(_PLANNED, indent=1, sort_keys=True), "utf-8")
+    _PLANNED.clear()
 
 
 def _page_context(
@@ -485,4 +505,5 @@ def setup(app: Sphinx) -> dict[str, Any]:
     app.connect("doctree-resolved", _doctree_resolved)
     app.connect("autodoc-process-docstring", _process_docstring)
     app.connect("html-page-context", _page_context)
+    app.connect("build-finished", _write_planned)
     return {"version": "1", "parallel_read_safe": False, "parallel_write_safe": True}

@@ -10,11 +10,13 @@ Usage::
 Building needs the ``docs`` dependency group, which needs Python 3.13 or newer.
 Staging and the checks need only the ``test`` group.
 
-Every step runs and reports, whatever an earlier one found, so one run lists
-every problem: staging's, then Sphinx's, then the HTML rules'.
+Every step runs and reports, whatever an earlier one found, and a failure in
+one file or one step is reported, not raised, so one run lists every
+problem: staging's, then Sphinx's, then the HTML rules'. The exit status is 1
+exactly when a problem is found. ``--out`` may not be the repository or hold
+it, and inside the repository must sit under ``build/``.
 
-**Stage** writes a throwaway source tree, so the build never writes into the
-repository:
+**Stage** writes a throwaway source tree:
 
 - the pages under ``docs/site/``, written for the site;
 - the repository documents in ``mirror_table``, word for word. Only link
@@ -30,25 +32,29 @@ repository:
 
 A staged page that holds an email address is a problem, and is left out.
 
-**Build** runs Sphinx with ``-W -n --keep-going`` and reports each warning: an
-unresolved reference, or a citation of an unknown or withdrawn requirement,
-record or spec document. The extension ``docs/site/_ext/neolith_docs.py``
-anchors requirements and links citations.
+**Build** runs Sphinx with ``-W -n --keep-going`` and reports each warning.
+The extension ``docs/site/_ext/neolith_docs.py`` anchors requirements, links
+and checks citations, refuses raw HTML in pages the site writes, and records
+each ``{planned}`` block in ``planned.json``.
 
-**Check** reads every built file as a reader gets it: the page's text with
-character references decoded, its link targets decoded, and the raw file.
-On every page it refuses: no footer in the ``<footer>``, no ``noindex`` or
-no banner in the announcement on a development build, an email address,
-something shaped like a secret (in any text file), a script, stylesheet or
-CSS ``url()`` from another origin, a link or anchor that leads nowhere, and
-a ``<main>`` without a heading or text (the page must read without
-JavaScript; the search page is exempt). On pages the site writes or
-generates (everything that is not mirrored), it also refuses ``neolith._``,
-the word "official", the names of the project's authors and copyright
-holder, words about how the code is written and an install command on a
-development build, anywhere in ``<main>``; and words about planned
-behaviour outside a ``{planned}`` block, which alone carries
-``PLANNED_MARK``. The word rules are a backstop for review, not a proof.
+**Check** reads every built file as a reader gets it (``_Page.view``): the
+whole page's text with character references decoded, joined across inline
+elements such as highlighted code, the attributes a reader sees (``title``,
+``alt``, ``aria-label``), and the decoded link targets, as well as the raw
+file. On every page it refuses: no footer in the ``<footer>``, no
+``noindex`` or no banner in the announcement on a development build, an
+email address, something shaped like a secret (known token forms in any text
+file; a high-entropy run on pages the site writes), a URL to another origin
+in any attribute that loads (every attribute but a link's ``href``) or in
+CSS, a link or anchor that leads nowhere, and a ``<main>`` without a heading
+or text (the search page is exempt). On pages the site writes or generates,
+it also refuses ``neolith._``, the word "official", the names and GitHub
+handles of the people the repository records, words about how the code is
+written, a command that installs the package or a requirement on it on a
+development build, a citation of an unknown or withdrawn requirement, record
+or document, and words about planned behaviour outside a ``{planned}``
+block, which exempts its text from that rule only. The word rules state
+forms, read case-insensitively, and are a backstop for review, not a proof.
 """
 
 from __future__ import annotations
@@ -58,6 +64,8 @@ import contextlib
 import hashlib
 import inspect
 import io
+import json
+import math
 import posixpath
 import re
 import shutil
@@ -66,7 +74,7 @@ import sys
 import tomllib
 import urllib.parse
 import urllib.request
-from collections.abc import Collection, Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
@@ -145,23 +153,42 @@ _SECRETS = re.compile(
     r"|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_\w{22,}"  # GitHub tokens
     r"|xox[abposr]-[A-Za-z0-9-]{10,}"  # Slack tokens
     r"|sk-[A-Za-z0-9_-]{20,}"  # API keys in the sk- form
+    r"|pypi-[A-Za-z0-9_-]{50,}"  # PyPI upload tokens
+    r"|AIza[0-9A-Za-z_-]{35}"  # Google API keys
+    r"|\b[MNO][A-Za-z0-9_-]{23,27}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,}"  # Discord
     r"|-----BEGIN [A-Z ]*PRIVATE KEY-----"
     r"|https://hooks\.slack\.com/services/\S+"
+    r"|https://discord(?:app)?\.com/api/webhooks/\S+"
     r"|https://api\.cloudflare\.com/client/v4/workers/builds/deploy_hooks/\S+"
+    # A value given to a key, secret, token or password.
+    r"""|(?i:\b(?:api[_-]?key|secret|token|password|passwd)\b\s*[:=]\s*['"]?"""
+    r"[A-Za-z0-9_\-/+=.]{16,})"
 )
+# A run that may be a credential: judged by its mix of characters and entropy.
+_TOKEN_RUN = re.compile(r"[A-Za-z0-9+/_=-]{32,}")
+# The word rules are a backstop for review, not a proof: each states a form,
+# not a list of spellings, and reads case-insensitively.
 _OFFICIAL = re.compile(r"\bofficial(?:ly)?\b", re.IGNORECASE)
-_PRIVATE = re.compile(r"\bneolith\._")
+_PRIVATE = re.compile(r"\bneolith\._", re.IGNORECASE)
 _HOW_WRITTEN = re.compile(
-    r"\b(?:AI|LLMs?|Claude|ChatGPT|Copilot|GPT|vibe[- ]cod\w*|hand-?written"
-    r"|machine-generated|AI-generated)\b"
+    r"\b(?:AI|LLMs?|Claude|ChatGPT|Copilot|Gemini|GPT(?:-\d+)?|vibe[- ]cod\w*"
+    r"|hand-?written|machine-generated|AI-generated"
+    r"|(?:written|generated|drafted) (?:by|with) (?:an? )?(?:model|agent|assistant))\b",
+    re.IGNORECASE,
 )
+# Any command that installs this package, whatever the tool, and any
+# requirement on a version of it.
 _INSTALL = re.compile(
-    r"\b(?:pip|pip3|pipx|pipenv|uv|poetry|pdm|hatch|conda)\s+(?:install|add)\b"
-    r"|django-neolith=="
+    r"(?:install|add)\b[^\n]{0,80}?\bdjango[-_.]?neolith\b"
+    r"|\bdjango[-_.]?neolith\s*(?:===?|[<>!~]=|[<>]|@\s*\S)",
+    re.IGNORECASE,
 )
 _PLANNED = re.compile(
-    r"\b(?:will|planned|upcoming|coming soon|not yet (?:implemented|supported|"
-    r"available)|in a (?:future|later) (?:release|version|step))\b",
+    r"\b(?:will|shall|planned|plans? to|going to|upcoming|coming (?:soon|in|with)"
+    r"|not (?:yet )?(?:implemented|supported|available|built|done|ready)"
+    r"|(?:in|for|with) an? (?:future|later|coming|next) (?:release|version|step|update)"
+    r"|scheduled (?:for|in)|yet to (?:be|come)|eventually|TBD"
+    r"|(?:roadmap )?step \d+ (?:adds|brings|delivers|introduces|will))\b",
     re.IGNORECASE,
 )
 
@@ -397,12 +424,16 @@ def group_problems(public: Collection[str]) -> list[str]:
     return problems
 
 
-def public_names(package: object) -> list[str]:
-    """The names the reference documents: ``__all__`` but ``__version__``."""
+def public_names(package: object) -> tuple[list[str], list[str]]:
+    """The names the reference documents: ``__all__`` but ``__version__``.
+
+    Returns:
+        The names, and a problem if ``__all__`` is not a list of strings.
+    """
     names = getattr(package, "__all__", None)
-    if not isinstance(names, list):
-        raise DocsError("the package has no __all__ list")
-    return [name for name in names if name != "__version__"]
+    if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+        return [], ["neolith.__all__ is not a list of names"]
+    return [name for name in names if name != "__version__"], []
 
 
 def _directive(package: object, name: str) -> str:
@@ -418,21 +449,27 @@ def _directive(package: object, name: str) -> str:
 def api_pages(package: object) -> tuple[dict[str, str], list[str]]:
     """The reference pages: one per group, then the index of groups.
 
-    A group page documents only the names that are public, so a problem with
-    the group map is reported and the rest of the reference still builds.
+    A group page documents only the names that are public and that the
+    package defines, so a problem with one name is reported and the rest of
+    the reference still builds.
 
     Args:
         package: The ``neolith`` package.
 
     Returns:
-        Staged paths to page text, and one line per problem of ``group_problems``.
+        Staged paths to page text, and one line per problem.
     """
-    public = public_names(package)
+    public, problems = public_names(package)
     pages = {}
     for slug, (title, intro, names) in API_GROUPS.items():
-        body = "".join(
-            "\n" + _directive(package, name) for name in names if name in public
-        )
+        body = ""
+        for name in names:
+            if name not in public:
+                continue
+            try:
+                body += "\n" + _directive(package, name)
+            except Exception as error:  # reported, and the rest built
+                problems.append(f"neolith.{name}: cannot be documented: {error!r}")
         pages[f"reference/api/{slug}.md"] = (
             f"# {title}\n\n{intro}\n\n```{{eval-rst}}{body}```\n"
         )
@@ -441,7 +478,7 @@ def api_pages(package: object) -> tuple[dict[str, str], list[str]]:
         "# API\n\nEvery name the `neolith` package exports, by group.\n\n"
         f"```{{toctree}}\n:maxdepth: 1\n\n{entries}\n```\n"
     )
-    return pages, group_problems(public)
+    return pages, problems + group_problems(public)
 
 
 def requirements_page(
@@ -499,8 +536,16 @@ def commit(root: Path) -> str:
 
 
 def development(root: Path) -> bool:
-    """Whether the source is a development version, as ``__version__`` says."""
-    text = (root / "src" / "neolith" / "__init__.py").read_text(encoding="utf-8")
+    """Whether the source is a development version, as ``__version__`` says.
+
+    Raises:
+        DocsError: ``src/neolith/__init__.py`` cannot be read or has no
+            ``__version__``.
+    """
+    try:
+        text = (root / "src" / "neolith" / "__init__.py").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        raise DocsError(f"src/neolith/__init__.py: {error}") from error
     found = re.search(r'^__version__ = "([^"]+)"$', text, re.MULTILINE)
     if found is None:
         raise DocsError("src/neolith/__init__.py: no __version__")
@@ -555,23 +600,107 @@ class Result:
     problems: list[str] = field(default_factory=list)
 
 
+#: The file that marks a directory as one this script builds into.
+MARKER = ".neolith-docs-build"
+
+
+def prepare_out(root: Path, out: Path) -> Path:
+    """Check that ``out`` is safe to build into, mark it, and return it.
+
+    The build deletes ``out/src`` and ``out/html``, so ``out`` may not be the
+    repository or hold it. Inside the repository it must sit under
+    ``build/``, which git ignores; elsewhere it must be empty or already
+    marked as a build directory.
+
+    Raises:
+        DocsError: ``out`` is not a safe place to build.
+    """
+    out = out.resolve()
+    root = root.resolve()
+    if out == root or out in root.parents:
+        raise DocsError(f"{out}: holds the repository; build somewhere else")
+    inside = root in out.parents
+    if inside and (root / "build") not in out.parents:
+        raise DocsError(f"{out}: inside the repository but not under build/")
+    if (
+        not inside
+        and out.exists()
+        and any(out.iterdir())
+        and not (out / MARKER).exists()
+    ):
+        raise DocsError(f"{out}: not empty and not a docs build directory")
+    out.mkdir(parents=True, exist_ok=True)
+    (out / MARKER).touch()
+    return out
+
+
+def _mirror(
+    root: Path, table: Mapping[str, str], problems: list[str]
+) -> dict[str, str]:
+    links = Links(root, table, repo_url(root), commit(root))
+    pages: dict[str, str] = {}
+    for repo_path, staged_path in table.items():
+        try:
+            original = (root / repo_path).read_text(encoding="utf-8")
+            staged = rewrite_links(original, repo_path, links)
+            differs = same_text(original, staged)
+        except Exception as error:  # reported, and the rest staged
+            problems.append(f"{repo_path}: cannot be staged: {error!r}")
+            continue
+        if differs:
+            problems.append(f"{repo_path}: staging changed more than links: {differs}")
+        else:
+            pages[staged_path] = staged
+    problems.extend(links.problems)
+    return pages
+
+
+def _generated(
+    root: Path, table: Mapping[str, str], problems: list[str]
+) -> dict[str, str]:
+    pages: dict[str, str] = {}
+    sys.path.insert(0, str(root / "src"))
+    try:
+        import neolith
+
+        generated, said = api_pages(neolith)
+        pages.update(generated)
+        problems.extend(said)
+    except Exception as error:  # reported, and the rest staged
+        problems.append(f"the API reference cannot be generated: {error!r}")
+    finally:
+        sys.path.remove(str(root / "src"))
+    try:
+        requirements, said = requirements_page(root / "spec", table)
+        pages["reference/requirements.md"] = requirements
+        problems.extend(said)
+    except Exception as error:  # reported, and the rest staged
+        problems.append(f"the requirement index cannot be generated: {error!r}")
+    return pages
+
+
 def stage(
     root: Path = ROOT, out: Path = OUT, extra: Mapping[str, str] | None = None
 ) -> Result:
     """Write the site's source tree under ``out/src``, and collect its problems.
 
-    Every check runs, whatever the others found. A mirrored file whose staged
-    copy differs beyond its links, and a page that holds an email address,
-    are left out of the tree; everything else is written.
+    Every check runs, whatever the others found, and a failure in one file or
+    one step is reported as a problem, not raised. A mirrored file whose
+    staged copy differs beyond its links, and a page that holds an email
+    address, are left out of the tree; everything else is written.
 
     Args:
         root: The repository root.
-        out: Where the build writes.
+        out: Where the build writes; ``prepare_out`` checks it.
         extra: More pages, by staged path, as site-written pages.
 
     Returns:
         The staged source directory, with every problem found.
+
+    Raises:
+        DocsError: ``out`` is not a safe place to build.
     """
+    out = prepare_out(root, out)
     problems: list[str] = []
     source = out / "src"
     if source.exists():
@@ -584,42 +713,28 @@ def stage(
         ),
     )
     table = mirror_table(root)
-    links = Links(root, table, repo_url(root), commit(root))
-    pages: dict[str, str] = {}
-    for repo_path, staged_path in table.items():
-        original = (root / repo_path).read_text(encoding="utf-8")
-        staged = rewrite_links(original, repo_path, links)
-        differs = same_text(original, staged)
-        if differs:
-            problems.append(f"{repo_path}: staging changed more than links: {differs}")
-        else:
-            pages[staged_path] = staged
-    problems.extend(links.problems)
-
-    sys.path.insert(0, str(root / "src"))
-    try:
-        import neolith
-    finally:
-        sys.path.remove(str(root / "src"))
-    generated, said = api_pages(neolith)
-    problems.extend(said)
-    pages.update(generated)
-    requirements, said = requirements_page(root / "spec", table)
-    problems.extend(said)
-    pages["reference/requirements.md"] = requirements
+    pages = _mirror(root, table, problems)
+    pages.update(_generated(root, table, problems))
     pages.update(extra or {})
     for staged_path, text in pages.items():
-        target = source / staged_path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text, encoding="utf-8")
-
+        try:
+            target = source / staged_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, encoding="utf-8")
+        except Exception as error:  # reported, and the rest staged
+            problems.append(f"{staged_path}: cannot be written: {error!r}")
     for page in sorted(source.rglob("*.md")):
-        lines = email_lines(page.read_text(encoding="utf-8"))
+        name = page.relative_to(source).as_posix()
+        try:
+            lines = email_lines(page.read_text(encoding="utf-8"))
+        except Exception as error:  # reported, and the page left out
+            problems.append(f"{name}: cannot be read: {error!r}; the page is left out")
+            page.unlink()
+            continue
         if lines:
             where = ", ".join(map(str, lines))
             problems.append(
-                f"{page.relative_to(source).as_posix()}: an email address on "
-                f"line {where}; the page is left out"
+                f"{name}: an email address on line {where}; the page is left out"
             )
             page.unlink()
     return Result(source, problems)
@@ -649,13 +764,14 @@ def build(
     """Stage, then build the HTML with Sphinx, collecting every problem.
 
     Sphinx runs with ``-W -n --keep-going`` whatever staging found, so its
-    warnings are reported with staging's.
+    warnings are reported with staging's. The extension records each
+    ``{planned}`` block it writes in ``out/planned.json``.
 
     Returns:
         The HTML directory, with the problems of staging and every warning.
 
     Raises:
-        DocsError: Sphinx is not installed.
+        DocsError: Sphinx is not installed, or ``out`` is not a safe place.
     """
     try:
         from sphinx.cmd.build import build_main
@@ -665,35 +781,45 @@ def build(
             "or newer: python -m pip install -e . --group docs"
         ) from error
     staged = stage(root, out, extra)
-    problems = staged.problems + fetch_inventories()
+    out = staged.path.parent
+    problems = staged.problems
+    try:
+        problems += fetch_inventories()
+    except Exception as error:  # reported, and the build goes on
+        problems.append(f"the inventories cannot be fetched: {error!r}")
     html = out / "html"
     if html.exists():
         shutil.rmtree(html)
     warnings = out / "warnings.txt"
     warnings.unlink(missing_ok=True)
+    (out / PLANNED_RECORD).unlink(missing_ok=True)
     # Sphinx's own output is kept, and shown only if it failed without a
     # warning; each warning comes from the file -w writes.
     output = io.StringIO()
-    with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
-        status = build_main(
-            [
-                "-b",
-                "dirhtml",
-                "-c",
-                str(root / "docs" / "site"),
-                "-d",
-                str(out / "doctrees"),
-                "-E",
-                "-W",
-                "-n",
-                "--keep-going",
-                "-q",
-                "-w",
-                str(warnings),
-                str(staged.path),
-                str(html),
-            ]
-        )
+    status: object = 0
+    try:
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            status = build_main(
+                [
+                    "-b",
+                    "dirhtml",
+                    "-c",
+                    str(root / "docs" / "site"),
+                    "-d",
+                    str(out / "doctrees"),
+                    "-E",
+                    "-W",
+                    "-n",
+                    "--keep-going",
+                    "-q",
+                    "-w",
+                    str(warnings),
+                    str(staged.path),
+                    str(html),
+                ]
+            )
+    except Exception as error:  # reported with what came before
+        problems.append(f"Sphinx raised {error!r}")
     said = _warnings(warnings, staged.path)
     problems.extend(said)
     if status and not said:
@@ -703,36 +829,145 @@ def build(
 
 # Checking the HTML
 
-_FOREIGN_CSS = re.compile(r"""(?:url\(\s*['"]?|@import\s+['"]?)\s*(?:https?:)?//""")
+#: Where the extension records each ``{planned}`` block: page to element ids.
+PLANNED_RECORD = "planned.json"
+# A URL to another origin.
+_FOREIGN_URL = re.compile(r"(?:https?:)?//[^\s\"'<>),]+", re.IGNORECASE)
+# A URL that CSS loads, in url(), @import, image-set() or a list of them.
+_FOREIGN_CSS = re.compile(
+    r"""(?:url\(|@import|image-set\(|,)\s*(?:url\(\s*)?['"]?\s*(?:https?:)?//""",
+    re.IGNORECASE,
+)
 _TEXT_FILES = (".html", ".js", ".css", ".txt", ".json", ".xml", ".svg", ".map")
+_VOID = frozenset(
+    [
+        "area",
+        "base",
+        "br",
+        "col",
+        "embed",
+        "hr",
+        "img",
+        "input",
+        "link",
+        "meta",
+        "source",
+        "track",
+        "wbr",
+    ]
+)
+_BLOCK = frozenset(
+    [
+        "address",
+        "article",
+        "aside",
+        "blockquote",
+        "body",
+        "br",
+        "dd",
+        "details",
+        "div",
+        "dl",
+        "dt",
+        "figcaption",
+        "figure",
+        "footer",
+        "form",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "head",
+        "header",
+        "hr",
+        "li",
+        "main",
+        "nav",
+        "ol",
+        "p",
+        "pre",
+        "section",
+        "summary",
+        "table",
+        "tbody",
+        "td",
+        "tfoot",
+        "th",
+        "thead",
+        "title",
+        "tr",
+        "ul",
+    ]
+)
+# Attributes whose text a reader sees, or a screen reader reads.
+_SEEN_ATTRIBUTES = frozenset(
+    {"title", "alt", "aria-label", "aria-description", "placeholder"}
+)
+# Attributes that hold a URL the page loads or links to.
+_URL_ATTRIBUTES = frozenset({"href", "src", "data", "poster", "action", "srcset"})
 
 
 class _Page(HTMLParser):
-    """What the checks read from one page, as a reader's browser shows it."""
+    """One page as a reader gets it.
 
-    def __init__(self) -> None:
+    ``view`` is its whole text with character references decoded, joined
+    across inline elements (as in highlighted code) and split at blocks, with
+    the attributes a reader sees and the decoded link targets. The text of a
+    ``{planned}`` block, known by the element ids the extension recorded, is
+    also kept apart.
+
+    Args:
+        planned: The ids of this page's ``{planned}`` blocks.
+    """
+
+    def __init__(self, planned: Collection[str] = ()) -> None:
         super().__init__(convert_charrefs=True)
+        self.planned_ids = set(planned)
+        self.raw = ""
         self.ids: set[str] = set()
         self.links: list[str] = []
         self.hrefs: list[str] = []
         self.foreign: list[str] = []
         self.robots: list[str] = []
-        self.text: list[str] = []
+        self.seen: list[str] = []
         self.main_text: list[str] = []
         self.planned_text: list[str] = []
         self.footer_text: list[str] = []
         self.banner_text: list[str] = []
         self.styles: list[str] = []
         self.has_h1 = False
-        self._open: dict[str, int] = {
-            "main": 0,
-            "planned": 0,
-            "footer": 0,
-            "banner": 0,
-            "skip": 0,
-            "style": 0,
-        }
+        self._open = dict.fromkeys(
+            ("main", "planned", "footer", "banner", "skip", "style"), 0
+        )
         self._stack: list[tuple[str, tuple[str, ...]]] = []
+
+    def _attributes(self, tag: str, values: dict[str, str]) -> None:
+        for name, value in values.items():
+            if name in _SEEN_ATTRIBUTES or (tag == "meta" and name == "content"):
+                self.seen.append(f" {value} ")
+            if name == "style":
+                self.styles.append(value)
+            if name.startswith("xmlns"):
+                continue  # a namespace name, not a load
+            navigates = (tag in ("a", "area") and name == "href") or (
+                tag == "link" and values.get("rel", "") in ("canonical", "alternate")
+            )
+            urls = (
+                [part.split()[0] for part in value.split(",") if part.strip()]
+                if name == "srcset"
+                else [value]
+            )
+            if name in _URL_ATTRIBUTES:
+                for url in urls:
+                    self.hrefs.append(urllib.parse.unquote(url))
+                    if not navigates and re.match(r"(?:https?:)?//", url, re.I):
+                        self.foreign.append(url)
+                    else:
+                        self.links.append(url)
+            elif not navigates and tag != "meta":
+                self.foreign.extend(_FOREIGN_URL.findall(value))
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         values = {name: value or "" for name, value in attrs}
@@ -742,30 +977,17 @@ class _Page(HTMLParser):
             self.ids.add(values["name"])
         if tag == "meta" and values.get("name", "").lower() == "robots":
             self.robots.append(values.get("content", ""))
-        for name in ("href", "src"):
-            if name not in values:
-                continue
-            link = values[name]
-            self.hrefs.append(urllib.parse.unquote(link))
-            if tag not in ("a", "link", "script", "img", "iframe", "source"):
-                continue
-            if tag != "a" and re.match(r"(?:https?:)?//", link):
-                self.foreign.append(link)
-            elif tag == "a" or name == "src" or "stylesheet" in values.get("rel", ""):
-                self.links.append(link)
-        if "style" in values:
-            self.styles.append(values["style"])
-        if tag in ("br", "img", "meta", "link", "input", "hr", "wbr", "source"):
+        self._attributes(tag, values)
+        if tag in _BLOCK:
+            self._text(" ")
+        if tag in _VOID:
             return
         classes = values.get("class", "").split()
         opened = tuple(
             kind
             for kind, here in (
                 ("main", tag == "main"),
-                (
-                    "planned",
-                    re.fullmatch(r"\d+", values.get(PLANNED_MARK, "")) is not None,
-                ),
+                ("planned", values.get("id", "") in self.planned_ids),
                 ("footer", tag == "footer"),
                 (
                     "banner",
@@ -784,10 +1006,12 @@ class _Page(HTMLParser):
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         self.handle_starttag(tag, attrs)
-        if tag not in ("br", "img", "meta", "link", "input", "hr", "wbr", "source"):
+        if tag not in _VOID:
             self.handle_endtag(tag)
 
     def handle_endtag(self, tag: str) -> None:
+        if tag in _BLOCK:
+            self._text(" ")
         if not any(name == tag for name, _ in self._stack):
             return
         while self._stack:
@@ -802,37 +1026,73 @@ class _Page(HTMLParser):
             self.styles.append(data)
         if self._open["skip"]:
             return
-        self.text.append(data)
+        self._text(data)
+
+    def _text(self, data: str) -> None:
+        if self._open["planned"]:
+            self.planned_text.append(data)
+        else:
+            self.seen.append(data)
         if self._open["footer"]:
             self.footer_text.append(data)
         if self._open["banner"]:
             self.banner_text.append(data)
         if self._open["main"]:
-            (self.planned_text if self._open["planned"] else self.main_text).append(
-                data
-            )
+            self.main_text.append(data)
+
+    def view(self, *, planned: bool = True) -> str:
+        """What a reader gets, with or without the ``{planned}`` blocks."""
+        parts = [*self.seen, " ", *(self.planned_text if planned else []), " "]
+        return _joined([*parts, " ".join(self.hrefs)])
 
 
-#: The attribute the ``{planned}`` directive alone writes, holding the step.
-PLANNED_MARK = "data-neolith-planned"
+def people(root: Path) -> list[str]:
+    """The people the repository records: authors, copyright holder, committers.
 
-
-def _people(root: Path) -> list[str]:
-    """The people's names the repository holds: its authors and copyright holder."""
-    with (root / "pyproject.toml").open("rb") as file:
-        authors = tomllib.load(file)["project"].get("authors", [])
+    Returns:
+        Each word of three letters or more of their names, and the handle of
+        each committer's GitHub address.
+    """
     names: list[str] = []
+    try:
+        with (root / "pyproject.toml").open("rb") as file:
+            authors = tomllib.load(file)["project"].get("authors", [])
+    except (OSError, tomllib.TOMLDecodeError, KeyError):
+        authors = []
     for author in authors:
         for part in re.split(r"\s+and\s+", str(author.get("name", ""))):
             if "contributors" not in part and part.strip():
                 names.append(part.strip())
-    licence = (root / "LICENSE").read_text(encoding="utf-8")
+    try:
+        licence = (root / "LICENSE").read_text(encoding="utf-8")
+    except OSError:
+        licence = ""
     for match in re.finditer(r"Copyright \(c\) [\d, -]+(.+)", licence):
         holder = match[1].strip().rstrip(".")
         if "contributors" not in holder:
             names.append(holder)
-    words = {word for name in names for word in name.split() if len(word) > 2}
-    return sorted(words)
+    try:
+        log = subprocess.run(
+            ["git", "log", "--format=%an%x00%ae"],  # noqa: S607
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        log = ""
+    for line in set(log.splitlines()):
+        name, _, address = line.partition("\0")
+        names.append(name)
+        handle = re.fullmatch(
+            r"(?:\d+\+)?([\w.-]+)@users\.noreply\.github\.com", address
+        )
+        if handle:
+            names.append(handle[1])
+    words = {
+        word for name in names for word in re.split(r"[\s,]+", name) if len(word) > 2
+    }
+    return sorted(words, key=str.lower)
 
 
 def _mirrored_files(root: Path) -> set[str]:
@@ -852,27 +1112,72 @@ def _matches(pattern: re.Pattern[str], text: str) -> list[str]:
     return sorted({found[0] for found in pattern.finditer(text)})
 
 
-def check_html(html: Path, root: Path = ROOT, development: bool = True) -> list[str]:
+def _entropy(run: str) -> float:
+    counts = {char: run.count(char) for char in set(run)}
+    return -sum(n / len(run) * math.log2(n / len(run)) for n in counts.values())
+
+
+def _secrets(texts: Iterable[str], *, seen: bool) -> set[str]:
+    found = {match[0] for text in texts for match in _SECRETS.finditer(text)}
+    if seen:
+        for text in texts:
+            for run in _TOKEN_RUN.findall(text):
+                mixed = all(re.search(cls, run) for cls in ("[a-z]", "[A-Z]", "[0-9]"))
+                if mixed and _entropy(run) >= 4.2:
+                    found.add(run)
+    return found
+
+
+def _planned_record(html: Path) -> dict[str, list[str]]:
+    record = html.parent / PLANNED_RECORD
+    if not record.exists():
+        return {}
+    loaded = json.loads(record.read_text(encoding="utf-8"))
+    return {str(k): [str(i) for i in v] for k, v in loaded.items()}
+
+
+def check_html(
+    html: Path,
+    root: Path = ROOT,
+    development: bool = True,
+    planned: Mapping[str, Collection[str]] | None = None,
+) -> list[str]:
     """Check every built file and page against the site rules.
 
-    The rules read what a reader gets: the page's text with its character
-    references decoded, and its link targets decoded, as well as the raw file.
+    Every rule reads what a reader gets (``_Page.view``): the whole page, not
+    only ``<main>``. A file that cannot be read is a problem, and the others
+    are still checked.
 
     Args:
         html: The built site.
         root: The repository root.
         development: Whether this is a development build, which carries
             ``noindex`` and the banner and shows no install command.
+        planned: The ids of the ``{planned}`` blocks on each page; by default,
+            what the extension recorded beside ``html``.
 
     Returns:
         One line per problem.
     """
+    from scripts import citations
+
     problems: list[str] = []
+    try:
+        records: citations.Records | None = citations.Records(root)
+    except Exception as error:  # reported, and the rest checked
+        problems.append(f"the citations cannot be read: {error!r}")
+        records = None
+    if planned is None:
+        try:
+            planned = _planned_record(html)
+        except Exception as error:  # reported, and the rest checked
+            problems.append(f"{PLANNED_RECORD} cannot be read: {error!r}")
+            planned = {}
     mirrored = _mirrored_files(root)
-    people = _people(root)
-    names = (
-        re.compile(r"\b(?:" + "|".join(map(re.escape, people)) + r")\b", re.IGNORECASE)
-        if people
+    names = people(root)
+    named = (
+        re.compile(r"(?<![\w@])@?(?:" + "|".join(map(re.escape, names)) + r")\b", re.I)
+        if names
         else None
     )
     pages: dict[str, _Page] = {}
@@ -880,55 +1185,103 @@ def check_html(html: Path, root: Path = ROOT, development: bool = True) -> list[
         if not path.is_file() or path.suffix not in _TEXT_FILES:
             continue
         rel = path.relative_to(html).as_posix()
-        raw = path.read_text(encoding="utf-8", errors="replace")
-        page = _Page()
-        if path.suffix == ".html":
-            page.feed(raw)
-            page.close()
-        seen = [raw, "".join(page.text), " ".join(page.hrefs)]
-        count = len({found[0] for text in seen for found in _SECRETS.finditer(text)})
-        if count:
-            problems.append(f"{rel}: holds {count} thing(s) shaped like a secret")
-        if path.suffix == ".css" or page.styles:
-            css = raw if path.suffix == ".css" else "\n".join(page.styles)
-            if _FOREIGN_CSS.search(css):
-                problems.append(f"{rel}: its CSS loads from another origin")
-        if path.suffix != ".html" or rel.startswith("_static/"):
-            continue
-        pages[rel] = page
-        addresses = sorted(
-            {found[0] for text in seen for found in _EMAIL.finditer(text)}
-        )
-        problems.extend(f"{rel}: holds the email address {a}" for a in addresses)
-        problems.extend(
-            f"{rel}: links to {href}"
-            for href in page.hrefs
-            if href.lower().startswith("mailto:")
-        )
-        problems.extend(f"{rel}: {p}" for p in _page_problems(page, rel, development))
-        if rel in mirrored:
-            continue
-        main = _joined(page.main_text)
-        everything = _joined([*page.main_text, " ", *page.planned_text])
-        rules = [
-            (_PRIVATE, raw + " ".join(page.hrefs), "names a private module"),
-            (_OFFICIAL, everything, "says official"),
-            (_HOW_WRITTEN, everything, "says how the code is written"),
-            (_PLANNED, main, "describes planned behaviour outside a {planned} block"),
-        ]
-        if development:
-            rules.append(
-                (_INSTALL, everything, "shows an install command before a release")
-            )
-        if names is not None:
-            rules.append((names, everything, "names a person"))
-        for pattern, text, what in rules:
+        try:
             problems.extend(
-                f"{rel}: {what} ({word!r})" for word in _matches(pattern, text)
+                _file_problems(path, rel, development, planned, pages, mirrored)
             )
+            page = pages.get(rel)
+            if page is not None and rel not in mirrored:
+                problems.extend(
+                    f"{rel}: {said}"
+                    for said in _site_problems(page, rel, development, named, records)
+                )
+        except Exception as error:  # reported, and the rest checked
+            problems.append(f"{rel}: cannot be checked: {error!r}")
     for rel, page in pages.items():
         problems.extend(_link_problems(html, rel, page.links, pages))
     return problems
+
+
+def _file_problems(
+    path: Path,
+    rel: str,
+    development: bool,
+    planned: Mapping[str, Collection[str]],
+    pages: dict[str, _Page],
+    mirrored: Collection[str],
+) -> Iterator[str]:
+    raw = path.read_text(encoding="utf-8")
+    page = _Page(planned.get(rel, ()))
+    if path.suffix == ".html":
+        page.raw = raw
+        page.feed(raw)
+        page.close()
+    seen = page.view()
+    # A run judged by entropy alone counts on pages the site writes; the
+    # mirrored specification holds example tokens as test vectors.
+    guessed = path.suffix == ".html" and rel not in mirrored
+    count = len(_secrets([raw, seen], seen=False) | _secrets([seen], seen=guessed))
+    if count:
+        yield f"{rel}: holds {count} thing(s) shaped like a secret"
+    css = raw if path.suffix == ".css" else "\n".join(page.styles)
+    if _FOREIGN_CSS.search(css):
+        yield f"{rel}: its CSS loads from another origin"
+    if path.suffix != ".html" or rel.startswith("_static/"):
+        return
+    pages[rel] = page
+    addresses = {found[0] for found in _EMAIL.finditer(raw)}
+    addresses |= {found[0] for found in _EMAIL.finditer(seen)}
+    yield from (f"{rel}: holds the email address {a}" for a in sorted(addresses))
+    yield from (
+        f"{rel}: links to {h}" for h in page.hrefs if h.lower().startswith("mailto:")
+    )
+    yield from (f"{rel}: {said}" for said in _page_problems(page, rel, development))
+
+
+def _site_problems(
+    page: _Page,
+    rel: str,
+    development: bool,
+    named: re.Pattern[str] | None,
+    records: object,
+) -> Iterator[str]:
+    """The rules for pages the site writes or generates, on the reader's view."""
+    from scripts import citations
+
+    everything = page.view()
+    rules = [
+        (_PRIVATE, everything + " " + page.raw, "names a private module"),
+        (_OFFICIAL, everything, "says official"),
+        (_HOW_WRITTEN, everything, "says how the code is written"),
+        (
+            _PLANNED,
+            page.view(planned=False),
+            "describes planned behaviour outside a {planned} block",
+        ),
+    ]
+    if development:
+        rules.append(
+            (_INSTALL, everything, "shows an install command before a release")
+        )
+    if named is not None:
+        rules.append((named, everything, "names a person"))
+    for pattern, text, what in rules:
+        yield from (f"{what} ({word!r})" for word in _matches(pattern, text))
+    if isinstance(records, citations.Records):
+        history = rel == "reference/requirements/index.html"
+        for found in citations.find(everything):
+            if found.kind == citations.REQUIREMENT and found.key in citations.NOT_IDS:
+                continue
+            if history and found.key in records.withdrawn:
+                continue
+            said = records.problem(found)
+            if said is not None:
+                yield said
+        if not history:
+            for href in page.hrefs:
+                anchor = re.fullmatch(r"[a-z]+-\d+", href.partition("#")[2])
+                if anchor and anchor[0].upper() in records.withdrawn:
+                    yield f"links to withdrawn requirement {anchor[0].upper()}"
 
 
 def _page_problems(page: _Page, rel: str, development: bool) -> Iterator[str]:
@@ -939,11 +1292,13 @@ def _page_problems(page: _Page, rel: str, development: bool) -> Iterator[str]:
             yield "no noindex on a development build"
         if BANNER not in _joined(page.banner_text):
             yield "no development banner"
-    yield from (f"loads {link} from another origin" for link in page.foreign)
+    yield from (
+        f"loads {link} from another origin" for link in sorted(set(page.foreign))
+    )
     if rel != "search/index.html":
         if not page.has_h1:
             yield "<main> has no heading without JavaScript"
-        if len(_joined(page.main_text + page.planned_text)) < 40:
+        if len(_joined(page.main_text)) < 40:
             yield "<main> has no text without JavaScript"
 
 
@@ -991,8 +1346,15 @@ def check(
     """
     built = build(root, out, extra)
     problems = list(built.problems)
+    try:
+        is_development = development(root)
+    except DocsError as error:
+        problems.append(f"{error}; checked as a development build")
+        is_development = True
     if built.path.is_dir():
-        problems.extend(check_html(built.path, root, development(root)))
+        problems.extend(check_html(built.path, root, is_development))
+    else:
+        problems.append(f"{built.path}: no HTML was built")
     return problems
 
 
@@ -1010,28 +1372,25 @@ def serve(html: Path, port: int) -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run one command; return the exit status."""
+    """Run one command; return the exit status: 0 with no problem, else 1."""
     parser = argparse.ArgumentParser(description="Build and check the docs site.")
     parser.add_argument("command", choices=["stage", "build", "check", "serve"])
     parser.add_argument("--out", type=Path, default=OUT, help="where to build")
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args(argv)
-    out = args.out.resolve()
     try:
         if args.command == "stage":
-            result = stage(ROOT, out)
-            problems = result.problems
+            problems = stage(ROOT, args.out).problems
         elif args.command == "build":
-            result = build(ROOT, out)
-            problems = result.problems
-        elif args.command == "serve":
-            result = build(ROOT, out)
+            problems = build(ROOT, args.out).problems
+        elif args.command == "check":
+            problems = check(ROOT, args.out)
+        else:
+            result = build(ROOT, args.out)
             for problem in result.problems:
                 print(problem, file=sys.stderr)
             serve(result.path, args.port)
             return 0
-        else:
-            problems = check(ROOT, out)
     except DocsError as error:
         print(error, file=sys.stderr)
         return 1

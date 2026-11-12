@@ -7,11 +7,13 @@ newer) and are skipped where it is not installed.
 
 import ast
 import importlib.util
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -38,7 +40,7 @@ def _links(problems: list[str] | None = None) -> docs.Links:
 
 
 def test_the_groups_name_every_public_name_once() -> None:
-    assert docs.group_problems(docs.public_names(neolith)) == []
+    assert docs.group_problems(docs.public_names(neolith)[0]) == []
     grouped = [name for _, _, names in docs.API_GROUPS.values() for name in names]
     assert sorted(grouped) == sorted(set(neolith.__all__) - {"__version__"})
 
@@ -47,12 +49,12 @@ def test_the_groups_name_every_public_name_once() -> None:
     ("public", "problem"),
     [
         pytest.param(
-            [*docs.public_names(neolith), "NewThing"],
+            [*docs.public_names(neolith)[0], "NewThing"],
             "NewThing is public and in no group",
             id="ungrouped",
         ),
         pytest.param(
-            [n for n in docs.public_names(neolith) if n != "connect"],
+            [n for n in docs.public_names(neolith)[0] if n != "connect"],
             "group apps names connect, which is not public",
             id="not-public",
         ),
@@ -69,7 +71,7 @@ def test_a_name_in_two_groups_is_refused(monkeypatch: pytest.MonkeyPatch) -> Non
     title, intro, names = groups["errors"]
     groups["errors"] = (title, intro, (*names, "contract"))
     monkeypatch.setattr(docs, "API_GROUPS", groups)
-    assert docs.group_problems(docs.public_names(neolith)) == [
+    assert docs.group_problems(docs.public_names(neolith)[0]) == [
         "contract is in groups contracts and errors"
     ]
 
@@ -333,7 +335,6 @@ def _copy_root(tmp_path: Path) -> Path:
         "CODE_OF_CONDUCT.md",
         "pyproject.toml",
         "LICENSE",
-        "tests",
     ):
         if (ROOT / name).is_dir():
             shutil.copytree(ROOT / name, root / name, ignore=skip)
@@ -342,20 +343,21 @@ def _copy_root(tmp_path: Path) -> Path:
     return root
 
 
-def test_staging_reports_every_problem_and_leaves_out_only_the_bad_files(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = _copy_root(tmp_path)
-    with (root / "VISION.md").open("a", encoding="utf-8") as file:
-        file.write("\nSee [this](NOWHERE.md).\n")
-    with (root / "spec" / "01-contracts.md").open("a", encoding="utf-8") as file:
-        file.write("\n**CON-1.** A second thing MUST be.\n")
-    with (root / "docs" / "site" / "concepts" / "index.md").open(
-        "a", encoding="utf-8"
-    ) as file:
-        file.write("\nWrite to someone@example.org.\n")
-    title, intro, names = docs.API_GROUPS["errors"]
-    monkeypatch.setitem(docs.API_GROUPS, "errors", (title, intro, (*names, "Bogus")))
+def _append(path: Path, text: str) -> None:
+    with path.open("a", encoding="utf-8") as file:
+        file.write(text)
+
+
+def _break_encoding(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    with (root / "CHANGELOG.md").open("ab") as file:
+        file.write(b"\n\xe9\n")
+
+
+def _break_link(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _append(root / "VISION.md", "\nSee [this](NOWHERE.md).\n")
+
+
+def _break_text(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     rewrite = docs.rewrite_links
 
     def changed(text: str, source: str, links: docs.Links) -> str:
@@ -363,24 +365,129 @@ def test_staging_reports_every_problem_and_leaves_out_only_the_bad_files(
         return staged + "\nAdded.\n" if source == "CHANGELOG.md" else staged
 
     monkeypatch.setattr(docs, "rewrite_links", changed)
-    result = docs.stage(root, tmp_path / "out")
+
+
+def _break_group(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    title, intro, names = docs.API_GROUPS["errors"]
+    monkeypatch.setitem(docs.API_GROUPS, "errors", (title, intro, (*names, "Bogus")))
+
+
+def _break_name(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    title, intro, names = docs.API_GROUPS["errors"]
+    monkeypatch.setitem(docs.API_GROUPS, "errors", (title, intro, (*names, "Ghost")))
+    monkeypatch.setattr(neolith, "__all__", [*neolith.__all__, "Ghost"])
+
+
+def _break_all(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(neolith, "__all__", "contract")
+
+
+def _break_spec(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _append(root / "spec" / "01-contracts.md", "\n**CON-1.** A second thing MUST be.\n")
+
+
+def _break_index(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def fails(spec_dir: Path, table: object) -> tuple[str, list[str]]:
+        raise RuntimeError("index")
+
+    monkeypatch.setattr(docs, "requirements_page", fails)
+
+
+def _break_api(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def fails(package: object) -> tuple[dict[str, str], list[str]]:
+        raise RuntimeError("reference")
+
+    monkeypatch.setattr(docs, "api_pages", fails)
+
+
+_STAGE_BREAKS = [
+    (_break_encoding, "CHANGELOG.md: cannot be staged: UnicodeDecodeError"),
+    (_break_link, "VISION.md: links to NOWHERE.md, which does not exist"),
+    (_break_text, "CHANGELOG.md: staging changed more than links"),
+    (_break_group, "group errors names Bogus, which is not public"),
+    (_break_name, "neolith.Ghost: cannot be documented: AttributeError"),
+    (_break_all, "neolith.__all__ is not a list of names"),
+    (_break_spec, "CON-1 is already defined"),
+    (_break_index, "the requirement index cannot be generated: RuntimeError('index')"),
+    (_break_api, "the API reference cannot be generated: RuntimeError('reference')"),
+]
+
+
+@pytest.mark.parametrize(
+    ("brake", "problem"), _STAGE_BREAKS, ids=[b.__name__ for b, _ in _STAGE_BREAKS]
+)
+def test_staging_reports_each_problem_with_every_other(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    brake: object,
+    problem: str,
+) -> None:
+    root = _copy_root(tmp_path)
+    _append(
+        root / "docs" / "site" / "concepts" / "index.md", "\nWrite to a@example.org.\n"
+    )
+    assert callable(brake)
+    brake(root, monkeypatch)
+    result = docs.stage(root, tmp_path / "out", {"index.md/x.md": "# X\n"})
     said = "\n".join(result.problems)
-    for expected in (
-        "VISION.md: links to NOWHERE.md, which does not exist",
-        "spec/01-contracts.md:",
-        "CON-1 is already defined",
-        "concepts/index.md: an email address on line",
-        "group errors names Bogus, which is not public",
-        "CHANGELOG.md: staging changed more than links",
-    ):
-        assert expected in said, (expected, said)
+    assert problem in said, said
+    assert "concepts/index.md: an email address on line" in said, said
+    assert "index.md/x.md: cannot be written" in said, said
     assert not (result.path / "concepts" / "index.md").exists()
-    assert not (result.path / "project" / "changelog.md").exists()
     assert (result.path / "project" / "vision.md").is_file()
+
+
+def test_staging_leaves_out_only_the_bad_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _copy_root(tmp_path)
+    _break_text(root, monkeypatch)
+    _break_group(root, monkeypatch)
+    result = docs.stage(root, tmp_path / "out")
+    assert not (result.path / "project" / "changelog.md").exists()
     assert (result.path / "reference" / "requirements.md").is_file()
     errors = (result.path / "reference" / "api" / "errors.md").read_text("utf-8")
     assert "Bogus" not in errors
     assert "neolith.UsageError" in errors
+
+
+@pytest.mark.parametrize(
+    ("where", "problem"),
+    [
+        pytest.param(lambda root, tmp: root, "holds the repository", id="root"),
+        pytest.param(
+            lambda root, tmp: root.parent, "holds the repository", id="parent"
+        ),
+        pytest.param(lambda root, tmp: root / "src", "not under build/", id="src"),
+        pytest.param(
+            lambda root, tmp: root / "docs" / "x", "not under build/", id="docs"
+        ),
+        pytest.param(
+            lambda root, tmp: tmp / "busy", "not empty and not a docs build", id="busy"
+        ),
+    ],
+)
+def test_staging_refuses_an_unsafe_place_to_build(
+    tmp_path: Path, where: object, problem: str
+) -> None:
+    root = _copy_root(tmp_path)
+    (tmp_path / "busy").mkdir()
+    (tmp_path / "busy" / "notes.txt").write_text("keep", "utf-8")
+    assert callable(where)
+    with pytest.raises(docs.DocsError, match=problem):
+        docs.stage(root, where(root, tmp_path))
+    assert (root / "src" / "neolith" / "__init__.py").is_file()
+    assert (root / "docs" / "site" / "index.md").is_file()
+    assert (tmp_path / "busy" / "notes.txt").is_file()
+
+
+def test_staging_builds_into_an_empty_place_a_marked_one_or_build(
+    tmp_path: Path,
+) -> None:
+    root = _copy_root(tmp_path)
+    for out in (tmp_path / "new", tmp_path / "new", root / "build" / "docs"):
+        assert docs.stage(root, out).problems == []
+        assert (out / docs.MARKER).exists()
 
 
 def test_staging_writes_every_mirrored_and_generated_page(tmp_path: Path) -> None:
@@ -466,6 +573,7 @@ _GOOD_TEXT = "Contracts are declared on a Protocol class and checked at import."
 _ROBOTS = '<meta name="robots" content="noindex">'
 _BANNER = f'<div class="bd-header-announcement"><div>{docs.BANNER}</div></div>'
 _FOOTER = f"<footer><p>{docs.FOOTER}</p></footer>"
+_PLANNED_ID = "neolith-planned-0123"
 
 
 def _page(
@@ -491,22 +599,43 @@ def _site(tmp_path: Path, pages: dict[str, str]) -> Path:
     return html
 
 
-def _found(tmp_path: Path, page: str, path: str = "concepts/index.html") -> list[str]:
-    return docs.check_html(_site(tmp_path, {path: page}), ROOT)
+def _found(
+    tmp_path: Path,
+    page: str,
+    path: str = "concepts/index.html",
+    others: dict[str, str] | None = None,
+) -> list[str]:
+    html = _site(tmp_path, {path: page, **(others or {})})
+    return docs.check_html(html, ROOT, planned={path: [_PLANNED_ID]})
+
+
+_SPEC = {
+    "spec/01-contracts/index.html": _page(
+        '<strong id="con-21">CON-21.</strong> ' + "The rule this page holds, withdrawn."
+    )
+}
 
 
 def test_a_good_page_passes(tmp_path: Path) -> None:
-    page = _page(_GOOD_TEXT + '<a href="../">home</a> <a href="#x" id="x">here</a>')
+    page = _page(
+        _GOOD_TEXT + '<a href="../">home</a> <a href="#x" id="x">here</a>'
+        ' <a href="https://docs.python.org/3/">Python</a>'
+        '<svg xmlns="http://www.w3.org/2000/svg"></svg>'
+    )
     assert _found(tmp_path, page) == []
 
 
 def _person() -> str:
-    people = docs._people(ROOT)
+    people = docs.people(ROOT)
     assert people
     return people[0]
 
 
-_PLANNED = '<div class="admonition planned" data-neolith-planned="5">{}</div>'
+def _planned(text: str) -> str:
+    return f'<div class="admonition planned" id="{_PLANNED_ID}"><p>{text}</p></div>'
+
+
+_LINK = '<a href="{}">x</a>' + _GOOD_TEXT
 
 _REFUSED = [
     # Every page.
@@ -534,12 +663,26 @@ _REFUSED = [
         ),
         "the email address someone@example.org",
     ),
-    ("mailto", _page('<a href="mailto:x">write</a>' + _GOOD_TEXT), "links to mailto:x"),
+    ("mailto", _page(_LINK.format("mailto:x")), "links to mailto:x"),
     ("secret-github", _page("token ghp_" + "a" * 36), "shaped like a secret"),
     ("secret-aws", _page("key AKIA" + "A" * 16), "shaped like a secret"),
+    ("secret-slack", _page("xoxb-" + "1" * 12), "shaped like a secret"),
+    ("secret-sk", _page("sk-" + "a" * 24), "shaped like a secret"),
+    ("secret-pypi", _page("pypi-" + "A" * 60), "shaped like a secret"),
+    ("secret-google", _page("AIza" + "B" * 35), "shaped like a secret"),
+    (
+        "secret-discord",
+        _page("M" + "a" * 25 + ".abcdef." + "b" * 30),
+        "shaped like a secret",
+    ),
     (
         "secret-private-key",
         _page("-----BEGIN RSA " + "PRIVATE KEY-----"),
+        "shaped like a secret",
+    ),
+    (
+        "secret-slack-hook",
+        _page("https://hooks.slack.com/services/" + "T" * 9),
         "shaped like a secret",
     ),
     (
@@ -551,19 +694,63 @@ _REFUSED = [
         "shaped like a secret",
     ),
     (
-        "secret-entity",
-        _page("token gh&#112;_" + "a" * 36),
+        "secret-assigned",
+        _page("api_key = 'Q2xhdWRlIGlzIGEgY2F0'"),
         "shaped like a secret",
     ),
+    (
+        "secret-entropy",
+        _page("value 7fK2pQ9xLmZ4vB8nR1tY6wE3sA5dG0hJ"),
+        "shaped like a secret",
+    ),
+    ("secret-entity", _page("token gh&#112;_" + "a" * 36), "shaped like a secret"),
     (
         "foreign-script",
         _page(head=_ROBOTS + '<script src="https://cdn.example.com/x.js"></script>'),
         "loads https://cdn.example.com/x.js from another origin",
     ),
     (
+        "foreign-video",
+        _page(body='<video src="https://x.example.com/v.mp4"></video>'),
+        "from another origin",
+    ),
+    (
+        "foreign-object",
+        _page(body='<object data="//x.example.com/o"></object>'),
+        "from another origin",
+    ),
+    (
+        "foreign-embed",
+        _page(body='<embed src="https://x.example.com/e">'),
+        "from another origin",
+    ),
+    (
+        "foreign-srcset",
+        _page(body='<img src="a.png" srcset="https://x.example.com/b.png 2x">'),
+        "from another origin",
+    ),
+    (
+        "foreign-any-attribute",
+        _page(body='<div data-src="https://x.example.com/p.png"></div>'),
+        "from another origin",
+    ),
+    (
         "foreign-style-import",
         _page(
             head=_ROBOTS + '<style>@import url("https://x.example.com/a.css");</style>'
+        ),
+        "its CSS loads from another origin",
+    ),
+    (
+        "foreign-style-import-string",
+        _page(head=_ROBOTS + '<style>@import "https://x.example.com/a.css";</style>'),
+        "its CSS loads from another origin",
+    ),
+    (
+        "foreign-image-set",
+        _page(
+            body="<div style='background: image-set("
+            '"https://x.example.com/a.png" 1x)\'></div>'
         ),
         "its CSS loads from another origin",
     ),
@@ -574,12 +761,12 @@ _REFUSED = [
     ),
     (
         "missing-page",
-        _page('<a href="../missing/">x</a>' + _GOOD_TEXT),
+        _page(_LINK.format("../missing/")),
         "../missing/, which does not exist",
     ),
     (
         "missing-html",
-        _page('<a href="nope.html">x</a>' + _GOOD_TEXT),
+        _page(_LINK.format("nope.html")),
         "nope.html, which does not exist",
     ),
     (
@@ -588,36 +775,73 @@ _REFUSED = [
         "pic.png, which does not exist",
     ),
     (
-        "missing-anchor",
-        _page('<a href="../#nowhere">x</a>' + _GOOD_TEXT),
-        "an anchor the page lacks",
+        "missing-stylesheet",
+        _page(head=_ROBOTS + '<link rel="stylesheet" href="x.css">'),
+        "x.css, which does not exist",
     ),
-    (
-        "absolute-link",
-        _page('<a href="/concepts/">x</a>' + _GOOD_TEXT),
-        "an absolute path",
-    ),
-    (
-        "outside-link",
-        _page('<a href="../../x/">x</a>' + _GOOD_TEXT),
-        "outside the site",
-    ),
+    ("missing-anchor", _page(_LINK.format("../#nowhere")), "an anchor the page lacks"),
+    ("absolute-link", _page(_LINK.format("/concepts/")), "an absolute path"),
+    ("outside-link", _page(_LINK.format("../../x/")), "outside the site"),
     ("no-heading", _page(h1=""), "<main> has no heading"),
     ("no-text", _page(""), "<main> has no text"),
-    # Pages the site writes.
+    (
+        "script-is-not-text",
+        _page("<script>" + _GOOD_TEXT + "</script>"),
+        "<main> has no text",
+    ),
+    # Pages the site writes: every rule reads the whole page as a reader gets it.
     (
         "private",
         _page("See neolith._forms for the helpers of each form."),
         "names a private module",
     ),
     (
-        "private-outside-main",
+        "private-title",
         _page(body='<a title="neolith._host.Connector" href="#">x</a>'),
         "names a private module",
     ),
     (
+        "private-href",
+        _page(_LINK.format("../neolith._host/")),
+        "names a private module",
+    ),
+    (
+        "private-highlighted",
+        _page(
+            '<pre><span class="n">neolith</span><span class="o">.</span>'
+            '<span class="n">_host</span></pre>'
+        ),
+        "names a private module",
+    ),
+    (
+        "private-emphasis",
+        _page("neolith.<em>_host</em> holds it."),
+        "names a private module",
+    ),
+    ("private-entity", _page("neolith&#46;_host holds it."), "names a private module"),
+    (
         "official",
         _page("The official way to declare a contract is shown."),
+        "says official",
+    ),
+    (
+        "official-title",
+        _page(head=_ROBOTS + "<title>The official docs</title>"),
+        "says official",
+    ),
+    (
+        "official-footer",
+        _page(footer=f"<footer><p>{docs.FOOTER} Official.</p></footer>"),
+        "says official",
+    ),
+    (
+        "official-alt",
+        _page(body='<img src="index.html" alt="the official logo">'),
+        "says official",
+    ),
+    (
+        "official-after-main",
+        _page("</main><p>The official one.</p><main>"),
         "says official",
     ),
     (
@@ -626,18 +850,43 @@ _REFUSED = [
         "says how the code is written",
     ),
     (
+        "how-written-lower",
+        _page("this page is ai-generated by an llm, then read."),
+        "says how the code is written",
+    ),
+    (
+        "how-written-agent",
+        _page("This text was drafted by an assistant, then read."),
+        "says how the code is written",
+    ),
+    (
         "install-pip",
         _page("Install it with pip install django-neolith today."),
         "shows an install command",
     ),
     (
-        "install-pipenv",
-        _page("Install it with pipenv install django-neolith today."),
+        "install-pip-flag",
+        _page("Run pip -q install django-neolith to get it."),
         "shows an install command",
     ),
     (
-        "install-hatch",
-        _page("Add it with hatch add django-neolith to the project."),
+        "install-pip-version",
+        _page("Run pip3.13 install django-neolith to get it."),
+        "shows an install command",
+    ),
+    (
+        "install-uv-tool",
+        _page("Run uv tool install django-neolith to get it."),
+        "shows an install command",
+    ),
+    (
+        "install-rye",
+        _page("Run rye add django-neolith in the project."),
+        "shows an install command",
+    ),
+    (
+        "install-easy",
+        _page("Run easy_install django-neolith in the shell."),
         "shows an install command",
     ),
     (
@@ -646,13 +895,53 @@ _REFUSED = [
         "shows an install command",
     ),
     (
+        "install-range",
+        _page("Require django-neolith>=0.1 in the requirements file."),
+        "shows an install command",
+    ),
+    (
+        "install-compatible",
+        _page("Require django-neolith~=0.1 in the requirements."),
+        "shows an install command",
+    ),
+    (
         "planned",
         _page("The HTTP transport will carry calls to a detached app."),
         "describes planned behaviour",
     ),
     (
+        "planned-not-yet",
+        _page("The HTTP transport is not implemented yet, sadly."),
+        "describes planned behaviour",
+    ),
+    (
+        "planned-coming",
+        _page("The HTTP transport is coming in step 5 of the plan."),
+        "describes planned behaviour",
+    ),
+    (
+        "planned-plan",
+        _page("We plan to add an HTTP transport after this one."),
+        "describes planned behaviour",
+    ),
+    (
+        "planned-step",
+        _page("Step 5 adds the HTTP transport to the host."),
+        "describes planned behaviour",
+    ),
+    (
+        "planned-scheduled",
+        _page("The HTTP transport is scheduled for step 5 now."),
+        "describes planned behaviour",
+    ),
+    (
         "planned-lookalike",
         _page(_GOOD_TEXT + '<div class="admonition planned">It will ship.</div>'),
+        "describes planned behaviour",
+    ),
+    (
+        "planned-upper-case-mark",
+        _page(_GOOD_TEXT + '<div DATA-NEOLITH-PLANNED="5">It will ship.</div>'),
         "describes planned behaviour",
     ),
     (
@@ -665,6 +954,26 @@ _REFUSED = [
         _page(f"Thanks to {_person().lower()} for the design of it."),
         "names a person",
     ),
+    (
+        "person-title",
+        _page(body=f'<abbr title="by {_person()}">x</abbr>'),
+        "names a person",
+    ),
+    (
+        "citation-unknown",
+        _page("As CON-9999 says, it holds for a call."),
+        "cites unknown requirement CON-9999",
+    ),
+    (
+        "citation-withdrawn",
+        _page("As CON-21 says, it holds for a call."),
+        "cites withdrawn requirement CON-21",
+    ),
+    (
+        "citation-withdrawn-anchor",
+        _page(_LINK.format("../spec/01-contracts/#con-21")),
+        "links to withdrawn requirement CON-21",
+    ),
 ]
 
 
@@ -672,7 +981,7 @@ _REFUSED = [
     ("page", "problem"), [p[1:] for p in _REFUSED], ids=[p[0] for p in _REFUSED]
 )
 def test_each_rule_refuses_its_page(tmp_path: Path, page: str, problem: str) -> None:
-    found = _found(tmp_path, page)
+    found = _found(tmp_path, page, others=_SPEC)
     assert any(problem in said for said in found), found
 
 
@@ -686,31 +995,65 @@ def test_each_rule_refuses_its_page(tmp_path: Path, page: str, problem: str) -> 
             "says how the code is written",
         ),
         ("Thanks to {person} for this block of text.", "names a person"),
+        ("As CON-9999 says, it holds.", "cites unknown requirement"),
+        ("See neolith._host for it.", "names a private module"),
     ],
 )
 def test_a_planned_block_exempts_only_the_planned_words_rule(
     tmp_path: Path, words: str, problem: str
 ) -> None:
-    block = _PLANNED.format(
-        "<p>It will carry calls. " + words.format(person=_person()) + "</p>"
-    )
+    block = _planned("It will carry calls. " + words.format(person=_person()))
     found = _found(tmp_path, _page(_GOOD_TEXT + block))
     assert any(problem in said for said in found), found
     assert not any("planned behaviour" in said for said in found), found
 
 
-def test_planned_words_inside_a_planned_block_pass(tmp_path: Path) -> None:
-    block = _PLANNED.format(
-        "<p>The HTTP transport will carry calls to a detached app.</p>"
-    )
+def test_planned_words_inside_a_recorded_planned_block_pass(tmp_path: Path) -> None:
+    block = _planned("The HTTP transport will carry calls to a detached app.")
     assert _found(tmp_path, _page(_GOOD_TEXT + block)) == []
 
 
+def test_a_planned_block_the_extension_did_not_record_is_not_exempt(
+    tmp_path: Path,
+) -> None:
+    block = _planned("The HTTP transport will carry calls to a detached app.")
+    html = _site(tmp_path, {"concepts/index.html": _page(_GOOD_TEXT + block)})
+    found = docs.check_html(html, ROOT, planned={})
+    assert any("planned behaviour" in said for said in found), found
+
+
+def test_the_planned_blocks_are_read_from_the_record_beside_the_html(
+    tmp_path: Path,
+) -> None:
+    block = _planned("The HTTP transport will carry calls to a detached app.")
+    html = _site(tmp_path, {"concepts/index.html": _page(_GOOD_TEXT + block)})
+    record = html.parent / docs.PLANNED_RECORD
+    assert any("planned behaviour" in said for said in docs.check_html(html, ROOT))
+    record.write_text(json.dumps({"concepts/index.html": [_PLANNED_ID]}), "utf-8")
+    assert docs.check_html(html, ROOT) == []
+    record.write_text("{", "utf-8")
+    assert any(
+        f"{docs.PLANNED_RECORD} cannot be read" in said
+        for said in docs.check_html(html, ROOT)
+    )
+
+
 def test_every_match_of_a_rule_is_reported(tmp_path: Path) -> None:
-    page = _page("The official way, officially. It will be, and is planned.")
-    found = _found(tmp_path, page)
+    found = _found(
+        tmp_path, _page("The official way, officially. It will be, and is planned.")
+    )
     assert sum("says official" in said for said in found) == 2, found
     assert sum("planned behaviour" in said for said in found) == 2, found
+
+
+def test_a_file_that_cannot_be_read_is_a_problem_and_the_rest_are_checked(
+    tmp_path: Path,
+) -> None:
+    html = _site(tmp_path, {"concepts/index.html": _page("The official way.")})
+    (html / "bad.html").write_bytes(b"\xff\xfe")
+    found = docs.check_html(html, ROOT)
+    assert any(said.startswith("bad.html: cannot be checked") for said in found), found
+    assert any("says official" in said for said in found), found
 
 
 def test_a_secret_in_a_script_file_is_refused(tmp_path: Path) -> None:
@@ -736,12 +1079,22 @@ def test_a_stylesheet_loading_from_another_origin_is_refused(tmp_path: Path) -> 
         pytest.param(_GOOD_TEXT + " See neolith._compat.", id="private-module"),
         pytest.param(_GOOD_TEXT + " python -m pip install -e .", id="install"),
         pytest.param(_GOOD_TEXT + " The step will add it.", id="future"),
+        pytest.param(_GOOD_TEXT + " As CON-21 said, once.", id="withdrawn"),
+        pytest.param(
+            _GOOD_TEXT + " eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9xyz", id="example-token"
+        ),
     ],
 )
 def test_a_mirrored_page_is_word_for_word_and_exempt_from_the_site_text_rules(
     tmp_path: Path, text: str
 ) -> None:
     assert _found(tmp_path, _page(text), "project/contributing/index.html") == []
+
+
+def test_the_requirement_index_may_list_a_withdrawn_requirement(tmp_path: Path) -> None:
+    page = _page(_GOOD_TEXT + ' <a href="../../spec/01-contracts/#con-21">CON-21</a>')
+    found = _found(tmp_path, page, "reference/requirements/index.html", _SPEC)
+    assert found == []
 
 
 @pytest.mark.parametrize(
@@ -760,10 +1113,35 @@ def test_a_mirrored_page_is_word_for_word_and_exempt_from_the_site_text_rules(
         pytest.param(
             "A spinning top is not a pipeline or a hatchback.", id="near-install"
         ),
+        pytest.param(
+            "Add the app to INSTALLED_APPS, then install its contract.",
+            id="install-word",
+        ),
+        pytest.param(
+            "A name reserved for a later standard kind is refused.", id="later-kind"
+        ),
+        pytest.param(
+            "The digest 0123456789abcdef0123456789abcdef is hex.", id="hex-digest"
+        ),
+        pytest.param(
+            '<a href="../con%63epts/">this page</a> and ' + _GOOD_TEXT,
+            id="encoded-link",
+        ),
+        pytest.param(
+            '<a href="#%78" id="x">here</a> and ' + _GOOD_TEXT, id="encoded-anchor"
+        ),
+        pytest.param(
+            '<a href="#y">there</a><a name="y"></a> and ' + _GOOD_TEXT,
+            id="named-anchor",
+        ),
     ],
 )
 def test_the_nearest_legitimate_text_passes(tmp_path: Path, text: str) -> None:
     assert _found(tmp_path, _page(text)) == []
+
+
+def test_the_search_page_needs_no_text_without_javascript(tmp_path: Path) -> None:
+    assert _found(tmp_path, _page("", h1=""), "search/index.html") == []
 
 
 def test_a_release_build_needs_no_banner_and_refuses_no_install(tmp_path: Path) -> None:
@@ -772,7 +1150,9 @@ def test_a_release_build_needs_no_banner_and_refuses_no_install(tmp_path: Path) 
     assert docs.check_html(html, ROOT, development=False) == []
 
 
-def test_the_people_are_the_authors_and_the_copyright_holder(tmp_path: Path) -> None:
+def test_the_people_are_the_authors_the_holder_and_the_committers(
+    tmp_path: Path,
+) -> None:
     (tmp_path / "pyproject.toml").write_text(
         '[project]\nauthors = [{ name = "Ada Lovelace and project contributors" }]\n',
         encoding="utf-8",
@@ -780,7 +1160,164 @@ def test_the_people_are_the_authors_and_the_copyright_holder(tmp_path: Path) -> 
     (tmp_path / "LICENSE").write_text(
         "Copyright (c) 2026, Grace Hopper\n", encoding="utf-8"
     )
-    assert docs._people(tmp_path) == ["Ada", "Grace", "Hopper", "Lovelace"]
+    git = [
+        "git",
+        "-c",
+        "user.name=Alan Turing",
+        "-c",
+        "user.email=7+aturing@users.noreply.github.com",
+    ]
+    for args in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "x"]):
+        subprocess.run([*git, *args], cwd=tmp_path, check=True)  # noqa: S603
+    assert docs.people(tmp_path) == [
+        "Ada",
+        "Alan",
+        "aturing",
+        "Grace",
+        "Hopper",
+        "Lovelace",
+        "Turing",
+    ]
+    html = _site(
+        tmp_path, {"concepts/index.html": _page("Thanks to @aturing for it, as ever.")}
+    )
+    assert any("names a person" in said for said in docs.check_html(html, tmp_path))
+
+
+# The command line, and the steps around Sphinx
+
+
+def _fake_sphinx(monkeypatch: pytest.MonkeyPatch, run: object) -> None:
+    for name in ("sphinx", "sphinx.cmd"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    module = types.ModuleType("sphinx.cmd.build")
+    module.build_main = run  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "sphinx.cmd.build", module)
+    monkeypatch.setattr(docs, "fetch_inventories", lambda: ["inventory problem"])
+
+
+def _warning_run(argv: list[str]) -> int:
+    warnings = Path(argv[argv.index("-w") + 1])
+    source = argv[-2]
+    warnings.write_text(
+        f"{source}/a.md:3: WARNING: one\n  more\n{source}/b.md: WARNING: two\n", "utf-8"
+    )
+    Path(argv[-1]).mkdir(parents=True)
+    return 1
+
+
+def test_a_build_reports_staging_the_inventories_and_every_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_sphinx(monkeypatch, _warning_run)
+    result = docs.build(ROOT, tmp_path, {"bad.md": "# Bad\n\nmail a@example.org\n"})
+    assert result.problems == [
+        "bad.md: an email address on line 3; the page is left out",
+        "inventory problem",
+        "a.md:3: WARNING: one more",
+        "b.md: WARNING: two",
+    ]
+
+
+def test_a_build_that_fails_without_a_warning_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def run(argv: list[str]) -> int:
+        print("crashed here")
+        return 2
+
+    _fake_sphinx(monkeypatch, run)
+    said = docs.build(ROOT, tmp_path).problems
+    assert said[-1].startswith("Sphinx failed with status 2:\ncrashed here"), said
+
+
+def test_a_build_that_raises_is_a_problem(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def run(argv: list[str]) -> int:
+        raise RuntimeError("boom")
+
+    _fake_sphinx(monkeypatch, run)
+    assert "Sphinx raised RuntimeError('boom')" in docs.build(ROOT, tmp_path).problems
+
+
+def test_a_check_reports_every_step_and_a_version_it_cannot_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    html = _site(tmp_path, {"concepts/index.html": _page("The official way.")})
+    monkeypatch.setattr(
+        docs, "build", lambda root, out, extra: docs.Result(html, ["built"])
+    )
+
+    def unreadable(root: Path) -> bool:
+        raise docs.DocsError("src/neolith/__init__.py: no __version__")
+
+    monkeypatch.setattr(docs, "development", unreadable)
+    found = docs.check(ROOT, tmp_path)
+    assert found[:2] == [
+        "built",
+        "src/neolith/__init__.py: no __version__; checked as a development build",
+    ]
+    assert any("says official" in said for said in found), found
+
+
+def test_a_check_says_when_no_html_was_built(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    missing = tmp_path / "html"
+    monkeypatch.setattr(
+        docs, "build", lambda root, out, extra: docs.Result(missing, [])
+    )
+    assert docs.check(ROOT, tmp_path) == [f"{missing}: no HTML was built"]
+
+
+@pytest.mark.parametrize(
+    ("command", "problems", "status"),
+    [
+        ("check", [], 0),
+        ("check", ["a problem"], 1),
+        ("build", [], 0),
+        ("build", ["a problem"], 1),
+        ("stage", [], 0),
+        ("stage", ["a problem"], 1),
+    ],
+)
+def test_the_exit_status_is_1_exactly_when_a_problem_is_found(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+    problems: list[str],
+    status: int,
+) -> None:
+    called: list[str] = []
+
+    def step(name: str) -> object:
+        def run(root: Path, out: Path, extra: object = None) -> docs.Result:
+            called.append(name)
+            return docs.Result(out, list(problems))
+
+        return run
+
+    def check(root: Path, out: Path, extra: object = None) -> list[str]:
+        called.append("check")
+        return list(problems)
+
+    monkeypatch.setattr(docs, "stage", step("stage"))
+    monkeypatch.setattr(docs, "build", step("build"))
+    monkeypatch.setattr(docs, "check", check)
+    assert docs.main([command, "--out", "x"]) == status
+    assert called == [command]
+    out, err = capsys.readouterr()
+    if problems:
+        assert "a problem" in err
+        assert "docs: 1 problem(s)" in err
+    else:
+        assert out == f"docs: every check passed ({command})\n"
+
+
+def test_a_place_that_is_not_safe_exits_1(capsys: pytest.CaptureFixture[str]) -> None:
+    assert docs.main(["stage", "--out", str(ROOT)]) == 1
+    assert "holds the repository" in capsys.readouterr().err
 
 
 # The build (needs the docs group)
@@ -852,7 +1389,10 @@ def test_the_site_builds_and_passes_every_check(tmp_path: Path) -> None:
     assert note in read("adr/0005-small-required-core")
     assert note in read("adr")
     assert note not in read("adr/0001-record-architecture-decisions")
-    assert 'data-neolith-planned="5"' in read("concepts")
+    record = json.loads((tmp_path / docs.PLANNED_RECORD).read_text("utf-8"))
+    (ident,) = record["concepts/index.html"]
+    assert f'class="admonition planned" id="{ident}"' in read("concepts")
+    assert 'href="../spec/00-overview/#ovr-5"' in read("concepts")
 
 
 # Each entry: a page, or a patch run before the build, and what must be said.
@@ -879,8 +1419,8 @@ _BAD_PAGES = {
         'the class "planned" belongs to {planned} blocks only',
     ),
     "bad/raw.md": (
-        '<div data-neolith-planned="5">It ships.</div>',
-        "raw HTML may not imitate a {planned} block",
+        '<div DATA-NEOLITH-PLANNED="5">It will ship.</div>',
+        "raw HTML is not allowed in a page the site writes",
     ),
     "bad/install.md": (
         "Install it with pip install django-neolith, as shown here.",
@@ -901,8 +1441,10 @@ neolith_docs._Site.__init__ = patched
 neolith_docs._alias_comment = lambda name, found: None
 """
 _BAD_PATCHED = [
-    # A block naming an unknown step carries no mark, so its words count.
+    # A block naming an unknown step is not recorded, so its words count.
     "bad/step/index.html: describes planned behaviour outside a {planned} block",
+    # Raw HTML is refused, and its words count too.
+    "bad/raw/index.html: describes planned behaviour outside a {planned} block",
     "record 0005: status 'Maybe' is not one the template admits",
     "requirement anchors",
     "neolith.Binary: no #: comment where it is defined",

@@ -12,7 +12,7 @@ An app that implements a contract is its **provider**. An app that calls it hold
 
 ## Modes
 
-Where an app runs is its **mode**, and the mode belongs to the deployment, never to the app's code (spec 00):
+Where an app runs is its **mode**, and the mode belongs to the deployment, never to the app's code (spec 00, [OVR-5](../spec/00-overview.md#ovr-5)):
 
 - An app is **attached** when it runs in the same host as its caller. Its connector reaches it over the in-process transport, which still serializes each request and reply, so a call means the same in both modes (ADR 0007).
 - An app is **detached** when it runs in its own host, and its connector reaches it over a network transport.
