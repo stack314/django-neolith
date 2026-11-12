@@ -22,7 +22,6 @@ from typing import Annotated, Any, Optional, Protocol, TypeAliasType, cast
 import pytest
 from hypothesis import HealthCheck, assume, given, settings
 from hypothesis import strategies as st
-from hypothesis_jsonschema import from_schema
 from jsonschema import Draft202012Validator, FormatChecker
 from pydantic import (
     AfterValidator,
@@ -55,6 +54,7 @@ from neolith._forms import (
     DURATION_PATTERN,
 )
 from neolith._portable import DATE_PATTERN, TIMESTAMP_PATTERN
+from tests.strategies import admitted_by
 
 SPEC = Path(__file__).resolve().parent.parent / "spec" / "01-contracts.md"
 SAFE = 2**53 - 1
@@ -793,7 +793,7 @@ def test_finite_numbers_travel_in_the_range_the_description_states(
 def test_each_form_round_trips_from_its_description(
     annotation: object, described: dict[str, Any], data: st.DataObject
 ) -> None:
-    value = data.draw(from_schema(described))
+    value = data.draw(admitted_by(described))
     # python-jsonschema and hypothesis read "$" as Python does, so a final
     # newline can be drawn; spec 01 refuses it (see above).
     assume(not (isinstance(value, str) and value.endswith("\n")))

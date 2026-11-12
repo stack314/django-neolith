@@ -23,7 +23,6 @@ from typing import Any, Literal, Protocol, cast
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
-from hypothesis_jsonschema import from_schema
 from pydantic import AwareDatetime, BaseModel
 
 from neolith import (
@@ -38,6 +37,7 @@ from neolith import (
 from neolith._connector import Connector, Failure, InProcess, internal_message
 from neolith._context import Scope, Sent
 from neolith._contracts import Action
+from tests.strategies import admitted_by
 from tests.test_contract_round_trip import _HYPOTHESIS, _TYPES, _name, _records
 from tests.test_crossing import _shared
 
@@ -569,7 +569,7 @@ def test_generated_values_cross_to_the_provider_and_back_unchanged(
         return
     description = Contract.of(connector._contract.declaration).describe()
     schema = {"$defs": description["$defs"], "$ref": f"#/$defs/{record.__name__}"}
-    sent = record.model_validate_json(json.dumps(data.draw(from_schema(schema))))
+    sent = record.model_validate_json(json.dumps(data.draw(admitted_by(schema))))
     with _context.root("tests", requires=(connector._contract.identity,)):
         reply = connector.send(sent)
     assert type(reply) is record

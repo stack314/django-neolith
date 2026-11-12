@@ -20,7 +20,6 @@ import pydantic.plugin._loader
 import pytest
 from hypothesis import assume, given
 from hypothesis import strategies as st
-from hypothesis_jsonschema import from_schema
 from jsonschema import Draft202012Validator
 from pydantic import (
     BaseModel,
@@ -35,6 +34,7 @@ from pydantic_core import SchemaSerializer
 
 from neolith import Contract, ContractDefinitionError, action, contract
 from neolith._crossing import check_request, codec
+from tests.strategies import admitted_by
 from tests.test_contract_round_trip import (
     _FORMAT_CHECKER,
     _HYPOTHESIS,
@@ -1431,7 +1431,7 @@ def test_generated_values_cross_equal_and_unshared(data: st.DataObject) -> None:
         found, schema = _declare_request(record)
     except ContractDefinitionError:
         return
-    _crosses(found, record, schema, data.draw(from_schema(schema)))
+    _crosses(found, record, schema, data.draw(admitted_by(schema)))
 
 
 @pytest.mark.spec("TRN-10", "TRN-12", "TRN-13")
@@ -1439,7 +1439,7 @@ def test_generated_values_cross_equal_and_unshared(data: st.DataObject) -> None:
 @given(st.data())
 def test_every_portable_form_crosses_equal_and_unshared(data: st.DataObject) -> None:
     found, schema = _declare_request(Reference)
-    _crosses(found, Reference, schema, data.draw(from_schema(schema)))
+    _crosses(found, Reference, schema, data.draw(admitted_by(schema)))
 
 
 class Settable(BaseModel):
@@ -1541,7 +1541,7 @@ def test_changing_everything_in_one_read_changes_nothing_in_another(
         record, found = Defaulted, _declare(Defaulted)
         text = b"{}"
     else:
-        text = json.dumps(data.draw(from_schema(schema))).encode()
+        text = json.dumps(data.draw(admitted_by(schema))).encode()
     reader = codec(found, record)
     first, second = reader.read(text), reader.read(text)
     before = _state(second)

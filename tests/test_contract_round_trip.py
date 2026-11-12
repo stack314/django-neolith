@@ -24,7 +24,6 @@ from typing import Annotated, Any, Literal, Protocol, cast
 import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
-from hypothesis_jsonschema import from_schema
 from jsonschema import Draft202012Validator, FormatChecker
 from pydantic import (
     AfterValidator,
@@ -53,6 +52,7 @@ from neolith._portable import (
     portable_scalars,
     portable_settings,
 )
+from tests.strategies import admitted_by
 
 _HYPOTHESIS = settings(
     derandomize=True,
@@ -422,7 +422,7 @@ def test_generated_contracts_round_trip_through_their_description(
     except ContractDefinitionError:
         # Refused: the property is about contracts that are accepted.
         return
-    value = data.draw(from_schema(schema))
+    value = data.draw(admitted_by(schema))
     _round_trip_with_defaults(record, schema, value)
 
 
@@ -439,7 +439,7 @@ def test_generated_detail_records_round_trip_through_their_description(
         schema = _declare(record, role="detail")
     except ContractDefinitionError:
         return
-    value = data.draw(from_schema(schema))
+    value = data.draw(admitted_by(schema))
     _round_trip_with_defaults(record, schema, value)
 
 
@@ -479,7 +479,7 @@ def test_reference_contract_round_trips_through_its_description(
     data: st.DataObject,
 ) -> None:
     schema = _declare(Reference)
-    value = data.draw(from_schema(schema))
+    value = data.draw(admitted_by(schema))
     _round_trip_with_defaults(Reference, schema, value)
 
 

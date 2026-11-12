@@ -28,7 +28,6 @@ from typing import Annotated, Any, Literal, Protocol, cast
 import pytest
 from hypothesis import assume, event, given, settings
 from hypothesis import strategies as st
-from hypothesis_jsonschema import from_schema
 from jsonschema import Draft202012Validator, FormatChecker, validators
 from jsonschema.exceptions import ValidationError as SchemaValidationError
 from pydantic import (
@@ -58,6 +57,7 @@ from neolith._crossing import (
     check_request,
     codec,
 )
+from tests.strategies import admitted_by
 from tests.test_contract_round_trip import (
     _FORMAT_CHECKER,
     _HYPOTHESIS,
@@ -1572,7 +1572,7 @@ def test_a_generated_value_is_written_as_its_own_serializer_writes_it(
         found, schema = _contract_for(record)
     except ContractDefinitionError:
         return
-    raw = data.draw(from_schema(schema))
+    raw = data.draw(admitted_by(schema))
     assume(_fits(schema, raw))
     value = codec(found, record).read(json.dumps(raw).encode())
     text = check_request(found, found.actions["send"], value)
@@ -1742,7 +1742,7 @@ def test_whatever_is_sent_fits_the_description_and_reads_back_as_it_was_held(
     data: st.DataObject,
 ) -> None:
     sender = codec(_REFERENCE, Reference)
-    raw = data.draw(from_schema(_REFERENCE_SCHEMA))
+    raw = data.draw(admitted_by(_REFERENCE_SCHEMA))
     assume(_fits(_REFERENCE_SCHEMA, raw))
     value = sender.read(json.dumps(raw).encode())
     # A value read from text that fits the description is always sent.
@@ -2224,7 +2224,7 @@ def _agrees(schema: dict[str, Any], data: st.DataObject) -> None:
     assert _keywords(schema) <= set(_KEYWORDS)
     checker = _checker(schema)
     reference = _Reference(schema, format_checker=_FORMATS)
-    valid = data.draw(from_schema(_every_field(schema)))
+    valid = data.draw(admitted_by(_every_field(schema)))
     paths = _paths(valid)
     chosen = data.draw(
         st.lists(st.sampled_from(paths), min_size=1, max_size=8, unique=True)

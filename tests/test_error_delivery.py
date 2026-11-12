@@ -18,7 +18,6 @@ from typing import Annotated, Any, Literal, Protocol, cast
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
-from hypothesis_jsonschema import from_schema
 from pydantic import AwareDatetime, BaseModel, BeforeValidator
 
 from neolith import (
@@ -33,6 +32,7 @@ from neolith._connector import Connector, Failure, InProcess, internal_message
 from neolith._context import Scope, Sent
 from neolith._contracts import Action, is_received, untyped_problem
 from neolith._crossing import codec
+from tests.strategies import admitted_by
 from tests.test_contract_round_trip import _HYPOTHESIS, _TYPES, _name, _records
 from tests.test_crossing import _shared
 
@@ -540,7 +540,7 @@ def test_generated_details_cross_equal_and_unshared(data: st.DataObject) -> None
         return
     description = Contract.of(connector._contract.declaration).describe()
     schema = {"$defs": description["$defs"], "$ref": f"#/$defs/{record.__name__}"}
-    detail = record.model_validate_json(json.dumps(data.draw(from_schema(schema))))
+    detail = record.model_validate_json(json.dumps(data.draw(admitted_by(schema))))
     raised[:] = [ContractError("failed", "it failed", detail)]
     with (
         _context.root("tests", requires=(connector._contract.identity,)),
