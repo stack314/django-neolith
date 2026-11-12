@@ -557,14 +557,16 @@ def test_each_field_is_admitted_as_a_tuple_and_may_be_left_out(field: str) -> No
 def test_a_field_that_is_a_str_or_a_class_misses_its_trailing_comma(
     field: str, value: object
 ) -> None:
+    # The value is also checked as the one entry of the tuple, whatever its
+    # kind. Only an entry its field admits adds no second line.
     refusals = _refusals(_valid(**{field: value}))
     assert {found for found, _ in refusals} == {field}
     assert sum("trailing comma" in text for _, text in refusals) == 1
-    # A value of the entry's kind is also checked as the entry that was meant.
-    meant = (field == "resources" and value == "django.contrib.humanize") or (
-        field == "requires" and value in (Unmarked, int)
-    )
-    assert len(refusals) == (2 if meant else 1)
+    admitted = (field, value) in [
+        ("batteries", "django.contrib.humanize"),
+        ("requires", Stock),
+    ]
+    assert len(refusals) == (1 if admitted else 2)
 
 
 class _Pair(tuple[Any, ...]):
@@ -611,9 +613,10 @@ def test_a_field_that_is_not_exactly_a_tuple_is_refused(
     refusals = _refusals(_valid(**{field: value}))
     assert {found for found, _ in refusals} == {field}
     assert sum("write a tuple, (" in text for _, text in refusals) == 1
-    # The items of a list are checked as entries, and "x" is not a Provided.
-    listed = type(value) is list and field == "provides"
-    assert len(refusals) == (2 if listed else 1)
+    # The items of a builtin container are checked as entries, and "x" is
+    # not a Provided.
+    read = type(value) in (list, set, frozenset, dict) and field == "provides"
+    assert len(refusals) == (2 if read else 1)
 
 
 @pytest.mark.spec("APP-6")
@@ -811,12 +814,15 @@ def test_a_provided_without_its_allow_list_is_refused_and_an_empty_one_admitted(
     ids=repr,
 )
 def test_an_allow_list_that_is_not_exactly_a_tuple_is_refused(callers: object) -> None:
-    field, text = _refusal(_valid(provides=(_provided(principal_from=callers),)))
-    assert field == "provides"
-    assert text.startswith("stock.v1: principal_from is ")
-    assert "not a tuple" in text
-    # Only a str is the one-element tuple that lost its comma.
-    assert ("trailing comma" in text) == (callers == "web")
+    refusals = _refusals(_valid(provides=(_provided(principal_from=callers),)))
+    assert {field for field, _ in refusals} == {"provides"}
+    lines = [text for _, text in refusals if "not a tuple" in text]
+    assert len(lines) == 1
+    assert lines[0].startswith("stock.v1: principal_from is ")
+    # A str or a class is the one entry of a tuple that lost its comma.
+    assert ("trailing comma" in lines[0]) == (callers in ("web", Stock))
+    # Only the class is an entry that is refused as well.
+    assert len(refusals) == (2 if callers is Stock else 1)
 
 
 @pytest.mark.spec("APP-6")
@@ -835,10 +841,11 @@ def test_a_one_element_tuple_without_its_comma_is_named_as_that() -> None:
     written = _provided(principal_from=("orders",))
     assert _snapshot(_declare(_valid(provides=(written,)))).provides[0].principal_from
 
-    # A Provided is the missing-comma case in provides only.
+    # In another field a Provided is read the same way, as its one entry.
     for other in ("requires", "resources", "batteries"):
-        _field, text = _refusal(_valid(**{other: _provided()}))
-        assert "trailing comma" not in text
+        lines = [text for _, text in _refusals(_valid(**{other: _provided()}))]
+        assert len(lines) == 2
+        assert sum("trailing comma" in text for text in lines) == 1
 
 
 @pytest.mark.spec("APP-5", "APP-6")
@@ -1125,9 +1132,7 @@ _REACHES: dict[str, tuple[Namespace, dict[str, object], list[str]]] = {
 
 @pytest.mark.spec("APP-7")
 @pytest.mark.parametrize("case", sorted(_REACHES))
-def test_every_refusal_reaches_the_diagnostic(case: str) -> None:
-    # A refusal ends the walk only where the next check cannot read the
-    # value. Each case has a second mistake behind the first.
+def test_a_refusal_of_an_entry_or_a_placement_hides_none_behind_it(case: str) -> None:
     namespace, mixed_in, expected = _REACHES[case]
     bases = (
         (type("Mixin", (), {"__module__": __name__, **mixed_in}),) if mixed_in else ()
@@ -1138,28 +1143,124 @@ def test_every_refusal_reaches_the_diagnostic(case: str) -> None:
     assert len(lines) == len(expected), lines
 
 
-@pytest.mark.parametrize(
-    "value",
-    [
-        {"cache"},
-        frozenset({"cache"}),
-        {"cache": True},
-        iter(["cache"]),
-        _Pair(("cache",)),
+# The matrix: where a value is written, by the kind of value. Each kind holds
+# one entry that its field refuses, as the second mistake behind the first.
+
+_BAD_ENTRY: dict[str, tuple[object, str]] = {
+    "provides": ("stock.v1", "'stock.v1' is not a Provided"),
+    "requires": ("shop.Stock", "'shop.Stock' is not a contract class"),
+    "resources": ("cache", "'cache', is not a resource kind"),
+    "batteries": ("a..b", "'a..b', is not a Django app name"),
+    "principal_from": ("Web", "'Web', is not an app's name"),
+}
+_BAD_CLASS: dict[str, str] = {
+    "provides": "Unmarked is not a Provided",
+    "requires": "Unmarked is not a contract",
+    "resources": "Unmarked, is not a resource kind",
+    "batteries": "Unmarked, is not a Django app name",
+    "principal_from": "Unmarked, is not an app's name",
+}
+_BAD_PROVIDED: dict[str, list[str]] = {
+    "provides": [
+        "entry 0: Unmarked is not a contract",
+        "entry 0: implementation is missing",
+        "entry 0: principal_from is missing",
     ],
-    ids=["set", "frozenset", "dict", "iterator", "tuple subclass"],
-)
-def test_a_container_that_cannot_be_read_in_order_gets_its_one_refusal(
-    value: object,
+    "requires": ["a neolith._declaration.Provided is not a contract class"],
+    "resources": ["a neolith._declaration.Provided, is not a resource kind"],
+    "batteries": ["a neolith._declaration.Provided, is not a Django app name"],
+    "principal_from": ["a neolith._declaration.Provided, is not an app's name"],
+}
+# How each kind is refused as a container, and whether its entries are read.
+_READ_KINDS: dict[str, Callable[[object], object]] = {
+    "list": lambda entry: [entry],
+    "set": lambda entry: {entry},
+    "frozenset": lambda entry: frozenset({entry}),
+    "dict": lambda entry: {entry: True},
+}
+_STOP_KINDS: dict[str, Callable[[object], object]] = {
+    "iterator": lambda entry: iter([entry]),
+    "generator": lambda entry: (item for item in [entry]),
+    "tuple subclass": lambda entry: _Pair((entry,)),
+    "namedtuple": lambda entry: _Named(entry),
+    "list subclass": lambda entry: _Listed([entry]),
+    "bytes": lambda entry: b"cache",
+    "range": lambda entry: range(1),
+    "None": lambda entry: None,
+    "int": lambda entry: 5,
+    "lazy": lambda entry: SimpleLazyObject(lambda: pytest.fail("evaluated")),
+}
+_KINDS = ["str", "class", "Provided", *_READ_KINDS, "empty tuple", *_STOP_KINDS]
+
+
+class _Listed(list[Any]):
+    __slots__ = ()
+
+    def __iter__(self) -> Iterator[Any]:
+        pytest.fail("the author's code ran")
+
+
+def _written(place: str, value: object) -> Namespace:
+    # A second field holds a mistake of its own, in every cell.
+    if place == "principal_from":
+        return _valid(label="Stock", provides=(_provided(principal_from=value),))
+    return _valid(label="Stock", **{place: value})
+
+
+@pytest.mark.spec("APP-7")
+@pytest.mark.parametrize("kind", _KINDS)
+@pytest.mark.parametrize("place", [*_FIELDS, "principal_from"])
+def test_every_refusal_reaches_the_diagnostic(place: str, kind: str) -> None:
+    # A check is skipped only where the value cannot be read safely, judged
+    # by its type: the stop kinds. Everywhere else the entry behind the
+    # refused container is refused beside it.
+    entry, said = _BAD_ENTRY[place]
+    comma, container = "trailing comma", "write a tuple"
+    if place == "principal_from":
+        container = "not a tuple; list the calling apps"
+    behind: list[str]
+    if kind == "str":
+        value, first, behind = entry, comma, [said]
+    elif kind == "class":
+        value, first, behind = Unmarked, comma, [_BAD_CLASS[place]]
+    elif kind == "Provided":
+        value, first, behind = Provided(Unmarked), comma, _BAD_PROVIDED[place]
+    elif kind in _READ_KINDS:
+        value, first, behind = _READ_KINDS[kind](entry), container, [said]
+    elif kind == "empty tuple":
+        # An empty allow-list is admitted, and says that no app may assert.
+        value, behind = (), []
+        first = "" if place == "principal_from" else "an empty tuple"
+    else:
+        value, first, behind = _STOP_KINDS[kind](entry), container, []
+
+    refusals = _refusals(_written(place, value))
+    field = "provides" if place == "principal_from" else place
+    lines = [text for found, text in refusals if found == field]
+    assert [found for found, _ in refusals if found != field] == ["label"]
+    expected = [*([first] if first else []), *behind]
+    for fragment in expected:
+        assert sum(fragment in line for line in lines) == 1, (fragment, lines)
+    assert len(lines) == len(expected), lines
+
+
+@pytest.mark.spec("APP-7")
+@pytest.mark.parametrize("field", ["provides", "requires"])
+def test_a_class_listed_twice_is_reported_before_it_names_a_contract(
+    field: str,
 ) -> None:
-    # Reading these could run the author's code, or gives no position to
-    # name an entry by, so the walk stops at the container.
-    for namespace in (
-        _valid(resources=value),
-        _valid(provides=(_provided(principal_from=value),)),
-    ):
-        _field, text = _refusal(namespace)
-        assert "cache" not in text
+    # Marked with @contract it is still the same class, listed twice.
+    def write(first: type, second: type) -> Namespace:
+        if field == "requires":
+            return _valid(requires=(first, second))
+        return _valid(provides=(_provided(first), _provided(second)))
+
+    lines = [text for _, text in _refusals(write(Unmarked, Unmarked))]
+    assert sum("is not a contract" in text for text in lines) == 2
+    assert sum("Unmarked is listed twice" in text for text in lines) == 1
+    assert len(lines) == 3
+    assert len(_refusals(write(Unmarked, int))) == 2
+    assert len(_refusals(write(Stock, Stock))) == 1
 
 
 @pytest.mark.spec("APP-7")

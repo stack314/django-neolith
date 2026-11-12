@@ -253,6 +253,8 @@ class NeolithAppConfig(AppConfig):
         config = type(self)
         snapshot = declaration_of(config)
         if snapshot is None:
+            # Nothing is left to read: the two checks below compare with a
+            # snapshot, or are about a declared app, and this config is none.
             raise DeclarationError(
                 f"app {_class_name(config)}: it holds no checked declaration, "
                 "so it cannot be an installed app; an app's config class sets "
@@ -304,6 +306,7 @@ def _check(cls: type[NeolithAppConfig]) -> tuple[list[str], Declaration | None]:
         whole = klass is cls and declares
         for attribute in body:
             if attribute.startswith("_"):
+                # Not a refusal: a name that starts with "_" is admitted.
                 continue
             if (
                 attribute == "default"
@@ -311,8 +314,11 @@ def _check(cls: type[NeolithAppConfig]) -> tuple[list[str], Declaration | None]:
                 and issubclass(klass, NeolithAppConfig)
                 and body[attribute] is False
             ):
-                # The value neolith gave this base class when it was defined.
+                # Not a refusal: the value neolith gave this base class when
+                # it was defined.
                 continue
+            # One name gets one line for where it is. The branches exclude
+            # each other, and only the last has a value with a form to check.
             holder = "" if klass is cls else f"{_class_name(klass)} holds it; "
             if attribute in _EVENT_FIELDS:
                 refusals.append(
@@ -335,12 +341,17 @@ def _check(cls: type[NeolithAppConfig]) -> tuple[list[str], Declaration | None]:
                 written.setdefault(attribute, body[attribute])
     written.update(own)
 
+    # A class that writes neither name nor label is a base class with no
+    # app's name to check. The fields are checked whenever they are written.
+    named = "name" in written or "label" in written
     name = _check_name(written["name"], refusals) if "name" in written else None
-    label = _check_label(written, refusals) if declares or "label" in written else None
+    label = _check_label(written, refusals) if named else None
     provides, provided = _check_provides(written, refusals)
     requires = _check_requires(written, provided, refusals)
     resources = _check_resources(written, refusals)
     batteries = _check_batteries(written, name, refusals)
+    # Not a skipped check: every check has run, and only a declaring class
+    # with no refusal gets a snapshot.
     if refusals or not declares or name is None or label is None:
         return refusals, None
     return refusals, Declaration(
@@ -352,6 +363,10 @@ def _check(cls: type[NeolithAppConfig]) -> tuple[list[str], Declaration | None]:
         resources=resources,
         batteries=batteries,
     )
+
+
+# name, label and implementation are single values. Each has one form, so
+# each gets one line, and its check has nothing behind it to skip.
 
 
 def _check_name(value: object, refusals: list[str]) -> str | None:
@@ -380,45 +395,70 @@ def _check_label(own: dict[str, Any], refusals: list[str]) -> str | None:
     return None
 
 
-def _entries(field: str, own: dict[str, Any], refusals: list[str]) -> tuple[Any, ...]:
-    """Return a field's entries, as far as they can be read.
+_BUILTIN_CONTAINERS: Final = (list, set, frozenset, dict)
 
-    A refused container does not hide its entries. A value that is the one
-    entry of a tuple that lost its comma is checked as that entry, and the
-    items of a list are checked as entries. Any other container gives none:
-    reading it could run the author's code, or gives no order to name an
-    entry's position by.
+
+def _read(value: object) -> tuple[str, tuple[Any, ...] | None]:
+    """Say how a value holds its entries, and return every entry readable.
+
+    Whether an entry is read depends only on whether reading is safe, judged
+    by the value's type, never on what the author may have meant:
+
+    - a ``tuple`` is the admitted form;
+    - an exact ``str``, a class or a ``Provided`` is itself the one entry of
+      a tuple that lost its comma;
+    - an exact ``list``, ``set``, ``frozenset`` or ``dict`` is iterated by
+      the interpreter alone, and gives the values the author wrote (the keys,
+      for a ``dict``);
+    - anything else gives ``None``. Iterating a subclass, an iterator or a
+      lazy object runs the author's code, the items of ``bytes`` or a
+      ``range`` are not values the author wrote, and a value such as ``None``
+      or an ``int`` holds none.
+    """
+    kind = type(value)
+    if kind is tuple:
+        return "tuple", value  # type: ignore[return-value]  # judged by type()
+    if kind is str or issubclass(kind, type) or kind is Provided:
+        return "entry", (value,)
+    if kind in _BUILTIN_CONTAINERS:
+        return "other", tuple(value)  # type: ignore[arg-type]  # as above
+    return "other", None
+
+
+def _entries(field: str, own: dict[str, Any], refusals: list[str]) -> tuple[Any, ...]:
+    """Return a field's entries, as far as ``_read`` can read them.
+
+    A refused container does not hide its entries.
     """
     if field not in own:
+        # Nothing was written: a field with no entry is left out.
         return ()
     value = own[field]
-    kind = type(value)
-    if (
-        kind is str
-        or issubclass(kind, type)
-        or (field == "provides" and kind is Provided)
-    ):
+    form, entries = _read(value)
+    if form == "entry":
         refusals.append(
             f"{field}: got {_show(value)}; the trailing comma of a one-element "
             f"tuple is missing, write {_EXAMPLES[field]}"
         )
-        meant = {"provides": kind is Provided, "requires": issubclass(kind, type)}
-        return (value,) if meant.get(field, kind is str) else ()
-    if kind is not tuple:
+    elif form == "other":
         refusals.append(
             f"{field}: got {_show(value)}; write a tuple, {_EXAMPLES[field]}"
         )
-        return tuple(value) if kind is list else ()
-    if not value:
+    elif not entries:
         refusals.append(
             f"{field}: an empty tuple; remove the line, a field with no entry "
             "is left out"
         )
-        return ()
-    return tuple(value)
+    # None only where _read cannot read the value.
+    return () if entries is None else entries
 
 
 def _contract_of(value: object, where: str, refusals: list[str]) -> Contract | None:
+    """Return the contract a value names, or ``None`` with its one refusal.
+
+    Each branch ends the read of this value because no contract can be read
+    from it: it is absent, it is not a class, or the class carries no mark.
+    """
     if value is _MISSING:
         refusals.append(
             f"{where}: the contract is missing; name the contract's class, "
@@ -447,12 +487,28 @@ def _twice(first: Contract, second: Contract) -> str:
     )
 
 
+def _again(entry: object, unread: list[type]) -> bool:
+    """True if a class that names no contract was already listed.
+
+    The class is compared by identity. When its own refusal is fixed it is
+    still the same class, so its repeat is reported beside it.
+    """
+    if not issubclass(type(entry), type):
+        # Another value is replaced, not kept, when its refusal is fixed.
+        return False
+    if any(entry is earlier for earlier in unread):
+        return True
+    unread.append(entry)  # type: ignore[arg-type]  # judged by type()
+    return False
+
+
 def _check_provides(
     own: dict[str, Any], refusals: list[str]
 ) -> tuple[list[Provision], dict[str, Contract]]:
     """Return the checked entries, and every contract named, by identity."""
     provisions: list[Provision] = []
     seen: dict[str, Contract] = {}
+    unread: list[type] = []
     for position, entry in enumerate(_entries("provides", own, refusals)):
         where = f"provides: entry {position}"
         if type(entry) is not Provided:
@@ -460,6 +516,7 @@ def _check_provides(
                 f"{where}: {_show(entry)} is not a Provided; write "
                 f"{_EXAMPLES['provides']}"
             )
+            # Only a Provided has the three arguments the rest reads.
             continue
         # Each argument is read once, and the value read is the value kept.
         held = entry._contract
@@ -475,6 +532,8 @@ def _check_provides(
                 )
             else:
                 seen[found.identity] = found
+        elif _again(held, unread):
+            refusals.append(f"{where}: {_show(held)} is listed twice")
         path = _check_implementation(implementation, where, refusals)
         callers = _check_principal_from(principal_from, where, refusals)
         if found is not None and path is not None and callers is not None:
@@ -487,6 +546,7 @@ def _check_implementation(value: object, where: str, refusals: list[str]) -> str
         'name the implementation class by its dotted path, implementation="'
         '<module>.<Class>"'
     )
+    # A single value with one form: one line, and nothing behind it.
     if value is _MISSING:
         refusals.append(f"{where}: implementation is missing; {advice}")
         return None
@@ -508,23 +568,25 @@ def _check_principal_from(
         'principal_from=("<app>",), or write principal_from=() for none'
     )
     if value is _MISSING:
+        # Nothing was written, so there is no entry to read.
         refusals.append(f"{where} is missing; {advice}")
         return None
-    admitted = True
-    if type(value) is str:
+    form, found = _read(value)
+    if form == "entry":
         refusals.append(
             f"{where} is {_show(value)}, not a tuple; the trailing comma of a "
             'one-element tuple is missing, write principal_from=("<app>",)'
         )
-        value, admitted = (value,), False
-    elif type(value) is list:
+    elif form == "other":
         refusals.append(f"{where} is {_show(value)}, not a tuple; {advice}")
-        value, admitted = tuple(value), False
-    elif type(value) is not tuple:
-        refusals.append(f"{where} is {_show(value)}, not a tuple; {advice}")
+    if found is None:
+        # _read cannot read the value, so it has no entries to check.
         return None
-    entries: tuple[Any, ...] = value
+    admitted = form == "tuple"
+    entries = found
     for position, entry in enumerate(entries):
+        # One entry gets one line: "*" is not an app's name either, and the
+        # line that names the wildcard says more.
         if type(entry) is str and entry == "*":
             refusals.append(
                 f'{where}: entry {position} is "*"; there is no wildcard, '
@@ -549,6 +611,9 @@ def _repeats(entries: tuple[Any, ...]) -> list[str]:
     again: list[str] = []
     for entry in entries:
         if type(entry) is not str:
+            # Comparing another value could run the author's __eq__ or
+            # __hash__, and such an entry is replaced when its refusal is
+            # fixed, so no repeat of it can be known.
             continue
         if entry in seen and entry not in again:
             again.append(entry)
@@ -561,9 +626,15 @@ def _check_requires(
 ) -> list[Contract]:
     required: list[Contract] = []
     seen: dict[str, Contract] = {}
+    unread: list[type] = []
     for position, entry in enumerate(_entries("requires", own, refusals)):
         found = _contract_of(entry, f"requires: entry {position}", refusals)
         if found is None:
+            if _again(entry, unread):
+                refusals.append(
+                    f"requires: entry {position}: {_show(entry)} is listed twice"
+                )
+            # The checks below compare identities, and this entry has none.
             continue
         where = f"requires: {found.identity}"
         if found.identity in seen:
@@ -610,6 +681,9 @@ def _check_batteries(
                 f"batteries: entry {position}, {_show(entry)}, is not a Django "
                 'app name in dotted form, such as "django.contrib.humanize"'
             )
+        # The branches exclude each other: an entry equal to a checked name
+        # is a dotted path. A name that was refused is None here, and no
+        # entry in dotted form equals a name that is not in dotted form.
         elif entry == name:
             refusals.append(
                 f"batteries: entry {position}, {entry!r}, is the app itself; "
