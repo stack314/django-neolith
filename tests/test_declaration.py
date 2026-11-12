@@ -44,6 +44,7 @@ from neolith._declaration import (
     Provision,
     declaration_of,
 )
+from tests import host_apps
 from tests.declaration_contracts import (
     Couriers,
     Invoices,
@@ -52,6 +53,7 @@ from tests.declaration_contracts import (
     StockV2,
     Unmarked,
 )
+from tests.hosting import in_fresh_process
 from tests.test_contract_round_trip import _HYPOTHESIS
 
 Namespace = dict[str, Any]
@@ -1443,6 +1445,18 @@ class StockConfig(NeolithAppConfig):
     resources = ("database",)
 """
 
+_SERVICES = """
+from tests.declaration_contracts import Level, Sku
+
+
+class StockService:
+    def level(self, request: Sku) -> Level:
+        return Level(on_hand=0)
+"""
+
+# The app that provides the contract _APPS requires, for a host to set up.
+_COURIERS = "tests.host_apps.couriers"
+
 MakeApp = Callable[..., str]
 
 
@@ -1455,7 +1469,8 @@ def make_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[MakeAp
         package = f"declared_{next(_COUNTER)}"
         root = tmp_path / package
         root.mkdir()
-        for module, source in {"__init__": "", "apps": apps, **modules}.items():
+        written = {"__init__": "", "apps": apps, "services": _SERVICES, **modules}
+        for module, source in written.items():
             text = textwrap.dedent(source).replace("{package}", package)
             (root / f"{module}.py").write_text(text, encoding="utf-8")
         made.append(package)
@@ -1550,29 +1565,51 @@ def test_a_declaration_is_read_in_a_fresh_process_before_settings_exist(
 def test_a_declared_app_loads_in_the_global_registry_beside_neolith(
     make_app: MakeApp, entry: str, neolith_first: bool
 ) -> None:
+    # A process hosts one set of apps, so each set loads in its own.
     package = make_app()
-    before = _installed()
-    entries = [entry.replace("{package}", package), "neolith"]
-    with override_settings(INSTALLED_APPS=entries[::-1] if neolith_first else entries):
-        config = global_apps.get_app_config(package)
-        assert type(config) is _config_class(package)
-        assert _snapshot(type(config)).label == config.label == package
-        assert global_apps.is_installed("neolith")
-    assert _installed() == before
-    # A second override builds new instances and checks them again.
-    with override_settings(INSTALLED_APPS=entries):
-        assert global_apps.get_app_config(package) is not config
-    assert _installed() == before
+    entries = [entry.replace("{package}", package), _COURIERS, "neolith"]
+    printed = in_fresh_process(
+        f"""
+        import django
+        from django.apps import apps
+        from django.test.utils import override_settings
+
+        from neolith._declaration import declaration_of
+        from {package}.apps import StockConfig
+
+        django.setup()
+        config = apps.get_app_config({package!r})
+        assert type(config) is StockConfig
+        assert declaration_of(StockConfig).label == config.label == {package!r}
+        assert apps.is_installed("neolith")
+        # A second override builds new instances and checks them again.
+        with override_settings(INSTALLED_APPS=settings.INSTALLED_APPS):
+            assert apps.get_app_config({package!r}) is not config
+        assert apps.get_app_config({package!r}) is config
+        print("loaded")
+        """,
+        entries[::-1] if neolith_first else entries,
+    )
+    assert printed == "loaded\n"
 
 
 def test_a_config_class_kept_outside_the_apps_module_is_an_entry(
     make_app: MakeApp,
 ) -> None:
     package = make_app(apps="", config=_APPS)
-    with override_settings(INSTALLED_APPS=[f"{package}.config.StockConfig", "neolith"]):
-        assert type(global_apps.get_app_config(package)) is _config_class(
-            package, "config"
-        )
+    printed = in_fresh_process(
+        f"""
+        import django
+        from django.apps import apps
+
+        from {package}.config import StockConfig
+
+        django.setup()
+        print(type(apps.get_app_config({package!r})) is StockConfig)
+        """,
+        [f"{package}.config.StockConfig", _COURIERS, "neolith"],
+    )
+    assert printed == "True\n"
 
 
 @pytest.mark.spec("APP-1")
@@ -1592,9 +1629,19 @@ def test_a_declared_app_in_the_global_registry_needs_neolith_installed(
             'add "neolith" to INSTALLED_APPS'
         )
         assert _installed() == before
-    # Following the advice loads the app.
-    with override_settings(INSTALLED_APPS=[package, "neolith"]):
-        assert global_apps.is_installed(package)
+    # Following the advice loads the app, beside the provider of the
+    # contract it requires, in a process of its own.
+    printed = in_fresh_process(
+        f"""
+        import django
+        from django.apps import apps
+
+        django.setup()
+        print(apps.is_installed({package!r}))
+        """,
+        [package, _COURIERS, "neolith"],
+    )
+    assert printed == "True\n"
 
 
 def test_the_settings_fixture_and_modify_settings_take_the_same_path(
@@ -1603,14 +1650,17 @@ def test_the_settings_fixture_and_modify_settings_take_the_same_path(
     package = make_app()
     with pytest.raises(DeclarationError, match="'neolith' is not installed"):
         setattr(settings, "INSTALLED_APPS", [package])  # noqa: B010
-    setattr(settings, "INSTALLED_APPS", [package, "neolith"])  # noqa: B010
-    assert global_apps.is_installed(package)
+    # This process sets up the test host only (tests.host_apps).
+    setattr(settings, "INSTALLED_APPS", host_apps.INSTALLED)  # noqa: B010
+    assert global_apps.is_installed("tests.host_apps.stock")
+    setattr(settings, "INSTALLED_APPS", [])  # noqa: B010
 
-    other = make_app()
     with pytest.raises(DeclarationError, match="'neolith' is not installed"):
-        modify_settings(INSTALLED_APPS={"append": other, "remove": "neolith"}).enable()
-    with modify_settings(INSTALLED_APPS={"append": other}):
-        assert global_apps.is_installed(other)
+        modify_settings(
+            INSTALLED_APPS={"append": package, "remove": "neolith"}
+        ).enable()
+    with modify_settings(INSTALLED_APPS={"append": host_apps.INSTALLED}):
+        assert global_apps.is_installed("tests.host_apps.stock")
 
 
 def test_isolate_apps_takes_a_declared_app_without_neolith(make_app: MakeApp) -> None:
@@ -1641,10 +1691,21 @@ def test_the_models_module_of_a_declared_app_is_imported(make_app: MakeApp) -> N
     package = make_app(
         models="from django.db import models\n\n\nclass Note(models.Model):\n    pass\n"
     )
-    with override_settings(INSTALLED_APPS=[package, "neolith"]):
-        config = global_apps.get_app_config(package)
-        assert config.models_module is sys.modules[f"{package}.models"]
-        assert config.get_model("Note")._meta.app_label == package
+    printed = in_fresh_process(
+        f"""
+        import sys
+
+        import django
+        from django.apps import apps
+
+        django.setup()
+        config = apps.get_app_config({package!r})
+        assert config.models_module is sys.modules[{package!r} + ".models"]
+        print(config.get_model("Note")._meta.app_label)
+        """,
+        [package, _COURIERS, "neolith"],
+    )
+    assert printed == f"{package}\n"
 
 
 @pytest.mark.spec("APP-1")
