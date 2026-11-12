@@ -101,8 +101,29 @@ def _current() -> Host | None:
     """The table of the set-up Django's global registry holds now, if any.
 
     Read from the registry each time, so nothing outside a set-up keeps it.
+    Calls use this table only.
+    """
+    return _host_of(global_apps.app_configs.get(_LABEL))
+
+
+def _existing() -> Host | None:
+    """The table that exists for ``connect()`` to check against, if any.
+
+    The registry's own when it holds neolith's app, set up or not. While an
+    override leaves neolith's app out, the table of the registry Django
+    restores when the override ends: it still exists, and calls resume on it.
     """
     config = global_apps.app_configs.get(_LABEL)
+    if config is not None:
+        return _host_of(config)
+    for stored in reversed(global_apps.stored_app_configs):
+        config = stored.get(_LABEL)
+        if config is not None:
+            return _host_of(config)
+    return None
+
+
+def _host_of(config: object) -> Host | None:
     if type(config) is not HostConfig:
         return None
     host = vars(config).get(_HOST_ATTR)
@@ -278,6 +299,15 @@ def validate(
         f"app {app}: provides: {provision.contract.identity}: implementation "
         f"{_quoted(path)}"
     )
+    if not path.startswith(f"{config.name}."):
+        refusals.append(
+            f"{where} is outside the app's package, {_long(config.name)}; an "
+            "implementation belongs to the app that provides it, so its path "
+            f'starts with "{_long(config.name)}."'
+        )
+        # A path outside the package cannot name a class of the app, so
+        # nothing outside it is imported or built.
+        return None
     module_name, _, attribute = path.rpartition(".")
     try:
         module = importlib.import_module(module_name)
@@ -303,6 +333,8 @@ def validate(
     # Read statically: a metaclass cannot answer for the class.
     own_module = vars(cls).get("__module__")
     own_name: str = type.__dict__["__qualname__"].__get__(cls)
+    # Only a class proven to be the app's own is built.
+    foreign = True
     if type(own_module) is not str:
         refusals.append(f"{where}: the class's module cannot be read")
         problem = True
@@ -322,12 +354,23 @@ def validate(
         problem = True
     # A module that cannot be read cannot be placed in an app.
     if type(own_module) is str:
-        problem |= _belongs(registry, config, own_module, where, refusals)
-    for found_problem in provision.contract._implementation_problems(cls):
+        foreign = _outside(registry, config, own_module, where, refusals)
+        problem |= foreign or _declared_with(config, own_module, where, refusals)
+    try:
+        found_problems = provision.contract._implementation_problems(cls)
+    except Exception as error:  # the check could not read the class at all
+        found_problems = [
+            f"{provision.contract.identity}, implementation: the class cannot "
+            f"be read: {_cause(error)}"
+        ]
+    for found_problem in found_problems:
         refusals.append(f"app {app}: provides: {found_problem}")
         problem = True
-    # Built even when a check above failed, so that a failing __init__ is
-    # reported beside the rest.
+    if foreign:
+        # A class of another app, or of none, is never built here.
+        return None
+    # Built even when another check above failed, so that a failing __init__
+    # is reported beside the rest.
     try:
         instance = cls()
     except Exception as error:
@@ -342,27 +385,34 @@ def validate(
 _NOTHING: Final = object()
 
 
-def _belongs(
+def _outside(
     registry: Apps, config: AppConfig, module: str, where: str, refusals: list[str]
 ) -> bool:
-    """Refuse a module outside the app, or one read at Declare; True if refused."""
+    """Refuse a class whose module belongs to another app or to none."""
     container = registry.get_containing_app_config(module)
-    if container is not config:
-        owner = "no app" if container is None else f"app {container.label}"
-        refusals.append(
-            f"{where}: the class is in {_long(module)}, which belongs to {owner}; an "
-            f"implementation belongs to the app that provides it, {config.name}"
-        )
-        return True
+    if container is config:
+        return False
+    owner = "no app" if container is None else f"app {container.label}"
+    refusals.append(
+        f"{where}: the class is in {_long(module)}, which belongs to {owner}; an "
+        f"implementation belongs to the app that provides it, {config.name}"
+    )
+    return True
+
+
+def _declared_with(
+    config: AppConfig, module: str, where: str, refusals: list[str]
+) -> bool:
+    """Refuse a class in a module that is read with the declaration."""
     declared_in = vars(type(config)).get("__module__")
-    if module in (config.name, declared_in):
-        refusals.append(
-            f"{where}: the class is in {_long(module)}, which is read with the "
-            "declaration; put the implementation in another module of the "
-            f"app, such as {config.name}.services"
-        )
-        return True
-    return False
+    if module not in (config.name, declared_in):
+        return False
+    refusals.append(
+        f"{where}: the class is in {_long(module)}, which is read with the "
+        "declaration; put the implementation in another module of the "
+        f"app, such as {config.name}.services"
+    )
+    return True
 
 
 # Names and paths are shown whole up to this length, so advice can be copied.
@@ -411,7 +461,7 @@ def connect(identity: str, /) -> "Connected":
             "for example 'inventory.v1'"
         )
     with _LOCK:
-        host = _current()
+        host = _existing()
         if host is None:
             _RECORDED.setdefault(identity, {})[_place()] = None
         elif identity not in host.known:

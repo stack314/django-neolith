@@ -552,6 +552,13 @@ class Contract:
                 problems.append(str(error))
                 # The checks below compare the types this read did not give.
                 continue
+            except Exception as error:  # any other failure to read it
+                problems.append(
+                    f"{where}: action {name!r} cannot be read "
+                    f"({type(error).__name__}: {error})"
+                )
+                # As above: no types were read.
+                continue
             if request is not item.request:
                 problems.append(
                     f"{where}: action {name!r} takes {_name(request)}, but "
@@ -934,7 +941,13 @@ def _signature(
         raise ContractDefinitionError(
             f"{where}: actions are synchronous in this version"
         )
-    parameters = list(inspect.signature(function).parameters.values())
+    try:
+        signature = inspect.signature(function)
+    except Exception as error:  # a __signature__ or __wrapped__ it cannot read
+        raise ContractDefinitionError(
+            f"{where}: cannot read its signature ({type(error).__name__}: {error})"
+        ) from error
+    parameters = list(signature.parameters.values())
     if len(parameters) not in ((2,) if declared else (2, 3)) or any(
         p.kind is not inspect.Parameter.POSITIONAL_OR_KEYWORD
         or p.default is not inspect.Parameter.empty
@@ -943,7 +956,7 @@ def _signature(
         raise ContractDefinitionError(
             f"{where}: an action takes exactly (self, request)"
             + ("" if declared else " or (self, request, ctx: CallContext)")
-            + f", not {inspect.signature(function)}"
+            + f", not {signature}"
         )
     if declared and parameters[1].name in _RESERVED_PARAMETERS:
         raise ContractDefinitionError(
