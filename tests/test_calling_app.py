@@ -140,7 +140,7 @@ def test_a_call_outside_the_calling_apps_requires_is_a_usage_error(
         "app shop calls front.v1, which its declaration does not require; it "
         f"requires {', '.join(sorted(requires)) or 'no contract'}."
     )
-    assert message.endswith("opens a scope that names its own app")
+    assert message.endswith('opens neolith.command_scope("<its label>")')
     assert isinstance(raised.value, RuntimeError)
     assert ContractError not in type(raised.value).__mro__
     assert provider.seen == []
