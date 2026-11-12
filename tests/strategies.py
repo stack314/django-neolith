@@ -31,6 +31,29 @@ def _timestamps(draw: st.DrawFn) -> str:
 TIMESTAMPS = _timestamps()
 
 
+def _typed(node: Any) -> Any:  # noqa: ANN401
+    """The same description, with each ``allOf`` member given its parent's type.
+
+    A member such as ``{"pattern": ...}`` admits every JSON value that is not a
+    string, so hypothesis-jsonschema draws any JSON and filters it. Next to
+    ``"type": "string"`` the conjunction is the same with the member typed, and
+    generation no longer discards most draws.
+    """
+    if isinstance(node, list):
+        return [_typed(item) for item in node]
+    if not isinstance(node, dict):
+        return node
+    typed = {key: _typed(value) for key, value in node.items()}
+    if "type" in typed and isinstance(typed.get("allOf"), list):
+        typed["allOf"] = [
+            {"type": typed["type"], **member}
+            if isinstance(member, dict) and "type" not in member
+            else member
+            for member in typed["allOf"]
+        ]
+    return typed
+
+
 @st.composite
 def admitted_by(draw: st.DrawFn, schema: dict[str, Any]) -> Any:  # noqa: ANN401
     """Values the description admits, with timestamps the spec admits.
@@ -41,4 +64,6 @@ def admitted_by(draw: st.DrawFn, schema: dict[str, Any]) -> Any:  # noqa: ANN401
     """
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", HypothesisWarning)
-        return draw(from_schema(schema, custom_formats={"date-time": TIMESTAMPS}))
+        return draw(
+            from_schema(_typed(schema), custom_formats={"date-time": TIMESTAMPS})
+        )
