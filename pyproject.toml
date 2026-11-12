@@ -57,6 +57,16 @@ test = [
     "rfc3339-validator>=0.1.4",
     "griffe==2.4.1",
 ]
+# sphinx, myst-parser and pydata-sphinx-theme: the documentation site, built
+# by scripts/docs.py (ADR 0024). Sphinx 9.2 needs Python 3.13, so on an older
+# interpreter the group installs none of them; the library's floor stays 3.12.
+# Pinned so that a build cannot drift.
+docs = [
+    "sphinx==9.2.0; python_version >= '3.13'",
+    "myst-parser==5.2.0; python_version >= '3.13'",
+    "pydata-sphinx-theme==0.24.0; python_version >= '3.13'",
+    "markdown-it-py==4.2.0",
+]
 lint = ["ruff>=0.14", "mypy>=1.18", "django-stubs>=5.2", "types-jsonschema>=4.26"]
 dev = [{ include-group = "test" }, { include-group = "lint" }]
 
@@ -67,7 +77,21 @@ path = "src/neolith/__init__.py"
 packages = ["src/neolith"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/neolith", "tests", "scripts", "spec", "LICENSE", "README.md", "CHANGELOG.md"]
+# docs/, VISION.md, CONTRIBUTING.md and CODE_OF_CONDUCT.md: the tests read the
+# records and the site's sources, and the site links them (ADR 0024).
+include = [
+    "src/neolith",
+    "tests",
+    "scripts",
+    "spec",
+    "docs",
+    "LICENSE",
+    "README.md",
+    "CHANGELOG.md",
+    "VISION.md",
+    "CONTRIBUTING.md",
+    "CODE_OF_CONDUCT.md",
+]
 
 [tool.pytest.ini_options]
 minversion = "8.4"
@@ -152,6 +176,12 @@ plugins = ["mypy_django_plugin.main"]
 # bodies mypy accepts only inside a Protocol class.
 module = "tests.test_contracts"
 disable_error_code = ["empty-body"]
+
+[[tool.mypy.overrides]]
+# scripts/docs.py imports Sphinx only to build, and the docs group installs it
+# only on Python 3.13 or newer (ADR 0024).
+module = ["sphinx", "sphinx.*"]
+ignore_missing_imports = true
 
 [tool.django-stubs]
 django_settings_module = "tests.settings"

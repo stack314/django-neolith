@@ -44,35 +44,17 @@ import griffe
 import pytest
 
 import neolith
-from scripts import spec_trace
+from scripts.citations import ID_SHAPED as _ID_SHAPED
+from scripts.citations import JOIN as _JOIN
+from scripts.citations import JOIN_SPELLINGS as _JOIN_SPELLINGS
+from scripts.citations import JOINS as _JOINS
+from scripts.citations import NUMBERS as _NUMBERS
+from scripts.citations import Records
 
 ROOT = Path(__file__).resolve().parents[1]
 PUBLIC = sorted(set(neolith.__all__) - {"__version__"})
 
 _SECTIONS = {"text", "parameters", "attributes", "returns", "raises"}
-# The one set of joins between cited numbers, in a list or a range: each
-# pattern, with the spellings of it the tests write. Every citation rule reads
-# _JOIN, and every variant the tests try is drawn from these spellings.
-_JOINS = {
-    r",\s*": (", ", ","),
-    r",?\s+and\s+": (" and ", ", and "),
-    r",?\s+or\s+": (" or ", ", or "),
-    r"\s+(?:to|through)\s+": (" to ", " through "),
-    r"\s*[-\u2013\u2014]\s*": ("-", "\u2013", "\u2014", " \u2013 ", " - "),
-}
-_JOIN = "(?:" + "|".join(_JOINS) + ")"
-_JOIN_SPELLINGS = tuple(
-    spelling for spellings in _JOINS.values() for spelling in spellings
-)
-# A word shaped like a requirement ID: capital letters, a hyphen, digits; and
-# the numbers joined to it, as in "CON-30 and 31", "CON-30-33" or
-# "CON-30 through CON-33". A number of another area starts a word of its own.
-_ID_SHAPED = re.compile(
-    r"(?<![\w-])(?P<area>[A-Z]+)-(?P<number>\d+)"
-    rf"(?P<ends>(?:{_JOIN}(?:(?P=area)-)?\d+(?!\w))*)(?!\w)"
-)
-# Words of that shape that are names of other things, not requirement IDs.
-_NOT_IDS = frozenset({"UTF-8", "ECMA-262"})
 # Parameter defaults that name an object the package does not export, each with
 # its reason. Every other private name in a signature is refused.
 _ADMITTED_DEFAULTS = {
@@ -80,52 +62,6 @@ _ADMITTED_DEFAULTS = {
     # it with the app's name; its public form is open in #63.
     ("neolith.Provided", "_MISSING"),
 }
-# The numbers after a citing word, joined as above: "0017", "0017 and 0019",
-# "01, 02 or 03", "0017 through 0019", "0017\u20130019". A number followed by
-# a point and a digit is a version, such as "spec 0.1", and ends the list.
-_NUMBERS = rf"(?P<rest>(?:\s+\d+(?!\.\d)(?:{_JOIN}\d+(?!\.\d))*)?)"
-# "ADR", "ADRs", "decision record", "Decision records"; "spec", "Spec",
-# "specs", "specification", "Specifications".
-_ADR = re.compile(r"\b(?:ADRs?|[Dd]ecision records?)\b" + _NUMBERS)
-_SPEC = re.compile(r"\b[Ss]pec(?:ification)?s?\b" + _NUMBERS)
-
-
-class Records:
-    """The requirement IDs, spec documents and ADRs that a docstring may cite."""
-
-    def __init__(self, root: Path) -> None:
-        trace = spec_trace.Trace()
-        spec_trace.read_spec(root / "spec", trace)
-        self.live = {
-            rid for rid, found in trace.requirements.items() if not found.withdrawn
-        }
-        self.withdrawn = set(trace.requirements) - self.live
-        self.documents = set(trace.documents)
-        self.adrs = {
-            path.name[:4]
-            for path in (root / "docs" / "adr").glob("[0-9][0-9][0-9][0-9]-*.md")
-        }
-
-    def problems(self, text: str) -> Iterator[str]:
-        """Say which citations in ``text`` name nothing."""
-        words = []
-        for match in _ID_SHAPED.finditer(text):
-            words.append(f"{match['area']}-{match['number']}")
-            for end in re.findall(r"\d+", match["ends"]):
-                words.append(f"{match['area']}-{end}")
-        for word in words:
-            if word in self.withdrawn:
-                yield f"cites withdrawn requirement {word}"
-            elif word not in self.live and word not in _NOT_IDS:
-                yield f"cites unknown requirement {word}"
-        for pattern, known, width, what in (
-            (_ADR, self.adrs, 4, "ADR"),
-            (_SPEC, self.documents, 2, "spec document"),
-        ):
-            for match in pattern.finditer(text):
-                for number in re.findall(r"\d+", match["rest"]):
-                    if len(number) != width or number not in known:
-                        yield f"cites unknown {what} {number}"
 
 
 def _load(package: str, where: Path) -> griffe.Module:
@@ -845,7 +781,7 @@ def test_a_sample_in_every_admitted_shape_passes(
         pytest.param("as CON-30 says", "as CON-9999 says", "CON-9999", id="unknown-id"),
         pytest.param("as CON-30 says", "as CON-030 says", "CON-030", id="padded-id"),
         pytest.param("as CON-30 says", "as CNO-30 says", "CNO-30", id="unknown-area"),
-        pytest.param("as CON-30 says", "as SHA-256 says", "SHA-256", id="id-shaped"),
+        pytest.param("as CON-30 says", "as ISO-8601 says", "ISO-8601", id="id-shaped"),
         pytest.param("ADR 0008;", "ADR 9999;", "unknown ADR 9999", id="unknown-adr"),
         pytest.param("ADR 0008;", "ADR 8;", "unknown ADR 8", id="short-adr"),
         pytest.param(

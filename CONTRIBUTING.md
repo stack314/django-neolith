@@ -73,6 +73,15 @@ python scripts/spec_trace.py --report spec-report.json
 
 `scripts/spec_trace.py` checks the requirement IDs in `spec/`, reads which requirements the passing tests cite from the report pytest wrote, and prints the trace (**P5**, **T5**). CI runs the same commands on Django 5.2 with Python 3.12 and on the newest supported pair, on x86-64 and arm64 ([ADR 0012](docs/adr/0012-supported-python-and-django-versions.md)). To try another Django locally, add it to the install line, for example `"Django~=5.2.0"`.
 
+To build the documentation site and check it against the site's rules ([ADR 0024](docs/adr/0024-user-documentation-is-built-with-sphinx-from-this-repository.md)), you need Python 3.13 or newer:
+
+```
+python -m pip install -e . --group docs
+python scripts/docs.py check
+```
+
+`python scripts/docs.py serve` builds the site and serves it at `http://127.0.0.1:8000/`. Until the repository is public, run the check before requesting review.
+
 ## Writing
 
 These rules apply to documentation, docstrings, error messages, commit messages and pull request text.
