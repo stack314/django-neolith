@@ -12,13 +12,14 @@ import logging
 import pickle
 import types
 from collections.abc import Callable
-from typing import Annotated, Any, Protocol, cast
+from datetime import UTC, datetime, timedelta, timezone
+from typing import Annotated, Any, Literal, Protocol, cast
 
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 from hypothesis_jsonschema import from_schema
-from pydantic import BaseModel, BeforeValidator
+from pydantic import AwareDatetime, BaseModel, BeforeValidator
 
 from neolith import Contract, ContractDefinitionError, ContractError, action, contract
 from neolith._connector import Connector, Failure, InProcess
@@ -524,3 +525,76 @@ def test_an_error_from_reading_the_request_is_the_hosts_failure() -> None:
     with pytest.raises(ContractError) as raised:
         connector.reserve(Guarded(order=1))
     _assert_internal(raised.value)
+
+
+# A declared kind's detail only the description refuses: Pydantic holds it,
+# the send check does not (TRN-15), so the error becomes internal.
+
+
+class WideDetail(BaseModel):
+    """A detail record whose type holds values its description refuses."""
+
+    n: int = 0
+    kind: Literal["a", "b"] = "a"
+    at: AwareDatetime = datetime(2000, 1, 1, tzinfo=UTC)
+
+
+@contract("described.errors.v1")
+class DescribedErrors(Protocol):
+    @action(errors={"refused": WideDetail})
+    def get(self, request: Order) -> Done: ...
+
+
+def _detail_past_literal() -> WideDetail:
+    detail = WideDetail()
+    detail.kind = "c"  # type: ignore[assignment]  # set after validation
+    return detail
+
+
+_DETAILS_ONLY_THE_DESCRIPTION_REFUSES: dict[str, Callable[[], WideDetail]] = {
+    "integer past the portable range": lambda: WideDetail(n=2**53),
+    "negative integer past the portable range": lambda: WideDetail(n=-(2**53)),
+    "value outside a literal": _detail_past_literal,
+    "timestamp past year 9999 in UTC": lambda: WideDetail(
+        at=datetime(9999, 12, 31, 23, tzinfo=timezone(-timedelta(hours=5)))
+    ),
+}
+
+
+def _raise_detail(detail: WideDetail) -> ContractError:
+    class Refusing:
+        def get(self, request: Order) -> Done:
+            raise ContractError("refused", "it was refused", detail)
+
+    connector: Any = Connector(DescribedErrors, InProcess(DescribedErrors, Refusing()))
+    with pytest.raises(ContractError) as raised:
+        connector.get(Order(order=1))
+    return raised.value
+
+
+@pytest.mark.spec("CON-43", "CON-44", "TRN-15")
+@pytest.mark.parametrize(
+    "case",
+    list(_DETAILS_ONLY_THE_DESCRIPTION_REFUSES),
+    ids=list(_DETAILS_ONLY_THE_DESCRIPTION_REFUSES),
+)
+def test_a_detail_only_the_description_refuses_reaches_the_caller_as_internal(
+    case: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    detail = _DETAILS_ONLY_THE_DESCRIPTION_REFUSES[case]()
+    with caplog.at_level(logging.ERROR, logger="neolith"):
+        _assert_internal(_raise_detail(detail))
+    assert "described.errors.v1, action 'get': the provider failed" in caplog.text
+
+
+@pytest.mark.spec("CON-43", "TRN-15")
+def test_a_detail_at_the_descriptions_bounds_is_delivered() -> None:
+    # The nearest legitimate shapes: the largest portable integers, and the
+    # last instant of year 9999 in UTC.
+    for detail in (
+        WideDetail(n=2**53 - 1),
+        WideDetail(n=-(2**53 - 1), kind="b"),
+        WideDetail(at=datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC)),
+    ):
+        received = _raise_detail(detail)
+        assert (received.kind, received.data) == ("refused", detail)
