@@ -20,6 +20,7 @@ from typing import Protocol, cast
 
 import pytest
 from django.apps import AppConfig
+from django.apps import apps as global_apps
 from django.apps.registry import Apps
 from django.test.utils import isolate_apps, override_settings
 from hypothesis import given
@@ -363,6 +364,15 @@ def _validate_case(write_app: WriteApp, case: str) -> tuple[str, str]:
         tail = (
             "does not import: ModuleNotFoundError: No module named '{package}.absent'"
         )
+    elif case == "module replaced":
+        services = (
+            "import sys\n\n\nclass _Slots:\n    __slots__ = ()\n\n\n"
+            "sys.modules[__name__] = _Slots()\n"
+        )
+        tail = (
+            " does not import: {package}.services is not a module whose names can "
+            "be read (TypeError: vars() argument must have __dict__ attribute)"
+        )
     elif case == "module raises":
         services = "raise RuntimeError('broken at import')\n"
         tail = "does not import: RuntimeError: broken at import"
@@ -403,7 +413,7 @@ def _validate_case(write_app: WriteApp, case: str) -> tuple[str, str]:
             "implementation belongs to the app that provides it, {package}"
         )
     elif case == "module unreadable":
-        services = _STOCK + "\n\nStockService.__module__ = None\n"
+        services = _DANGER + "\n\nStockService.__module__ = None\n"
         tail = ": the class's module cannot be read"
     elif case == "in the app's package":
         impl = "{package}.StockService"
@@ -449,6 +459,7 @@ def _validate_case(write_app: WriteApp, case: str) -> tuple[str, str]:
 _VALIDATE_CASES = [
     "module missing",
     "module raises",
+    "module replaced",
     "attribute missing",
     "not a class",
     "re-exported",
@@ -664,7 +675,10 @@ def test_an_override_that_leaves_neolith_out_holds_no_host_until_it_ends() -> No
         host = _current()
         with override_settings(INSTALLED_APPS=["django.contrib.humanize"]):
             assert _current() is None
-            with _context.root("web"), pytest.raises(UsageError, match="not set up"):
+            with (
+                _context.root("web"),
+                pytest.raises(UsageError, match="calls resume when that ends"),
+            ):
                 couriers.quote(Sku(sku="x"))
         assert _current() is host
 
@@ -1154,3 +1168,190 @@ def test_set_up_empties_the_record_it_checked() -> None:
         host_apps.INSTALLED,
     )
     assert printed == "['stock.v1']\n[]\n"
+
+
+# Round 2: nothing outside the app imported or built, one table definition,
+# records tied to the set-up that checked them.
+
+
+@pytest.mark.spec("APP-11", "APP-12")
+def test_a_sibling_package_or_a_nested_app_is_refused_unimported(
+    write_app: WriteApp, tmp_path: Path
+) -> None:
+    package = write_app(
+        _apps_module(provides=[("Stock", "{package}x.services.StockService")])
+    )
+    # A package whose name starts with the app's, and an app nested in it.
+    for root in (tmp_path / f"{package}x",):
+        root.mkdir()
+        (root / "__init__.py").write_text("", encoding="utf-8")
+        (root / "services.py").write_text(_DANGER, encoding="utf-8")
+    importlib.invalidate_caches()
+    behind = _invoices_app(write_app, "class InvoiceService:\n    pass\n")
+    sibling_refusals = _refusals(package, behind)
+    assert any(
+        f"is outside the app's package, {package};" in line for line in sibling_refusals
+    )
+    assert any("action 'void' is missing" in line for line in sibling_refusals)
+    assert f"{package}x.services" not in sys.modules
+
+    # The nested app: the declaring app is the outer package, its billing
+    # package another installed app.
+    outer = write_app(
+        _apps_module(provides=[("Stock", "{package}.billing.services.StockService")])
+    )
+    (tmp_path / outer / "billing").mkdir()
+    (tmp_path / outer / "billing" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / outer / "billing" / "services.py").write_text(_DANGER, encoding="utf-8")
+    importlib.invalidate_caches()
+    refusals = _refusals(outer, f"{outer}.billing", behind)
+    assert (
+        f"app {outer}: provides: stock.v1: implementation "
+        f"'{outer}.billing.services.StockService': {outer}.billing.services belongs "
+        f"to app billing; an implementation belongs to the app that provides it, "
+        f"{outer}"
+    ) in refusals
+    assert any("action 'void' is missing" in line for line in refusals)
+    assert f"{outer}.billing.services" not in sys.modules
+
+
+@pytest.mark.spec("APP-11", "APP-12")
+def test_a_class_of_another_installed_app_is_refused_unbuilt(
+    write_app: WriteApp,
+) -> None:
+    other = write_app(_apps_module(), services=_DANGER)
+    package = write_app(
+        _apps_module(provides=[("Stock", "{package}.reexport.StockService")]),
+        reexport=f"from {other}.services import StockService\n",
+    )
+    behind = _invoices_app(write_app, "class InvoiceService:\n    pass\n")
+    refusals = _refusals(package, other, behind)
+    assert any(
+        f"the class is in {other}.services, which belongs to app {other};" in line
+        for line in refusals
+    )
+    assert any("action 'void' is missing" in line for line in refusals)
+    assert not any("raised OSError: built" in line for line in refusals)
+
+
+class _ReprRaises:
+    def __repr__(self) -> str:
+        raise RuntimeError("repr refused")
+
+
+def test_a_message_that_cannot_be_formatted_hides_no_problem() -> None:
+    def second(self: object, request: Sku) -> None: ...
+
+    second.__annotations__["request"] = _ReprRaises()
+    impl = type("Impl", (), {"second": second})
+    problems = Contract.of(Ledger)._implementation_problems(impl)
+    assert problems == [
+        "ledger.v1, implementation Impl: action 'first' is missing",
+        "ledger.v1, implementation Impl: action 'second' takes <_ReprRaises>, but "
+        "ledger.v1 declares Sku",
+    ]
+    # @implements names the first problem, as before set-up listed them all.
+    with pytest.raises(neolith.ContractDefinitionError) as raised:
+        neolith.implements(Ledger)(impl)
+    assert str(raised.value) == problems[0]
+
+
+def test_calls_and_connect_read_one_table_under_set_available_apps() -> None:
+    couriers = connect("couriers.v3")
+    with override_settings(INSTALLED_APPS=host_apps.INSTALLED):
+        global_apps.set_available_apps(["tests.host_apps.couriers"])
+        try:
+            with pytest.raises(UsageError, match="no app of this host provides"):
+                connect("nope.v1")
+            with (
+                _context.root("web"),
+                pytest.raises(UsageError, match="calls resume when that ends"),
+            ):
+                couriers.quote(Sku(sku="x"))
+        finally:
+            global_apps.unset_available_apps()
+        with _context.root("web"):
+            assert couriers.quote(Sku(sku="ab")) == Level(on_hand=2)
+
+
+_UNDECLARED_CONNECTS = """
+from neolith import connect
+
+connect("nope.v1")
+"""
+
+
+@pytest.mark.spec("APP-12", "APP-14")
+@pytest.mark.parametrize("place", ["__init__", "models"])
+@pytest.mark.parametrize("before_neolith", [True, False])
+def test_connect_during_a_later_set_up_is_recorded_wherever_the_app_sits(
+    write_app: WriteApp, tmp_path: Path, place: str, before_neolith: bool
+) -> None:
+    # An undeclared app, loaded by a later set-up, asks for an unknown
+    # identity in either phase of loading: set-up reports it with its place.
+    package = write_app("", **{place: _UNDECLARED_CONNECTS})
+    installed = list(host_apps.INSTALLED)
+    added = [package, *installed] if before_neolith else [*installed, package]
+    printed = in_fresh_process(
+        f"""
+        import django
+        from django.test.utils import override_settings
+
+        django.setup()
+        try:
+            with override_settings(INSTALLED_APPS={added!r}):
+                print("admitted")
+        except Exception as error:
+            print(type(error).__name__)
+            print(error)
+        """,
+        installed,
+    )
+    where = tmp_path / package / f"{place}.py"
+    assert printed.splitlines() == [
+        "DeclarationError",
+        f"connect: 'nope.v1' at {where}:4 is not a contract this host knows; it "
+        "knows the contracts its apps provide or require, which are couriers.v3, "
+        "stock.v1",
+    ]
+
+
+@pytest.mark.spec("APP-14")
+def test_a_refused_later_set_up_leaves_no_record_its_table_knew(
+    write_app: WriteApp,
+) -> None:
+    # Added apps whose modules connect() at import to a contract the refused
+    # set-up's table knew: one refused as a changed set, one by Resolve.
+    connects = 'from neolith import connect\n\nconnect("billing.invoices.v1")\n'
+    changed = _invoices_app(write_app, connects + _INVOICES)
+    unmet = write_app(
+        _apps_module(
+            provides=[("Invoices", "{package}.services.InvoiceService")],
+            requires=["StockV2"],
+        ),
+        services=connects + _INVOICES,
+    )
+    printed = in_fresh_process(
+        f"""
+        import django
+        from django.test.utils import override_settings
+
+        django.setup()
+        installed = list(settings.INSTALLED_APPS)
+        for added in ({changed!r}, {unmet!r}):
+            try:
+                with override_settings(INSTALLED_APPS=[added, *installed]):
+                    print("admitted")
+            except Exception as error:
+                print(type(error).__name__)
+            with override_settings(INSTALLED_APPS=installed):
+                print("the first apps are admitted")
+        """,
+        host_apps.INSTALLED,
+    )
+    assert printed.splitlines() == [
+        "ImproperlyConfigured",
+        "the first apps are admitted",
+        "DeclarationError",
+        "the first apps are admitted",
+    ]
