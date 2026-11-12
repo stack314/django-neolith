@@ -164,7 +164,7 @@ def _difference(
 
 def _unknown_at(identity: str, place: str, host: Host) -> str:
     return (
-        f"connect: {identity!r} at {place} is not a contract this host knows; "
+        f"connect: {_quoted(identity)} at {place} is not a contract this host knows; "
         f"{_knows(host)}"
     )
 
@@ -275,7 +275,8 @@ def validate(
     app = config.label
     path = provision.implementation
     where = (
-        f"app {app}: provides: {provision.contract.identity}: implementation {path!r}"
+        f"app {app}: provides: {provision.contract.identity}: implementation "
+        f"{_quoted(path)}"
     )
     module_name, _, attribute = path.rpartition(".")
     try:
@@ -288,7 +289,8 @@ def validate(
     found = vars(module).get(attribute, _NOTHING)
     if found is _NOTHING:
         refusals.append(
-            f"{where} does not import: {module_name} defines no {attribute}"
+            f"{where} does not import: {_long(module_name)} defines no "
+            f"{_long(attribute)}"
         )
         # Nothing is there to check.
         return None
@@ -306,15 +308,16 @@ def validate(
         problem = True
     elif "." in own_name or "<" in own_name:
         refusals.append(
-            f"{where}: the class is {own_module}.{own_name}, which is not "
+            f"{where}: the class is {_long(f'{own_module}.{own_name}')}, which is not "
             f"defined at the top level of its module; define it at the top "
             f"level of a module of app {app}"
         )
         problem = True
     elif f"{own_module}.{own_name}" != path:
         refusals.append(
-            f"{where} names {own_module}.{own_name} by another path; a class "
-            f'is named by its own path, implementation="{own_module}.{own_name}"'
+            f"{where} names {_long(f'{own_module}.{own_name}')} by another path; a "
+            "class is named by its own path, "
+            f'implementation="{_long(f"{own_module}.{own_name}")}"'
         )
         problem = True
     # A module that cannot be read cannot be placed in an app.
@@ -347,19 +350,31 @@ def _belongs(
     if container is not config:
         owner = "no app" if container is None else f"app {container.label}"
         refusals.append(
-            f"{where}: the class is in {module}, which belongs to {owner}; an "
+            f"{where}: the class is in {_long(module)}, which belongs to {owner}; an "
             f"implementation belongs to the app that provides it, {config.name}"
         )
         return True
     declared_in = vars(type(config)).get("__module__")
     if module in (config.name, declared_in):
         refusals.append(
-            f"{where}: the class is in {module}, which is read with the "
+            f"{where}: the class is in {_long(module)}, which is read with the "
             "declaration; put the implementation in another module of the "
             f"app, such as {config.name}.services"
         )
         return True
     return False
+
+
+# Names and paths are shown whole up to this length, so advice can be copied.
+_LONG: Final = 160
+
+
+def _long(text: str) -> str:
+    return text if len(text) <= _LONG else f"{text[:_LONG]}..."
+
+
+def _quoted(text: str) -> str:
+    return repr(text) if len(text) <= _LONG else f"{text[:_LONG]!r}..."
 
 
 def _cause(error: Exception) -> str:
@@ -401,8 +416,8 @@ def connect(identity: str, /) -> "Connected":
             _RECORDED.setdefault(identity, {})[_place()] = None
         elif identity not in host.known:
             raise UsageError(
-                f"connect({identity!r}): no app of this host provides or "
-                f"requires {identity}; {_knows(host)}"
+                f"connect({_quoted(identity)}): no app of this host provides or "
+                f"requires {_long(identity)}; {_knows(host)}"
             )
     return Connected(identity)
 
@@ -421,7 +436,7 @@ def _place() -> str:
 
 def _not_set_up(identity: str) -> UsageError:
     return UsageError(
-        f"connector to {identity}: the host is not set up yet. Calls begin once "
+        f"connector to {_long(identity)}: the host is not set up yet. Calls begin once "
         "Django has loaded every app and neolith's set-up has passed, so a call "
         "cannot be made at import, in an app's ready() or in an "
         "implementation's __init__"

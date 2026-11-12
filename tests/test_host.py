@@ -958,3 +958,16 @@ def test_a_later_set_up_with_other_hosted_apps_is_refused(
         "2",
         "the same apps are admitted",
     ]
+
+
+def test_a_message_is_bounded_whatever_was_written(write_app: WriteApp) -> None:
+    long = "x" * 5000
+    package = write_app(
+        _apps_module(provides=[("Stock", f"{{package}}.{long}.StockService")])
+    )
+    (line,) = _refusals(package)
+    assert len(line) < 800
+    with override_settings(INSTALLED_APPS=host_apps.INSTALLED):
+        with pytest.raises(UsageError) as raised:
+            connect(f"{long}.v1")
+        assert len(str(raised.value)) < 800
