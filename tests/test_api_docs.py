@@ -32,6 +32,7 @@ refuses the rest: a section, a word shaped like a requirement ID or a name in
 an annotation that the check does not know is a problem, not a pass.
 """
 
+import ast
 import builtins
 import importlib
 import logging
@@ -49,8 +50,16 @@ ROOT = Path(__file__).resolve().parents[1]
 PUBLIC = sorted(set(neolith.__all__) - {"__version__"})
 
 _SECTIONS = {"text", "parameters", "attributes", "returns", "raises"}
-# A word shaped like a requirement ID: capital letters, a hyphen, digits.
-_ID_SHAPED = re.compile(r"(?<![\w-])[A-Z]+-\d+(?![\w-])")
+# What joins the two ends of a range: a hyphen, an en or em dash, "to" or
+# "through".
+_RANGE = r"(?:\s*[-\u2013\u2014]\s*|\s+(?:to|through)\s+)"
+# A word shaped like a requirement ID: capital letters, a hyphen, digits; and
+# the end of a range that starts with it, as in "CON-30-33", "CON-30 to 33" or
+# "CON-30 through CON-33".
+_ID_SHAPED = re.compile(
+    r"(?<![\w-])(?P<area>[A-Z]+)-(?P<number>\d+)"
+    rf"(?:{_RANGE}(?:(?P=area)-)?(?P<end>\d+))?(?!\w)"
+)
 # Words of that shape that are names of other things, not requirement IDs.
 _NOT_IDS = frozenset({"UTF-8", "ECMA-262"})
 # Parameter defaults that name an object the package does not export, each with
@@ -61,9 +70,10 @@ _ADMITTED_DEFAULTS = {
     ("neolith.Provided", "_MISSING"),
 }
 # The numbers after a citing word: "0017", "0017 and 0019", "01, 02 or 03",
-# "0017, 0019, and 0021", "0017 to 0019". A number followed by a point and a
-# digit is a version, such as "spec 0.1", and ends the list.
-_NUMBERS = r"(?P<rest>(?:\s+(?:and\s+|or\s+|to\s+)?\d+(?!\.\d),?)*)"
+# "0017, 0019, and 0021", and a range, "0017 to 0019", "0017 through 0019",
+# "0017-0019" or "0017\u20130019". A number followed by a point and a digit is
+# a version, such as "spec 0.1", and ends the list.
+_NUMBERS = r"(?P<rest>(?:(?:\s+(?:and\s+|or\s+)?|" + _RANGE + r")\d+(?!\.\d),?)*)"
 # "ADR", "ADRs", "decision record", "Decision records"; "spec", "Spec",
 # "specs", "specification", "Specifications".
 _ADR = re.compile(r"\b(?:ADRs?|[Dd]ecision records?)\b" + _NUMBERS)
@@ -88,7 +98,12 @@ class Records:
 
     def problems(self, text: str) -> Iterator[str]:
         """Say which citations in ``text`` name nothing."""
-        for word in _ID_SHAPED.findall(text):
+        words = []
+        for match in _ID_SHAPED.finditer(text):
+            words.append(f"{match['area']}-{match['number']}")
+            if match["end"] is not None:
+                words.append(f"{match['area']}-{match['end']}")
+        for word in words:
             if word in self.withdrawn:
                 yield f"cites withdrawn requirement {word}"
             elif word not in self.live and word not in _NOT_IDS:
@@ -174,12 +189,29 @@ def _sections(found: griffe.Object) -> tuple[dict[str, list[str]], list[str]]:
 _TITLES = {"parameters": "Args", "attributes": "Attributes", "returns": "Returns"}
 
 
+def _leading_expression(description: str) -> str | None:
+    """The text before the first colon of the first line, if it is code."""
+    head, colon, _ = description.partition("\n")[0].partition(":")
+    head = head.replace("`", "").strip()
+    if not colon or not head:
+        return None
+    try:
+        ast.parse(head, mode="eval")
+    except SyntaxError:
+        return None
+    return head
+
+
 def _written_types(text: str) -> list[str]:
     """Say which entries write a type, which belongs in the annotation.
 
     The docstring is read with no owner, so that griffe has no annotation of
     its own to give: any type it finds was written in the text, as in
     ``name (int): ...``, ``Returns: int: ...`` or ``Returns: (int): ...``.
+    griffe splits off only a bare word before a ``Returns`` colon, so what
+    it leaves in the description is read too: text before the first colon
+    that parses as a Python expression, backticks aside, is a type, such as
+    ``tuple[str, int]: ...`` or ``str | None: ...``.
     """
     problems: list[str] = []
     for section in griffe.Docstring(text, parser="google").parse(warnings=False):
@@ -187,8 +219,10 @@ def _written_types(text: str) -> list[str]:
         if kind not in ("parameters", "attributes", "returns"):
             continue
         for item in section.value:
-            if item.annotation is not None or (kind == "returns" and item.name):
-                written = item.annotation or item.name
+            written = item.annotation or (item.name if kind == "returns" else None)
+            if not written and kind == "returns":
+                written = _leading_expression(item.description)
+            if written:
                 problems.append(
                     f"{_TITLES[kind]}: writes the type {written}; a "
                     "type belongs in the annotation"
@@ -1029,6 +1063,18 @@ def test_a_sample_in_every_admitted_shape_passes(
             "sample.make: Returns: writes the type T",
             id="parenthesized-type-in-returns",
         ),
+        pytest.param(
+            "        The new object.\n",
+            "        tuple[str, int]: The new object.\n",
+            "sample.make: Returns: writes the type tuple[str, int]",
+            id="generic-type-in-returns",
+        ),
+        pytest.param(
+            "        The new object.\n",
+            "        str | None: The new object.\n",
+            "sample.make: Returns: writes the type str | None",
+            id="union-type-in-returns",
+        ),
     ],
 )
 def test_each_rule_refuses_its_nearest_wrong_shape(
@@ -1049,6 +1095,19 @@ def test_each_rule_refuses_its_nearest_wrong_shape(
         ),
         pytest.param("(spec 01):", "(spec 01, as of spec 0.1):", id="spec-version"),
         pytest.param(", spec 01)", ", Spec 01)", id="Spec"),
+        pytest.param("ADRs 0017 and 0019", "ADRs 0017\u20130019", id="dash-range"),
+        pytest.param(", spec 01)", ", specs 01 through 03)", id="through-range"),
+        pytest.param("as CON-30 says", "as CON-23 to CON-24 say", id="id-range"),
+        pytest.param("as CON-30 says", "as CON-23-24 say", id="id-hyphen-range"),
+        *(
+            pytest.param("        The new object.\n", f"        {prose}\n", id=name)
+            for name, prose in (
+                ("returns-prose", "The kinds: a map from each kind."),
+                ("returns-code-prose", "``True`` if it holds: otherwise not."),
+                ("returns-parenthesis", "A map (by kind): from each kind."),
+                ("returns-citation", "The URL: see spec 01."),
+            )
+        ),
         pytest.param(", spec 01)", ", specs 01 and 03)", id="specs"),
         pytest.param(", spec 01)", ", specification 01)", id="specification"),
         pytest.param("ADR 0008;", "decision record 0008;", id="record"),
@@ -1093,6 +1152,87 @@ def test_each_admitted_spelling_passes(
 ) -> None:
     assert _GOOD.count(old) == 1
     assert _sample(tmp_path, _GOOD.replace(old, new), records) == []
+
+
+# Every refused form, written again in each variant English or Google style
+# gives it, so that a rule cannot pass a spelling it was not shown.
+_TYPES = (
+    "int",
+    "tuple[str, int]",
+    "Mapping[str, type[BaseModel]]",
+    "str | None",
+    "collections.abc.Mapping",
+    "``int``",
+    "``tuple[str, int]``",
+    "``str | None``",
+)
+_TYPE_PLACES = (
+    (
+        "        strict: Whether to check.\n",
+        "        strict ({}): Whether to check.\n",
+        "sample.make: Args: writes the type",
+    ),
+    (
+        "        name: Its name.\n\n    Raises:",
+        "        name ({}): Its name.\n\n    Raises:",
+        "sample.Thing: Attributes: writes the type",
+    ),
+    (
+        "        The new object.\n",
+        "        {}: The new object.\n",
+        "sample.make: Returns: writes the type",
+    ),
+    (
+        "        The new object.\n",
+        "        ({}): The new object.\n",
+        "sample.make: Returns: writes the type",
+    ),
+)
+_JOINS = (
+    ", ",
+    " and ",
+    " or ",
+    " to ",
+    " through ",
+    "-",
+    "\u2013",
+    "\u2014",
+    " \u2013 ",
+)
+_CITATIONS = (
+    ("ADR", "0017", "9999", "cites unknown ADR 9999"),
+    ("ADRs", "0017", "9999", "cites unknown ADR 9999"),
+    ("decision records", "0017", "9999", "cites unknown ADR 9999"),
+    ("spec", "01", "99", "cites unknown spec document 99"),
+    ("Spec", "01", "99", "cites unknown spec document 99"),
+    ("specs", "01", "99", "cites unknown spec document 99"),
+    ("specification", "01", "99", "cites unknown spec document 99"),
+)
+_RANGE_JOINS = (" to ", " through ", "-", "\u2013", "\u2014", " \u2013 ")
+
+
+def _variants() -> Iterator[tuple[str, str, str]]:
+    for old, template, problem in _TYPE_PLACES:
+        for written in _TYPES:
+            yield old, template.format(written), problem
+    cite = "as CON-30 says"
+    for word, good, bad, problem in _CITATIONS:
+        yield cite, f"as ``{word} {bad}`` says", problem
+        for join in _JOINS:
+            yield cite, f"as {word} {good}{join}{bad} says", problem
+    yield cite, "as ``CON-9999`` says", "cites unknown requirement CON-9999"
+    for join in _RANGE_JOINS:
+        for end in ("9999", "CON-9999"):
+            yield cite, f"as CON-30{join}{end} say", "unknown requirement CON-9999"
+
+
+@pytest.mark.parametrize(("old", "new", "problem"), list(_variants()))
+def test_each_refused_form_is_refused_in_every_variant(
+    tmp_path: Path, records: Records, old: str, new: str, problem: str
+) -> None:
+    assert _GOOD.count(old) == 1
+    found = _sample(tmp_path, _GOOD.replace(old, new), records)
+    assert any(problem in said for said in found), found
 
 
 def test_a_withdrawn_requirement_is_refused(tmp_path: Path) -> None:
