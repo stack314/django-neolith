@@ -1,6 +1,6 @@
 # 01. Contracts
 
-**Status:** draft. Identity, actions, the portable type system, errors, publication and checking are specified. How the provider's host and the connectors deliver errors follows [ADR 0008](../docs/adr/0008-typed-contract-errors-in-both-modes.md); the failure at the caller over its principal becomes a requirement with the call context (#10).
+**Status:** draft. Identity, actions, the portable type system, errors, publication and checking are specified. How the provider's host and the connectors deliver errors follows [ADR 0008](../docs/adr/0008-typed-contract-errors-in-both-modes.md); a principal with no valid sent form fails the call at the caller (CON-51); one that cannot be resolved joins that requirement with the host that resolves principals (roadmap step 4, #11).
 
 ## Identity and versioning
 

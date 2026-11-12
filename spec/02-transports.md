@@ -101,13 +101,15 @@ A host opens a *scope* for each root and around each action it runs. A scope hol
 
 ### The context of a call
 
-**TRN-27.** A call's deadline MUST be the earlier of its parent's deadline and the call's own timeout, counted from when the call is made, if it is given one. A timeout therefore never extends a deadline. A call with neither has no deadline.
+**TRN-27.** A call's deadline MUST be the earlier of its parent's deadline and the call's own timeout, if it is given one. The timeout is counted from when the calling code asks the connector for the call, so the time the caller's own checks take comes off it. A timeout therefore never extends a deadline. A call with neither has no deadline.
 
 The deadline crosses as a *budget*: the time that remains when the call is sent, in whole milliseconds, rounded down ([03](03-http-transport.md)).
 
 **TRN-28.** A caller MUST fail a call whose budget is less than 1 ms with `timeout`, without sending it.
 
 **TRN-29.** A budget above 9999999999 ms MUST count as 9999999999, in every mode.
+
+**TRN-38.** A caller MUST NOT receive a reply or an error that comes back after the call's deadline, as the caller's own clock holds it: the call fails with `timeout`, in every mode. Over a network the caller stops waiting at its deadline. In-process the connector checks the caller's deadline when the outcome is back, since the provider's side counts its deadline from the budget when the call arrived (TRN-36), which can be later. A `timeout` that a transport or a provider's host produced is passed on as it is.
 
 **TRN-30.** A call MUST carry its parent's principal, trace identifier and `tracestate`, unchanged.
 

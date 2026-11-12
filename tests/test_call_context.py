@@ -36,7 +36,9 @@ from neolith import (
     ContractDefinitionError,
     ContractError,
     Principal,
+    _connector,
     _context,
+    _crossing,
     action,
     contract,
     implements,
@@ -572,13 +574,143 @@ def test_a_calls_deadline_is_the_earlier_of_its_parents_and_its_own(
 
 
 @pytest.mark.spec("TRN-27")
-def test_a_timeout_is_counted_from_when_the_call_is_made(clock: Clock) -> None:
+def test_a_timeout_is_counted_from_when_the_connector_is_called(
+    clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    check = _crossing.check_request
+
+    def slow_check(contract: Contract, action: Action, request: object) -> bytes:
+        # The caller's own check of the request takes a quarter of a second.
+        clock.time += 0.25
+        return check(contract, action, request)
+
+    monkeypatch.setattr(_connector, "check_request", slow_check)
     connector, _, carrying = _desk()
     with _context.root("shop"):
-        # The call starts at 1000, and its checks take a quarter of a second.
-        clock.steps = [0, 0.25]
         connector.ask(Ask(), timeout=2)
-    assert carrying.sent[0].budget == 1750
+        # The checks alone use the timeout up: counted as made, never sent.
+        with pytest.raises(ContractError) as raised:
+            connector.ask(Ask(), timeout=0.25)
+    assert [sent.budget for sent in carrying.sent] == [1750]
+    assert raised.value.message == "the deadline passed before the call was sent"
+
+
+# The caller's own deadline (TRN-38).
+
+
+@pytest.mark.spec("TRN-38", "TRN-4")
+@pytest.mark.parametrize("ending", ["a reply", "a standard error", "a failure"])
+def test_an_outcome_after_the_callers_deadline_is_discarded_by_the_caller(
+    clock: Clock, caplog: pytest.LogCaptureFixture, ending: str
+) -> None:
+    def then(request: Ask, ctx: CallContext) -> object:
+        clock.time += 0.75
+        made = _ENDINGS[ending]()
+        if isinstance(made, BaseException):
+            raise made
+        return made
+
+    connector, provider, carrying = _desk(then)
+    # The clock stands at 1000 for the call's start and its budget, and half
+    # a second passes before the call arrives. The provider counts its second
+    # from arrival, so it is in time at 1001.25; the caller's deadline was
+    # 1001.
+    clock.steps = [0, 0, 0.5]
+    with (
+        _context.root("shop") as scope,
+        caplog.at_level(logging.ERROR, "neolith"),
+        pytest.raises(ContractError) as raised,
+    ):
+        connector.ask(Ask(), timeout=1)
+    assert carrying.sent[0].budget == 1000
+    assert provider.seen[0].deadline == 1001.5
+    assert (raised.value.kind, raised.value.message) == ("timeout", _LATE)
+    assert raised.value.data is None
+    assert is_received(raised.value)
+    assert raised.value.__context__ is None
+    if ending == "a standard error":
+        # The caller's host records the error it discarded.
+        (record,) = caplog.records
+        assert "not_found" in record.getMessage()
+        assert scope.context.trace_id in record.getMessage()
+
+
+@pytest.mark.spec("TRN-38")
+def test_an_outcome_just_inside_the_callers_deadline_is_delivered(
+    clock: Clock,
+) -> None:
+    def then(request: Ask, ctx: CallContext) -> None:
+        clock.time += 0.25
+
+    connector, _, _ = _desk(then)
+    with _context.root("shop", timeout=1):
+        clock.steps = [0, 0, 0.5]
+        assert connector.ask(Ask()) == Told()
+        clock.steps = [0, 0, 0.5, 0, 0, 0.25]
+        with pytest.raises(ContractError, match="timeout"):
+            connector.ask(Ask())
+
+
+@pytest.mark.spec("TRN-38")
+def test_a_timeout_the_transport_gives_is_passed_on_as_it_is(clock: Clock) -> None:
+    class Late:
+        contract = DESK
+
+        def call(self, action: Action, request: bytes, context: Sent) -> bytes | None:
+            clock.time += 5
+            raise Failure("timeout", "the provider stopped waiting")
+
+    connector: Any = Connector(Desk, Late())
+    with _context.root("shop"), pytest.raises(ContractError) as raised:
+        connector.ask(Ask(), timeout=1)
+    assert raised.value.message == "the provider stopped waiting"
+
+
+@pytest.mark.spec("TRN-38", "TRN-4")
+@given(
+    own=st.integers(1, 20),
+    root=st.none() | st.integers(1, 20),
+    before=st.integers(0, 6),
+    transit=st.integers(0, 6),
+    spent=st.integers(0, 40),
+    back=st.integers(0, 6),
+    raises=st.booleans(),
+)
+def test_no_outcome_reaches_the_caller_after_its_own_deadline(
+    own: int,
+    root: int | None,
+    before: int,
+    transit: int,
+    spent: int,
+    back: int,
+    raises: bool,
+) -> None:
+    clock = Clock()
+    # Halves of a second are exact. Time passes before the budget is read, on
+    # the way to the provider, in the action and on the way back.
+    deadline = 1000 + (own if root is None else min(own, root))
+
+    def then(request: Ask, ctx: CallContext) -> None:
+        clock.time += spent / 2
+        if raises:
+            raise ContractError("not_found", "no such desk")
+
+    connector, provider, _ = _desk(then)
+    with mock.patch.object(_context, "now", clock), _context.root("shop", timeout=root):
+        clock.steps = [0, before / 2, transit / 2, 0, back / 2]
+        try:
+            reply = connector.ask(Ask(), timeout=own)
+        except ContractError as error:
+            outcome = error.kind
+        else:
+            assert reply == Told()
+            outcome = "reply"
+        ended = clock.time
+    if ended >= deadline:
+        assert outcome == "timeout"
+    else:
+        assert outcome == ("not_found" if raises else "reply")
+        assert len(provider.seen) == 1
 
 
 @pytest.mark.spec("TRN-27", "TRN-28")
@@ -677,17 +809,27 @@ def test_a_deadline_that_passes_before_dispatch_fails_with_timeout(
 
 
 @pytest.mark.spec("TRN-19", "TRN-35")
-def test_the_deadline_is_checked_before_the_request_is_read(clock: Clock) -> None:
+def test_the_deadline_is_checked_before_the_request_is_read(
+    clock: Clock, caplog: pytest.LogCaptureFixture
+) -> None:
     provider = Seeing()
     transport = InProcess(Desk, provider)
     clock.steps = [0, 1]
-    with pytest.raises(Failure) as raised:
-        transport.call(ASK, b"not json", _sent(budget=1000))
-    assert raised.value.kind == "timeout"
-    # In time, the same request fails the receive check instead.
-    with pytest.raises(Failure) as raised:
-        transport.call(ASK, b"not json", _sent(budget=1000))
-    assert raised.value.kind == "internal"
+    with caplog.at_level(logging.ERROR, "neolith"):
+        with pytest.raises(Failure) as raised:
+            transport.call(ASK, b"not json", _sent(budget=1000))
+        # The step that failed is the deadline's: its message, and no failure
+        # of the provider logged, since the request was never read.
+        assert (raised.value.kind, raised.value.message) == (
+            "timeout",
+            "the deadline passed before the action was run",
+        )
+        assert caplog.records == []
+        # In time, the same request fails the receive check instead.
+        with pytest.raises(Failure) as raised:
+            transport.call(ASK, b"not json", _sent(budget=1000))
+        assert raised.value.kind == "internal"
+        assert len(caplog.records) == 1
     assert provider.seen == []
 
 
@@ -699,11 +841,20 @@ def test_the_context_is_read_before_the_deadline_is_checked(
     # that cannot be read is a failure of the host, found at the step where a
     # provider reads the headers: before the deadline.
     transport = InProcess(Desk, Seeing())
-    clock.steps = [0, 0.5]
-    with caplog.at_level(logging.CRITICAL, "neolith"), pytest.raises(Failure) as raised:
-        transport.call(ASK, b"{}", _sent(principal=b"{}", budget=1000))
-    assert raised.value.kind == "internal"
-    assert clock.reads == 2
+    with caplog.at_level(logging.ERROR, "neolith"):
+        clock.steps = [0, 0.5]
+        with pytest.raises(Failure) as raised:
+            transport.call(ASK, b"{}", _sent(principal=b"{}", budget=1000))
+        assert raised.value.kind == "internal"
+        assert clock.reads == 2
+        # With the deadline passed as well, the failure is still found first:
+        # it is logged, and the call is late, not refused before it ran.
+        clock.steps = [0, 5]
+        with pytest.raises(Failure) as raised:
+            transport.call(ASK, b"{}", _sent(principal=b"{}", budget=1000))
+        assert (raised.value.kind, raised.value.message) == ("timeout", _LATE)
+    assert len(caplog.records) == 2
+    assert all("the provider failed" in r.getMessage() for r in caplog.records)
 
 
 _LATE = "the deadline passed before the call ended; the action might have run"

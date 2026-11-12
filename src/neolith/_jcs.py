@@ -57,11 +57,19 @@ _RUN = b"0" * 16
 _BEYOND = re.compile(rb"[\xf0-\xff]")
 
 
+def _members(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """An object's members, refusing a name that occurs twice (RFC 7493)."""
+    members = dict(pairs)
+    if len(members) != len(pairs):
+        raise ValueError("a member name occurs twice in one object")
+    return members
+
+
 def _quick(text: bytes | str) -> bytes | None:
     """The canonical form as the json module writes it, or ``None`` when the
     text holds something it writes otherwise, or is not I-JSON."""
     try:
-        value = json.loads(text, parse_float=_quick_number)
+        value = json.loads(text, parse_float=_quick_number, object_pairs_hook=_members)
         written = json.dumps(
             value,
             ensure_ascii=False,
@@ -92,12 +100,25 @@ def canonical_text(text: bytes | str) -> bytes:
     same for any spelling of a value. A text that holds only what the json
     module writes exactly as JCS does is written by it, which is several
     times quicker than ``canonical``; any other text takes the long way.
-    Raises ``ValueError`` for a text that is not I-JSON.
+
+    Raises ``ValueError`` for a text that is not I-JSON: one that is not JSON,
+    or holds a member name twice in one object, a lone surrogate or a number
+    beyond a double, and for one nested deeper than the json module reads.
     """
     quick = _quick(text)
     if quick is not None:
         return quick
-    return canonical(json.loads(text, parse_int=_double))
+    try:
+        value = json.loads(text, parse_int=_double, object_pairs_hook=_members)
+    except RecursionError:
+        value = _TOO_DEEP
+    if value is _TOO_DEEP:
+        # Raised outside the handler, so the deep traceback is not chained.
+        raise ValueError("the text is nested deeper than the JSON reader goes")
+    return canonical(value)
+
+
+_TOO_DEEP = object()
 
 
 def canonical(value: object) -> bytes:

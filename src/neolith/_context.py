@@ -409,24 +409,33 @@ class Scope:
         derived = canonical([parent, contract, action, request_hash, count])
         return b64url(hashlib.sha256(derived).digest())
 
-    def budget(self, timeout: float | None, started: float) -> int | None:
-        """The remaining budget of a call made now, in whole milliseconds.
+    def budget(
+        self, timeout: float | None, started: float
+    ) -> tuple[int | None, float | None]:
+        """The remaining budget of a call sent now, in whole milliseconds, and
+        the call's deadline on this host's clock.
 
-        The call's deadline is the earlier of the scope's and the call's own:
-        ``timeout`` seconds from ``started``, when the call was made. The
-        budget is rounded down, so it is 0 or less once the deadline has
-        passed, capped at ``BUDGET_CAP``, and ``None`` when there is no
-        deadline.
+        The deadline is the earlier of the scope's and the call's own:
+        ``timeout`` seconds from ``started``, when the connector was called.
+        The budget is rounded down, so it is 0 or less once the deadline has
+        passed, and capped at ``BUDGET_CAP``, as the deadline is with it.
+        Both are ``None`` when there is no deadline.
         """
         current = now()
         deadline = self.held.deadline
         remaining = None if deadline is None else deadline - current
         if timeout is not None:
+            # Taken from the timeout itself, so that a call that took no time
+            # so far has exactly its timeout left.
             own = timeout - (current - started)
-            remaining = own if remaining is None else min(remaining, own)
-        if remaining is None:
-            return None
-        return min(math.floor(remaining * 1000), BUDGET_CAP)
+            if remaining is None or own < remaining:
+                remaining, deadline = own, started + timeout
+        if remaining is None or deadline is None:
+            return None, None
+        return (
+            min(math.floor(remaining * 1000), BUDGET_CAP),
+            min(deadline, current + BUDGET_CAP / 1000),
+        )
 
 
 _CURRENT: contextvars.ContextVar[Scope | None] = contextvars.ContextVar(

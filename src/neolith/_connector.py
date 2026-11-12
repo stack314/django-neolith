@@ -22,7 +22,9 @@ that text back, so caller and provider never share an object (ADR 0007).
 The deadline crosses as a budget and is counted from when the call arrives. It
 is checked before the request is read and again when the action's outcome is
 ready to return; an outcome that is late is discarded, and the call fails with
-``timeout``. The action is never interrupted (ADR 0008 Decision 2).
+``timeout``. The action is never interrupted (ADR 0008 Decision 2). The
+connector checks the caller's own deadline once more when the outcome is back,
+since time can pass between the budget's reading and the call's arrival.
 
 The provider's side, the provider's host in-process, delivers only an error
 the action raised itself, of a kind it may raise: a standard kind other than
@@ -486,7 +488,11 @@ class Connector:
     def _call(
         self, action: Action, request: object, context: object, timeout: object
     ) -> BaseModel | None:
-        """Run the caller's checks in order, then send the call once."""
+        """Run the caller's checks in order, then send the call once.
+
+        The call's own timeout is counted from here, where the connector is
+        called, so the time its own checks take comes off it.
+        """
         started = _context.now()
         seconds = _context.timeout_option(timeout)
         # Step 1: the context, and its principal's sent form.
@@ -513,7 +519,7 @@ class Connector:
         # Step 3: the key. The call counts as made from here on.
         key = scope.child_key(self._contract.identity, action.name, text)
         # Step 4: the deadline, the earlier of the scope's and the call's own.
-        budget = scope.budget(seconds, started)
+        budget, deadline = scope.budget(seconds, started)
         if budget is not None and budget < 1:
             raise _received("timeout", _NOT_SENT)
         sent = Sent(
@@ -525,9 +531,26 @@ class Connector:
             caller=scope.app,
         )
         outcome = self._carry(action, text, sent)
+        # The caller's own deadline, on its own clock: over a network it
+        # stops waiting then, so whatever comes back later is discarded here
+        # too. A timeout the transport gave says where the deadline passed.
+        late = deadline is not None and _context.now() >= deadline
         if isinstance(outcome, ContractError):
-            raise outcome
-        return outcome
+            if not late or outcome.kind == "timeout":
+                raise outcome
+            with contextlib.suppress(Exception):
+                _log.error(
+                    "%s, action %r: the caller's deadline passed, so the %s error "
+                    "that came back was discarded (trace %s)",
+                    self._contract.identity,
+                    action.name,
+                    outcome.kind,
+                    trace_id,
+                )
+        elif not late:
+            return outcome
+        del outcome
+        raise _received("timeout", _LATE)
 
     def _carry(
         self, action: Action, text: bytes, sent: Sent

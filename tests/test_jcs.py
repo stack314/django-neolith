@@ -290,12 +290,30 @@ def test_the_vectors_are_written_the_same_from_their_text() -> None:
         "",
         "[1,]",
         "[" * 100_000,
+        '{"a":1,"a":2}',
+        '{"a":1,"a":1}',
+        '[{"b":{"a":"x","c":[],"a":"x"}}]',
+        '{"a":{"b":1,"b":1.5e-7}}',
+        '{"a":1,"\\u0061":2}',
+        '{"\U0001f600":1,"\\ud83d\\ude00":2}',
     ],
 )
 def test_a_text_that_is_not_i_json_is_refused_either_way(text: str) -> None:
     assert _quick(text) is None
-    with pytest.raises((ValueError, RecursionError)):
+    with pytest.raises(ValueError, match=r".") as raised:
         canonical_text(text)
+    assert not isinstance(raised.value, RecursionError)
+    assert raised.value.__cause__ is None
+    with pytest.raises(ValueError, match=r"."):
+        canonical_text(text.encode("utf-8"))
+
+
+def test_a_name_that_occurs_once_in_each_object_is_not_a_duplicate() -> None:
+    text = '{"a":{"a":[{"a":1},{"a":1}]},"b":{"a":1}}'
+    assert _quick(text) == text.encode()
+    assert canonical_text('{"\U0001f600":{"\U0001f600":1}}') == (
+        '{"\U0001f600":{"\U0001f600":1}}'.encode()
+    )
 
 
 @pytest.mark.parametrize(
@@ -305,7 +323,6 @@ def test_a_text_that_is_not_i_json_is_refused_either_way(text: str) -> None:
         ("[0.5,100.0,1e2,1.5e3,0.0001]", b"[0.5,100,100,1500,0.0001]"),
         ('{"a":"\\u00e9\\u0000"}', '{"a":"\u00e9\\u0000"}'.encode()),
         (' { "a" : [ ] } ', b'{"a":[]}'),
-        ('{"a":1,"a":2}', b'{"a":2}'),
     ],
 )
 def test_a_plain_text_is_written_the_quick_way(text: str, written: bytes) -> None:
