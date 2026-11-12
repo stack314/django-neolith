@@ -49,7 +49,7 @@ Outside Django: Django REST framework's `Request.user` setter also assigns the u
 
 ## Decision
 
-Option 3, as two things that can be accepted apart. Decisions 1 to 10 are the seam and its Django-user backend. Decision 11 is the narrowing of 0010 that Decision 9 needs, proposed as a decision of its own. Under option 2, Decision 9 is replaced, together with the admitted set's `key field` and `subject` lines and Decision 10's two rows on the key; Decisions 1 to 8 and the rest of 10 stand.
+Option 3, written as two parts that could be accepted apart. Decisions 1 to 10 are the seam and its Django-user backend. Decision 11 is the narrowing of 0010 that Decision 9 needs, made as a decision of its own. Under option 2, Decision 9 is replaced, together with the admitted set's `key field` and `subject` lines and Decision 10's two rows on the key; Decisions 1 to 8 and the rest of 10 stand.
 
 ### The admitted set
 
@@ -233,7 +233,7 @@ Alternatives weighed:
 - **Only the inputs of the backends that were called.** Tighter keys. Correct too, but the set changes per response, and a test has to cover each prefix of the list.
 - **Vary whenever a backend is configured**, call or no call. Simplest. It would end caching of every anonymous page on a host with session users, against 0017's cost rule.
 - **Leave `Vary` to the backend.** `SessionMiddleware` already does this for cookies. A backend has no response to patch when it runs inside a connector call.
-- **`Cache-Control: private` as well**, when a principal was resolved or the union holds `*`. Django's documentation recommends it for per-user pages beside `vary_on_cookie`, and Spring Security goes further and marks every response `no-store` by default. It would also protect against a wrong declaration. It overrides a deployer's explicit `public` (Django drops `public` when `private` is set), it ends shared caching of pages that `Vary` already keys per user, and 0017 Decision 4 fixes `Vary` and nothing more. `Vary` alone is proposed for 0.1, and the directive is Open question 8.
+- **`Cache-Control: private` as well**, when a principal was resolved or the union holds `*`. Django's documentation recommends it for per-user pages beside `vary_on_cookie`, and Spring Security goes further and marks every response `no-store` by default. It would also protect against a wrong declaration. It overrides a deployer's explicit `public` (Django drops `public` when `private` is set), it ends shared caching of pages that `Vary` already keys per user, and 0017 Decision 4 fixes `Vary` and nothing more. `Vary` alone is chosen for 0.1, and the directive is Open question 8.
 
 The cost: on a host with a cookie backend and a header backend, every page that makes a call varies on both. The host states the middleware order for its own backend only; the author of another backend states, in that backend's documentation, which middleware it has to follow.
 
@@ -359,7 +359,7 @@ Alternatives weighed:
 
 ### 11. A separate decision: 0010 Decision 2 is narrowed, so that a primary key may be a subject under a deployer-given issuer
 
-This decision can be accepted or declined apart from the rest, and what leans on it is named at the end of this section. It changes what an Accepted record, [0010](0010-pluggable-principal-resolution.md), says, and how one sentence of Accepted 0004 is read, and it is proposed as that change (D1), not as a reading of 0010.
+This decision was written so that it could be taken or left apart from the rest, and what rests on it is named at the end of this section. It changes what an Accepted record, [0010](0010-pluggable-principal-resolution.md), says, and how one sentence of Accepted 0004 is read, and it was made as that change (D1), not as a reading of 0010.
 
 **What 0010 says.** Decision 2: "a primary key on its own is never a subject". Its Consequences: a project that resolves Django users "needs an identifier for each user that is stable across hosts, which the primary key alone is not". "On its own" could be read as satisfied by the issuer. That reading would leave the sentence without effect, since every subject travels with an issuer (spec 03: "A subject is unique only within its issuer"). So Decision 9 does not fit 0010 as written.
 
@@ -413,7 +413,7 @@ This decision can be accepted or declined apart from the rest, and what leans on
 3. **A time limit on resolution.** The root has a deadline (0017 Decision 4), and resolution runs inside the first call. Whether the host should bound a backend by that deadline, and how on the sync path, is not decided here.
 4. **Telling a refused credential from a broken backend.** Comparable systems all give this a named signal: DRF's `AuthenticationFailed` beside a `None` return, Django's `PermissionDenied` in `authenticate()`, Spring Security's exception types in `ProviderManager`, ASP.NET Core's `NoResult` and `Fail`, and Encore's `Unauthenticated` beside any other error. A named exception here would let the host log a refusal as a warning and anything else as an error; callers would still see `internal`, as 0017 fixes. It is left open because no backend shipped in step 4 refuses a credential, and step 5's backend will, on the side where a refusal is `unauthenticated`: one exception should serve both sides, and naming it now would guess at step 5. Adding it later leaves a backend that raises a plain `Exception` logged as an error, as today.
 5. **Users of several hosts** (the repository's [open question 4](../open-questions.md)). Whether each host has its own `django.contrib.auth` decides how many issuers a project ends up with. This record works either way, and does not settle it.
-6. **A shared check for declared inputs.** The harness check named in Decision 3 is proposed, not specified. It belongs with `neolith.testing` when a second backend exists to try it on.
+6. **A shared check for declared inputs.** The harness check named in Decision 3 is named, not specified. It belongs with `neolith.testing` when a second backend exists to try it on.
 7. **A name per entry.** If a second shipped backend, or adopters' logs, show that position and path are not enough, a `NAME` key as in `TEMPLATES` is the candidate, and it would have to be required to stay one form.
 8. **`Cache-Control: private`.** Whether the host should also mark a response private when a principal was resolved, as Decision 6 weighs, would benefit from adopters' cache set-ups.
 
