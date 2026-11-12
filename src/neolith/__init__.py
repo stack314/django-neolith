@@ -10,6 +10,7 @@ from neolith._contracts import (
     contract,
     implements,
 )
+from neolith._declaration import DeclarationError, NeolithAppConfig, Provided
 from neolith._forms import Binary, Decimal128, Duration
 
 __all__ = [
@@ -20,8 +21,11 @@ __all__ = [
     "ContractDefinitionError",
     "ContractError",
     "Decimal128",
+    "DeclarationError",
     "Duration",
+    "NeolithAppConfig",
     "Principal",
+    "Provided",
     "__version__",
     "action",
     "contract",
