@@ -61,7 +61,8 @@ declaration  = name label [provides] [requires] [resources] [batteries]
                                                                  ; a field with no entry is left out; an empty tuple is refused
 name         = <dotted Python path>                              ; Django's AppConfig.name, unchanged; it never leaves the host
 label        = app-name                                          ; always written; spec 05's "name", Decision 1
-                                                                 ; 0009 as amended adds: not "default"
+                                                                 ; 0009 as amended adds: not a label the host reserves,
+                                                                 ; "default" or "django_cache"
 app-name     = segment                                           ; "segment" of spec 01, CON-10
 provides     = tuple of Provided, no two with one contract identity
 Provided     = Provided(<contract class>,
