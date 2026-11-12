@@ -1031,6 +1031,12 @@ def test_action_defaults_to_no_declared_kinds() -> None:
     held = Action("get", True, Ping, None)
     assert dict(held.errors) == {}
     hash(held)
+    # Left out, the kinds are as frozen as given ones, and equal to none given.
+    with pytest.raises(TypeError, match="read-only"):
+        cast("dict[str, Any]", held.errors)["expired"] = Expired
+    assert held == Action("get", True, Ping, None, {})
+    assert type(held.errors) is type(Action("get", True, Ping, None, {}).errors)
+    assert held.errors is not Action("get", True, Ping, None).errors
 
 
 def test_action_freezes_a_plain_dict_of_kinds() -> None:
