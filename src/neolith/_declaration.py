@@ -245,8 +245,10 @@ class NeolithAppConfig(AppConfig):
         Django's registry calls this for every config while it loads. Django
         reads ``name`` and ``label`` from the live class for each instance, so
         an instance that differs from the snapshot is refused, in any
-        registry. In Django's global registry a declared app also needs
-        neolith's own app installed.
+        registry. A config that holds no checked declaration, such as a base
+        class or a class whose check never ran, is refused as well. In
+        Django's global registry a declared app also needs neolith's own app
+        installed.
         """
         config = type(self)
         snapshot = declaration_of(config)

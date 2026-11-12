@@ -414,6 +414,16 @@ def test_a_base_class_is_not_a_default_and_its_declaring_subclass_is() -> None:
     assert declaration_of(NeolithAppConfig) is None
 
 
+@pytest.mark.spec("APP-6")
+def test_a_base_class_whose_default_was_rebound_is_refused_in_a_subclass() -> None:
+    # Only the False that neolith gave the base class is passed over.
+    base = _declare({}, name="Base")
+    setattr(base, "default", True)  # noqa: B010
+    field, text = _refusal(_valid(), base)
+    assert field == "default"
+    assert text.startswith(f"{__name__}.Base holds it; ")
+
+
 def test_a_declaring_class_keeps_the_default_it_sets() -> None:
     assert _declare(_valid(default=False)).default is False
 
@@ -1055,6 +1065,25 @@ def test_only_a_class_own_snapshot_counts() -> None:
     for other in (None, 5, "shop.stock", config("shop", neolith), AppConfig, object):
         assert declaration_of(other) is None
     assert declaration_of(config) is _snapshot(config)
+
+
+def test_a_snapshot_copied_onto_another_class_does_not_count() -> None:
+    snapshot = _snapshot(_declare(_valid()))
+    other = _declare({}, name="Base")
+    setattr(other, "__neolith_declaration__", snapshot)  # noqa: B010
+    assert vars(other)["__neolith_declaration__"] is snapshot
+    assert declaration_of(other) is None
+
+
+def test_a_snapshot_held_only_by_a_base_class_does_not_count() -> None:
+    base = _declare({}, name="Base")
+    config = _declare(_valid(), base)
+    snapshot = _snapshot(config)
+    # The snapshot names this class, and the class reaches it by inheritance.
+    delattr(config, "__neolith_declaration__")
+    setattr(base, "__neolith_declaration__", snapshot)  # noqa: B010
+    assert getattr(config, "__neolith_declaration__").config is config  # noqa: B009
+    assert declaration_of(config) is None
 
 
 # Loading a declared app into a registry.
