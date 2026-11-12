@@ -15,7 +15,7 @@ import pickle
 import threading
 import types
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any, Literal, Protocol, cast
@@ -30,14 +30,25 @@ from neolith import (
     Contract,
     ContractDefinitionError,
     ContractError,
+    _context,
     action,
     contract,
     implements,
 )
-from neolith._connector import Connector, Failure, InProcess
+from neolith._connector import Connector, Failure, InProcess, internal_message
+from neolith._context import Scope, Sent
 from neolith._contracts import Action
 from tests.test_contract_round_trip import _HYPOTHESIS, _TYPES, _name, _records
 from tests.test_crossing import _shared
+
+
+@pytest.fixture(autouse=True)
+def call_scope() -> Iterator[Scope]:
+    """A root for each test's calls: a connector call needs an open scope
+    (spec 02, TRN-23). How a call's context is derived and crosses is tested
+    in ``test_call_context.py``."""
+    with _context.root() as scope:
+        yield scope
 
 
 class Part(BaseModel):
@@ -192,16 +203,17 @@ def test_an_action_the_contract_does_not_have_is_a_usage_error(name: str) -> Non
         ((_reserve(), _reserve()), {}),
         ((_reserve(),), {"request": _reserve()}),
         ((), {"req": _reserve()}),
-        # The behaviour until the call context (#10 task 6) adds timeout= and
-        # context= as a connector call's options.
-        ((), {"request": _reserve(), "timeout": 1}),
+        # An option is not a request, and no other keyword is an option.
+        ((), {"timeout": 1}),
+        ((), {"request": _reserve(), "deadline": 1}),
     ],
     ids=[
         "nothing",
         "two requests",
         "both ways",
         "other keyword",
-        "option, until task 6",
+        "an option alone",
+        "an unknown option",
     ],
 )
 def test_a_call_with_anything_but_one_request_is_a_usage_error(
@@ -259,11 +271,13 @@ def test_the_action_runs_in_the_callers_thread_in_a_copy_of_its_context() -> Non
 
 
 @pytest.mark.spec("TRN-6", "TRN-16")
-def test_concurrent_callers_each_get_their_own_reply() -> None:
+def test_concurrent_callers_each_get_their_own_reply(call_scope: Scope) -> None:
     connector = _connect(Recording(lambda r: Reserved(ok=r.order % 2 == 0)))
 
     def call(order: int) -> bool:
-        return cast("bool", connector.reserve(Reserve(order=order)).ok)
+        # A pool's thread does not inherit the context, so each call names it.
+        reply = connector.reserve(Reserve(order=order), context=call_scope.context)
+        return cast("bool", reply.ok)
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         results = list(pool.map(call, range(200)))
@@ -281,7 +295,7 @@ class Counting:
         self._outcome = outcome
         self.contract = Contract.of(Inventory)
 
-    def call(self, action: Action, request: bytes) -> bytes | None:
+    def call(self, action: Action, request: bytes, context: Sent) -> bytes | None:
         self.calls.append((action.name, request))
         return self._outcome(action, request)
 
@@ -333,7 +347,9 @@ def _assert_internal(raised: pytest.ExceptionInfo[ContractError]) -> None:
     error = raised.value
     assert error.kind == "internal"
     assert error.data is None
-    assert error.message == "the provider failed, or its reply could not be read"
+    scope = _context._CURRENT.get()
+    assert scope is not None
+    assert error.message == internal_message(scope.context.trace_id)
     assert error.__cause__ is None
     assert error.__context__ is None
     assert getattr(error, "__notes__", []) == []
@@ -503,7 +519,11 @@ def test_an_action_of_another_contract_is_refused_by_the_transport() -> None:
 
     transport = InProcess(Inventory, Recording())
     with pytest.raises(TypeError, match="has no action 'reserve' of this declaration"):
-        transport.call(Contract.of(Other).actions["reserve"], b"{}")
+        transport.call(
+            Contract.of(Other).actions["reserve"],
+            b"{}",
+            Sent(None, "1" * 32, "", None, "key", None),
+        )
 
 
 # Invariant: whatever the description admits crosses there and back unchanged.

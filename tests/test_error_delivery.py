@@ -11,7 +11,7 @@ import json
 import logging
 import pickle
 import types
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Annotated, Any, Literal, Protocol, cast
 
@@ -21,14 +21,36 @@ from hypothesis import strategies as st
 from hypothesis_jsonschema import from_schema
 from pydantic import AwareDatetime, BaseModel, BeforeValidator
 
-from neolith import Contract, ContractDefinitionError, ContractError, action, contract
-from neolith._connector import Connector, Failure, InProcess
+from neolith import (
+    Contract,
+    ContractDefinitionError,
+    ContractError,
+    _context,
+    action,
+    contract,
+)
+from neolith._connector import Connector, Failure, InProcess, internal_message
+from neolith._context import Scope, Sent
 from neolith._contracts import Action, is_received, untyped_problem
 from neolith._crossing import codec
 from tests.test_contract_round_trip import _HYPOTHESIS, _TYPES, _name, _records
 from tests.test_crossing import _shared
 
-INTERNAL = "the provider failed, or its reply could not be read"
+
+@pytest.fixture(autouse=True)
+def call_scope() -> Iterator[Scope]:
+    """A root for each test's calls: a connector call needs an open scope
+    (spec 02, TRN-23). How a call's context is derived and crosses is tested
+    in ``test_call_context.py``."""
+    with _context.root() as scope:
+        yield scope
+
+
+def _internal() -> str:
+    """The fixed message of an internal error for the test's trace."""
+    scope = _context._CURRENT.get()
+    assert scope is not None
+    return internal_message(scope.context.trace_id)
 
 
 class Order(BaseModel):
@@ -81,7 +103,7 @@ def _call(failure: Callable[[], BaseException]) -> ContractError:
 
 
 def _assert_internal(error: ContractError) -> None:
-    assert (error.kind, error.message, error.data) == ("internal", INTERNAL, None)
+    assert (error.kind, error.message, error.data) == ("internal", _internal(), None)
     assert error.__cause__ is None
     assert error.__context__ is None
     assert getattr(error, "__notes__", []) == []
@@ -342,7 +364,7 @@ class Arriving:
     def __init__(self, failure: Failure) -> None:
         self._failure = failure
 
-    def call(self, action: Action, request: bytes) -> bytes | None:
+    def call(self, action: Action, request: bytes, context: Sent) -> bytes | None:
         raise self._failure
 
 
