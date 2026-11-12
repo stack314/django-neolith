@@ -9,6 +9,6 @@ class CouriersConfig(NeolithAppConfig):
         Provided(
             Couriers,
             implementation="tests.host_apps.couriers.services.CourierService",
-            principal_from=(),
+            principal_from=("stock",),
         ),
     )

@@ -15,6 +15,7 @@ import sys
 import textwrap
 import threading
 from collections.abc import Callable, Iterator, Sequence
+from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -36,8 +37,14 @@ from neolith import (
     connect,
     contract,
 )
+from neolith._context import Scope
 from neolith._contracts import _IDENTITY
-from neolith._declaration import Declaration, NeolithAppConfig, Provision
+from neolith._declaration import (
+    Declaration,
+    NeolithAppConfig,
+    Provision,
+    declaration_of,
+)
 from neolith._host import _RECORDED, HostConfig, _current, build, resolve
 from tests import declaration_contracts, host_apps
 from tests.declaration_contracts import (
@@ -50,6 +57,7 @@ from tests.declaration_contracts import (
     StockV2,
 )
 from tests.host_apps.couriers import services as courier_services
+from tests.host_apps.web.apps import WebConfig
 from tests.hosting import in_fresh_process
 from tests.test_contract_round_trip import _HYPOTHESIS
 
@@ -604,6 +612,15 @@ def test_every_refusal_reaches_the_diagnostic(write_app: WriteApp, case: str) ->
 # Set-up in Django's global registry, on the test host.
 
 
+def _web() -> AbstractContextManager[Scope]:
+    """A root for the web app, which requires what its declaration says."""
+    declaration = declaration_of(WebConfig)
+    assert declaration is not None
+    return _context.root(
+        "web", requires=tuple(c.identity for c in declaration.requires)
+    )
+
+
 def test_neolith_is_an_installed_app_whose_config_django_picks() -> None:
     assert type(AppConfig.create("neolith")) is HostConfig
     assert HostConfig.name == HostConfig.label == "neolith"
@@ -613,7 +630,7 @@ def test_neolith_is_an_installed_app_whose_config_django_picks() -> None:
 def test_after_set_up_a_call_reaches_the_provider_as_its_app() -> None:
     stock = connect("stock.v1")
     with override_settings(INSTALLED_APPS=host_apps.INSTALLED):
-        with _context.root("web"):
+        with _web():
             reply = stock.level(Sku(sku="abcd"))
         assert reply == Level(on_hand=4)
         # The stock app's own call to couriers is made as the stock app.
@@ -634,7 +651,7 @@ def test_a_call_before_set_up_is_a_usage_error_and_not_sent() -> None:
     with override_settings(INSTALLED_APPS=host_apps.INSTALLED):
         quote = couriers.quote
     # An action read during set-up is refused once the host is gone again.
-    with _context.root("web"), pytest.raises(UsageError, match="not set up"):
+    with _web(), pytest.raises(UsageError, match="not set up"):
         quote(Sku(sku="x"))
     assert len(courier_services.CALLS) == before
 
@@ -654,7 +671,7 @@ def test_set_up_twice_with_the_same_apps_builds_a_fresh_table() -> None:
             )
             second_instance = courier_services.BUILT[-1]
             assert second_instance is not first_instance
-            with _context.root("web"):
+            with _web():
                 couriers.quote(Sku(sku="a"))
                 couriers.quote(Sku(sku="b"))
             assert [served for _, served in courier_services.CALLS[-2:]] == [
@@ -663,7 +680,7 @@ def test_set_up_twice_with_the_same_apps_builds_a_fresh_table() -> None:
             ]
         # Leaving the override restores the registry, and its set-up.
         assert _current() is first
-        with _context.root("web"):
+        with _web():
             couriers.quote(Sku(sku="c"))
         assert courier_services.CALLS[-1] == ("web", first_instance)
     assert _current() is None
@@ -676,7 +693,7 @@ def test_an_override_that_leaves_neolith_out_holds_no_host_until_it_ends() -> No
         with override_settings(INSTALLED_APPS=["django.contrib.humanize"]):
             assert _current() is None
             with (
-                _context.root("web"),
+                _web(),
                 pytest.raises(UsageError, match="calls resume when that ends"),
             ):
                 couriers.quote(Sku(sku="x"))
@@ -717,7 +734,7 @@ def test_concurrent_first_calls_after_set_up_each_get_their_reply() -> None:
 
     def call(index: int) -> None:
         barrier.wait()
-        with _context.root("web"):
+        with _web():
             replies[index] = stock.level(Sku(sku="x" * index))
 
     with override_settings(INSTALLED_APPS=host_apps.INSTALLED):
@@ -792,7 +809,7 @@ def test_a_connector_holds_its_identity_and_nothing_else() -> None:
         # A mistake in the calling code keeps step 3's builtin classes.
         with pytest.raises(AttributeError, match="has no action 'restock'"):
             stock.restock  # noqa: B018
-        with _context.root("web"), pytest.raises(TypeError, match="takes one request"):
+        with _web(), pytest.raises(TypeError, match="takes one request"):
             stock.level()
         assert stock.level.__name__ == "level"
 
@@ -994,7 +1011,7 @@ def test_a_later_set_up_with_other_hosted_apps_is_refused(
         installed = list(settings.INSTALLED_APPS)
         for changed in (
             [{invoices!r}, *installed],
-            installed[1:],
+            [name for name in installed if name != "tests.host_apps.web"],
             ["other_config.Other", *installed[1:]],
         ):
             try:
@@ -1002,7 +1019,7 @@ def test_a_later_set_up_with_other_hosted_apps_is_refused(
                     print("admitted", changed)
             except ImproperlyConfigured as error:
                 print(type(error).__name__, error)
-            with _context.root("web"):
+            with _context.root("web", requires=("stock.v1",)):
                 print(stock.level(Sku(sku="ab")).on_hand)
         with override_settings(INSTALLED_APPS=installed):
             print("the same apps are admitted")
@@ -1013,7 +1030,7 @@ def test_a_later_set_up_with_other_hosted_apps_is_refused(
     assert printed.splitlines() == [
         f"{message}{invoices} was added; a process hosts one set of apps",
         "2",
-        f"{message}stock was removed; a process hosts one set of apps",
+        f"{message}web was removed; a process hosts one set of apps",
         "2",
         f"{message}stock has another config class; a process hosts one set of apps",
         "2",
@@ -1286,13 +1303,13 @@ def test_calls_and_connect_read_one_table_under_set_available_apps() -> None:
             with pytest.raises(UsageError, match="no app of this host provides"):
                 connect("nope.v1")
             with (
-                _context.root("web"),
+                _web(),
                 pytest.raises(UsageError, match="calls resume when that ends"),
             ):
                 couriers.quote(Sku(sku="x"))
         finally:
             global_apps.unset_available_apps()
-        with _context.root("web"):
+        with _web():
             assert couriers.quote(Sku(sku="ab")) == Level(on_hand=2)
 
 

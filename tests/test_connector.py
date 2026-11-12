@@ -47,8 +47,12 @@ def call_scope() -> Iterator[Scope]:
     """A root for each test's calls: a connector call needs an open scope
     (spec 02, TRN-23). How a call's context is derived and crosses is tested
     in ``test_call_context.py``."""
-    with _context.root() as scope:
+    with _context.root("tests", requires=_REQUIRES) as scope:
         yield scope
+
+
+# The contracts this module declares, which its calling app requires.
+_REQUIRES = ("connector.v1", "described.v1", "keyword.v1", "other.v1")
 
 
 class Part(BaseModel):
@@ -566,7 +570,8 @@ def test_generated_values_cross_to_the_provider_and_back_unchanged(
     description = Contract.of(connector._contract.declaration).describe()
     schema = {"$defs": description["$defs"], "$ref": f"#/$defs/{record.__name__}"}
     sent = record.model_validate_json(json.dumps(data.draw(from_schema(schema))))
-    reply = connector.send(sent)
+    with _context.root("tests", requires=(connector._contract.identity,)):
+        reply = connector.send(sent)
     assert type(reply) is record
     assert reply == sent
     assert _shared(sent, received[0]) == set()
@@ -812,7 +817,8 @@ def test_a_request_named_near_a_connector_option_is_admitted(name: str) -> None:
     )
     contract(f"{_name('near')}.v1")(declared)
     connector: Any = Connector(declared, InProcess(declared, _implementing(name)))
-    assert connector.go(**{name: Release(order=1)}) is None
+    with _context.root("tests", requires=(Contract.of(declared).identity,)):
+        assert connector.go(**{name: Release(order=1)}) is None
 
 
 def _implementing(name: str) -> object:

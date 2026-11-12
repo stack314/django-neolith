@@ -117,11 +117,40 @@ class Carrying:
         return self._inner.call(action, request, context)
 
 
+# The contracts every app in these tests requires, and the apps each provider
+# lets assert a principal. The checks of the calling app are tested in
+# test_calling_app.py.
+_REQUIRES = ("desk.v1", "inner.v1", "takes.v1")
+_LISTED = ("shop", "desk", "stock", "outer", "inner")
+
+
+def _root(app: str | None = "shop", **given: Any) -> Any:  # noqa: ANN401
+    """A root for an app that requires every contract these tests call."""
+    return _context.root(app, requires=_REQUIRES, **given)
+
+
+def _provider(
+    implementation: object,
+    *,
+    app: str | None = None,
+    principal_from: tuple[str, ...] = _LISTED,
+) -> InProcess:
+    return InProcess(
+        Desk,
+        implementation,
+        app=app,
+        requires=_REQUIRES,
+        principal_from=principal_from,
+    )
+
+
 def _desk(
-    then: Callable[[Ask, CallContext], object] | None = None, app: str | None = "desk"
+    then: Callable[[Ask, CallContext], object] | None = None,
+    app: str | None = "desk",
+    principal_from: tuple[str, ...] = _LISTED,
 ) -> tuple[Any, Seeing, Carrying]:
     provider = Seeing(then)
-    carrying = Carrying(InProcess(Desk, provider, app=app))
+    carrying = Carrying(_provider(provider, app=app, principal_from=principal_from))
     return Connector(Desk, carrying), provider, carrying
 
 
@@ -154,7 +183,7 @@ def _sent(**changes: Any) -> Sent:  # noqa: ANN401
         "tracestate": "",
         "budget": None,
         "idempotency_key": "parent-key",
-        "caller": None,
+        "caller": "shop",
     }
     return Sent(**{**fields, **changes})
 
@@ -184,7 +213,7 @@ def test_a_call_made_in_no_scope_is_a_usage_error_and_is_not_sent() -> None:
     connector, provider, carrying = _desk()
     with pytest.raises(RuntimeError, match="needs a call context") as raised:
         connector.ask(Ask())
-    assert type(raised.value) is RuntimeError
+    assert type(raised.value) is neolith.UsageError
     assert carrying.sent == []
     assert provider.seen == []
     # No context was started for it either.
@@ -198,7 +227,7 @@ def test_a_call_from_a_fresh_empty_context_is_a_usage_error() -> None:
     def call() -> object:
         return connector.ask(Ask())
 
-    with _context.root("shop"):
+    with _root("shop"):
         # A thread the app starts may not inherit the context; an empty
         # Context gives the same on every build (ADR 0017, Consequences).
         with pytest.raises(RuntimeError, match="needs a call context"):
@@ -221,7 +250,7 @@ def test_a_call_from_a_fresh_empty_context_is_a_usage_error() -> None:
 @pytest.mark.spec("TRN-22")
 def test_a_thread_calls_with_the_context_it_is_handed_or_a_copy() -> None:
     connector, provider, _ = _desk()
-    with _context.root("shop", principal=ALICE) as scope, ThreadPoolExecutor(1) as pool:
+    with _root("shop", principal=ALICE) as scope, ThreadPoolExecutor(1) as pool:
         named = pool.submit(
             contextvars.Context().run, connector.ask, Ask(), context=scope.context
         )
@@ -234,8 +263,8 @@ def test_a_thread_calls_with_the_context_it_is_handed_or_a_copy() -> None:
 @pytest.mark.spec("TRN-22", "TRN-31")
 def test_a_named_scope_takes_the_place_of_the_ambient_one() -> None:
     connector, provider, _ = _desk()
-    with _context.root("outer", principal=ALICE) as outer:
-        with _context.root("inner", principal=BOB):
+    with _root("outer", principal=ALICE) as outer:
+        with _root("inner", principal=BOB):
             connector.ask(Ask())
             connector.ask(Ask(), context=outer.context)
             connector.ask(Ask(), context=None)
@@ -260,7 +289,7 @@ def test_a_root_closes_however_it_ends(how: str) -> None:
     }
     kept: list[tuple[CallContext, contextvars.Context]] = []
     try:
-        with _context.root("shop") as scope:
+        with _root("shop") as scope:
             kept.append((scope.context, contextvars.copy_context()))
             connector.ask(Ask())
             if ended[how] is not None:
@@ -272,7 +301,7 @@ def test_a_root_closes_however_it_ends(how: str) -> None:
     assert _context._OPEN == {}
     with pytest.raises(RuntimeError, match="names no open scope") as raised:
         connector.ask(Ask(), context=context)
-    assert type(raised.value) is RuntimeError
+    assert type(raised.value) is neolith.UsageError
     # A context copied while the root was open still names it, closed.
     with pytest.raises(RuntimeError, match="has ended"):
         held.run(connector.ask, Ask())
@@ -303,7 +332,7 @@ def test_an_actions_scope_closes_however_the_action_ends(
             raise ending
 
     connector, provider, _ = _desk(then)
-    with _context.root("shop") as scope, caplog.at_level(logging.CRITICAL, "neolith"):
+    with _root("shop") as scope, caplog.at_level(logging.CRITICAL, "neolith"):
         with contextlib.suppress(ContractError, KeyboardInterrupt):
             connector.ask(Ask())
         (kept,) = provider.seen
@@ -322,7 +351,7 @@ def test_an_actions_scope_closes_however_the_action_ends(
 @pytest.mark.spec("TRN-26")
 def test_a_context_value_only_names_its_scope() -> None:
     connector, provider, carrying = _desk()
-    with _context.root("shop", principal=ALICE, timeout=30) as scope:
+    with _root("shop", principal=ALICE, timeout=30) as scope:
         issued = scope.context
         changed = dataclasses.replace(
             issued,
@@ -370,7 +399,7 @@ def test_a_change_forced_into_a_context_value_reaches_no_call() -> None:
         inner.ask(Ask(), context=ctx)
 
     outer, _, outer_carrying = _desk(then)
-    with _context.root("shop", principal=ALICE, timeout=30) as scope:
+    with _root("shop", principal=ALICE, timeout=30) as scope:
         outer.ask(Ask())
     key = outer_carrying.sent[0].idempotency_key
     assert [ctx.principal for ctx in inner_provider.seen] == [ALICE, ALICE]
@@ -385,7 +414,7 @@ def test_a_change_forced_into_a_context_value_reaches_no_call() -> None:
 @pytest.mark.spec("TRN-26", "CON-29")
 def test_a_context_this_host_did_not_issue_names_no_scope() -> None:
     connector, provider, _ = _desk()
-    with _context.root("shop") as scope:
+    with _root("shop") as scope:
         for scope_id in ("0" * 32, "", scope.context.scope_id.upper(), None, ["x"], 7):
             forged = dataclasses.replace(scope.context, scope_id=cast("str", scope_id))
             with pytest.raises(RuntimeError, match="names no open scope"):
@@ -415,7 +444,7 @@ def test_an_option_of_another_kind_is_a_usage_error(
     option: str, value: object, error: type[Exception]
 ) -> None:
     connector, provider, carrying = _desk()
-    with _context.root("shop", timeout=30) as scope:
+    with _root("shop", timeout=30) as scope:
         with pytest.raises(error, match=f"{option}= takes") as raised:
             connector.ask(Ask(), **{option: value})
         assert type(raised.value) is error
@@ -429,7 +458,7 @@ def test_an_option_of_another_kind_is_a_usage_error(
 @pytest.mark.spec("TRN-16")
 def test_the_options_go_with_a_request_passed_either_way(clock: Clock) -> None:
     connector, provider, carrying = _desk()
-    with _context.root("shop") as scope:
+    with _root("shop") as scope:
         assert connector.ask(Ask(n=1), timeout=5, context=scope.context) == Told(n=1)
         assert connector.ask(request=Ask(n=2), timeout=5.5, context=None) == Told(n=2)
         assert connector.ask(Ask(n=3), timeout=None) == Told(n=3)
@@ -444,7 +473,7 @@ def test_the_options_go_with_a_request_passed_either_way(clock: Clock) -> None:
 @pytest.mark.spec("TRN-2", "TRN-30", "TRN-31", "TRN-36", "TRN-37")
 def test_an_action_receives_the_context_of_the_call(clock: Clock) -> None:
     connector, provider, carrying = _desk()
-    with _context.root("shop", principal=ALICE, timeout=30) as scope:
+    with _root("shop", principal=ALICE, timeout=30) as scope:
         connector.ask(Ask())
     (ctx,) = provider.seen
     (sent,) = carrying.sent
@@ -483,7 +512,7 @@ def test_an_action_receives_the_context_of_the_call(clock: Clock) -> None:
 @pytest.mark.spec("TRN-37")
 def test_an_action_that_does_not_take_the_context_is_run_without_it() -> None:
     connector, provider, _ = _desk()
-    with _context.root():
+    with _root():
         assert connector.tell(Ask(n=3)) is None
     assert provider.told == [Ask(n=3)]
 
@@ -496,7 +525,7 @@ def test_a_nested_call_carries_its_parents_context_on() -> None:
         inner.ask(Ask(n=request.n + 1))
 
     outer, outer_provider, _ = _desk(then, app="desk")
-    with _context.root("shop", principal=ALICE, timeout=10) as scope:
+    with _root("shop", principal=ALICE, timeout=10) as scope:
         outer.ask(Ask())
     (first,) = outer_provider.seen
     (second,) = inner_provider.seen
@@ -513,21 +542,25 @@ def test_a_nested_call_carries_its_parents_context_on() -> None:
     assert inner_carrying.sent[0].caller == "desk"
 
 
-@pytest.mark.spec("TRN-31")
+@pytest.mark.spec("TRN-31", "TRN-42")
 def test_a_call_from_a_scope_of_no_app_carries_no_caller() -> None:
-    inner, inner_provider, _ = _desk(app=None)
+    inner, inner_provider, inner_carrying = _desk(app=None)
     outer, outer_provider, _ = _desk(lambda request, ctx: inner.ask(Ask()), app=None)
-    with _context.root():
+    with _root(), pytest.raises(ContractError) as raised:
         outer.ask(Ask())
-    assert outer_provider.seen[0].caller is None
-    assert inner_provider.seen[0].caller is None
+    # The outer call is the shop's; the action's own call is from no app,
+    # which carries none, and the provider refuses it before it runs.
+    assert outer_provider.seen[0].caller == "shop"
+    assert raised.value.kind == "internal"
+    assert inner_carrying.sent[0].caller is None
+    assert inner_provider.seen == []
 
 
 @pytest.mark.spec("TRN-30", "TRN-36")
 def test_the_tracestate_that_arrived_is_passed_on() -> None:
     inner, inner_provider, inner_carrying = _desk()
     provider = Seeing(lambda request, ctx: inner.ask(Ask()))
-    transport = InProcess(Desk, provider, app="desk")
+    transport = _provider(provider, app="desk")
     transport.call(ASK, b"{}", _sent(tracestate="vendor=1,other=2", caller="shop"))
     assert provider.seen[0].tracestate == "vendor=1,other=2"
     assert provider.seen[0].caller == "shop"
@@ -571,7 +604,7 @@ def test_a_calls_deadline_is_the_earlier_of_its_parents_and_its_own(
     clock: Clock, root: float | None, own: float | None, budget: float | None
 ) -> None:
     connector, provider, carrying = _desk()
-    with _context.root("shop", timeout=root):
+    with _root("shop", timeout=root):
         if budget is not None and budget < 1:
             with pytest.raises(ContractError, match="timeout"):
                 connector.ask(Ask(), timeout=own)
@@ -596,7 +629,7 @@ def test_a_timeout_is_counted_from_when_the_connector_is_called(
 
     monkeypatch.setattr(_connector, "check_request", slow_check)
     connector, _, carrying = _desk()
-    with _context.root("shop"):
+    with _root("shop"):
         connector.ask(Ask(), timeout=2)
         # The checks alone use the timeout up: counted as made, never sent.
         with pytest.raises(ContractError) as raised:
@@ -627,7 +660,7 @@ def test_an_outcome_after_the_callers_deadline_is_discarded_by_the_caller(
     # 1001.
     clock.steps = [0, 0, 0.5]
     with (
-        _context.root("shop") as scope,
+        _root("shop") as scope,
         caplog.at_level(logging.ERROR, "neolith"),
         pytest.raises(ContractError) as raised,
     ):
@@ -653,7 +686,7 @@ def test_an_outcome_just_inside_the_callers_deadline_is_delivered(
         clock.time += 0.25
 
     connector, _, _ = _desk(then)
-    with _context.root("shop", timeout=1):
+    with _root("shop", timeout=1):
         clock.steps = [0, 0, 0.5]
         assert connector.ask(Ask()) == Told()
         clock.steps = [0, 0, 0.5, 0, 0, 0.25]
@@ -671,7 +704,7 @@ def test_a_timeout_the_transport_gives_is_passed_on_as_it_is(clock: Clock) -> No
             raise Failure("timeout", "the provider stopped waiting")
 
     connector: Any = Connector(Desk, Late())
-    with _context.root("shop"), pytest.raises(ContractError) as raised:
+    with _root("shop"), pytest.raises(ContractError) as raised:
         connector.ask(Ask(), timeout=1)
     assert raised.value.message == "the provider stopped waiting"
 
@@ -707,7 +740,7 @@ def test_no_outcome_reaches_the_caller_after_its_own_deadline(
             raise ContractError("not_found", "no such desk")
 
     connector, provider, _ = _desk(then)
-    with mock.patch.object(_context, "now", clock), _context.root("shop", timeout=root):
+    with mock.patch.object(_context, "now", clock), _root("shop", timeout=root):
         clock.steps = [0, before / 2, transit / 2, 0, back / 2]
         try:
             reply = connector.ask(Ask(), timeout=own)
@@ -727,7 +760,7 @@ def test_no_outcome_reaches_the_caller_after_its_own_deadline(
 @pytest.mark.spec("TRN-27", "TRN-28")
 def test_time_that_passes_in_the_parent_comes_off_the_budget(clock: Clock) -> None:
     connector, _, carrying = _desk()
-    with _context.root("shop", timeout=10):
+    with _root("shop", timeout=10):
         clock.time += 4
         connector.ask(Ask())
         connector.ask(Ask(), timeout=7)
@@ -747,7 +780,7 @@ def test_a_call_with_no_budget_left_fails_with_timeout_and_is_not_sent(
     clock: Clock, own: float
 ) -> None:
     connector, provider, carrying = _desk()
-    with _context.root("shop"), pytest.raises(ContractError) as raised:
+    with _root("shop"), pytest.raises(ContractError) as raised:
         connector.ask(Ask(), timeout=own)
     assert raised.value.kind == "timeout"
     assert raised.value.message == "the deadline passed before the call was sent"
@@ -763,7 +796,7 @@ def test_a_call_from_a_scope_whose_deadline_has_passed_is_not_sent(
     clock: Clock,
 ) -> None:
     connector, _, carrying = _desk()
-    with _context.root("shop", timeout=5):
+    with _root("shop", timeout=5):
         # 1/512 of a second is left: a budget of 1 ms, rounded down.
         clock.time += 5 - 2**-9
         assert connector.ask(Ask()) == Told()
@@ -790,9 +823,9 @@ def test_a_call_from_a_scope_whose_deadline_has_passed_is_not_sent(
 def test_a_budget_is_capped(clock: Clock, own: float, budget: int) -> None:
     clock.time = 0.0
     connector, provider, carrying = _desk()
-    with _context.root("shop"):
+    with _root("shop"):
         connector.ask(Ask(), timeout=own)
-    with _context.root("shop", timeout=own):
+    with _root("shop", timeout=own):
         connector.ask(Ask())
     assert [sent.budget for sent in carrying.sent] == [budget, budget]
     assert provider.seen[0].deadline == budget / 1000
@@ -806,7 +839,7 @@ def test_a_deadline_that_passes_before_dispatch_fails_with_timeout(
     clock: Clock,
 ) -> None:
     connector, provider, carrying = _desk()
-    with _context.root("shop"):
+    with _root("shop"):
         # Readings: the call's start, its budget, its arrival, then the
         # provider's check, by which time the one second has passed.
         clock.steps = [0, 0, 0, 1]
@@ -824,7 +857,7 @@ def test_the_deadline_is_checked_before_the_request_is_read(
     clock: Clock, caplog: pytest.LogCaptureFixture
 ) -> None:
     provider = Seeing()
-    transport = InProcess(Desk, provider)
+    transport = _provider(provider)
     clock.steps = [0, 1]
     with caplog.at_level(logging.ERROR, "neolith"):
         with pytest.raises(Failure) as raised:
@@ -851,7 +884,7 @@ def test_the_context_is_read_before_the_deadline_is_checked(
     # In-process the principal's form has passed the caller's check, so one
     # that cannot be read is a failure of the host, found at the step where a
     # provider reads the headers: before the deadline.
-    transport = InProcess(Desk, Seeing())
+    transport = _provider(Seeing())
     with caplog.at_level(logging.ERROR, "neolith"):
         clock.steps = [0, 0.5]
         with pytest.raises(Failure) as raised:
@@ -895,7 +928,7 @@ def test_an_outcome_after_the_deadline_is_discarded(
 
     connector, provider, _ = _desk(then)
     with (
-        _context.root("shop") as scope,
+        _root("shop") as scope,
         caplog.at_level(logging.ERROR, "neolith"),
         pytest.raises(ContractError) as raised,
     ):
@@ -939,7 +972,7 @@ def test_the_transport_discards_an_outcome_after_its_deadline(
     clock: Clock, caplog: pytest.LogCaptureFixture, ending: str
 ) -> None:
     provider = Seeing(_ending(clock, 2, ending))
-    transport = InProcess(Desk, provider)
+    transport = _provider(provider)
     with caplog.at_level(logging.ERROR, "neolith"), pytest.raises(Failure) as raised:
         transport.call(ASK, b"{}", _sent(budget=2000))
     failed = raised.value
@@ -965,7 +998,7 @@ def test_the_transport_discards_an_outcome_after_its_deadline(
 def test_the_transport_delivers_an_outcome_just_inside_its_deadline(
     clock: Clock, caplog: pytest.LogCaptureFixture, ending: str
 ) -> None:
-    transport = InProcess(Desk, Seeing(_ending(clock, 1.9375, ending)))
+    transport = _provider(Seeing(_ending(clock, 1.9375, ending)))
     delivered = {"a standard error": "not_found", "a declared error": "gone"}
     with caplog.at_level(logging.CRITICAL, "neolith"):
         if ending == "a reply":
@@ -989,7 +1022,7 @@ def test_the_providers_check_holds_where_the_callers_cannot_fire(
     in_time = {"a standard error": "not_found", "a declared error": "gone"}
     early, _, _ = _desk(_ending(clock, 0.5, ending))
     connector, provider, carrying = _desk(_ending(clock, 1 + 2**-12, ending))
-    with _context.root("shop"), caplog.at_level(logging.CRITICAL, "neolith"):
+    with _root("shop"), caplog.at_level(logging.CRITICAL, "neolith"):
         if ending == "a reply":
             assert early.ask(Ask(), timeout=1 + 2**-11) == Told(n=1)
         else:
@@ -998,7 +1031,7 @@ def test_the_providers_check_holds_where_the_callers_cannot_fire(
             assert raised.value.kind == in_time.get(ending, "internal")
     clock.time = 1000.0
     with (
-        _context.root("shop"),
+        _root("shop"),
         caplog.at_level(logging.ERROR, "neolith"),
         pytest.raises(ContractError) as raised,
     ):
@@ -1042,7 +1075,7 @@ def test_the_caller_discards_what_a_transport_returns_late(
 ) -> None:
     late: Any = Connector(Desk, Slow(clock, 1, outcome))
     in_time: Any = Connector(Desk, Slow(clock, 0.9375, outcome))
-    with _context.root("shop") as scope, caplog.at_level(logging.ERROR, "neolith"):
+    with _root("shop") as scope, caplog.at_level(logging.ERROR, "neolith"):
         if outcome is None:
             assert in_time.ask(Ask(), timeout=1) == Told(n=7)
         else:
@@ -1103,7 +1136,7 @@ def test_a_late_outcome_is_timeout_whatever_it_would_have_been_in_time(
     clock: Clock, caplog: pytest.LogCaptureFixture, case: str
 ) -> None:
     answer, in_time = _ARRIVING[case]
-    with _context.root("shop"), caplog.at_level(logging.CRITICAL, "neolith"):
+    with _root("shop"), caplog.at_level(logging.CRITICAL, "neolith"):
         for takes, kind in ((0.5, in_time), (1, "timeout")):
             connector: Any = Connector(Desk, Answering(clock, takes, answer))
             with pytest.raises(ContractError) as raised:
@@ -1120,7 +1153,7 @@ def test_a_nested_error_is_timeout_once_the_callers_deadline_has_passed(
     missing: Any = Connector(Desk, Slow(clock, 0.75, Failure("not_found", "x")))
     # The action lets the error of its own call end it.
     connector = _desk(lambda request, ctx: missing.ask(Ask()))[0]
-    with _context.root("shop"), caplog.at_level(logging.ERROR, "neolith"):
+    with _root("shop"), caplog.at_level(logging.ERROR, "neolith"):
         with pytest.raises(ContractError) as raised:
             connector.ask(Ask(), timeout=1)
         assert raised.value.kind == "internal"
@@ -1144,8 +1177,13 @@ def test_a_nested_error_is_timeout_once_the_callers_deadline_has_passed(
 _UNSENT: dict[str, tuple[Callable[[Any, Scope], object], type[Exception], str]] = {
     "no scope": (
         lambda c, s: contextvars.Context().run(c.ask, Ask()),
-        RuntimeError,
+        neolith.UsageError,
         "needs a call context",
+    ),
+    "a contract the app does not require": (
+        lambda c, s: _outside_requires(lambda: c.ask(Ask())),
+        neolith.UsageError,
+        "which its declaration does not require",
     ),
     "a principal with no sent form": (
         lambda c, s: _in_root(lambda: c.ask(Ask()), principal=Principal("i", "")),
@@ -1166,12 +1204,25 @@ _UNSENT: dict[str, tuple[Callable[[Any, Scope], object], type[Exception], str]] 
 
 
 def _in_root(call: Callable[[], object], **given: Any) -> object:  # noqa: ANN401
-    with _context.root("shop", **given):
+    with _root("shop", **given):
+        return call()
+
+
+def _outside_requires(call: Callable[[], object]) -> object:
+    with _context.root("shop", requires=()):
         return call()
 
 
 @pytest.mark.spec(
-    "TRN-34", "TRN-23", "TRN-28", "CON-51", "TRN-18", "CON-28", "CON-48", "CON-49"
+    "TRN-34",
+    "TRN-23",
+    "TRN-39",
+    "TRN-28",
+    "CON-51",
+    "TRN-18",
+    "CON-28",
+    "CON-48",
+    "CON-49",
 )
 @pytest.mark.parametrize("answer", list(_ARRIVING), ids=list(_ARRIVING))
 @pytest.mark.parametrize("cause", list(_UNSENT), ids=list(_UNSENT))
@@ -1182,7 +1233,7 @@ def test_a_call_that_fails_a_callers_check_is_never_sent(
     connector: Any = Connector(Desk, transport)
     call, error, message = _UNSENT[cause]
     with (
-        _context.root("shop") as scope,
+        _root("shop") as scope,
         caplog.at_level(logging.CRITICAL, "neolith"),
         pytest.raises(error, match=message) as raised,
     ):
@@ -1191,7 +1242,7 @@ def test_a_call_that_fails_a_callers_check_is_never_sent(
     assert transport.calls == 0
     # Sent, the same call ends as the rules for what arrives say.
     with (
-        _context.root("shop"),
+        _root("shop"),
         caplog.at_level(logging.CRITICAL, "neolith"),
         pytest.raises(ContractError) as arrived,
     ):
@@ -1217,7 +1268,7 @@ def test_the_callers_deadline_is_counted_from_when_the_connector_is_called(
     # reading.
     late: Any = Connector(Desk, Slow(clock, 0.875, None))
     in_time: Any = Connector(Desk, Slow(clock, 0.5, None))
-    with _context.root("shop"):
+    with _root("shop"):
         assert in_time.ask(Ask(), timeout=1) == Told(n=7)
         with pytest.raises(ContractError) as raised:
             late.ask(Ask(), timeout=1)
@@ -1258,7 +1309,7 @@ def test_an_outcome_just_inside_the_deadline_is_delivered(
         "a standard error": "not_found",
         "a declared error": "gone",
     }
-    with _context.root("shop"), caplog.at_level(logging.CRITICAL, "neolith"):
+    with _root("shop"), caplog.at_level(logging.CRITICAL, "neolith"):
         if ending == "a reply":
             assert connector.ask(Ask(), timeout=2) == Told(n=1)
             return
@@ -1277,7 +1328,7 @@ def test_a_signal_to_stop_after_the_deadline_is_not_discarded(
         raise stop()
 
     connector, _, _ = _desk(then)
-    with _context.root("shop") as scope:
+    with _root("shop") as scope:
         with pytest.raises(stop):
             connector.ask(Ask(), timeout=1)
         assert list(_context._OPEN) == [scope.context.scope_id]
@@ -1300,7 +1351,7 @@ def test_calls_an_action_makes_after_its_deadline_fail_with_timeout(
             raise
 
     outer, _, _ = _desk(then)
-    with _context.root("shop"), pytest.raises(ContractError) as raised:
+    with _root("shop"), pytest.raises(ContractError) as raised:
         outer.ask(Ask(), timeout=3)
     # The nested call was not sent, and the outer call is late too.
     assert [error.kind for error in caught] == ["timeout"]
@@ -1331,7 +1382,7 @@ def test_no_outcome_reaches_the_caller_after_the_deadline(
             raise ContractError("not_found", "no such desk")
 
     connector, provider, _ = _desk(then)
-    with mock.patch.object(_context, "now", clock), _context.root("shop", timeout=root):
+    with mock.patch.object(_context, "now", clock), _root("shop", timeout=root):
         try:
             reply = connector.ask(Ask(), timeout=budget)
         except ContractError as error:
@@ -1368,7 +1419,7 @@ def _children(
     """Each request and key of the calls an action makes, run once as ``sent``."""
     inner, _, carrying = _desk()
     provider = Seeing(lambda request, ctx: calls(inner, ctx))
-    InProcess(Desk, provider, app="desk").call(ASK, b"{}", sent or _sent())
+    _provider(provider, app="desk").call(ASK, b"{}", sent or _sent())
     return [
         (request, context.idempotency_key)
         for request, context in zip(carrying.requests, carrying.sent, strict=True)
@@ -1421,7 +1472,7 @@ def test_a_derived_key_is_the_one_node_derives() -> None:
         for n in (1, 1, 2):
             inner.ask(Gone(n=n))
 
-    InProcess(Desk, Seeing(then)).call(ASK, b"{}", _sent())
+    _provider(Seeing(then)).call(ASK, b"{}", _sent())
     assert Keeping.keys == [
         "yYarvmlgPLZ_l-4R8NOtDgoat1r_TaAgA25SRncxskk",
         "7jgALsjqFQLbHmYFAexPE5jR2be4TwxBUcP-lWxLD0g",
@@ -1506,7 +1557,7 @@ def test_a_retried_parent_reproduces_its_childrens_keys_under_fan_out() -> None:
 @pytest.mark.spec("TRN-33")
 def test_a_parent_with_no_key_gives_its_children_random_keys() -> None:
     connector, _, carrying = _desk()
-    with _context.root("shop") as scope:
+    with _root("shop") as scope:
         assert scope.context.idempotency_key is None
         for _ in range(200):
             connector.ask(Ask())
@@ -1544,7 +1595,7 @@ def test_the_context_is_checked_before_the_request() -> None:
     connector, _, carrying = _desk()
     with pytest.raises(RuntimeError, match="needs a call context"):
         connector.ask("not a request", timeout=0)
-    with _context.root("shop") as scope:
+    with _root("shop") as scope:
         pass
     with pytest.raises(RuntimeError, match="names no open scope"):
         connector.ask("not a request", context=scope.context)
@@ -1557,7 +1608,7 @@ def test_the_principal_is_checked_before_the_request_and_the_deadline(
 ) -> None:
     connector, _, carrying = _desk()
     with (
-        _context.root("shop", principal=Principal("i", ""), timeout=1),
+        _root("shop", principal=Principal("i", ""), timeout=1),
         caplog.at_level(logging.CRITICAL, "neolith"),
     ):
         clock.time += 5
@@ -1571,7 +1622,7 @@ def test_the_principal_is_checked_before_the_request_and_the_deadline(
 @pytest.mark.spec("TRN-34", "TRN-14")
 def test_the_request_is_checked_before_the_deadline(clock: Clock) -> None:
     connector, _, carrying = _desk()
-    with _context.root("shop", timeout=1):
+    with _root("shop", timeout=1):
         clock.time += 5
         with pytest.raises(TypeError, match="the request"):
             connector.ask("not a request")
@@ -1603,7 +1654,7 @@ def test_a_call_whose_principal_is_not_valid_fails_at_the_caller_with_internal(
 ) -> None:
     connector, provider, carrying = _desk()
     with (
-        _context.root("shop", principal=principal) as scope,
+        _root("shop", principal=principal) as scope,
         caplog.at_level(logging.ERROR, "neolith"),
         pytest.raises(ContractError) as raised,
     ):
@@ -1644,7 +1695,7 @@ def test_a_valid_principal_reaches_the_provider_read_from_its_sent_form(
     principal: Principal,
 ) -> None:
     connector, provider, carrying = _desk()
-    with _context.root("shop", principal=principal):
+    with _root("shop", principal=principal):
         connector.ask(Ask())
     (ctx,) = provider.seen
     assert ctx.principal == principal
@@ -1658,7 +1709,7 @@ def test_a_valid_principal_reaches_the_provider_read_from_its_sent_form(
 def test_a_call_with_no_principal_carries_none() -> None:
     inner, inner_provider, inner_carrying = _desk()
     outer, outer_provider, _ = _desk(lambda request, ctx: inner.ask(Ask()))
-    with _context.root("shop"):
+    with _root("shop"):
         outer.ask(Ask())
     assert outer_provider.seen[0].principal is None
     assert inner_provider.seen[0].principal is None
@@ -1681,7 +1732,7 @@ def test_a_principal_is_judged_once_for_its_scope(
     bad = Principal("i", "")
     with caplog.at_level(logging.CRITICAL, "neolith"):
         with (
-            _context.root("shop", principal=ALICE) as scope,
+            _root("shop", principal=ALICE) as scope,
             ThreadPoolExecutor(max_workers=4) as pool,
         ):
             list(
@@ -1690,7 +1741,7 @@ def test_a_principal_is_judged_once_for_its_scope(
                     range(20),
                 )
             )
-        with _context.root("shop", principal=bad):
+        with _root("shop", principal=bad):
             for _ in range(3):
                 with pytest.raises(ContractError, match="internal"):
                     connector.ask(Ask())
@@ -1707,7 +1758,7 @@ def test_an_internal_error_carries_the_trace_identifier(
 
     connector, _, _ = _desk(then)
     unreadable: Any = Connector(Desk, Carrying(reply=b"not json"))
-    with _context.root("shop") as scope, caplog.at_level(logging.ERROR, "neolith"):
+    with _root("shop") as scope, caplog.at_level(logging.ERROR, "neolith"):
         trace = scope.context.trace_id
         for call in (connector.ask, unreadable.ask):
             with pytest.raises(ContractError) as raised:
@@ -1742,16 +1793,16 @@ _PRINCIPALS = st.none() | st.builds(Principal, _TEXT, _TEXT, _CLAIMS)
 @_SETTINGS
 @given(
     principal=_PRINCIPALS,
-    app=st.none() | _NAMES,
-    provider_app=st.none() | _NAMES,
+    app=_NAMES,
+    provider_app=_NAMES,
     root=st.none() | st.integers(1, 100),
     own=st.none() | st.integers(1, 100),
     depth=st.integers(1, 3),
 )
 def test_the_context_an_action_receives_equals_the_one_its_caller_derived(
     principal: Principal | None,
-    app: str | None,
-    provider_app: str | None,
+    app: str,
+    provider_app: str,
     root: int | None,
     own: int | None,
     depth: int,
@@ -1766,11 +1817,13 @@ def test_the_context_an_action_receives_equals_the_one_its_caller_derived(
             if level + 1 < depth:
                 connectors[level + 1].ask(Ask(n=level + 1))
 
-        connector, provider, carrying = _desk(then, app=provider_app)
+        connector, provider, carrying = _desk(
+            then, app=provider_app, principal_from=(app, provider_app)
+        )
         connectors.append(connector)
         providers.append(provider)
         carried.append(carrying)
-    with _context.root(app, principal=principal, timeout=root) as scope:
+    with _root(app, principal=principal, timeout=root) as scope:
         connectors[0].ask(Ask(), timeout=own)
     deadlines = [scope.context.deadline]
     for level in range(depth):
@@ -1817,7 +1870,7 @@ def test_concurrent_callers_each_run_in_a_scope_of_their_own() -> None:
         scopes.append((request.n, ctx.scope_id, threading.get_ident()))
 
     connector, provider, _ = _desk(then)
-    with _context.root("shop", principal=ALICE) as scope:
+    with _root("shop", principal=ALICE) as scope:
         with ThreadPoolExecutor(max_workers=8) as pool:
             replies = list(
                 pool.map(
@@ -1913,8 +1966,8 @@ def test_an_implementation_takes_the_context_under_any_name() -> None:
         def tell(self, request: Ask, call: neolith.CallContext) -> None:
             raise ContractError("not_found", str(call.caller))
 
-    connector: Any = Connector(Desk, InProcess(Desk, Quoted()))
-    with _context.root("shop"):
+    connector: Any = Connector(Desk, _provider(Quoted()))
+    with _root("shop"):
         assert connector.ask(Ask()) == Told(n=1)
         with pytest.raises(ContractError, match="not_found: shop"):
             connector.tell(Ask())

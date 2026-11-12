@@ -42,8 +42,12 @@ def call_scope() -> Iterator[Scope]:
     """A root for each test's calls: a connector call needs an open scope
     (spec 02, TRN-23). How a call's context is derived and crosses is tested
     in ``test_call_context.py``."""
-    with _context.root() as scope:
+    with _context.root("tests", requires=_REQUIRES) as scope:
         yield scope
+
+
+# The contracts this module declares, which its calling app requires.
+_REQUIRES = ("delivery.v1", "described.errors.v1", "downstream.v1", "guarded.v1")
 
 
 def _internal() -> str:
@@ -336,7 +340,9 @@ def test_an_error_received_from_a_nested_call_reaches_the_caller_as_internal(
     how: str,
 ) -> None:
     _KEPT[:] = [_received()]
-    connector: Any = Connector(Shop, InProcess(Shop, Nesting(how)))
+    connector: Any = Connector(
+        Shop, InProcess(Shop, Nesting(how), app="tests", requires=_REQUIRES)
+    )
     with pytest.raises(ContractError) as raised:
         connector.reserve(Order(order=1))
     _assert_internal(raised.value)
@@ -344,7 +350,9 @@ def test_an_error_received_from_a_nested_call_reaches_the_caller_as_internal(
 
 @pytest.mark.spec("CON-48", "CON-43")
 def test_a_new_error_passing_a_nested_one_on_is_delivered() -> None:
-    connector: Any = Connector(Shop, InProcess(Shop, Nesting("a new error")))
+    connector: Any = Connector(
+        Shop, InProcess(Shop, Nesting("a new error"), app="tests", requires=_REQUIRES)
+    )
     with pytest.raises(ContractError) as raised:
         connector.reserve(Order(order=1))
     assert (raised.value.kind, raised.value.message) == (
@@ -534,7 +542,10 @@ def test_generated_details_cross_equal_and_unshared(data: st.DataObject) -> None
     schema = {"$defs": description["$defs"], "$ref": f"#/$defs/{record.__name__}"}
     detail = record.model_validate_json(json.dumps(data.draw(from_schema(schema))))
     raised[:] = [ContractError("failed", "it failed", detail)]
-    with pytest.raises(ContractError) as caught:
+    with (
+        _context.root("tests", requires=(connector._contract.identity,)),
+        pytest.raises(ContractError) as caught,
+    ):
         connector.send(Order(order=1))
     sent = json.loads(codec(connector._contract, record).send(detail, "the detail"))
     if untyped_problem(sent) is not None:
