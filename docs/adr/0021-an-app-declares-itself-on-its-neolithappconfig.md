@@ -292,7 +292,7 @@ Every refusal names the app and the field (APP-1, K2). At class definition the a
 
 **Where a `Provided` is checked.** `Provided(...)` runs in the class body, before the config class exists, so it cannot name the app. It therefore checks nothing: it keeps what it was given, with a private marker for an argument left out, and `__init_subclass__` checks every `Provided` with the rest of the declaration. A missing contract, `implementation` or `principal_from` is then a `DeclarationError` that names the config class, like every other row. Only an argument the signature does not have is refused by Python itself, with its `TypeError` at the call.
 
-`Contract.of` raises `ContractDefinitionError`, a `TypeError`, for a class that is not a contract. The check catches it and raises `DeclarationError` naming the config class and the field, with the original error as its cause, so one error type covers the table.
+`Contract.of` raises `ContractDefinitionError`, a `TypeError`, for a class that is not a contract. The check catches it and records a refusal naming the config class and the field, with the original message, so one error type covers the table.
 
 **On the app's own config, while the registry loads.** One refusal cannot wait for neolith's own app, because it is about that app being absent, and one is about the instance Django has just built.
 
