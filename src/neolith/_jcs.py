@@ -65,7 +65,7 @@ def _members(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return members
 
 
-def _quick(text: bytes | str) -> bytes | None:
+def _quick(text: str) -> bytes | None:
     """The canonical form as the json module writes it, or ``None`` when the
     text holds something it writes otherwise, or is not I-JSON."""
     try:
@@ -101,24 +101,33 @@ def canonical_text(text: bytes | str) -> bytes:
     module writes exactly as JCS does is written by it, which is several
     times quicker than ``canonical``; any other text takes the long way.
 
-    Raises ``ValueError`` for a text that is not I-JSON: one that is not JSON,
-    or holds a member name twice in one object, a lone surrogate or a number
-    beyond a double, and for one nested deeper than the json module reads.
+    Bytes are read as UTF-8 and nothing else, with no byte order mark (RFC
+    8259, section 8.1). Raises ``ValueError`` for a text that is not I-JSON:
+    one that is not UTF-8 or not JSON, or holds a member name twice in one
+    object, a lone surrogate or a number beyond a double, and for one nested
+    deeper than the json module reads.
     """
-    quick = _quick(text)
-    if quick is not None:
-        return quick
-    try:
-        value = json.loads(text, parse_int=_double, object_pairs_hook=_members)
-    except RecursionError:
-        value = _TOO_DEEP
-    if value is _TOO_DEEP:
-        # Raised outside the handler, so the deep traceback is not chained.
-        raise ValueError("the text is nested deeper than the JSON reader goes")
-    return canonical(value)
-
-
-_TOO_DEEP = object()
+    problem: str | None = None
+    if type(text) is bytes:
+        # Decoded here, once, so the json module never guesses an encoding.
+        try:
+            text = text.decode("utf-8")
+        except UnicodeDecodeError:
+            problem = "the text is not UTF-8"
+    elif type(text) is not str:
+        raise TypeError(f"JSON text is a str or bytes, not {type(text).__qualname__}")
+    if problem is None and isinstance(text, str):
+        quick = _quick(text)
+        if quick is not None:
+            return quick
+        try:
+            return canonical(
+                json.loads(text, parse_int=_double, object_pairs_hook=_members)
+            )
+        except RecursionError:
+            problem = "the text is nested deeper than the JSON reader goes"
+    # Raised outside the handlers, so nothing is chained to the refusal.
+    raise ValueError(problem)
 
 
 def canonical(value: object) -> bytes:

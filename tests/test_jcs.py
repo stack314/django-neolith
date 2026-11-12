@@ -14,10 +14,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from hypothesis import given
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from neolith._jcs import _quick, canonical, canonical_text
+
+# Deterministic, as every test is (CONTRIBUTING T3): the same examples on each
+# run, and no time limit that a busy machine could miss.
+_SETTINGS = settings(derandomize=True, database=None, max_examples=200, deadline=None)
 
 _VECTORS: dict[str, Any] = json.loads(
     (Path(__file__).parent / "data" / "jcs_vectors.json").read_text(encoding="utf-8")
@@ -149,6 +153,7 @@ _JSON = st.recursive(
 )
 
 
+@_SETTINGS
 @given(_JSON, st.randoms(use_true_random=False))
 def test_canonical_text_reads_back_and_does_not_depend_on_member_order(
     value: object, shuffle: random.Random
@@ -195,6 +200,7 @@ def _without_controls(value: object) -> object:
     return value
 
 
+@_SETTINGS
 @given(st.floats(allow_nan=False, allow_infinity=False))
 def test_a_double_reads_back_as_itself_in_its_shortest_digits(value: float) -> None:
     text = canonical(value).decode()
@@ -240,6 +246,7 @@ def _the_long_way(text: str) -> bytes | type[Exception]:
         return ValueError
 
 
+@_SETTINGS
 @given(_TEXTS, st.booleans())
 def test_the_quick_way_writes_what_the_long_way_writes(
     value: object, ascii_only: bool
@@ -300,12 +307,36 @@ def test_the_vectors_are_written_the_same_from_their_text() -> None:
 )
 def test_a_text_that_is_not_i_json_is_refused_either_way(text: str) -> None:
     assert _quick(text) is None
-    with pytest.raises(ValueError, match=r".") as raised:
-        canonical_text(text)
-    assert not isinstance(raised.value, RecursionError)
-    assert raised.value.__cause__ is None
-    with pytest.raises(ValueError, match=r"."):
-        canonical_text(text.encode("utf-8"))
+    for given_text in (text, text.encode("utf-8")):
+        with pytest.raises(ValueError, match=r".") as raised:
+            canonical_text(given_text)
+        # A plain refusal, with nothing shown chained to it: no deep traceback.
+        assert not isinstance(raised.value, RecursionError)
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None or raised.value.__suppress_context__
+
+
+_ENCODINGS = ["utf-16", "utf-16-le", "utf-16-be", "utf-32", "utf-32-le", "utf-8-sig"]
+
+
+@pytest.mark.parametrize("encoding", _ENCODINGS)
+@pytest.mark.parametrize(
+    "text", ['{"a":1}', '[1,"a"]', '"\u00e9"', "1", '{"\U0001f600":[0.5]}', "[]"]
+)
+def test_bytes_that_are_not_plain_utf8_are_refused(text: str, encoding: str) -> None:
+    # JSON text is UTF-8 with no byte order mark (RFC 8259, section 8.1).
+    assert canonical_text(text.encode("utf-8")) == canonical_text(text)
+    for given_text in (text.encode(encoding), "\ufeff" + text, b"\xff" + text.encode()):
+        with pytest.raises(ValueError, match=r".") as raised:
+            canonical_text(given_text)
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None or raised.value.__suppress_context__
+
+
+@pytest.mark.parametrize("text", [bytearray(b"[]"), memoryview(b"[]"), None, 1, [1]])
+def test_what_is_neither_text_nor_bytes_is_not_canonicalized(text: object) -> None:
+    with pytest.raises(TypeError, match="str or bytes"):
+        canonical_text(text)  # type: ignore[arg-type]
 
 
 def test_a_name_that_occurs_once_in_each_object_is_not_a_duplicate() -> None:

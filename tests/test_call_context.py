@@ -25,7 +25,7 @@ from typing import Any, Protocol, cast
 from unittest import mock
 
 import pytest
-from hypothesis import given
+from hypothesis import given, settings
 from hypothesis import strategies as st
 from pydantic import BaseModel
 
@@ -152,6 +152,10 @@ def _sent(**changes: Any) -> Sent:  # noqa: ANN401
     }
     return Sent(**{**fields, **changes})
 
+
+# Deterministic, as every test is (CONTRIBUTING T3): the same examples on each
+# run, and no time limit that a busy machine could miss.
+_SETTINGS = settings(derandomize=True, database=None, max_examples=200, deadline=None)
 
 ALICE = Principal("https://id.example.com", "alice", {"roles": ["clerk"], "n": 1})
 BOB = Principal("https://id.example.com", "bob")
@@ -667,6 +671,7 @@ def test_a_timeout_the_transport_gives_is_passed_on_as_it_is(clock: Clock) -> No
 
 
 @pytest.mark.spec("TRN-38", "TRN-4")
+@_SETTINGS
 @given(
     own=st.integers(1, 20),
     root=st.none() | st.integers(1, 20),
@@ -904,6 +909,180 @@ def test_an_outcome_after_the_deadline_is_discarded(
         assert "desk.v1, action 'ask'" in record.getMessage()
 
 
+# The two checks of a late outcome are each tested alone, since either gives
+# the same kind and message: the provider's side on the transport itself, and
+# through a connector whose own deadline is later (TRN-19, TRN-20); the
+# caller's with transports that check nothing (TRN-38).
+
+
+def _ending(clock: Clock, spent: float, ending: str) -> Callable[..., object]:
+    def then(request: Ask, ctx: CallContext) -> object:
+        clock.time += spent
+        made = _ENDINGS[ending]()
+        if isinstance(made, BaseException):
+            raise made
+        return made
+
+    return then
+
+
+@pytest.mark.spec("TRN-19", "TRN-20", "TRN-4")
+@pytest.mark.parametrize("ending", list(_ENDINGS), ids=list(_ENDINGS))
+def test_the_transport_discards_an_outcome_after_its_deadline(
+    clock: Clock, caplog: pytest.LogCaptureFixture, ending: str
+) -> None:
+    provider = Seeing(_ending(clock, 2, ending))
+    transport = InProcess(Desk, provider)
+    with caplog.at_level(logging.ERROR, "neolith"), pytest.raises(Failure) as raised:
+        transport.call(ASK, b"{}", _sent(budget=2000))
+    failed = raised.value
+    assert (failed.kind, failed.message, failed.detail) == ("timeout", _LATE, None)
+    assert failed.__context__ is None
+    assert len(provider.seen) == 1
+    messages = [record.getMessage() for record in caplog.records]
+    if ending == "a reply":
+        assert messages == []
+        return
+    # The provider's host records what it discarded, under the trace.
+    (message,) = messages
+    assert "0af7651916cd43dd8448eb211c80319c" in message
+    discarded = {"a standard error": "not_found", "a declared error": "gone"}
+    if ending in discarded:
+        assert f"the action's {discarded[ending]} error was discarded" in message
+    else:
+        assert "the provider failed" in message
+
+
+@pytest.mark.spec("TRN-20")
+@pytest.mark.parametrize("ending", list(_ENDINGS), ids=list(_ENDINGS))
+def test_the_transport_delivers_an_outcome_just_inside_its_deadline(
+    clock: Clock, caplog: pytest.LogCaptureFixture, ending: str
+) -> None:
+    transport = InProcess(Desk, Seeing(_ending(clock, 1.9375, ending)))
+    delivered = {"a standard error": "not_found", "a declared error": "gone"}
+    with caplog.at_level(logging.CRITICAL, "neolith"):
+        if ending == "a reply":
+            assert transport.call(ASK, b"{}", _sent(budget=2000)) == b'{"n":1}'
+            return
+        with pytest.raises(Failure) as raised:
+            transport.call(ASK, b"{}", _sent(budget=2000))
+    assert raised.value.kind == delivered.get(ending, "internal")
+
+
+@pytest.mark.spec("TRN-19", "TRN-20")
+@pytest.mark.parametrize("ending", ["a reply", "a standard error", "a failure"])
+def test_the_providers_check_holds_where_the_callers_cannot_fire(
+    clock: Clock, caplog: pytest.LogCaptureFixture, ending: str
+) -> None:
+    # The budget is rounded down to 1000 ms, so the provider's deadline, at
+    # 1001, is earlier than the caller's, at 1001 and 1/2048. An outcome
+    # between the two is late for the provider's side alone.
+    connector, provider, carrying = _desk(_ending(clock, 1 + 2**-12, ending))
+    with (
+        _context.root("shop"),
+        caplog.at_level(logging.ERROR, "neolith"),
+        pytest.raises(ContractError) as raised,
+    ):
+        connector.ask(Ask(), timeout=1 + 2**-11)
+    assert carrying.sent[0].budget == 1000
+    assert provider.seen[0].deadline == 1001.0
+    assert clock.time < 1001 + 2**-11
+    assert (raised.value.kind, raised.value.message) == ("timeout", _LATE)
+    # Only the provider's side logged a discard, if there was one to log.
+    assert not any("caller's deadline" in r.getMessage() for r in caplog.records)
+    if ending == "a standard error":
+        (record,) = caplog.records
+        assert "the action's not_found error was discarded" in record.getMessage()
+
+
+class Slow:
+    """A transport with no deadline check of its own, which takes a while."""
+
+    contract = DESK
+
+    def __init__(self, clock: Clock, takes: float, outcome: Failure | None) -> None:
+        self._clock = clock
+        self._takes = takes
+        self._outcome = outcome
+
+    def call(self, action: Action, request: bytes, context: Sent) -> bytes | None:
+        self._clock.time += self._takes
+        if self._outcome is not None:
+            raise self._outcome
+        return b'{"n":7}'
+
+
+@pytest.mark.spec("TRN-38", "TRN-4")
+@pytest.mark.parametrize(
+    "outcome",
+    [None, Failure("not_found", "no such desk"), Failure("gone", "gone", b'{"n":1}')],
+    ids=["a reply", "a standard error", "a declared error"],
+)
+def test_the_caller_discards_what_a_transport_returns_late(
+    clock: Clock, caplog: pytest.LogCaptureFixture, outcome: Failure | None
+) -> None:
+    late: Any = Connector(Desk, Slow(clock, 1, outcome))
+    in_time: Any = Connector(Desk, Slow(clock, 0.9375, outcome))
+    with _context.root("shop") as scope, caplog.at_level(logging.ERROR, "neolith"):
+        if outcome is None:
+            assert in_time.ask(Ask(), timeout=1) == Told(n=7)
+        else:
+            with pytest.raises(ContractError) as raised:
+                in_time.ask(Ask(), timeout=1)
+            assert raised.value.kind == outcome.kind
+        assert caplog.records == []
+        with pytest.raises(ContractError) as raised:
+            late.ask(Ask(), timeout=1)
+    assert (raised.value.kind, raised.value.message) == ("timeout", _LATE)
+    assert raised.value.data is None
+    assert raised.value.__context__ is None
+    if outcome is not None:
+        (record,) = caplog.records
+        assert "the caller's deadline passed" in record.getMessage()
+        assert f"the {outcome.kind} error" in record.getMessage()
+        assert scope.context.trace_id in record.getMessage()
+
+
+@pytest.mark.spec("TRN-38", "TRN-27")
+def test_the_callers_deadline_is_counted_from_when_the_connector_is_called(
+    clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    check = _crossing.check_request
+
+    def slow_check(contract: Contract, action: Action, request: object) -> bytes:
+        # The caller's own check of the request takes a quarter of a second.
+        clock.time += 0.25
+        return check(contract, action, request)
+
+    monkeypatch.setattr(_connector, "check_request", slow_check)
+    # With the check, the call is back 1.125 s after it was asked for: past
+    # its timeout of one second, though within a second of the budget's
+    # reading.
+    late: Any = Connector(Desk, Slow(clock, 0.875, None))
+    in_time: Any = Connector(Desk, Slow(clock, 0.5, None))
+    with _context.root("shop"):
+        assert in_time.ask(Ask(), timeout=1) == Told(n=7)
+        with pytest.raises(ContractError) as raised:
+            late.ask(Ask(), timeout=1)
+    assert (raised.value.kind, raised.value.message) == ("timeout", _LATE)
+
+
+@pytest.mark.spec("TRN-29", "TRN-38")
+def test_the_callers_deadline_is_capped_with_the_budget(clock: Clock) -> None:
+    scope = Scope(
+        CallContext(None, "1" * 32, "2" * 16, "", None, None, None, "3" * 32), None
+    )
+    clock.time = 0.0
+    assert scope.budget(1e12, 0.0) == (9_999_999_999, 9_999_999.999)
+    assert scope.budget(5.0, 0.0) == (5000, 5.0)
+    assert scope.budget(None, 0.0) == (None, None)
+    held = Scope(
+        CallContext(None, "1" * 32, "2" * 16, "", 2e10, None, None, "3" * 32), None
+    )
+    assert held.budget(None, 0.0) == (9_999_999_999, 9_999_999.999)
+    assert held.budget(3.0, 0.0) == (3000, 3.0)
+
+
 @pytest.mark.spec("TRN-20")
 @pytest.mark.parametrize("ending", list(_ENDINGS), ids=list(_ENDINGS))
 def test_an_outcome_just_inside_the_deadline_is_delivered(
@@ -975,6 +1154,7 @@ def test_calls_an_action_makes_after_its_deadline_fail_with_timeout(
 
 
 @pytest.mark.spec("TRN-4", "TRN-20")
+@_SETTINGS
 @given(
     budget=st.integers(1, 20),
     spent=st.integers(0, 40),
@@ -1402,6 +1582,7 @@ _PRINCIPALS = st.none() | st.builds(Principal, _TEXT, _TEXT, _CLAIMS)
 
 
 @pytest.mark.spec("TRN-2", "TRN-30", "TRN-31", "TRN-36", "TRN-37")
+@_SETTINGS
 @given(
     principal=_PRINCIPALS,
     app=st.none() | _NAMES,

@@ -13,11 +13,15 @@ from collections.abc import Iterator, Mapping
 from typing import Any
 
 import pytest
-from hypothesis import given
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from neolith import Principal
 from neolith._context import b64url, principal_form, read_principal
+
+# Deterministic, as every test is (CONTRIBUTING T3): the same examples on each
+# run, and no time limit that a busy machine could miss.
+_SETTINGS = settings(derandomize=True, database=None, max_examples=200, deadline=None)
 
 # The value.
 
@@ -397,6 +401,7 @@ def _valid(principal: Principal) -> bool:
 
 
 @pytest.mark.spec("CON-51")
+@_SETTINGS
 @given(_PRINCIPALS)
 def test_a_principal_has_a_sent_form_exactly_when_it_is_valid(
     principal: Principal,
