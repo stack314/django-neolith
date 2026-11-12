@@ -1,6 +1,6 @@
 # 05. App declaration and lifecycle
 
-**Status:** outline, except the form of a declaration, which is specified. Resolve, Validate and the rest of the lifecycle become requirements with the host (#11).
+**Status:** outline, except the form of a declaration, Resolve and Validate, which are specified. The rest of the lifecycle becomes requirements with the host (#11).
 
 ## Declaration
 
@@ -63,7 +63,7 @@ A host takes a set of apps through these phases in order. **APP-1.** A failure i
 1. **Declare.** Read every app's declaration.
 2. **Resolve.** For every `requires`, find a provider: an app in this host that `provides` it, or a configured remote provider. An unsatisfied requirement is an error here, not at call time.
 3. **Configure.** Build the host's configuration from the declarations plus environment: resources, transports, routing policies.
-4. **Validate.** Check every provided contract against its implementation: every action implemented, types match, declared errors exist.
+4. **Validate.** Check every provided contract against its implementation: every action implemented, with the declared request and reply types. Declared errors are checked when the contract is loaded ([01](01-contracts.md)).
 5. **Boot.** Initialise apps. Check that each app's database schema is current, and stop if it is not.
 6. **Serve.** Accept calls and, where configured, HTTP requests.
 7. **Drain.** On shutdown, stop accepting calls, finish in-flight calls up to their deadlines, then stop.
@@ -71,6 +71,30 @@ A host takes a set of apps through these phases in order. **APP-1.** A failure i
 Schema changes are not part of the lifecycle. They are an explicit step, run once per database before hosts that serve the app start. Several hosts can serve the same app at once ([ADR 0016](../docs/adr/0016-an-app-may-run-attached-and-detached-at-once.md)), and they must never race on its schema.
 
 A host running one app is a detached deployment. A host running several is a shared process. The host is the same program in both cases.
+
+### Resolve and Validate
+
+**APP-8.** A host MUST find a provider for every contract version that one of its apps requires, before it serves.
+
+**APP-9.** A host MUST NOT hold two apps that provide one contract version.
+
+**APP-10.** All apps of a host that name one contract version, as provided or as required, MUST name the same contract declaration of it.
+
+**APP-11.** A host MUST check every contract version its apps provide against its implementation before it serves: every action implemented, taking the declared request and returning the declared reply.
+
+**APP-12.** When Resolve and Validate find several refusals, the host MUST give all of them in one diagnostic, each naming its app or its call site.
+
+### Connectors before Serve
+
+Calling code asks the host for a connector by contract identity ([ADR 0003](../docs/adr/0003-apps-communicate-through-contracts.md)), and may do so in any phase. A host *knows* a contract version when one of its apps provides or requires it.
+
+**APP-13.** A call made through a connector before Validate has ended without a refusal MUST fail as a mistake in the calling code ([01](01-contracts.md), CON-29), and is not sent.
+
+**APP-14.** A connector asked for before Validate has ended, for a contract version the host does not know, MUST stop the host before it serves.
+
+**APP-15.** A connector asked for after Validate has ended, for a contract version the host does not know, MUST be refused as a mistake in the calling code when it is asked for.
+
+Decision records: [0003](../docs/adr/0003-apps-communicate-through-contracts.md), [0021](../docs/adr/0021-an-app-declares-itself-on-its-neolithappconfig.md), [0022](../docs/adr/0022-the-app-host-builds-settings-and-checks-before-it-serves.md).
 
 ## Operational settings
 
