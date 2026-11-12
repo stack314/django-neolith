@@ -30,6 +30,8 @@ An action has a name, a request type, a reply type and a set of error kinds.
 
 **CON-11.** An action name MUST match the rule `segment` of the grammar above.
 
+**CON-50.** A declaration MUST NOT name an action's request `context` or `timeout`. A connector call takes those names for its options ([ADR 0017](../docs/adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md) Decision 3), and a call may pass the request by its name.
+
 **CON-12.** Action names MUST be unique within a contract.
 
 Each action is either idempotent or non-idempotent.
@@ -153,7 +155,7 @@ Decision record: [0008](../docs/adr/0008-typed-contract-errors-in-both-modes.md)
 
 ## Checking a contract
 
-**CON-17.** An implementation MUST reject a contract that does not meet CON-10, CON-11, CON-12, CON-13, CON-14, CON-15, CON-20, CON-22, CON-23, CON-24 or CON-33, or whose records cannot ignore unknown fields as CON-6 and CON-7 require, before it serves the contract or calls any of its actions. The rejection names the contract, the action, the error kind where there is one and, for a type, the field.
+**CON-17.** An implementation MUST reject a contract that does not meet CON-10, CON-11, CON-12, CON-13, CON-14, CON-15, CON-20, CON-22, CON-23, CON-24, CON-33 or CON-50, or whose records cannot ignore unknown fields as CON-6 and CON-7 require, before it serves the contract or calls any of its actions. The rejection names the contract, the action, the error kind where there is one and, for a type, the field.
 
 **CON-18.** A provider MUST implement every action of its contract, taking the action's request type and returning its reply type.
 

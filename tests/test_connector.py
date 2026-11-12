@@ -193,9 +193,17 @@ def test_an_action_the_contract_does_not_have_is_a_usage_error(name: str) -> Non
         ((_reserve(), _reserve()), {}),
         ((_reserve(),), {"request": _reserve()}),
         ((), {"req": _reserve()}),
+        # The behaviour until the call context (#10 task 6) adds timeout= and
+        # context= as a connector call's options.
         ((), {"request": _reserve(), "timeout": 1}),
     ],
-    ids=["nothing", "two requests", "both ways", "other keyword", "extra keyword"],
+    ids=[
+        "nothing",
+        "two requests",
+        "both ways",
+        "other keyword",
+        "option, until task 6",
+    ],
 )
 def test_a_call_with_anything_but_one_request_is_a_usage_error(
     args: tuple[object, ...], kwargs: dict[str, object]
@@ -766,3 +774,48 @@ def test_a_reply_at_the_descriptions_bounds_crosses() -> None:
 
         connector: Any = Connector(Described, InProcess(Described, Replying()))
         assert connector.get(Narrow()) == reply
+
+
+@pytest.mark.spec("CON-50", "CON-17")
+@pytest.mark.parametrize("name", ["context", "timeout"])
+def test_a_request_named_like_a_connector_option_is_refused(name: str) -> None:
+    # A connector call takes these names for its options (ADR 0017 Decision
+    # 3), so a request passed by its name could not be told from them.
+    namespace: dict[str, Any] = {"Release": Release, "Done": Release}
+    exec(  # noqa: S102  # a fixed declaration built for this test
+        f"def go(self, {name}: Release) -> None: ...", namespace
+    )
+    declared = types.new_class(
+        _name("Reserved"),
+        (Protocol,),
+        exec_body=lambda ns: ns.update(go=action(namespace["go"])),
+    )
+    with pytest.raises(
+        ContractDefinitionError, match=rf"its request is named '{name}'"
+    ):
+        contract(f"{_name('reserved')}.v1")(declared)
+
+
+@pytest.mark.spec("CON-50")
+@pytest.mark.parametrize("name", ["ctx", "contexts", "timeout_", "request"])
+def test_a_request_named_near_a_connector_option_is_admitted(name: str) -> None:
+    namespace: dict[str, Any] = {"Release": Release}
+    exec(  # noqa: S102  # a fixed declaration built for this test
+        f"def go(self, {name}: Release) -> None: ...", namespace
+    )
+    declared = types.new_class(
+        _name("Near"),
+        (Protocol,),
+        exec_body=lambda ns: ns.update(go=action(namespace["go"])),
+    )
+    contract(f"{_name('near')}.v1")(declared)
+    connector: Any = Connector(declared, InProcess(declared, _implementing(name)))
+    assert connector.go(**{name: Release(order=1)}) is None
+
+
+def _implementing(name: str) -> object:
+    namespace: dict[str, Any] = {"Release": Release}
+    exec(  # noqa: S102  # a fixed implementation built for this test
+        f"def go(self, {name}: Release) -> None: return None", namespace
+    )
+    return type(_name("Impl"), (), {"go": namespace["go"]})()

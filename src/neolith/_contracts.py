@@ -574,7 +574,7 @@ def contract[T](identity: str, /) -> Callable[[type[T]], type[T]]:
                     "underscores"
                 )
             portable.where = f"{identity}, action {attr!r}"
-            request, reply = _signature(portable.where, value)
+            request, reply = _signature(portable.where, value, declared=True)
             request_type, request_ref = portable.root(request, "request")
             capture(request_type)
             reply_type, reply_ref = (
@@ -848,8 +848,19 @@ def _parse_identity(identity: object) -> tuple[str, int]:
     return match["name"], int(match["major"])
 
 
-def _signature(where: str, function: Callable[..., Any]) -> tuple[object, object]:
-    """Return the request and reply annotations; ``None`` for an empty reply."""
+# Names a connector call takes for its options (ADR 0017 Decision 3), so a
+# declaration's request may not take them (spec 01, CON-50).
+_RESERVED_PARAMETERS = frozenset({"context", "timeout"})
+
+
+def _signature(
+    where: str, function: Callable[..., Any], *, declared: bool = False
+) -> tuple[object, object]:
+    """Return the request and reply annotations; ``None`` for an empty reply.
+
+    ``declared`` marks an action's declaration, whose request may not take a
+    name a connector call keeps for its options.
+    """
     if inspect.iscoroutinefunction(function) or inspect.isasyncgenfunction(function):
         raise ContractDefinitionError(
             f"{where}: actions are synchronous in this version"
@@ -863,6 +874,12 @@ def _signature(where: str, function: Callable[..., Any]) -> tuple[object, object
         raise ContractDefinitionError(
             f"{where}: an action takes exactly (self, request), "
             f"not {inspect.signature(function)}"
+        )
+    if declared and parameters[1].name in _RESERVED_PARAMETERS:
+        raise ContractDefinitionError(
+            f"{where}: its request is named {parameters[1].name!r}, which a "
+            "connector call keeps for its own option; name it otherwise, such "
+            "as 'request'"
         )
     try:
         hints = typing.get_type_hints(function)
