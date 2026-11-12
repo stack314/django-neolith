@@ -16,7 +16,7 @@ import textwrap
 import threading
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
-from typing import cast
+from typing import Protocol, cast
 
 import pytest
 from django.apps import AppConfig
@@ -31,11 +31,13 @@ from neolith import (
     ContractError,
     UsageError,
     _context,
+    action,
     connect,
+    contract,
 )
 from neolith._contracts import _IDENTITY
 from neolith._declaration import Declaration, NeolithAppConfig, Provision
-from neolith._host import HostConfig, _current, build, resolve
+from neolith._host import _RECORDED, HostConfig, _current, build, resolve
 from tests import declaration_contracts, host_apps
 from tests.declaration_contracts import (
     Couriers,
@@ -297,23 +299,19 @@ def test_resolve_refuses_exactly_what_the_rules_name(
     provider: dict[str, str] = {}
     for declaration in declarations:
         app = declaration.label
-        for field, contract in [
-            ("provides", p.contract) for p in declaration.provides
-        ] + [("requires", c) for c in declaration.requires]:
-            seen = first_class.setdefault(
-                contract.identity, (contract.declaration, app)
-            )
-            if seen[0] is not contract.declaration:
-                expected.add((app, field, contract.identity, "class"))
+        for field, named in [("provides", p.contract) for p in declaration.provides] + [
+            ("requires", c) for c in declaration.requires
+        ]:
+            seen = first_class.setdefault(named.identity, (named.declaration, app))
+            if seen[0] is not named.declaration:
+                expected.add((app, field, named.identity, "class"))
         for provision in declaration.provides:
             if provider.setdefault(provision.contract.identity, app) != app:
                 expected.add((app, "provides", provision.contract.identity, "provider"))
     for declaration in declarations:
-        for contract in declaration.requires:
-            if contract.identity not in provider:
-                expected.add(
-                    (declaration.label, "requires", contract.identity, "unmet")
-                )
+        for named in declaration.requires:
+            if named.identity not in provider:
+                expected.add((declaration.label, "requires", named.identity, "unmet"))
 
     contracts, refusals = resolve(declarations)
     found = set()
@@ -345,6 +343,14 @@ from tests.declaration_contracts import Level, Sku
 class StockService:
     def level(self, request: Level) -> Sku:
         return Sku(sku="")
+"""
+
+
+# A class that must never be built: set-up refuses it unbuilt.
+_DANGER = """
+class StockService:
+    def __init__(self) -> None:
+        raise OSError("built")
 """
 
 
@@ -382,12 +388,23 @@ def _validate_case(write_app: WriteApp, case: str) -> tuple[str, str]:
             "defined at the top level of its module; define it at the top level "
             "of a module of app {package}"
         )
-    elif case == "outside any app":
+    elif case == "outside the package":
         impl = "tests.declaration_contracts.Level"
         tail = (
-            ": the class is in tests.declaration_contracts, which belongs to no "
-            "app; an implementation belongs to the app that provides it, {package}"
+            " is outside the app's package, {package}; an implementation belongs "
+            'to the app that provides it, so its path starts with "{package}."'
         )
+    elif case == "class of no app":
+        # Reached through the app's package, defined in a package that is no
+        # app, and never built.
+        impl = "{package}.reexport.StockService"
+        tail = (
+            ": the class is in {other}.services, which belongs to no app; an "
+            "implementation belongs to the app that provides it, {package}"
+        )
+    elif case == "module unreadable":
+        services = _STOCK + "\n\nStockService.__module__ = None\n"
+        tail = ": the class's module cannot be read"
     elif case == "in the app's package":
         impl = "{package}.StockService"
         tail = (
@@ -417,6 +434,10 @@ def _validate_case(write_app: WriteApp, case: str) -> tuple[str, str]:
     extra: dict[str, str] = {}
     if case == "re-exported":
         extra["reexport"] = "from {package}.services import StockService\n"
+    if case == "class of no app":
+        other = write_app("", services=_DANGER)
+        extra["reexport"] = f"from {other}.services import StockService\n"
+        tail = tail.replace("{other}", other)
     if case == "in the app's package":
         extra["__init__"] = _STOCK
     if case == "in the config's module":
@@ -432,7 +453,9 @@ _VALIDATE_CASES = [
     "not a class",
     "re-exported",
     "nested",
-    "outside any app",
+    "outside the package",
+    "class of no app",
+    "module unreadable",
     "in the app's package",
     "in the config's module",
     "action missing",
@@ -451,6 +474,8 @@ def test_an_implementation_outside_the_admitted_form_is_refused(
     assert any(line.startswith(head) and line.endswith(tail) for line in refusals), (
         refusals
     )
+    # A class outside the app is refused unbuilt.
+    assert not any("raised OSError: built" in line for line in refusals)
 
 
 @pytest.mark.spec("APP-11", "APP-12")
@@ -729,6 +754,10 @@ def test_connect_refuses_a_value_that_is_not_an_identity_at_any_time() -> None:
     check()
     with override_settings(INSTALLED_APPS=host_apps.INSTALLED):
         check()
+    # The whole text is the identity: nothing before or after it.
+    for text in ("stock.v1junk", "stock.v1\n", " stock.v1", "stock.v01", "stock"):
+        with pytest.raises(ValueError, match="is not a contract identity"):
+            connect(text)
     for value in (b"stock.v1", _Text("stock.v1"), None, Stock):
         with pytest.raises(TypeError, match="takes a contract identity as a str"):
             connect(value)  # type: ignore[arg-type]
@@ -971,3 +1000,157 @@ def test_a_message_is_bounded_whatever_was_written(write_app: WriteApp) -> None:
         with pytest.raises(UsageError) as raised:
             connect(f"{long}.v1")
         assert len(str(raised.value)) < 800
+
+
+# Every problem of the contract check, and nothing that escapes it.
+
+
+@contract("ledger.v1")
+class Ledger(Protocol):
+    @action(idempotent=True)
+    def first(self, request: Sku) -> Level: ...
+
+    @action
+    def second(self, request: Sku) -> None: ...
+
+
+_KINDS = [
+    "missing",
+    "not a function",
+    "invalid signature",
+    "unexpected signature",
+    "wrong request",
+    "wrong reply",
+]
+
+
+def _member(kind: str, reply: object) -> object:
+    """An implementation of a Ledger action with one problem of ``kind``."""
+    if kind == "not a function":
+        return staticmethod(len)
+    wrong = Sku if reply is Level else Level
+
+    def taking_level(self: object, request: Level) -> object: ...
+
+    def replying_wrong(self: object, request: Sku) -> object: ...
+
+    def plain(self: object, request: Sku) -> object: ...
+
+    taking_level.__annotations__["return"] = reply
+    replying_wrong.__annotations__["return"] = wrong
+    plain.__annotations__["return"] = reply
+    if kind == "wrong request":
+        return taking_level
+    if kind == "wrong reply":
+        return replying_wrong
+    plain.__signature__ = (  # type: ignore[attr-defined]
+        "not a signature" if kind == "invalid signature" else 5
+    )
+    return plain
+
+
+@pytest.mark.spec("APP-11", "APP-12")
+@pytest.mark.parametrize(("one", "two"), list(itertools.product(_KINDS, _KINDS)))
+def test_a_problem_with_one_action_hides_none_of_the_next(one: str, two: str) -> None:
+    body = {
+        name: _member(kind, reply)
+        for name, kind, reply in (("first", one, Level), ("second", two, None))
+        if kind != "missing"
+    }
+    impl = type("Impl", (), body)
+    problems = Contract.of(Ledger)._implementation_problems(impl)
+    # One line per action, each naming its action, none twice.
+    assert len(problems) == 2, problems
+    assert "action 'first'" in problems[0]
+    assert "action 'second'" in problems[1]
+
+
+def test_implements_raises_the_first_problem_as_before() -> None:
+    # The first action is missing and the second cannot be read: @implements
+    # names the first, as it did before set-up listed them all.
+    impl = type("Impl", (), {"second": _member("unexpected signature", None)})
+    with pytest.raises(neolith.ContractDefinitionError) as raised:
+        neolith.implements(Ledger)(impl)
+    assert (
+        str(raised.value) == "ledger.v1, implementation Impl: action 'first' is missing"
+    )
+    # An unreadable signature that comes first is a ContractDefinitionError.
+    impl = type("Impl", (), {"first": _member("invalid signature", Level)})
+    with pytest.raises(
+        neolith.ContractDefinitionError, match="cannot read its signature"
+    ):
+        neolith.implements(Ledger)(impl)
+
+
+@pytest.mark.spec("APP-12")
+def test_an_unreadable_signature_is_listed_beside_another_apps_refusal(
+    write_app: WriteApp,
+) -> None:
+    unreadable = write_app(
+        _apps_module(provides=[("Stock", "{package}.services.StockService")]),
+        services=_STOCK + '\n\nStockService.level.__signature__ = "not a signature"\n',
+    )
+    other = _invoices_app(write_app, _INVOICES.replace("request: Sku", "request: int"))
+    refusals = _refusals(unreadable, other)
+    assert len(refusals) == 2, refusals
+    assert refusals[0].startswith(f"app {unreadable}: provides: stock.v1, ")
+    assert "action 'level': cannot read its signature (ValueError: " in refusals[0]
+    assert refusals[1].startswith(f"app {other}: provides: billing.invoices.v1, ")
+
+
+@pytest.mark.spec("APP-10")
+def test_a_second_class_is_refused_naming_the_first_app_and_class(
+    write_app: WriteApp,
+) -> None:
+    stock = _stock_app(write_app)
+    needs_twin = write_app(_apps_module(requires=["StockTwin"]))
+    gives_twin = write_app(
+        _apps_module(provides=[("StockTwin", "{package}.services.StockService")]),
+        services=_STOCK,
+    )
+    first = (
+        "is tests.declaration_contracts.StockTwin here and "
+        f"tests.declaration_contracts.Stock in app {stock}; in a host, one "
+        "identity has one contract class"
+    )
+    assert _refusals(stock, needs_twin, gives_twin) == sorted(
+        [
+            f"app {gives_twin}: provides: stock.v1 is provided by app {stock} too; in "
+            "a host, one app provides a contract",
+            f"app {gives_twin}: provides: stock.v1 {first}",
+            f"app {needs_twin}: requires: stock.v1 {first}",
+        ]
+    )
+
+
+@pytest.mark.spec("APP-15")
+def test_connect_in_an_override_without_neolith_checks_the_restored_table() -> None:
+    with override_settings(INSTALLED_APPS=host_apps.INSTALLED):
+        recorded = dict(_RECORDED)
+        for installed in ([], ["django.contrib.humanize"]):
+            with override_settings(INSTALLED_APPS=installed):
+                with pytest.raises(UsageError, match="no app of this host provides"):
+                    connect("nope.v1")
+                assert repr(connect("stock.v1")) == "<connector to stock.v1>"
+        # Nothing was recorded, so a later set-up of the same apps passes.
+        assert dict(_RECORDED) == recorded
+        with override_settings(INSTALLED_APPS=host_apps.INSTALLED):
+            assert _current() is not None
+
+
+@pytest.mark.spec("APP-14")
+def test_set_up_empties_the_record_it_checked() -> None:
+    printed = in_fresh_process(
+        """
+        import django
+
+        from neolith import _host, connect
+
+        connect("stock.v1")
+        print(sorted(_host._RECORDED))
+        django.setup()
+        print(sorted(_host._RECORDED))
+        """,
+        host_apps.INSTALLED,
+    )
+    assert printed == "['stock.v1']\n[]\n"
