@@ -229,7 +229,7 @@ def test_a_command_scope_inside_an_action_is_a_root_of_its_own() -> None:
             inside.append(_quote())
         # The action's own scope is current again: front's app is not hosted
         # and requires nothing, so its call is refused.
-        with pytest.raises(UsageError, match="^app front calls couriers.v3"):
+        with pytest.raises(UsageError, match=r"^app front calls couriers\.v3"):
             couriers.quote(Sku(sku="ab"))
 
     provider = Recording(then)
@@ -248,11 +248,11 @@ def test_a_command_scope_inside_an_action_is_a_root_of_its_own() -> None:
 @pytest.mark.spec("TRN-50", "TRN-51", "TRN-46")
 @given(
     st.lists(
+        # couriers lets stock alone assert a principal.
         st.tuples(
-            st.sampled_from(["web", "stock"]),
-            st.sampled_from([None, ALICE]),
+            st.sampled_from([("web", None), ("stock", None), ("stock", ALICE)]),
             st.sampled_from([None, 60, 3600.5]),
-        ),
+        ).map(lambda drawn: (*drawn[0], drawn[1])),
         min_size=1,
         max_size=5,
     )
@@ -295,13 +295,26 @@ def test_every_call_carries_the_innermost_open_scope(
 @pytest.mark.spec("TRN-24", "TRN-25")
 @pytest.mark.usefixtures("host")
 @pytest.mark.parametrize(
-    "error", [KeyError("k"), ContractError("internal", "x"), KeyboardInterrupt()]
+    "error",
+    [
+        KeyError("k"),
+        ContractError("internal", "x"),
+        KeyboardInterrupt(),
+        asyncio.CancelledError(),
+    ],
 )
 def test_a_command_scope_closes_when_its_block_raises(error: BaseException) -> None:
-    with pytest.raises(type(error)) as raised, command_scope("web"):
-        held = _ambient()
-        raise error
+    found: list[_context.Scope | None] = []
+
+    def fail() -> None:
+        with command_scope("web"):
+            found.append(_ambient())
+            raise error
+
+    with pytest.raises(type(error)) as raised:
+        fail()
     assert raised.value is error
+    [held] = found
     assert held is not None
     assert held.closed
     assert _ambient() is None
@@ -449,7 +462,7 @@ def test_an_argument_of_another_form_is_refused_at_the_call(
 
 def test_the_principal_and_timeout_are_keywords() -> None:
     with pytest.raises(TypeError):
-        command_scope("web", ALICE)  # type: ignore[misc]
+        command_scope("web", ALICE)  # type: ignore[call-arg]
 
 
 @pytest.mark.spec("TRN-45", "CON-29")
@@ -477,9 +490,12 @@ def test_a_label_the_host_does_not_host_is_refused_on_entry(label: str) -> None:
 
 @pytest.mark.spec("TRN-45")
 def test_a_long_label_is_clipped_in_the_refusal() -> None:
-    with override_settings(INSTALLED_APPS=host_apps.INSTALLED):
-        with pytest.raises(UsageError) as raised, command_scope("x" * 10_000):
-            pass
+    with (
+        override_settings(INSTALLED_APPS=host_apps.INSTALLED),
+        pytest.raises(UsageError) as raised,
+        command_scope("x" * 10_000),
+    ):
+        pass
     assert len(str(raised.value)) < 1000
 
 
@@ -498,7 +514,9 @@ def test_a_command_scope_while_an_override_leaves_neolith_out_is_refused() -> No
     with override_settings(INSTALLED_APPS=host_apps.INSTALLED):
         with (
             override_settings(INSTALLED_APPS=["django.contrib.humanize"]),
-            pytest.raises(UsageError, match="neolith's app is not in Django's registry"),
+            pytest.raises(
+                UsageError, match="neolith's app is not in Django's registry"
+            ),
             command_scope("web"),
         ):
             pass
@@ -506,9 +524,12 @@ def test_a_command_scope_while_an_override_leaves_neolith_out_is_refused() -> No
             assert _quote().caller == "web"
 
 
-@pytest.mark.spec("TRN-44")
+@pytest.mark.spec("TRN-44", "TRN-45")
 def test_a_scope_built_before_set_up_opens_once_the_host_is_set_up() -> None:
     scope = command_scope("web")
+    # A refused entry opens nothing, so the same scope opens later.
+    with pytest.raises(UsageError, match="not set up yet"), scope:
+        pass
     with override_settings(INSTALLED_APPS=host_apps.INSTALLED), scope:
         assert _quote().caller == "web"
 
@@ -613,7 +634,7 @@ def test_the_advice_for_a_thread_with_no_scope_is_followed() -> None:
     refused, caller = seen
     assert isinstance(refused, UsageError)
     assert "none is active here" in str(refused)
-    assert 'open one with neolith.command_scope("<label>")' in str(refused)
+    assert 'opens one with neolith.command_scope("<label>")' in str(refused)
     assert caller == "web"
 
 

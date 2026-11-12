@@ -6,11 +6,12 @@ key and the calling app, which belong to one call; and the id of the scope
 that issued it, which never leaves this host.
 
 Scopes are private. The host opens one at each root and around each action it
-runs, and closes it when that ends. One context variable holds the scope a
-connector call derives its context from; a call may name another open scope
-with ``context=``, which is matched by its scope id and never read. This
-variable is state the host owns (CONTRIBUTING K6): app code has no way to read
-it.
+runs, and closes it when that ends; code opens a root of its own, for a
+command or background work, with ``neolith.command_scope``. One context
+variable holds the scope a connector call derives its context from; a call
+may name another open scope with ``context=``, which is matched by its scope
+id and never read. This variable is state the host owns (CONTRIBUTING K6):
+app code has no way to read it.
 
 A principal is checked through its sent form (spec 03): its JCS serialization
 in UTF-8, whose base64url encoding is at most 4096 bytes, read by the same
@@ -615,8 +616,9 @@ def root(
 ) -> contextlib.AbstractContextManager[Scope]:
     """Open a root that is not itself a call, as for a command or a test.
 
-    Private until the host opens roots (roadmap step 4, #11). It starts a new
-    trace and has no key and no caller. ``app`` is the app it runs for, the
+    The test harness's root, and the one ``neolith.command_scope`` opens once
+    it has checked its app against the host. It starts a new trace and has no
+    key and no caller. ``app`` is the app it runs for, the
     caller of the calls made from it, and ``requires`` the identities its
     declaration requires, or ``None`` for an app with no declaration. It has
     no deadline unless ``timeout`` gives one, in seconds from now.
@@ -686,7 +688,8 @@ def parent(context: object) -> Scope:
             raise UsageError(
                 "the call context passed as context= names no open scope on "
                 "this host: its call or scope has ended, or it was not issued "
-                "here. Work that outlives its call opens a scope of its own"
+                "here. Work that outlives its call opens a root of its own with "
+                'neolith.command_scope("<label>")'
             )
         return found
     ambient = _CURRENT.get()
@@ -695,12 +698,15 @@ def parent(context: object) -> Scope:
             "a connector call needs a call context, and none is active here. "
             "Make the call from inside an action or another scope the host "
             "opened, or pass context=; a thread the app starts does not "
-            "inherit the context"
+            "inherit the context. Code that runs outside any call, such as a "
+            "command or background work, opens one with "
+            'neolith.command_scope("<label>")'
         )
     if ambient.closed:
         raise UsageError(
             "the call context active here belongs to a call or scope that has "
-            "ended. Work that outlives its call opens a scope of its own"
+            "ended. Work that outlives its call opens a root of its own with "
+            'neolith.command_scope("<label>")'
         )
     return ambient
 
@@ -718,7 +724,7 @@ def check_required(scope: Scope, identity: str) -> None:
         return
     elsewhere = (
         "code that runs in another app's scope on its own app's account opens "
-        "a scope that names its own app"
+        'neolith.command_scope("<its label>")'
     )
     if requires is None:
         raise UsageError(
