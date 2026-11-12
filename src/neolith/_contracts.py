@@ -751,7 +751,8 @@ def action(
             letters, digits and underscores, starting with a letter; it is
             neither a standard kind nor a name reserved for a later standard
             kind (CON-23). A detail record follows the rules of a request
-            record, and nests maps and lists at most 32 levels deep (CON-30).
+            record, and its values nest at most 32 levels deep in records,
+            maps and lists, the detail record being the first (CON-24).
             ``@contract`` checks them, naming the contract, the action and
             the kind.
 

@@ -14,6 +14,8 @@ in Google sections, and these tests check that:
 - ``Attributes`` names only attributes the class has, and every public
   attribute is documented there or by its own docstring;
 - ``Raises`` names a builtin exception or one the public API exports;
+- no ``Args``, ``Attributes`` or ``Returns`` entry writes a type, which the
+  annotation holds;
 - every requirement ID cited is a live requirement of ``spec/``, read by
   ``scripts/spec_trace.py``, and every ``ADR NNNN`` and ``spec NN`` cited has
   its file;
@@ -58,8 +60,14 @@ _ADMITTED_DEFAULTS = {
     # it with the app's name; its public form is open in #63.
     ("neolith.Provided", "_MISSING"),
 }
-_ADR = re.compile(r"\bADRs?\b(?P<rest>(?:\s+(?:and\s+|or\s+)?\d+,?)*)")
-_SPEC = re.compile(r"\bspecs?\b(?P<rest>(?:\s+(?:and\s+|or\s+)?\d+,?)*)")
+# The numbers after a citing word: "0017", "0017 and 0019", "01, 02 or 03",
+# "0017, 0019, and 0021", "0017 to 0019". A number followed by a point and a
+# digit is a version, such as "spec 0.1", and ends the list.
+_NUMBERS = r"(?P<rest>(?:\s+(?:and\s+|or\s+|to\s+)?\d+(?!\.\d),?)*)"
+# "ADR", "ADRs", "decision record", "Decision records"; "spec", "Spec",
+# "specs", "specification", "Specifications".
+_ADR = re.compile(r"\b(?:ADRs?|[Dd]ecision records?)\b" + _NUMBERS)
+_SPEC = re.compile(r"\b[Ss]pec(?:ification)?s?\b" + _NUMBERS)
 
 
 class Records:
@@ -146,6 +154,7 @@ def _sections(found: griffe.Object) -> tuple[dict[str, list[str]], list[str]]:
         logger.removeHandler(listener)
         logger.setLevel(level)
     problems += [f"griffe: {said}" for said in listener.said]
+    problems += _written_types(docstring.value)
     listed: dict[str, list[str]] = {}
     for section in parsed:
         kind = section.kind.value
@@ -160,6 +169,31 @@ def _sections(found: griffe.Object) -> tuple[dict[str, list[str]], list[str]]:
         else:
             listed[kind] = []
     return listed, problems
+
+
+_TITLES = {"parameters": "Args", "attributes": "Attributes", "returns": "Returns"}
+
+
+def _written_types(text: str) -> list[str]:
+    """Say which entries write a type, which belongs in the annotation.
+
+    The docstring is read with no owner, so that griffe has no annotation of
+    its own to give: any type it finds was written in the text, as in
+    ``name (int): ...``, ``Returns: int: ...`` or ``Returns: (int): ...``.
+    """
+    problems: list[str] = []
+    for section in griffe.Docstring(text, parser="google").parse(warnings=False):
+        kind = section.kind.value
+        if kind not in ("parameters", "attributes", "returns"):
+            continue
+        for item in section.value:
+            if item.annotation is not None or (kind == "returns" and item.name):
+                written = item.annotation or item.name
+                problems.append(
+                    f"{_TITLES[kind]}: writes the type {written}; a "
+                    "type belongs in the annotation"
+                )
+    return problems
 
 
 def _parameters(found: griffe.Object) -> list[str] | None:
@@ -213,10 +247,12 @@ def _bases(found: griffe.Object) -> Iterator[str | griffe.Expr | None]:
 
 def _private_names(
     found: griffe.Object, exported: set[str]
-) -> Iterator[tuple[str, str]]:
+) -> Iterator[tuple[str, str, str]]:
     """Where the object names something the package does not export, and what.
 
     Its annotations, its base classes and its parameters' defaults are read.
+    Each finding is where, the name (or the text griffe could not read), and
+    the problem in words.
     """
     package = found.package.name
     for where, expressions in (
@@ -230,7 +266,11 @@ def _private_names(
             if expression is None or expression == "None":
                 continue
             if isinstance(expression, str):
-                yield where, f"{expression!r}, which griffe could not read"
+                yield (
+                    where,
+                    expression,
+                    f"its {where} hold {expression}, which griffe could not read",
+                )
                 continue
             for part in expression.iterate(flat=True):
                 if not isinstance(part, griffe.ExprName):
@@ -239,7 +279,14 @@ def _private_names(
                 # A type parameter's path ends "function[T]"; it names no object.
                 own = path == package or path.startswith(f"{package}.")
                 if own and not path.endswith("]") and path not in exported:
-                    yield where, part.name
+                    yield (
+                        where,
+                        part.name,
+                        (
+                            f"its {where} name {part.name}, which {package} does "
+                            "not export"
+                        ),
+                    )
 
 
 def _raised(name: str, package: griffe.Module, exported: dict[str, str]) -> bool:
@@ -378,8 +425,8 @@ def _object_problems(
     label: str, found: griffe.Object, package: griffe.Module, exported: dict[str, str]
 ) -> list[str]:
     problems = [
-        f"{label}: its {where} name {name}, which {package.name} does not export"
-        for where, name in _private_names(found, set(exported.values()))
+        f"{label}: {problem}"
+        for where, name, problem in _private_names(found, set(exported.values()))
         if where != "defaults" or (label, name) not in _ADMITTED_DEFAULTS
     ]
     problems += [f"{label}: {problem}" for problem in _base_problems(found)]
@@ -422,9 +469,8 @@ def _object_problems(
                 problems.append(f"{label}.{name}: documented twice")
             continue
         problems += [
-            f"{label}.{name}: its {where} name {private}, which "
-            f"{package.name} does not export"
-            for where, private in _private_names(member, set(exported.values()))
+            f"{label}.{name}: {problem}"
+            for _, _, problem in _private_names(member, set(exported.values()))
         ]
         if not isinstance(member, griffe.Attribute) or name not in documented:
             problems.append(f"{label}.{name}: has no docstring")
@@ -838,6 +884,151 @@ def test_a_sample_in_every_admitted_shape_passes(
             "sample.make: its annotations name _Hidden, which sample does not export",
             id="private-name-in-a-return",
         ),
+        # A rule each, so that removing any rule fails its sample.
+        pytest.param(
+            "        Problem: If it cannot be made.\n",
+            "        Problem If it cannot be made.\n",
+            "sample.make: griffe: ",
+            id="griffe-warning",
+        ),
+        pytest.param(
+            "        name: Its name.\n\n    Raises:",
+            "        name: Its name.\n        size: How many parts.\n\n    Raises:",
+            "sample.Thing.size: documented twice",
+            id="documented-twice",
+        ),
+        pytest.param(
+            '__all__ = ["Bigger",',
+            '__all__ = ["Gone", "Bigger",',
+            "sample.Gone: exported, but not defined",
+            id="exported-but-not-defined",
+        ),
+        pytest.param(
+            "def size(self) -> int:",
+            "def size(self) -> 'int +':",
+            "sample.Thing.size: its annotations hold 'int +', which griffe could "
+            "not read",
+            id="annotation-griffe-cannot-read",
+        ),
+        pytest.param(
+            'is checked on ``Thing``."""\n',
+            'is checked on ``Thing``."""\n\n\nclass Bad(Thing, Bigger):\n'
+            '    """No order."""\n\n\n__all__ += ["Bad"]\n',
+            "sample.Bad: it has no method resolution order",
+            id="no-method-resolution-order",
+        ),
+        # Citations, in each spelling English gives them.
+        pytest.param(
+            "        self.name = name\n",
+            '        """Build it (ADR 9994)."""\n        self.name = name\n',
+            "sample.Thing.__init__: cites unknown ADR 9994",
+            id="citation-in-a-constructor",
+        ),
+        pytest.param(", spec 01)", ", Spec 99)", "spec document 99", id="Spec"),
+        pytest.param(", spec 01)", ", specs 01 and 99)", "99", id="specs"),
+        pytest.param(
+            ", spec 01)", ", specification 99)", "spec document 99", id="specification"
+        ),
+        pytest.param(
+            "ADR 0008;", "decision record 9999;", "unknown ADR 9999", id="record"
+        ),
+        pytest.param(
+            "ADRs 0017 and 0019", "ADRs 0017, 0019, and 9996", "9996", id="oxford"
+        ),
+        pytest.param("ADRs 0017 and 0019", "ADRs 0017 to 9995", "9995", id="to"),
+        pytest.param(
+            "as CON-30 says", "as CON-9999's text says", "CON-9999", id="possessive"
+        ),
+        pytest.param("as CON-30 says", "as (CON-9999) says", "CON-9999", id="paren"),
+        # Section titles: another title for a section is still checked, and a
+        # title the check does not read is refused.
+        pytest.param(
+            "        Args:\n            value: Any integer.\n",
+            "        Arguments:\n            value: Any integer.\n"
+            "            other: Another.\n",
+            "sample.Thing.plain: Args lists ['value', 'other']",
+            id="Arguments-checked",
+        ),
+        pytest.param(
+            "        Args:\n            value: Any integer.\n",
+            "        Parameters:\n            other: Another.\n",
+            "sample.Thing.plain: Args lists ['other']",
+            id="Parameters-checked",
+        ),
+        pytest.param(
+            "        Args:\n            value: Any integer.\n",
+            "        args:\n            other: Another.\n",
+            "sample.Thing.plain: Args lists ['other']",
+            id="lowercase-args-checked",
+        ),
+        pytest.param(
+            "    Raises:\n        Problem: If it cannot be made.\n",
+            "    Exceptions:\n        Trouble: If it cannot be made.\n",
+            "sample.make: Raises names Trouble",
+            id="Exceptions-checked",
+        ),
+        pytest.param(
+            "    Returns:\n        The new object.\n",
+            "    Return:\n        The new object.\n",
+            "sample.make: has a section the check does not read: Return",
+            id="Return",
+        ),
+        pytest.param(
+            "    Raises:\n        Problem: If it cannot be made.\n",
+            "    Raise:\n        Problem: If it cannot be made.\n",
+            "sample.make: has a section the check does not read: Raise",
+            id="Raise",
+        ),
+        pytest.param(
+            "        **rest: The rest.\n",
+            "        **rest: The rest.\n\n"
+            "    Keyword Args:\n        strict: Whether.\n",
+            "sample.make: has a section the check does not read",
+            id="Keyword-Args",
+        ),
+        pytest.param(
+            "    Returns:\n        The new object.\n",
+            "    Yields:\n        The new object.\n",
+            "sample.make: has a section the check does not read",
+            id="Yields",
+        ),
+        pytest.param(
+            "    Returns:\n        The new object.\n",
+            "    Examples:\n        >>> make(int)\n",
+            "sample.make: has a section the check does not read",
+            id="Examples",
+        ),
+        # A type written in an entry, in each spelling Google style gives it.
+        pytest.param(
+            "        name: Its name.\n        parts:",
+            "        name (str): Its name.\n        parts:",
+            "sample.Thing: Args: writes the type str",
+            id="type-in-args",
+        ),
+        pytest.param(
+            "        strict: Whether to check.\n",
+            "        strict (bool, optional): Whether to check.\n",
+            "sample.make: Args: writes the type bool",
+            id="optional-type-in-args",
+        ),
+        pytest.param(
+            "        name: Its name.\n\n    Raises:",
+            "        name (str): Its name.\n\n    Raises:",
+            "sample.Thing: Attributes: writes the type str",
+            id="type-in-attributes",
+        ),
+        pytest.param(
+            "        The new object.\n",
+            "        T: The new object.\n",
+            "sample.make: Returns: writes the type T",
+            id="type-in-returns",
+        ),
+        pytest.param(
+            "        The new object.\n",
+            "        (T): The new object.\n",
+            "sample.make: Returns: writes the type T",
+            id="parenthesized-type-in-returns",
+        ),
     ],
 )
 def test_each_rule_refuses_its_nearest_wrong_shape(
@@ -846,6 +1037,62 @@ def test_each_rule_refuses_its_nearest_wrong_shape(
     assert _GOOD.count(old) == 1
     found = _sample(tmp_path, _GOOD.replace(old, new), records)
     assert any(problem in said for said in found), found
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        pytest.param(
+            '    """What ``make`` raises."""\n',
+            '    """\n    What ``make`` raises.\n    """\n',
+            id="summary-on-the-second-line",
+        ),
+        pytest.param("(spec 01):", "(spec 01, as of spec 0.1):", id="spec-version"),
+        pytest.param(", spec 01)", ", Spec 01)", id="Spec"),
+        pytest.param(", spec 01)", ", specs 01 and 03)", id="specs"),
+        pytest.param(", spec 01)", ", specification 01)", id="specification"),
+        pytest.param("ADR 0008;", "decision record 0008;", id="record"),
+        pytest.param("ADRs 0017 and 0019", "ADRs 0017, 0019, and 0008", id="oxford"),
+        pytest.param("ADRs 0017 and 0019", "ADRs 0017 to 0019", id="to"),
+        pytest.param("as CON-30 says", "as CON-30's text says", id="possessive"),
+        pytest.param("as CON-30 says", "as (CON-30) says", id="paren"),
+        pytest.param(
+            "#: The limit (spec 01): at most 32 levels, as CON-30 says, in UTF-8.",
+            "#: The limit (spec 01): at most 32 levels,\n#: as CON-30 says, in UTF-8.",
+            id="comment-over-two-lines",
+        ),
+        pytest.param(
+            "        Args:\n            value:",
+            "        Arguments:\n            value:",
+            id="Arguments",
+        ),
+        pytest.param(
+            "        Args:\n            value:",
+            "        Parameters:\n            value:",
+            id="Parameters",
+        ),
+        pytest.param(
+            "        Args:\n            value:",
+            "        Params:\n            value:",
+            id="Params",
+        ),
+        pytest.param(
+            "        Args:\n            value:",
+            "        args:\n            value:",
+            id="lowercase-args",
+        ),
+        pytest.param(
+            "    Raises:\n        Problem:",
+            "    Exceptions:\n        Problem:",
+            id="Exceptions",
+        ),
+    ],
+)
+def test_each_admitted_spelling_passes(
+    tmp_path: Path, records: Records, old: str, new: str
+) -> None:
+    assert _GOOD.count(old) == 1
+    assert _sample(tmp_path, _GOOD.replace(old, new), records) == []
 
 
 def test_a_withdrawn_requirement_is_refused(tmp_path: Path) -> None:
