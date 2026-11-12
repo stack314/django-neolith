@@ -26,6 +26,7 @@ State the host owns (CONTRIBUTING K6), all of it guarded by one lock:
 """
 
 import contextlib
+import contextvars
 import importlib
 import inspect
 import logging
@@ -497,9 +498,10 @@ def connect(identity: str, /) -> "Connector":
     A call through the connector raises ``UsageError``, never a contract
     error, when it is made before set-up has finished or while an override
     leaves neolith's app out of the registry; when no app of the host
-    provides the contract; when it is made in no open scope, in one that has
-    closed, or names a closed scope with ``context=``; and when the calling
-    app's declaration does not require the contract, or the app has none.
+    provides the contract; when it is made in no open scope or in one that
+    has closed; when it names with ``context=`` a scope that has closed or
+    that this host did not issue; and when the calling app's declaration does
+    not require the contract, or the app has none.
 
     Args:
         identity: The contract version, ``<name>.v<N>``.
@@ -661,9 +663,16 @@ def command_scope(
     the block call as ``app``, are checked against what its declaration
     requires, and carry ``principal``. The root takes nothing from a scope it
     is opened in: it starts a new trace, and has a deadline only when
-    ``timeout`` is given, counted from entry. The enclosing scope is current
-    again on exit. The root closes on exit, however the block ends, so a call
-    made in it afterwards, or naming its context, is a ``UsageError``.
+    ``timeout`` is given, counted from entry. The root closes on exit,
+    however the block ends, so a call made in it afterwards, or naming its
+    context, is a ``UsageError``.
+
+    The block opens and closes in one context: it holds no ``yield`` of a
+    generator or async generator, and roots opened in it close first. Then
+    the enclosing scope is current again on exit. A scope that finds itself
+    not current where its block ends, or cannot be reset there, still closes,
+    and its exit raises ``UsageError``; calls in the context it was left
+    current in are refused, since it has closed.
 
     The arguments are checked when it is called, and the host on entry.
 
@@ -685,8 +694,9 @@ def command_scope(
             ``float`` or ``None`` (a ``bool`` is refused).
         ValueError: If ``timeout`` is not finite.
         UsageError: On entry, if the host is not set up, if ``app`` is not
-            the label of a hosted app, or if the scope was opened before. A
-            refused entry opens nothing, and can be tried again.
+            the label of a hosted app, or if the scope was opened before; a
+            refused entry opens nothing, and can be tried again. On exit, if
+            the scope is not the one current where its block ends.
     """
     if type(app) is not str:
         raise TypeError(
@@ -704,14 +714,23 @@ def command_scope(
 class _CommandScope:
     """One command scope, entered at most once."""
 
-    __slots__ = ("_app", "_entered", "_lock", "_opened", "_principal", "_timeout")
+    __slots__ = (
+        "_app",
+        "_entered",
+        "_lock",
+        "_principal",
+        "_scope",
+        "_timeout",
+        "_token",
+    )
 
     _app: str
     _principal: Principal | None
     _timeout: float | None
     _entered: bool
     _lock: threading.Lock
-    _opened: contextlib.AbstractContextManager[_context.Scope] | None
+    _scope: _context.Scope | None
+    _token: contextvars.Token[_context.Scope | None] | None
 
     def __init__(self, *args: object, **kwargs: object) -> None:
         raise TypeError("a command scope is made by neolith.command_scope()")
@@ -726,7 +745,8 @@ class _CommandScope:
         made._timeout = timeout
         made._entered = False
         made._lock = threading.Lock()
-        made._opened = None
+        made._scope = None
+        made._token = None
         return made
 
     def __enter__(self) -> None:
@@ -740,16 +760,14 @@ class _CommandScope:
                     "one was entered before; call command_scope() again for a "
                     "new root"
                 )
-            requires = self._requires()
-            opened = _context.root(
+            fields = _context.root_fields(
                 self._app,
-                requires=requires,
+                requires=self._requires(),
                 principal=self._principal,
                 timeout=self._timeout,
             )
-            opened.__enter__()
+            self._scope, self._token = _context.begin(**fields)
             self._entered = True
-            self._opened = opened
 
     def _where(self) -> str:
         return f"command_scope({_quoted(self._app)})"
@@ -790,9 +808,29 @@ class _CommandScope:
         error: BaseException | None,
         traceback: types.TracebackType | None,
     ) -> None:
-        opened, self._opened = self._opened, None
-        if opened is not None:
-            opened.__exit__(kind, error, traceback)
+        scope, token = self._scope, self._token
+        self._scope = self._token = None
+        if scope is None or token is None:
+            return
+        current = _context._CURRENT.get() is scope
+        _context.close(scope)
+        if current:
+            try:
+                _context._CURRENT.reset(token)
+            except ValueError:  # left current in another context
+                pass
+            else:
+                return
+        # The state found is not the one the block opened: say so, rather
+        # than leave a context where calls fail later for no visible reason.
+        raise UsageError(
+            f"{self._where()}: the scope closed where it is not the current "
+            "scope, so the scope it was opened in could not be made current "
+            "again. Its block was left in another context than it was entered "
+            "in, as when a generator or async generator holds it across a "
+            "yield, or a root opened in it is still open. Open and close a "
+            "command scope in one block that does not yield"
+        )
 
     def __repr__(self) -> str:
         return f"<command scope for {_quoted(self._app)}>"

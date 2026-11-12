@@ -37,7 +37,10 @@ from neolith._connector import Connector, InProcess
 from tests import host_apps
 from tests.declaration_contracts import Sku
 from tests.host_apps.couriers import services as courier_services
+from tests.hosting import in_fresh_process
 from tests.test_calling_app import FRONT, Ask, Front, Recording, Told
+from tests.test_host import WriteApp, _apps_module
+from tests.test_host import write_app as write_app
 
 ALICE = Principal("https://id.example", "alice")
 HOSTED = "couriers, stock, web"
@@ -224,8 +227,14 @@ def test_a_nested_command_scope_takes_nothing_from_the_enclosing_one(
 def test_a_command_scope_inside_an_action_is_a_root_of_its_own() -> None:
     inside: list[CallContext] = []
 
+    held: list[_context.Scope] = []
+
     def then(request: Ask, ctx: CallContext) -> None:
+        assert ctx.idempotency_key is not None  # the enclosing scope has a key
         with command_scope("web"):
+            current = _ambient()
+            assert current is not None
+            held.append(current)
             inside.append(_quote())
         # The action's own scope is current again: front's app is not hosted
         # and requires nothing, so its call is refused.
@@ -241,8 +250,19 @@ def test_a_command_scope_inside_an_action_is_a_root_of_its_own() -> None:
         assert front.ask(Ask(n=1)) == Told(n=1)
     [action_ctx] = provider.seen
     [seen] = inside
+    [root] = held
+    # Every field a root sets, none taken from the action's keyed scope.
+    assert (root.app, root.requires) == ("web", frozenset({"stock.v1", "couriers.v3"}))
+    assert root.held.principal is None
+    assert root.held.deadline is None
+    assert root.held.idempotency_key is None
+    assert root.held.caller is None
+    assert root.held.tracestate == ""
     assert (seen.caller, seen.principal, seen.deadline) == ("web", None, None)
-    assert seen.trace_id != action_ctx.trace_id
+    assert seen.trace_id == root.held.trace_id != action_ctx.trace_id
+    # A random key (TRN-33), not one derived from the action's key.
+    assert seen.idempotency_key is not None
+    assert len(seen.idempotency_key) == 22
 
 
 @pytest.mark.spec("TRN-50", "TRN-51", "TRN-46")
@@ -373,6 +393,247 @@ def test_work_that_outlives_its_call_opens_its_own_scope() -> None:
     assert caller == "web"
 
 
+# A root that closes where it is not current (TRN-51's condition, TRN-53).
+
+
+def _isolated(test: Callable[[], None]) -> None:
+    """Run ``test`` in a copy of the context, so a scope it leaves current
+    stays there."""
+    contextvars.copy_context().run(test)
+
+
+@pytest.mark.spec("TRN-51")
+@pytest.mark.usefixtures("host")
+def test_a_generator_closed_where_it_was_opened_restores_the_enclosing_scope() -> None:
+    def rows() -> Iterator[int]:
+        with command_scope("web"):
+            yield 1
+            yield 2
+
+    def run() -> None:
+        with command_scope("stock"):
+            for _ in rows():
+                break  # the generator closes here, in this context
+            assert _quote().caller == "stock"
+        assert _ambient() is None
+
+    _isolated(run)
+
+
+@pytest.mark.spec("TRN-51")
+@pytest.mark.usefixtures("host")
+def test_an_async_generator_closed_in_its_task_restores_the_enclosing_scope() -> None:
+    async def rows() -> Any:  # noqa: ANN401
+        with command_scope("web"):
+            yield 1
+            yield 2
+
+    async def main() -> str | None:
+        with command_scope("stock"):
+            found = rows()
+            async for _ in found:
+                break
+            await found.aclose()
+            return _quote().caller
+
+    assert asyncio.run(main()) == "stock"
+
+
+@pytest.mark.spec("TRN-53", "TRN-25")
+@pytest.mark.usefixtures("host")
+def test_an_async_generator_broken_out_of_is_reported_and_its_scope_refused() -> None:
+    """Broken out of, the generator is closed later by the event loop, in
+    another context: its scope closes there and its exit is reported, and the
+    enclosing block, where it was left current, has its calls refused.
+    """
+    reported: list[object] = []
+
+    async def rows() -> Any:  # noqa: ANN401
+        with command_scope("web"):
+            yield 1
+            yield 2
+
+    refused: list[UsageError] = []
+
+    async def main() -> None:
+        asyncio.get_running_loop().set_exception_handler(
+            lambda loop, report: reported.append(report.get("exception"))
+        )
+        with command_scope("stock"):
+            async for _ in rows():
+                break
+            for _ in range(5):
+                await asyncio.sleep(0)  # the loop closes the generator
+            with pytest.raises(UsageError, match="has ended") as raised:
+                couriers.quote(Sku(sku="ab"))
+            refused.append(raised.value)
+
+    # The stock block's exit finds the closed web scope current: reported.
+    with pytest.raises(UsageError) as raised:
+        asyncio.run(main())
+    assert str(raised.value).startswith(
+        "command_scope('stock'): the scope closed where it is not"
+    )
+    assert len(refused) == 1
+    [error] = reported
+    assert isinstance(error, UsageError)
+    assert str(error).startswith(
+        "command_scope('web'): the scope closed where it is not"
+    )
+
+
+@pytest.mark.spec("TRN-53", "TRN-25")
+@pytest.mark.usefixtures("host")
+def test_a_scope_closed_out_of_order_is_reported_and_closes() -> None:
+    def run() -> None:
+        web, stock = command_scope("web"), command_scope("stock")
+        web.__enter__()
+        stock.__enter__()
+        web_scope = _context._CURRENT.get()
+        with pytest.raises(UsageError, match="not the current scope") as raised:
+            web.__exit__(None, None, None)
+        assert raised.value.args[0].startswith("command_scope('web'): ")
+        # stock is still open and current; web has closed.
+        assert _quote().caller == "stock"
+        stock.__exit__(None, None, None)
+        current = _ambient()
+        assert current is not None
+        assert current.closed
+        assert web_scope is not None
+        with pytest.raises(UsageError, match="has ended"):
+            couriers.quote(Sku(sku="ab"))
+
+    _isolated(run)
+
+
+@pytest.mark.spec("TRN-53", "TRN-25")
+@pytest.mark.usefixtures("host")
+def test_a_scope_left_in_another_context_is_reported_and_refused_where_it_was() -> None:
+    entered = contextvars.copy_context()
+    scope = command_scope("web")
+    entered.run(scope.__enter__)
+    elsewhere = entered.copy()  # where web is current, but not entered there
+    with pytest.raises(UsageError, match="not the current scope"):
+        elsewhere.run(scope.__exit__, None, None, None)
+    with pytest.raises(UsageError, match="has ended"):
+        entered.run(couriers.quote, Sku(sku="ab"))
+
+
+@pytest.mark.spec("TRN-53")
+@pytest.mark.usefixtures("host")
+def test_a_block_that_raises_where_its_scope_is_not_current_reports_both() -> None:
+    def run() -> None:
+        web = command_scope("web")
+
+        def fail() -> None:
+            with web:
+                command_scope("stock").__enter__()
+                raise KeyError("k")
+
+        with pytest.raises(UsageError) as raised:
+            fail()
+        assert isinstance(raised.value.__context__, KeyError)
+
+    _isolated(run)
+
+
+# Opened while a set-up runs, where an earlier table exists (TRN-45).
+
+
+@pytest.mark.spec("TRN-45")
+def test_a_command_scope_in_an_implementations_init_during_set_up_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    outcomes: list[str] = []
+    real = courier_services.CourierService.__init__
+
+    def init(self: courier_services.CourierService) -> None:
+        try:
+            with command_scope("web"):
+                outcomes.append("opened")
+        except UsageError as error:
+            outcomes.append(str(error))
+        real(self)
+
+    with override_settings(INSTALLED_APPS=host_apps.INSTALLED):
+        monkeypatch.setattr(courier_services.CourierService, "__init__", init)
+        with override_settings(INSTALLED_APPS=host_apps.INSTALLED):
+            pass
+    assert outcomes == [
+        "command_scope('web'): the host is not set up yet. A command scope "
+        "opens once Django has loaded every app and neolith's set-up has passed"
+    ]
+
+
+@pytest.mark.spec("TRN-45")
+def test_a_command_scope_in_ready_during_set_up_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.host_apps.web.apps import WebConfig
+
+    outcomes: list[str] = []
+
+    def ready(self: WebConfig) -> None:
+        try:
+            with command_scope("web"):
+                outcomes.append("opened")
+        except UsageError as error:
+            outcomes.append(str(error))
+
+    with override_settings(INSTALLED_APPS=host_apps.INSTALLED):
+        monkeypatch.setattr(WebConfig, "ready", ready, raising=False)
+        with override_settings(INSTALLED_APPS=host_apps.INSTALLED):
+            pass
+    assert len(outcomes) == 1
+    assert outcomes[0].startswith("command_scope('web'): the host is not set up yet")
+
+
+_AT_IMPORT = """
+import sys
+
+import django
+from django.test import override_settings
+
+django.setup()  # the first set-up imports the services module: one line
+del sys.modules[sys.argv[2] + ".services"]
+with override_settings(INSTALLED_APPS=json.loads(sys.argv[1])):
+    pass  # a later set-up imports it again: a second line
+"""
+
+_SERVICES_OPENING_A_SCOPE = """
+from neolith import UsageError, command_scope
+from tests.declaration_contracts import Sku
+
+try:
+    with command_scope("{package}"):
+        print("opened")
+except UsageError as error:
+    print(error)
+
+
+class InvoiceService:
+    def void(self, request: Sku) -> None:
+        return None
+"""
+
+
+@pytest.mark.spec("TRN-45")
+def test_a_command_scope_at_import_during_a_later_set_up_is_refused(
+    write_app: WriteApp,
+) -> None:
+    package = write_app(
+        _apps_module(provides=[("Invoices", "{package}.services.InvoiceService")]),
+        services=_SERVICES_OPENING_A_SCOPE,
+    )
+    printed = in_fresh_process(
+        _AT_IMPORT.replace("sys.argv[2]", repr(package)), [package, "neolith"]
+    )
+    refusal = f"command_scope('{package}'): the host is not set up yet."
+    lines = printed.splitlines()
+    assert len(lines) == 2
+    assert all(line.startswith(refusal) for line in lines)
+
+
 # Used once.
 
 
@@ -392,28 +653,50 @@ def test_a_command_scope_is_entered_once() -> None:
 
 @pytest.mark.spec("TRN-52")
 @pytest.mark.usefixtures("host")
-def test_threads_entering_one_command_scope_open_it_once() -> None:
+def test_threads_entering_one_command_scope_open_it_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first thread stops inside entry, after the once-only check, and
+    only then does the second thread enter: it must not open the scope too.
+    """
     scope = command_scope("web")
-    count = 8
-    start, held = threading.Barrier(count), threading.Barrier(count)
+    in_entry, second_done = threading.Event(), threading.Event()
+    real = _context.root_fields
+    calls: list[None] = []
+
+    def held_open(*args: Any, **kwargs: Any) -> dict[str, Any]:  # noqa: ANN401
+        calls.append(None)
+        if len(calls) == 1:
+            in_entry.set()
+            # Without the lock the second thread opens the scope meanwhile;
+            # with it, the second thread waits here until this entry ends.
+            second_done.wait(0.5)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(_context, "root_fields", held_open)
     outcomes: list[str] = []
 
-    def enter() -> None:
-        start.wait()
+    def enter(signal: threading.Event | None) -> None:
         try:
-            with scope:
-                outcomes.append("opened")
-                held.wait()  # every other thread has tried meanwhile
+            scope.__enter__()
         except UsageError:
             outcomes.append("refused")
-            held.wait()
+        else:
+            outcomes.append("opened")
+            scope.__exit__(None, None, None)
+        finally:
+            if signal is not None:
+                signal.set()
 
-    threads = [threading.Thread(target=enter) for _ in range(count)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-    assert sorted(outcomes) == ["opened"] + ["refused"] * (count - 1)
+    first = threading.Thread(target=enter, args=(None,))
+    first.start()
+    assert in_entry.wait(5)
+    second = threading.Thread(target=enter, args=(second_done,))
+    second.start()
+    first.join()
+    second.join()
+    assert sorted(outcomes) == ["opened", "refused"]
+    assert len(calls) == 1
 
 
 @pytest.mark.usefixtures("host")
@@ -628,7 +911,9 @@ def test_the_advice_for_a_thread_with_no_scope_is_followed() -> None:
             seen.append(_quote().caller)
 
     with command_scope("web"):
-        thread = threading.Thread(target=work)
+        # A thread that does not inherit the context: before Python 3.14, or
+        # without thread_inherit_context, every thread starts so.
+        thread = threading.Thread(target=contextvars.Context().run, args=(work,))
         thread.start()
         thread.join()
     refused, caller = seen
@@ -658,3 +943,128 @@ def test_the_advice_for_a_call_outside_requires_is_followed(
 def test_command_scope_is_public() -> None:
     assert neolith.command_scope is command_scope
     assert "command_scope" in neolith.__all__
+
+
+# Every UsageError a call or a command scope raises is in the docstrings.
+
+
+def _words(doc: str | None) -> str:
+    return " ".join((doc or "").split())
+
+
+def _no_scope() -> None:
+    contextvars.Context().run(couriers.quote, Sku(sku="ab"))
+
+
+def _closed_scope() -> None:
+    with command_scope("web"):
+        kept = contextvars.copy_context()
+    kept.run(couriers.quote, Sku(sku="ab"))
+
+
+def _closed_context() -> None:
+    with command_scope("web"):
+        held = _ambient()
+    assert held is not None
+    couriers.quote(Sku(sku="ab"), context=held.context)
+
+
+def _foreign_context() -> None:
+    made = CallContext(
+        principal=None,
+        trace_id="0" * 31 + "1",
+        span_id="0" * 15 + "1",
+        tracestate="",
+        deadline=None,
+        idempotency_key=None,
+        caller=None,
+        scope_id="x",
+    )
+    with command_scope("web"):
+        couriers.quote(Sku(sku="ab"), context=made)
+
+
+def _not_required() -> None:
+    with command_scope("couriers"):
+        stock.level(Sku(sku="a"))
+
+
+def _undeclared() -> None:
+    with _context.root("admin"):
+        couriers.quote(Sku(sku="ab"))
+
+
+def _not_provided() -> None:
+    # web requires couriers.v3 and stock.v1; every known one has a provider,
+    # so this case is reached by a connector recorded for another host.
+    with command_scope("web"):
+        neolith._host.Connector._made("nowhere.v1").quote(Sku(sku="ab"))
+
+
+def _unknown_identity() -> None:
+    connect("nowhere.v1")
+
+
+def _not_hosted() -> None:
+    with command_scope("nowhere"):
+        pass
+
+
+def _second_entry() -> None:
+    scope = command_scope("web")
+    with scope:
+        pass
+    with scope:
+        pass
+
+
+def _exit_not_current() -> None:
+    def run() -> None:
+        web = command_scope("web")
+        web.__enter__()
+        command_scope("stock").__enter__()
+        web.__exit__(None, None, None)
+
+    contextvars.copy_context().run(run)
+
+
+@pytest.mark.usefixtures("host")
+@pytest.mark.parametrize(
+    ("trigger", "usage", "on_connect"),
+    [
+        (_no_scope, "made in no open scope", "made in no open scope"),
+        (_closed_scope, "in one that has closed", "in one that has closed"),
+        (_closed_context, "a scope that has closed or that this host did", None),
+        (_foreign_context, "that this host did not issue", "did not issue"),
+        (
+            _not_required,
+            "does not require the contract",
+            "does not require",
+        ),
+        (_undeclared, "or whose app has no declaration", "or the app has none"),
+        (_not_provided, "contract no app of the host provides", "no app of the host"),
+        (_unknown_identity, "for a contract the host, once set up", None),
+        (_not_hosted, "for an app that is not hosted", None),
+        (_second_entry, "a second time", None),
+        (_exit_not_current, "by its exit when it is not the current", None),
+    ],
+)
+def test_every_usage_error_is_in_the_docstrings(
+    trigger: Callable[[], None], usage: str, on_connect: str | None
+) -> None:
+    with pytest.raises(UsageError):
+        trigger()
+    assert usage in _words(UsageError.__doc__)
+    if on_connect is not None:
+        assert on_connect in _words(connect.__doc__)
+
+
+def test_the_states_before_set_up_are_in_the_docstrings() -> None:
+    with pytest.raises(UsageError, match="not set up yet"):
+        couriers.quote(Sku(sku="ab"))
+    with pytest.raises(UsageError, match="not set up yet"), command_scope("web"):
+        pass
+    for phrase in ("before set-up has finished", "leaves neolith's app out"):
+        assert phrase in _words(UsageError.__doc__)
+    assert "before set-up has finished" in _words(connect.__doc__)
+    assert "neolith's app out" in _words(connect.__doc__)

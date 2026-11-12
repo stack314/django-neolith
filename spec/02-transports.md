@@ -117,7 +117,11 @@ Commands and background work run outside any request or call, so their code open
 
 **TRN-50.** An explicit root opened inside another scope MUST NOT take anything from that scope: not its app, its principal, its deadline or its trace.
 
-**TRN-51.** When an explicit root opened inside another scope closes, calls MUST be made in that enclosing scope again.
+**TRN-51.** When an explicit root opened inside another scope closes where it is the scope calls are made in, calls MUST be made in that enclosing scope again.
+
+An explicit root is opened and closed by one block of code that does not suspend in the middle and closes the roots opened in it first. A root held across a suspension, such as a generator that yields inside it, can close where calls run under another scope, and the enclosing scope cannot be made current again there.
+
+**TRN-53.** A host MUST report an explicit root that closes outside the flow of execution it was opened in, or where it is not the scope calls are made in, as a mistake in the calling code (CON-29). The root still closes (TRN-24), so a call made where it was left current is refused (TRN-25).
 
 **TRN-52.** A host MUST refuse to open one explicit root a second time, while it is open or after it has closed, as TRN-45 refuses.
 
