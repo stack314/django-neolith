@@ -371,7 +371,7 @@ def _validate_case(write_app: WriteApp, case: str) -> tuple[str, str]:
         )
         tail = (
             " does not import: {package}.services is not a module whose names can "
-            "be read (TypeError: vars() argument must have __dict__ attribute)"
+            "be read (TypeError: "
         )
     elif case == "module raises":
         services = "raise RuntimeError('broken at import')\n"
@@ -482,9 +482,9 @@ def test_an_implementation_outside_the_admitted_form_is_refused(
     package, tail = _validate_case(write_app, case)
     refusals = _refusals(package)
     head = f"app {package}: provides: stock.v1"
-    assert any(line.startswith(head) and line.endswith(tail) for line in refusals), (
-        refusals
-    )
+    # The tail ends with the cause where only its class is fixed: the message
+    # of a builtin error can change between Python versions.
+    assert any(line.startswith(head) and tail in line for line in refusals), refusals
     # A class outside the app is refused unbuilt.
     assert not any("raised OSError: built" in line for line in refusals)
 
@@ -1108,7 +1108,11 @@ def test_an_unreadable_signature_is_listed_beside_another_apps_refusal(
     refusals = _refusals(unreadable, other)
     assert len(refusals) == 2, refusals
     assert refusals[0].startswith(f"app {unreadable}: provides: stock.v1, ")
-    assert "action 'level': cannot read its signature (ValueError: " in refusals[0]
+    # Which error inspect raises for it depends on the Python version.
+    assert re.search(
+        r"action 'level': cannot read its signature \((ValueError|TypeError): ",
+        refusals[0],
+    ), refusals[0]
     assert refusals[1].startswith(f"app {other}: provides: billing.invoices.v1, ")
 
 
