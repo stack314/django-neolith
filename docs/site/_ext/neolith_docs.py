@@ -8,7 +8,10 @@
   ``scripts/citations.py`` finds (``CON-12``, ``ADR 0017``, ``spec 01``)
   becomes a link, outside headings, existing links, code and signatures. A
   citation of an unknown or withdrawn requirement, record or document is a
-  warning, so the build fails; one in a heading is checked but not linked.
+  warning, so the build fails; one in a heading or in a link's words is
+  checked but not linked, and so is a link to a withdrawn requirement's
+  anchor. A mirrored document and the generated requirement index may name a
+  withdrawn requirement, as history.
 - **Specified by, Decided in.** Each API entry that cites requirements, spec
   documents or records lists them after its text, with each record's status.
 - **Record status.** A record whose status is not ``Accepted`` gets a note
@@ -22,7 +25,9 @@
   defined, in a private module, takes that comment as its text.
 - **``{planned}``.** A block for behaviour that does not work yet, naming the
   roadmap step that delivers it; a step the roadmap does not list is a
-  warning.
+  warning. Only this block carries ``PLANNED_MARK``, which the check reads;
+  the class ``planned`` on anything else, and raw HTML that imitates the
+  block, are warnings.
 """
 
 from __future__ import annotations
@@ -31,16 +36,16 @@ import functools
 import re
 import typing
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any
 
 from docutils import nodes
-from docutils.parsers.rst import directives
 from sphinx import addnodes
 from sphinx.application import Sphinx
 from sphinx.ext.autodoc import Options
 from sphinx.pycode import ModuleAnalyzer
 from sphinx.util import logging
 from sphinx.util.docutils import SphinxDirective
+from sphinx.writers.html5 import HTML5Translator
 
 from scripts import citations
 
@@ -68,6 +73,12 @@ _NOT_LINKED = (
     addnodes.toctree,
 )
 _REQUIREMENT_CLASS = "neolith-requirement"
+#: The attribute only a ``{planned}`` block carries; scripts/docs.py reads it.
+PLANNED_MARK = "data-neolith-planned"
+_PLANNED_CLASS = re.compile(r"""class\s*=\s*["']?[^"'>]*\bplanned\b""")
+_ANCHOR = re.compile(r"([a-z]+)-(\d+)")
+# The generated index lists every requirement, withdrawn ones too.
+_INDEX = "reference/requirements"
 
 
 class _Site:
@@ -206,6 +217,7 @@ def _doctree_read(app: Sphinx, doctree: nodes.document) -> None:
     docname = app.env.docname
     _drop_alias_values(doctree)
     _public_references(doctree)
+    _refuse_planned_lookalikes(doctree)
     if not docname.startswith("spec/") or docname == "spec/index":
         return
     site = _site(app)
@@ -252,35 +264,47 @@ def _inside(node: nodes.Node, kinds: tuple[type, ...]) -> bool:
     return False
 
 
+def _withdrawn_links(app: Sphinx, doctree: nodes.document, docname: str) -> None:
+    """Warn on a link to a withdrawn requirement's anchor, outside history."""
+    if docname in app.config.neolith_mirrored or docname == _INDEX:
+        return
+    withdrawn = _site(app).records.withdrawn
+    for reference in doctree.findall(nodes.reference):
+        anchor = _ANCHOR.fullmatch(reference.get("refuri", "").partition("#")[2])
+        if anchor and anchor[0].upper() in withdrawn:
+            _log.warning(
+                "links to withdrawn requirement %s",
+                anchor[0].upper(),
+                location=reference,
+            )
+
+
 def _link_citations(app: Sphinx, doctree: nodes.document, docname: str) -> None:
     site = _site(app)
     builder = app.builder
-    mirrored = docname in app.config.neolith_mirrored
+    history = docname in app.config.neolith_mirrored or docname == _INDEX
     for text in list(doctree.findall(nodes.Text)):
         if _inside(text, _CODE):
             continue
         found = sorted(citations.find(str(text)), key=lambda c: c.start)
         if not found:
             continue
-        if _inside(text, (nodes.reference,)):
-            # Already a link: its target, not its words, is what is checked.
-            continue
         good = []
         for citation in found:
-            if citation.kind == citations.REQUIREMENT and (
-                citation.key in citations.NOT_IDS
-                or (mirrored and citation.key in site.records.withdrawn)
-            ):
-                # A mirrored document may name a withdrawn requirement, as
-                # its history; the link leads to the struck-through text.
-                if citation.key in site.records.withdrawn:
+            if citation.kind == citations.REQUIREMENT:
+                if citation.key in citations.NOT_IDS:
+                    continue
+                if history and citation.key in site.records.withdrawn:
+                    # A mirrored document may name a withdrawn requirement as
+                    # its history; the link leads to the struck-through text.
                     good.append(citation)
-                continue
+                    continue
             problem = site.records.problem(citation)
             if problem is None:
                 good.append(citation)
             else:
                 _log.warning("%s", problem, location=text.parent)
+        # Words already inside a link are checked above, and not linked again.
         if not good or _inside(text, _NOT_LINKED):
             continue
         source = str(text)
@@ -312,6 +336,7 @@ def _plain_repository_links(app: Sphinx, doctree: nodes.document) -> None:
 
 def _doctree_resolved(app: Sphinx, doctree: nodes.document, docname: str) -> None:
     _plain_repository_links(app, doctree)
+    _withdrawn_links(app, doctree, docname)
     _link_citations(app, doctree, docname)
 
 
@@ -376,26 +401,60 @@ def _process_docstring(
 # The {planned} block.
 
 
+class planned(nodes.Admonition, nodes.Element):
+    """A ``{planned}`` block; the only element that carries ``PLANNED_MARK``."""
+
+
+def _visit_planned(translator: HTML5Translator, node: planned) -> None:
+    marks = {PLANNED_MARK: node["step"]} if node["step"] else {}
+    translator.body.append(
+        translator.starttag(node, "div", CLASS="admonition planned", **marks)
+    )
+
+
+def _depart_planned(translator: HTML5Translator, node: planned) -> None:
+    translator.body.append("</div>\n")
+
+
 class Planned(SphinxDirective):
-    """Behaviour that does not work yet, with the roadmap step that delivers it."""
+    """Behaviour that does not work yet, with the roadmap step that delivers it.
+
+    The block carries ``PLANNED_MARK`` only when the roadmap lists the step,
+    and nothing else can carry it, so the check exempts only this block.
+    """
 
     required_arguments = 1
     has_content = True
-    option_spec: ClassVar[dict[str, Any]] = {"class": directives.class_option}
 
     def run(self) -> list[nodes.Node]:
         """Build the block; warn if the roadmap lists no such step."""
         step = self.arguments[0]
-        if step not in _site_at(self.config.neolith_root).steps:
+        known = step in _site_at(self.config.neolith_root).steps
+        if not known:
             _log.warning(
                 "{planned} names roadmap step %s, which the roadmap does not list",
                 step,
                 location=self.get_location(),
             )
-        block = nodes.admonition(classes=["planned"])
+        block = planned(step=step if known else "")
         block += nodes.title("", f"Planned: roadmap step {step}")
         self.state.nested_parse(self.content, self.content_offset, block)
         return [block]
+
+
+def _refuse_planned_lookalikes(doctree: nodes.document) -> None:
+    """Warn where anything but a ``{planned}`` block claims to be one."""
+    for node in doctree.findall(nodes.Element):
+        if isinstance(node, planned):
+            continue
+        if "planned" in node.get("classes", []):
+            _log.warning(
+                'the class "planned" belongs to {planned} blocks only', location=node
+            )
+        if isinstance(node, nodes.raw) and (
+            PLANNED_MARK in node.astext() or _PLANNED_CLASS.search(node.astext())
+        ):
+            _log.warning("raw HTML may not imitate a {planned} block", location=node)
 
 
 def _page_context(
@@ -419,6 +478,7 @@ def setup(app: Sphinx) -> dict[str, Any]:
     app.add_config_value("neolith_repo_public", False, "env", bool)
     app.add_config_value("neolith_development", True, "env", bool)
     app.add_config_value("neolith_mirrored", (), "env", tuple)
+    app.add_node(planned, html=(_visit_planned, _depart_planned))
     app.add_directive("planned", Planned)
     app.connect("source-read", _source_read)
     app.connect("doctree-read", _doctree_read)

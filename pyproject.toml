@@ -60,7 +60,8 @@ test = [
 # sphinx, myst-parser and pydata-sphinx-theme: the documentation site, built
 # by scripts/docs.py (ADR 0024). Sphinx 9.2 needs Python 3.13, so on an older
 # interpreter the group installs none of them; the library's floor stays 3.12.
-# Pinned so that a build cannot drift.
+# The direct dependencies are pinned exactly; their own dependencies follow
+# the ranges those packages declare.
 docs = [
     "sphinx==9.2.0; python_version >= '3.13'",
     "myst-parser==5.2.0; python_version >= '3.13'",

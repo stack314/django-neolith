@@ -53,7 +53,7 @@ napoleon_numpy_docstring = False
 napoleon_use_rtype = False
 
 intersphinx_mapping = {
-    name: (base, str(docs.CACHE / f"{name}.inv"))
+    name: (base, str(docs.inventory_file(name)))
     for name, (base, _) in docs.INVENTORIES.items()
 }
 intersphinx_timeout = 30

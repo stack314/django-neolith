@@ -10,6 +10,9 @@ Usage::
 Building needs the ``docs`` dependency group, which needs Python 3.13 or newer.
 Staging and the checks need only the ``test`` group.
 
+Every step runs and reports, whatever an earlier one found, so one run lists
+every problem: staging's, then Sphinx's, then the HTML rules'.
+
 **Stage** writes a throwaway source tree, so the build never writes into the
 repository:
 
@@ -18,36 +21,43 @@ repository:
   targets change: a link to a mirrored file points at its page, and a link to
   any other file of the repository points at it on GitHub at the built
   commit. markdown-it-py parses the source and the staged copy, and every
-  token but a link's target must be equal. A link to a path that does not
-  exist is a problem;
+  token but a link's target must be equal, or the file is left out. A link
+  to a path that does not exist is a problem;
 - the API reference, one page per group of ``API_GROUPS``, which must name
   each name of ``neolith.__all__`` but ``__version__`` exactly once;
-- the index of requirement IDs, read with ``scripts/spec_trace.py``.
+- the index of requirement IDs, read with ``scripts/spec_trace.py``, whose
+  problems are reported too.
 
-Any staged page that holds an email address is a problem, and the file is
-not built.
+A staged page that holds an email address is a problem, and is left out.
 
-**Build** runs Sphinx with ``-W -n --keep-going``: a warning, an unresolved
-reference or a citation of an unknown or withdrawn requirement, record or
-spec document fails it. The extension ``docs/site/_ext/neolith_docs.py``
+**Build** runs Sphinx with ``-W -n --keep-going`` and reports each warning: an
+unresolved reference, or a citation of an unknown or withdrawn requirement,
+record or spec document. The extension ``docs/site/_ext/neolith_docs.py``
 anchors requirements and links citations.
 
-**Check** reads every built page and refuses, on every page: a missing
-footer, a missing ``noindex`` or banner on a development build, an email
-address, something shaped like a secret, a script or stylesheet from another
-origin, a link or anchor that leads nowhere, and a ``<main>`` without a
-heading and text (the page must read without JavaScript; the search page is
-exempt). On pages the site writes or generates (everything that is not
-mirrored), it also refuses ``neolith._``, the word "official", a person's
-name, words about how the code is written, an install command on a
-development build, and words about planned behaviour outside a ``{planned}``
-block.
+**Check** reads every built file as a reader gets it: the page's text with
+character references decoded, its link targets decoded, and the raw file.
+On every page it refuses: no footer in the ``<footer>``, no ``noindex`` or
+no banner in the announcement on a development build, an email address,
+something shaped like a secret (in any text file), a script, stylesheet or
+CSS ``url()`` from another origin, a link or anchor that leads nowhere, and
+a ``<main>`` without a heading or text (the page must read without
+JavaScript; the search page is exempt). On pages the site writes or
+generates (everything that is not mirrored), it also refuses ``neolith._``,
+the word "official", the names of the project's authors and copyright
+holder, words about how the code is written and an install command on a
+development build, anywhere in ``<main>``; and words about planned
+behaviour outside a ``{planned}`` block, which alone carries
+``PLANNED_MARK``. The word rules are a backstop for review, not a proof.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
+import hashlib
 import inspect
+import io
 import posixpath
 import re
 import shutil
@@ -81,7 +91,7 @@ API_GROUPS: dict[str, tuple[str, str, tuple[str, ...]]] = {
     "apps": (
         "Apps and hosts",
         "Declaring an app, and connecting to a contract (spec 05).",
-        ("NeolithAppConfig", "Provided", "connect"),
+        ("NeolithAppConfig", "Provided", "connect", "Connector"),
     ),
     "call-context": (
         "Call context",
@@ -146,7 +156,8 @@ _HOW_WRITTEN = re.compile(
     r"|machine-generated|AI-generated)\b"
 )
 _INSTALL = re.compile(
-    r"\b(?:pip|pip3|pipx|uv|poetry|pdm|conda)\s+(?:install|add)\b|django-neolith=="
+    r"\b(?:pip|pip3|pipx|pipenv|uv|poetry|pdm|hatch|conda)\s+(?:install|add)\b"
+    r"|django-neolith=="
 )
 _PLANNED = re.compile(
     r"\b(?:will|planned|upcoming|coming soon|not yet (?:implemented|supported|"
@@ -404,24 +415,24 @@ def _directive(package: object, name: str) -> str:
     return f".. autodata:: neolith.{name}\n   :no-value:\n"
 
 
-def api_pages(package: object) -> dict[str, str]:
+def api_pages(package: object) -> tuple[dict[str, str], list[str]]:
     """The reference pages: one per group, then the index of groups.
+
+    A group page documents only the names that are public, so a problem with
+    the group map is reported and the rest of the reference still builds.
 
     Args:
         package: The ``neolith`` package.
 
     Returns:
-        Staged paths to page text.
-
-    Raises:
-        DocsError: ``API_GROUPS`` and ``__all__`` disagree.
+        Staged paths to page text, and one line per problem of ``group_problems``.
     """
-    problems = group_problems(public_names(package))
-    if problems:
-        raise DocsError("\n".join(problems))
+    public = public_names(package)
     pages = {}
     for slug, (title, intro, names) in API_GROUPS.items():
-        body = "".join("\n" + _directive(package, name) for name in names)
+        body = "".join(
+            "\n" + _directive(package, name) for name in names if name in public
+        )
         pages[f"reference/api/{slug}.md"] = (
             f"# {title}\n\n{intro}\n\n```{{eval-rst}}{body}```\n"
         )
@@ -430,21 +441,21 @@ def api_pages(package: object) -> dict[str, str]:
         "# API\n\nEvery name the `neolith` package exports, by group.\n\n"
         f"```{{toctree}}\n:maxdepth: 1\n\n{entries}\n```\n"
     )
-    return pages
+    return pages, group_problems(public)
 
 
-def requirements_page(spec_dir: Path, table: Mapping[str, str]) -> str:
+def requirements_page(
+    spec_dir: Path, table: Mapping[str, str]
+) -> tuple[str, list[str]]:
     """The index of requirement IDs, with each one's document and level.
 
-    Raises:
-        DocsError: the specification has a problem ``spec_trace`` reports.
+    Returns:
+        The page, and each problem ``spec_trace`` reports in the specification.
     """
     from scripts import spec_trace
 
     trace = spec_trace.Trace()
     spec_trace.read_spec(spec_dir, trace)
-    if trace.problems:
-        raise DocsError("\n".join(trace.problems))
     rows = []
     for rid, found in trace.requirements.items():
         page = posixpath.relpath(table[f"spec/{found.document}"], "reference")
@@ -452,17 +463,19 @@ def requirements_page(spec_dir: Path, table: Mapping[str, str]) -> str:
         rows.append(
             f"| [{rid}]({page}#{rid.lower()}) | spec {found.document[:2]} | {state} |"
         )
-    return (
+    page = (
         "# Requirements\n\nEvery requirement ID in the specification, with its "
         "document and its level. A withdrawn ID keeps its place and its "
         "anchor.\n\n| ID | Document | Level |\n|---|---|---|\n" + "\n".join(rows) + "\n"
     )
+    return page, [f"spec/{problem}" for problem in trace.problems]
 
 
 # Staging
 
 
 def repo_url(root: Path) -> str:
+    """The repository on GitHub, from ``project.urls.Source``."""
     with (root / "pyproject.toml").open("rb") as file:
         url = tomllib.load(file)["project"]["urls"]["Source"]
     if not isinstance(url, str):
@@ -485,8 +498,27 @@ def commit(root: Path) -> str:
     return done.stdout.strip()
 
 
-def fetch_inventories(cache: Path) -> list[str]:
-    """Download each intersphinx inventory once into ``cache``.
+def development(root: Path) -> bool:
+    """Whether the source is a development version, as ``__version__`` says."""
+    text = (root / "src" / "neolith" / "__init__.py").read_text(encoding="utf-8")
+    found = re.search(r'^__version__ = "([^"]+)"$', text, re.MULTILINE)
+    if found is None:
+        raise DocsError("src/neolith/__init__.py: no __version__")
+    return ".dev" in found[1]
+
+
+def inventory_file(name: str, cache: Path = CACHE) -> Path:
+    """Where the inventory ``name`` is cached: one file per URL it comes from."""
+    base, path = INVENTORIES[name]
+    digest = hashlib.sha256((base + path).encode()).hexdigest()[:16]
+    return cache / f"{name}-{digest}.inv"
+
+
+def fetch_inventories(cache: Path = CACHE) -> list[str]:
+    """Download each intersphinx inventory into ``cache`` unless it is there.
+
+    The file is named by its URL, so a changed URL fetches anew. A cached
+    inventory is a snapshot: it is not refreshed while it exists.
 
     Returns:
         One line per inventory that is neither cached nor downloadable.
@@ -494,7 +526,7 @@ def fetch_inventories(cache: Path) -> list[str]:
     problems = []
     cache.mkdir(parents=True, exist_ok=True)
     for name, (base, path) in INVENTORIES.items():
-        target = cache / f"{name}.inv"
+        target = inventory_file(name, cache)
         if target.exists():
             continue
         url = base + path
@@ -510,10 +542,27 @@ def fetch_inventories(cache: Path) -> list[str]:
     return problems
 
 
+@dataclass
+class Result:
+    """What a step produced, and every problem it found.
+
+    Attributes:
+        path: The staged source or the HTML directory.
+        problems: One line per problem.
+    """
+
+    path: Path
+    problems: list[str] = field(default_factory=list)
+
+
 def stage(
     root: Path = ROOT, out: Path = OUT, extra: Mapping[str, str] | None = None
-) -> Path:
-    """Write the site's source tree under ``out/src``.
+) -> Result:
+    """Write the site's source tree under ``out/src``, and collect its problems.
+
+    Every check runs, whatever the others found. A mirrored file whose staged
+    copy differs beyond its links, and a page that holds an email address,
+    are left out of the tree; everything else is written.
 
     Args:
         root: The repository root.
@@ -521,20 +570,14 @@ def stage(
         extra: More pages, by staged path, as site-written pages.
 
     Returns:
-        The staged source directory.
-
-    Raises:
-        DocsError: a mirrored file changed beyond its links, a link leads
-            nowhere, a page holds an email address, or the API groups and
-            ``__all__`` disagree.
+        The staged source directory, with every problem found.
     """
     problems: list[str] = []
     source = out / "src"
     if source.exists():
         shutil.rmtree(source)
-    site = root / "docs" / "site"
     shutil.copytree(
-        site,
+        root / "docs" / "site",
         source,
         ignore=shutil.ignore_patterns(
             "conf.py", "_ext", "_templates", "_static", "__pycache__"
@@ -542,15 +585,15 @@ def stage(
     )
     table = mirror_table(root)
     links = Links(root, table, repo_url(root), commit(root))
+    pages: dict[str, str] = {}
     for repo_path, staged_path in table.items():
         original = (root / repo_path).read_text(encoding="utf-8")
         staged = rewrite_links(original, repo_path, links)
         differs = same_text(original, staged)
         if differs:
             problems.append(f"{repo_path}: staging changed more than links: {differs}")
-        target = source / staged_path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(staged, encoding="utf-8")
+        else:
+            pages[staged_path] = staged
     problems.extend(links.problems)
 
     sys.path.insert(0, str(root / "src"))
@@ -558,13 +601,14 @@ def stage(
         import neolith
     finally:
         sys.path.remove(str(root / "src"))
-    try:
-        generated = api_pages(neolith)
-        generated["reference/requirements.md"] = requirements_page(root / "spec", table)
-    except DocsError as error:
-        problems.append(str(error))
-        generated = {}
-    for staged_path, text in {**generated, **(extra or {})}.items():
+    generated, said = api_pages(neolith)
+    problems.extend(said)
+    pages.update(generated)
+    requirements, said = requirements_page(root / "spec", table)
+    problems.extend(said)
+    pages["reference/requirements.md"] = requirements
+    pages.update(extra or {})
+    for staged_path, text in pages.items():
         target = source / staged_path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text, encoding="utf-8")
@@ -574,32 +618,45 @@ def stage(
         if lines:
             where = ", ".join(map(str, lines))
             problems.append(
-                f"{page.relative_to(source)}: an email address on line {where}"
+                f"{page.relative_to(source).as_posix()}: an email address on "
+                f"line {where}; the page is left out"
             )
-    if problems:
-        raise DocsError("\n".join(problems))
-    return source
+            page.unlink()
+    return Result(source, problems)
 
 
 # Building
 
 
+def _warnings(path: Path, source: Path) -> list[str]:
+    """The warnings Sphinx wrote, one line each, relative to the staged tree."""
+    if not path.exists():
+        return []
+    found: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        if re.search(r"\b(?:WARNING|ERROR|CRITICAL|SEVERE):", line) or not found:
+            found.append(line.replace(str(source) + "/", ""))
+        else:
+            found[-1] += " " + line.strip()
+    return found
+
+
 def build(
     root: Path = ROOT, out: Path = OUT, extra: Mapping[str, str] | None = None
-) -> Path:
-    """Stage, then build the HTML with Sphinx, failing on any warning.
+) -> Result:
+    """Stage, then build the HTML with Sphinx, collecting every problem.
+
+    Sphinx runs with ``-W -n --keep-going`` whatever staging found, so its
+    warnings are reported with staging's.
 
     Returns:
-        The HTML directory.
+        The HTML directory, with the problems of staging and every warning.
 
     Raises:
-        DocsError: staging failed, an inventory cannot be fetched, or Sphinx
-            warned.
+        DocsError: Sphinx is not installed.
     """
-    source = stage(root, out, extra)
-    problems = fetch_inventories(CACHE)
-    if problems:
-        raise DocsError("\n".join(problems))
     try:
         from sphinx.cmd.build import build_main
     except ImportError as error:
@@ -607,51 +664,75 @@ def build(
             "building needs the docs dependency group, which needs Python 3.13 "
             "or newer: python -m pip install -e . --group docs"
         ) from error
-
+    staged = stage(root, out, extra)
+    problems = staged.problems + fetch_inventories()
     html = out / "html"
     if html.exists():
         shutil.rmtree(html)
-    status = build_main(
-        [
-            "-b",
-            "dirhtml",
-            "-c",
-            str(root / "docs" / "site"),
-            "-d",
-            str(out / "doctrees"),
-            "-E",
-            "-W",
-            "-n",
-            "--keep-going",
-            "-q",
-            str(source),
-            str(html),
-        ]
-    )
-    if status:
-        raise DocsError("Sphinx reported the warnings above")
-    return html
+    warnings = out / "warnings.txt"
+    warnings.unlink(missing_ok=True)
+    # Sphinx's own output is kept, and shown only if it failed without a
+    # warning; each warning comes from the file -w writes.
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+        status = build_main(
+            [
+                "-b",
+                "dirhtml",
+                "-c",
+                str(root / "docs" / "site"),
+                "-d",
+                str(out / "doctrees"),
+                "-E",
+                "-W",
+                "-n",
+                "--keep-going",
+                "-q",
+                "-w",
+                str(warnings),
+                str(staged.path),
+                str(html),
+            ]
+        )
+    said = _warnings(warnings, staged.path)
+    problems.extend(said)
+    if status and not said:
+        problems.append(f"Sphinx failed with status {status}:\n{output.getvalue()}")
+    return Result(html, problems)
 
 
 # Checking the HTML
 
+_FOREIGN_CSS = re.compile(r"""(?:url\(\s*['"]?|@import\s+['"]?)\s*(?:https?:)?//""")
+_TEXT_FILES = (".html", ".js", ".css", ".txt", ".json", ".xml", ".svg", ".map")
+
 
 class _Page(HTMLParser):
-    """What the checks read from one page."""
+    """What the checks read from one page, as a reader's browser shows it."""
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.ids: set[str] = set()
         self.links: list[str] = []
+        self.hrefs: list[str] = []
         self.foreign: list[str] = []
         self.robots: list[str] = []
+        self.text: list[str] = []
         self.main_text: list[str] = []
         self.planned_text: list[str] = []
+        self.footer_text: list[str] = []
+        self.banner_text: list[str] = []
+        self.styles: list[str] = []
         self.has_h1 = False
-        self._main = 0
-        self._planned = 0
-        self._skip = 0
-        self._stack: list[tuple[str, bool, bool]] = []
+        self._open: dict[str, int] = {
+            "main": 0,
+            "planned": 0,
+            "footer": 0,
+            "banner": 0,
+            "skip": 0,
+            "style": 0,
+        }
+        self._stack: list[tuple[str, tuple[str, ...]]] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         values = {name: value or "" for name, value in attrs}
@@ -659,42 +740,81 @@ class _Page(HTMLParser):
             self.ids.add(values["id"])
         if values.get("name") and tag == "a":
             self.ids.add(values["name"])
-        if tag == "meta" and values.get("name") == "robots":
+        if tag == "meta" and values.get("name", "").lower() == "robots":
             self.robots.append(values.get("content", ""))
         for name in ("href", "src"):
-            if name in values and tag in ("a", "link", "script", "img", "iframe"):
-                link = values[name]
-                if tag != "a" and re.match(r"(?:https?:)?//", link):
-                    self.foreign.append(link)
-                elif (
-                    tag == "a" or name == "src" or "stylesheet" in values.get("rel", "")
-                ):
-                    self.links.append(link)
+            if name not in values:
+                continue
+            link = values[name]
+            self.hrefs.append(urllib.parse.unquote(link))
+            if tag not in ("a", "link", "script", "img", "iframe", "source"):
+                continue
+            if tag != "a" and re.match(r"(?:https?:)?//", link):
+                self.foreign.append(link)
+            elif tag == "a" or name == "src" or "stylesheet" in values.get("rel", ""):
+                self.links.append(link)
+        if "style" in values:
+            self.styles.append(values["style"])
         if tag in ("br", "img", "meta", "link", "input", "hr", "wbr", "source"):
             return
-        main = tag == "main"
-        planned = "planned" in values.get("class", "").split()
-        self._stack.append((tag, main, planned))
-        self._main += main
-        self._planned += planned
-        if tag in ("script", "style"):
-            self._skip += 1
-        if tag == "h1" and self._main:
+        classes = values.get("class", "").split()
+        opened = tuple(
+            kind
+            for kind, here in (
+                ("main", tag == "main"),
+                (
+                    "planned",
+                    re.fullmatch(r"\d+", values.get(PLANNED_MARK, "")) is not None,
+                ),
+                ("footer", tag == "footer"),
+                (
+                    "banner",
+                    any(c.startswith("bd-header-announcement") for c in classes),
+                ),
+                ("skip", tag in ("script", "style", "template")),
+                ("style", tag == "style"),
+            )
+            if here
+        )
+        self._stack.append((tag, opened))
+        for kind in opened:
+            self._open[kind] += 1
+        if tag == "h1" and self._open["main"]:
             self.has_h1 = True
 
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.handle_starttag(tag, attrs)
+        if tag not in ("br", "img", "meta", "link", "input", "hr", "wbr", "source"):
+            self.handle_endtag(tag)
+
     def handle_endtag(self, tag: str) -> None:
+        if not any(name == tag for name, _ in self._stack):
+            return
         while self._stack:
-            name, main, planned = self._stack.pop()
-            self._main -= main
-            self._planned -= planned
-            if name in ("script", "style"):
-                self._skip -= 1
+            name, opened = self._stack.pop()
+            for kind in opened:
+                self._open[kind] -= 1
             if name == tag:
                 break
 
     def handle_data(self, data: str) -> None:
-        if self._main and not self._skip:
-            (self.planned_text if self._planned else self.main_text).append(data)
+        if self._open["style"]:
+            self.styles.append(data)
+        if self._open["skip"]:
+            return
+        self.text.append(data)
+        if self._open["footer"]:
+            self.footer_text.append(data)
+        if self._open["banner"]:
+            self.banner_text.append(data)
+        if self._open["main"]:
+            (self.planned_text if self._open["planned"] else self.main_text).append(
+                data
+            )
+
+
+#: The attribute the ``{planned}`` directive alone writes, holding the step.
+PLANNED_MARK = "data-neolith-planned"
 
 
 def _people(root: Path) -> list[str]:
@@ -715,26 +835,28 @@ def _people(root: Path) -> list[str]:
     return sorted(words)
 
 
-def _page_path(html: Path, page: Path) -> str:
-    """The URL path of a built page, relative to the site root, with a trailing /."""
-    rel = page.relative_to(html).as_posix()
-    if rel == "index.html":
-        return ""
-    if rel.endswith("/index.html"):
-        return rel[: -len("index.html")]
-    return rel
-
-
-def _mirrored_pages(root: Path) -> set[str]:
-    pages = set()
+def _mirrored_files(root: Path) -> set[str]:
+    """The built files of the mirrored pages, relative to the site root."""
+    files = set()
     for staged in mirror_table(root).values():
         stem = staged[: -len(".md")]
-        pages.add(stem[: -len("index")] if stem.endswith("index") else stem + "/")
-    return pages
+        files.add(stem + ".html" if stem.endswith("index") else stem + "/index.html")
+    return files
+
+
+def _joined(parts: list[str]) -> str:
+    return " ".join("".join(parts).split())
+
+
+def _matches(pattern: re.Pattern[str], text: str) -> list[str]:
+    return sorted({found[0] for found in pattern.finditer(text)})
 
 
 def check_html(html: Path, root: Path = ROOT, development: bool = True) -> list[str]:
-    """Check every built page against the site rules.
+    """Check every built file and page against the site rules.
+
+    The rules read what a reader gets: the page's text with its character
+    references decoded, and its link targets decoded, as well as the raw file.
 
     Args:
         html: The built site.
@@ -746,117 +868,132 @@ def check_html(html: Path, root: Path = ROOT, development: bool = True) -> list[
         One line per problem.
     """
     problems: list[str] = []
-    mirrored = _mirrored_pages(root)
+    mirrored = _mirrored_files(root)
     people = _people(root)
+    names = (
+        re.compile(r"\b(?:" + "|".join(map(re.escape, people)) + r")\b", re.IGNORECASE)
+        if people
+        else None
+    )
     pages: dict[str, _Page] = {}
-    files = sorted(html.rglob("*"))
-    for path in files:
-        if not path.is_file():
+    for path in sorted(html.rglob("*")):
+        if not path.is_file() or path.suffix not in _TEXT_FILES:
             continue
-        if path.suffix in (".html", ".js", ".css", ".txt", ".json", ".xml"):
-            text = path.read_text(encoding="utf-8", errors="replace")
-            where = path.relative_to(html).as_posix()
-            if _SECRETS.search(text):
-                problems.append(f"{where}: holds something shaped like a secret")
-            if path.suffix == ".html" and _EMAIL.search(text):
-                problems.append(f"{where}: holds an email address")
-        if path.suffix != ".html" or path.parts[len(html.parts)] == "_static":
+        rel = path.relative_to(html).as_posix()
+        raw = path.read_text(encoding="utf-8", errors="replace")
+        page = _Page()
+        if path.suffix == ".html":
+            page.feed(raw)
+            page.close()
+        seen = [raw, "".join(page.text), " ".join(page.hrefs)]
+        count = len({found[0] for text in seen for found in _SECRETS.finditer(text)})
+        if count:
+            problems.append(f"{rel}: holds {count} thing(s) shaped like a secret")
+        if path.suffix == ".css" or page.styles:
+            css = raw if path.suffix == ".css" else "\n".join(page.styles)
+            if _FOREIGN_CSS.search(css):
+                problems.append(f"{rel}: its CSS loads from another origin")
+        if path.suffix != ".html" or rel.startswith("_static/"):
             continue
-        text = path.read_text(encoding="utf-8")
-        parsed = _Page()
-        parsed.feed(text)
-        url = _page_path(html, path)
-        pages[url] = parsed
-        name = url or "/"
-        for link in parsed.links:
-            file = urllib.parse.unquote(link.partition("#")[0].partition("?")[0])
-            if file and not _SCHEME.match(file) and not file.startswith("/"):
-                suffix = posixpath.splitext(file)[1]
-                if suffix and suffix != ".html" and not (path.parent / file).exists():
-                    problems.append(f"{name}: {link} does not exist")
-        if FOOTER not in text:
-            problems.append(f"{name}: no footer")
-        if development:
-            if not any("noindex" in robots for robots in parsed.robots):
-                problems.append(f"{name}: no noindex on a development build")
-            if BANNER not in text:
-                problems.append(f"{name}: no development banner")
-        problems.extend(
-            f"{name}: loads {link} from another origin" for link in parsed.foreign
+        pages[rel] = page
+        addresses = sorted(
+            {found[0] for text in seen for found in _EMAIL.finditer(text)}
         )
-        main = " ".join(" ".join(parsed.main_text).split())
-        if url != "search/" and (not parsed.has_h1 or len(main) < 40):
-            problems.append(
-                f"{name}: <main> has no heading and text without JavaScript"
-            )
-        if url in mirrored:
+        problems.extend(f"{rel}: holds the email address {a}" for a in addresses)
+        problems.extend(
+            f"{rel}: links to {href}"
+            for href in page.hrefs
+            if href.lower().startswith("mailto:")
+        )
+        problems.extend(f"{rel}: {p}" for p in _page_problems(page, rel, development))
+        if rel in mirrored:
             continue
+        main = _joined(page.main_text)
+        everything = _joined([*page.main_text, " ", *page.planned_text])
         rules = [
-            (_PRIVATE, text, "names a private module"),
-            (_OFFICIAL, main, "says official"),
-            (_HOW_WRITTEN, main, "says how the code is written"),
+            (_PRIVATE, raw + " ".join(page.hrefs), "names a private module"),
+            (_OFFICIAL, everything, "says official"),
+            (_HOW_WRITTEN, everything, "says how the code is written"),
             (_PLANNED, main, "describes planned behaviour outside a {planned} block"),
         ]
         if development:
-            rules.append((_INSTALL, main, "shows an install command before a release"))
-        if people:
-            names = re.compile(r"\b(?:" + "|".join(map(re.escape, people)) + r")\b")
-            rules.append((names, main, "names a person"))
-        for pattern, where, what in rules:
-            found = pattern.search(where)
-            if found:
-                problems.append(f"{name}: {what} ({found[0]!r})")
-    for url, parsed in pages.items():
-        problems.extend(_link_problems(url or "/", url, parsed.links, pages))
+            rules.append(
+                (_INSTALL, everything, "shows an install command before a release")
+            )
+        if names is not None:
+            rules.append((names, everything, "names a person"))
+        for pattern, text, what in rules:
+            problems.extend(
+                f"{rel}: {what} ({word!r})" for word in _matches(pattern, text)
+            )
+    for rel, page in pages.items():
+        problems.extend(_link_problems(html, rel, page.links, pages))
     return problems
 
 
+def _page_problems(page: _Page, rel: str, development: bool) -> Iterator[str]:
+    if FOOTER not in _joined(page.footer_text):
+        yield "no footer"
+    if development:
+        if not any("noindex" in robots.lower() for robots in page.robots):
+            yield "no noindex on a development build"
+        if BANNER not in _joined(page.banner_text):
+            yield "no development banner"
+    yield from (f"loads {link} from another origin" for link in page.foreign)
+    if rel != "search/index.html":
+        if not page.has_h1:
+            yield "<main> has no heading without JavaScript"
+        if len(_joined(page.main_text + page.planned_text)) < 40:
+            yield "<main> has no text without JavaScript"
+
+
 def _link_problems(
-    name: str, url: str, links: list[str], pages: Mapping[str, _Page]
+    html: Path, rel: str, links: list[str], pages: Mapping[str, _Page]
 ) -> Iterator[str]:
+    here = posixpath.dirname(rel)
     for link in links:
         if not link or _SCHEME.match(link) or link.startswith("//"):
             continue
         path, _, fragment = link.partition("#")
         path = urllib.parse.unquote(path.partition("?")[0])
         if path.startswith("/"):
-            yield f"{name}: links to {link}, an absolute path"
+            yield f"{rel}: links to {link}, an absolute path"
             continue
         if not path:
-            target = url
+            target = rel
         else:
-            joined = posixpath.normpath(posixpath.join(url or ".", path))
+            joined = posixpath.normpath(posixpath.join(here or ".", path))
             if joined == ".." or joined.startswith("../"):
-                yield f"{name}: links to {link}, outside the site"
+                yield f"{rel}: links to {link}, outside the site"
                 continue
-            if joined.endswith("index.html"):
-                joined = posixpath.dirname(joined)
-            elif posixpath.splitext(joined)[1]:
-                continue  # a file, checked where the page is read
-            target = "" if joined in (".", "") else joined + "/"
+            if path.endswith("/") or not posixpath.splitext(joined)[1]:
+                joined = posixpath.join("" if joined == "." else joined, "index.html")
+            target = joined
+        if not (html / target).is_file():
+            yield f"{rel}: links to {link}, which does not exist"
+            continue
         page = pages.get(target)
-        if page is None:
-            yield f"{name}: links to {link}, which is not a page"
-        elif fragment and urllib.parse.unquote(fragment) not in page.ids:
-            yield f"{name}: links to {link}, an anchor the page lacks"
+        if (
+            fragment
+            and page is not None
+            and urllib.parse.unquote(fragment) not in page.ids
+        ):
+            yield f"{rel}: links to {link}, an anchor the page lacks"
 
 
 def check(
     root: Path = ROOT, out: Path = OUT, extra: Mapping[str, str] | None = None
 ) -> list[str]:
-    """Build the site, then check it.
+    """Build the site and check it, reporting every problem of every step.
 
     Returns:
-        One line per problem.
+        One line per problem: staging's, Sphinx's, then the HTML rules'.
     """
-    html = build(root, out, extra)
-    sys.path.insert(0, str(root / "src"))
-    try:
-        import neolith
-    finally:
-        sys.path.remove(str(root / "src"))
-    development = ".dev" in neolith.__version__
-    return check_html(html, root, development)
+    built = build(root, out, extra)
+    problems = list(built.problems)
+    if built.path.is_dir():
+        problems.extend(check_html(built.path, root, development(root)))
+    return problems
 
 
 def serve(html: Path, port: int) -> None:
@@ -882,21 +1019,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     out = args.out.resolve()
     try:
         if args.command == "stage":
-            print(stage(ROOT, out))
+            result = stage(ROOT, out)
+            problems = result.problems
         elif args.command == "build":
-            print(build(ROOT, out))
+            result = build(ROOT, out)
+            problems = result.problems
         elif args.command == "serve":
-            serve(build(ROOT, out), args.port)
+            result = build(ROOT, out)
+            for problem in result.problems:
+                print(problem, file=sys.stderr)
+            serve(result.path, args.port)
+            return 0
         else:
             problems = check(ROOT, out)
-            for problem in problems:
-                print(problem, file=sys.stderr)
-            if problems:
-                return 1
-            print("docs: every check passed")
     except DocsError as error:
         print(error, file=sys.stderr)
         return 1
+    for problem in problems:
+        print(problem, file=sys.stderr)
+    if problems:
+        print(f"docs: {len(problems)} problem(s)", file=sys.stderr)
+        return 1
+    print(f"docs: every check passed ({args.command})")
     return 0
 
 
