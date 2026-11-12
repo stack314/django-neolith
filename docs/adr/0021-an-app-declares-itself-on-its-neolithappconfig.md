@@ -1,6 +1,7 @@
 # 0021. An app declares itself in class attributes of its `NeolithAppConfig`, with contracts named by their declaration classes
 
-- **Status:** Proposed
+- **Status:** Accepted
+- **Accepted:** 2026-11-12
 - **Date:** 2026-11-12
 
 ## Context
@@ -21,7 +22,7 @@ Forces:
 - **Parity** (principle 5, [0007](0007-in-process-transport-serializes.md)). What an attached app gets, it gets detached too.
 - **No hidden state** (K6) and **no new runtime dependency** (K5).
 
-Two other Proposed records of step 4 are named here: [0009](0009-one-database-alias-per-app.md) as amended, which gives each app a database alias, and the app host record (0022), which sets what the host builds, when set-up runs and how a stop is reported.
+Two other records of step 4 are named here: [0009](0009-one-database-alias-per-app.md) as amended, which gives each app a database alias, and the app host record (0022), which sets what the host builds, when set-up runs and how a stop is reported.
 
 What Django does, read at 5.2.19 and 6.1.3 (the cited files are the same in both unless noted):
 
@@ -404,7 +405,7 @@ The cost: the host holds one more piece of documented state, and an unknown iden
 - A failed set-up is logged before it is raised, because a server that retries loading sees Django's "populate() isn't reentrant" and not the refusals.
 - Decision 9 adds step 1a to the caller's order of 0017 Decision 9, as this record's own addition. It does not change that record's text, its existing checks or their order (D1, D2).
 - `neolith.UsageError`, `neolith.DeclarationError`, `NeolithAppConfig`, `Provided` and `connect` join the public surface. The usage errors of step 3 that Python already names (`TypeError`, `ValueError`, `AttributeError` for a wrong argument or an unknown action) stay as they are, and its `RuntimeError` for a missing or closed scope narrows to `UsageError`, which code that catches `RuntimeError` still catches.
-- #11's plan differs from this record in two places, and follows it if the record is accepted: PR 1's "checked when the app registry is ready" becomes "checked when the class is defined", and the design gate's "system checks for startup failures" covers the host's own rules, with Resolve and Validate reported as 0022 proposes.
+- #11's plan differs from this record in two places, and follows it: PR 1's "checked when the app registry is ready" becomes "checked when the class is defined", and the design gate's "system checks for startup failures" covers the host's own rules, with Resolve and Validate reported as 0022 proposes.
 - Specification changes for PRs 1 to 3, in neutral terms and with new `APP` and `TRN` requirement IDs: an app's name follows `segment`; names are unique among the apps of all hosts that exchange calls, which is a duty of deployment and has no test; a resource is named by its kind in 0.1; each provided contract carries its list of calling apps that may assert a principal; a declaration outside the admitted form stops the host before Serve, and a host reports together the refusals of one declaration, and those of Resolve and Validate; within a host, a contract version has one provider and one declaration; a call to a contract the calling app does not require is a mistake in the calling code, in every mode, is not sent, and is checked at the place step 1a names; an implementation is recommended to offer the pre-deployment check of Decision 9.
 - Tests for PR 1 draw declarations from the grammar above with Hypothesis, and mutate one element at a time to produce each row of the first table. They cover a base class beside a declaring class in one `apps` module, a mixin with a public name, and the list of admitted Django options on each supported version. PR 1 also covers a class with several mistakes, reported in one error. PR 2 covers `isolate_apps` with a declared app, with and without neolith's app, a `label` rebound after the class is defined, a registry without neolith's app, a `connect()` at import for a known and an unknown identity, a call before set-up has finished, several refusals reported in one error, and `override_settings` in and out.
 

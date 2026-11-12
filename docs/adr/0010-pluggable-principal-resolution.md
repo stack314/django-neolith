@@ -1,6 +1,7 @@
 # 0010. Pluggable principal resolution in core
 
 - **Status:** Accepted
+- Narrowed by [0023](0023-a-request-principal-comes-from-ordered-backends.md) (Decision 11)
 - **Accepted:** 2026-11-11
 - **Date:** 2026-11-03
 

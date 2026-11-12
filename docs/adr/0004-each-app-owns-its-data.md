@@ -1,6 +1,7 @@
 # 0004. Each app owns its data
 
 - **Status:** Accepted
+- Narrowed by [0023](0023-a-request-principal-comes-from-ordered-backends.md) (Decision 11)
 - **Date:** 2026-11-03
 
 ## Context

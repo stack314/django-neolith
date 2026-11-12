@@ -23,7 +23,7 @@ Questions not yet decided are in [open-questions.md](../open-questions.md).
 | [0006](0006-contracts-are-typed-and-published-as-openapi.md) | Contracts are typed and published as OpenAPI | Accepted |
 | [0007](0007-in-process-transport-serializes.md) | The in-process transport serializes, like the network ones | Accepted |
 | [0008](0008-typed-contract-errors-in-both-modes.md) | Contract errors are typed and identical in both modes | Accepted |
-| [0009](0009-one-database-alias-per-app.md) | One database alias per app | Proposed |
+| [0009](0009-one-database-alias-per-app.md) | One database alias per app | Accepted |
 | [0010](0010-pluggable-principal-resolution.md) | Pluggable principal resolution in core | Accepted |
 | [0011](0011-django-ninja-for-contract-endpoints.md) | django-ninja for contract endpoints | Proposed |
 | [0012](0012-supported-python-and-django-versions.md) | Supported Python and Django versions | Accepted |
@@ -35,6 +35,6 @@ Questions not yet decided are in [open-questions.md](../open-questions.md).
 | [0018](0018-requirement-ids-and-spec-to-test-traceability.md) | Requirement IDs and spec-to-test traceability | Accepted |
 | [0019](0019-wire-encodings-of-the-portable-forms.md) | Wire encodings of the portable forms | Accepted |
 | [0020](0020-wire-forms-pydantic-writes-otherwise-are-neolith-annotated-types.md) | A portable form whose wire spelling differs from Pydantic's default is a neolith Annotated type | Accepted |
-| [0021](0021-an-app-declares-itself-on-its-neolithappconfig.md) | An app declares itself in class attributes of its `NeolithAppConfig`, with contracts named by their declaration classes | Proposed |
-| [0022](0022-the-app-host-builds-settings-and-checks-before-it-serves.md) | The app host builds settings from declarations, checks at app loading, and boots when a handler is built | Proposed |
-| [0023](0023-a-request-principal-comes-from-ordered-backends.md) | A request's principal comes from ordered backends that declare their request inputs, and a Django user is named by a deployer-given issuer and its primary key | Proposed |
+| [0021](0021-an-app-declares-itself-on-its-neolithappconfig.md) | An app declares itself in class attributes of its `NeolithAppConfig`, with contracts named by their declaration classes | Accepted |
+| [0022](0022-the-app-host-builds-settings-and-checks-before-it-serves.md) | The app host builds settings from declarations, checks at app loading, and boots when a handler is built | Accepted |
+| [0023](0023-a-request-principal-comes-from-ordered-backends.md) | A request's principal comes from ordered backends that declare their request inputs, and a Django user is named by a deployer-given issuer and its primary key | Accepted |

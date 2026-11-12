@@ -1,6 +1,7 @@
 # 0009. One database alias per app
 
-- **Status:** Proposed
+- **Status:** Accepted
+- **Accepted:** 2026-11-12
 - **Date:** 2026-11-03, amended 2026-11-12
 
 ## Context
@@ -11,7 +12,7 @@
 - **What an alias is called**, and who chooses the name.
 - **What the deployer may say about a database**, given that some Django settings join aliases back together.
 
-Two other Proposed records of step 4 are named here by number: the app declaration record (0021), which sets the form of a declaration, and the app host record (0022), which sets what the host builds and checks. "PR 6" and "PR 7" are the pull requests of #11's plan.
+Two other records of step 4 are named here by number: the app declaration record (0021), which sets the form of a declaration, and the app host record (0022), which sets what the host builds and checks. "PR 6" and "PR 7" are the pull requests of #11's plan.
 
 ### Terms
 

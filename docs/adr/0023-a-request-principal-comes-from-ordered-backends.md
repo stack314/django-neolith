@@ -1,6 +1,7 @@
 # 0023. A request's principal comes from ordered backends that declare their request inputs, and a Django user is named by a deployer-given issuer and its primary key
 
-- **Status:** Proposed
+- **Status:** Accepted
+- **Accepted:** 2026-11-12
 - **Date:** 2026-11-12
 
 ## Context
@@ -13,7 +14,7 @@
 
 [0017](0017-call-context-explicit-at-the-action-ambient-for-propagation.md) Decision 4 fixes when the host asks: once per request root, at the latest by the root's first connector call, with concurrent first calls sharing the result. A request that makes no call causes no resolution. A failure to resolve is recorded once, and every call from that root then fails with `internal`. A response that the principal may shape varies on the inputs the backend reads.
 
-This record is for PR 9 of roadmap step 4 (#11). It relies on the app host record, [0022](0022-the-app-host-builds-settings-and-checks-before-it-serves.md), also Proposed, for the `NEOLITH` setting, the builder, set-up and the check series.
+This record is for PR 9 of roadmap step 4 (#11). It relies on the app host record, [0022](0022-the-app-host-builds-settings-and-checks-before-it-serves.md), for the `NEOLITH` setting, the builder, set-up and the check series.
 
 Step 4 has no network transport, so this record covers one of the seam's two jobs: resolving the principal of an ordinary Django request. Authenticating the calling app of an incoming contract call is step 5 (#12).
 
@@ -362,18 +363,18 @@ This decision can be accepted or declined apart from the rest, and what leans on
 
 **What 0010 says.** Decision 2: "a primary key on its own is never a subject". Its Consequences: a project that resolves Django users "needs an identifier for each user that is stable across hosts, which the primary key alone is not". "On its own" could be read as satisfied by the issuer. That reading would leave the sentence without effect, since every subject travels with an issuer (spec 03: "A subject is unique only within its issuer"). So Decision 9 does not fit 0010 as written.
 
-**The narrowing.** If this record is accepted:
+**The narrowing.** With this record Accepted:
 
 - 0010 Decision 2's sentence is narrowed to: a primary key is admitted as a subject only when the principal's issuer is given by the deployer to name the one table the key belongs to, and when the key's field type is one Decision 9 admits, whose values are not given twice in ordinary use; in every other case it is never a subject;
 - 0010's Consequence is read with it: the identifier that is stable across hosts is the pair of that issuer and the key, and its stability rests on the deployer's part in Decision 8;
 - a Consequence of [0004](0004-each-app-owns-its-data.md) is read with it too: "A database primary key is not a principal ID, because it means nothing outside its database." The key alone is still not a principal ID. The stored principal ID is the pair of issuer and subject, and under this narrowing its subject may be the key's text, with the issuer naming the table that gives the key its meaning;
-- the pull request that marks this record Accepted adds one line under the status of 0010 and of 0004, `Narrowed by 0023 (Decision 11)`, with a link here. Nothing else in either changes, and nothing in either is edited before then.
+- the pull request that marks this record Accepted adds one line under the status of 0010 and of 0004, `Narrowed by 0023 (Decision 11)`, with a link here. Nothing else in either changes.
 
 **The rule this relies on.** D2 and the README of the records let an Accepted record change in three ways: a typo, a broken link, and `Superseded by NNNN` for a reversal. A narrowing of one sentence is none of them, and superseding 0010 as a whole is not what is meant. So the pull request that adds this record also amends D2 and the README's status line with a fourth way: "To narrow part of it, the new record quotes the sentences it narrows, and the old record gains a line under its status, `Narrowed by NNNN (Decision k)`; nothing else in it changes." The line stands on its own, not in `Status`, so the template's status values stay as they are. The sentences narrowed are the three quoted above: one in 0010 Decision 2, one in 0010's Consequences and one in 0004's Consequences.
 
 **What is traded.** 0010 as written gives a provider a guarantee from the value alone, that no subject is a bare row number. With the narrowing, the guarantee depends on configuration the host cannot verify. What is gained: a project with `django.contrib.auth`'s own user model can make its first call without a custom user model or a new table.
 
-**Until it is accepted.** 0010 binds as written, and this record, being Proposed, binds nothing. The Django-user backend of PR 9 cannot merge with a key as its subject. If the narrowing is not accepted, the dedicated field of Decision 9's alternatives is the candidate. Decision 9 is replaced, together with the admitted set's `key field` and `subject` lines and Decision 10's two rows on the key; Decisions 1 to 8 and the rest of 10 stand.
+**What rests on it.** While this record was Proposed, 0010 bound as written, and the Django-user backend of PR 9 could not merge with a key as its subject. Decision 9, the admitted set's `key field` and `subject` lines and Decision 10's two rows on the key rest on this narrowing; Decisions 1 to 8 and the rest of 10 do not. Without it, the dedicated field of Decision 9's alternatives would have taken their place.
 
 ## Consequences
 
@@ -408,14 +409,13 @@ This decision can be accepted or declined apart from the rest, and what leans on
 ## Open questions
 
 1. **The call side of the seam.** Step 5 (#12) adds the backend that authenticates the calling app. Its record decides whether that is a second base class or a second pair of methods, and whether both kinds share `PRINCIPAL_BACKENDS`. There is a naming risk: the key's name is public from step 4, and if step 5 puts call-side backends elsewhere, 0010's own word would name only half of the seam.
-2. **Another subject for Django users.** A project with a string key, a plain integer key or an inherited user model, or one that wants an opaque subject, writes a subclass in 0.1. If several do, a `subject_field` option with a uniqueness check is the candidate. It is also the fallback if Decision 11 is not accepted.
+2. **Another subject for Django users.** A project with a string key, a plain integer key or an inherited user model, or one that wants an opaque subject, writes a subclass in 0.1. If several do, a `subject_field` option with a uniqueness check is the candidate.
 3. **A time limit on resolution.** The root has a deadline (0017 Decision 4), and resolution runs inside the first call. Whether the host should bound a backend by that deadline, and how on the sync path, is not decided here.
 4. **Telling a refused credential from a broken backend.** Comparable systems all give this a named signal: DRF's `AuthenticationFailed` beside a `None` return, Django's `PermissionDenied` in `authenticate()`, Spring Security's exception types in `ProviderManager`, ASP.NET Core's `NoResult` and `Fail`, and Encore's `Unauthenticated` beside any other error. A named exception here would let the host log a refusal as a warning and anything else as an error; callers would still see `internal`, as 0017 fixes. It is left open because no backend shipped in step 4 refuses a credential, and step 5's backend will, on the side where a refusal is `unauthenticated`: one exception should serve both sides, and naming it now would guess at step 5. Adding it later leaves a backend that raises a plain `Exception` logged as an error, as today.
 5. **Users of several hosts** (the repository's [open question 4](../open-questions.md)). Whether each host has its own `django.contrib.auth` decides how many issuers a project ends up with. This record works either way, and does not settle it.
 6. **A shared check for declared inputs.** The harness check named in Decision 3 is proposed, not specified. It belongs with `neolith.testing` when a second backend exists to try it on.
 7. **A name per entry.** If a second shipped backend, or adopters' logs, show that position and path are not enough, a `NAME` key as in `TEMPLATES` is the candidate, and it would have to be required to stay one form.
 8. **`Cache-Control: private`.** Whether the host should also mark a response private when a principal was resolved, as Decision 6 weighs, would benefit from adopters' cache set-ups.
-9. **Acceptance of Decision 11.** The narrowing of 0010 Decision 2 is a proposal like the rest of this record, and PR 9's Django-user backend waits on it.
 
 ## References
 
