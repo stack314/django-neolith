@@ -190,6 +190,18 @@ def test_the_mirror_table_holds_every_spec_document_and_record() -> None:
             "```\n[a](VISION.md)\n```\n\n[b](vision.md)",
             id="fence-unchanged",
         ),
+        pytest.param(
+            "CONTRIBUTING.md",
+            "[License](LICENSE#l3)",
+            f"[License]({REPO}/blob/{SHA}/LICENSE#l3)",
+            id="unmirrored-with-fragment",
+        ),
+        pytest.param(
+            "CONTRIBUTING.md",
+            "[vision](VISION%2Emd)",
+            "[vision](vision.md)",
+            id="percent-encoded",
+        ),
     ],
 )
 def test_links_lead_to_their_staged_targets_and_nothing_else_changes(
@@ -230,6 +242,31 @@ def test_a_link_that_leads_nowhere_is_refused(written: str, problem: str) -> Non
 )
 def test_a_change_beyond_a_link_target_is_refused(staged: str) -> None:
     assert docs.same_text("See the [vision](VISION.md), now", staged) is not None
+
+
+@pytest.mark.parametrize(
+    ("original", "staged"),
+    [
+        pytest.param("a\n\nb\n", "a\n\n\nb\n", id="lines-moved"),
+        pytest.param(
+            "[t][a]\n\n[a]: x\n[b]: y\n", "[t][a]\n\n[a]: x\n[c]: y\n", id="definition"
+        ),
+    ],
+)
+def test_a_change_markdown_shows_no_text_for_is_refused(
+    original: str, staged: str
+) -> None:
+    assert docs.same_text(original, staged) is not None
+
+
+def test_a_target_with_a_blank_is_written_in_angle_brackets(tmp_path: Path) -> None:
+    (tmp_path / "a b.txt").write_text("x", "utf-8")
+    problems: list[str] = []
+    links = docs.Links(tmp_path, {"README.md": "page.md"}, REPO, SHA, problems)
+    staged = docs.rewrite_links("[x](a%20b.txt)\n", "README.md", links)
+    assert staged == f"[x](<{REPO}/blob/{SHA}/a b.txt>)\n"
+    assert problems == []
+    assert docs.same_text("[x](a%20b.txt)\n", staged) is None
 
 
 def test_a_change_of_link_target_alone_is_admitted() -> None:
@@ -435,6 +472,19 @@ def test_staging_reports_each_problem_with_every_other(
     assert "index.md/x.md: cannot be written" in said, said
     assert not (result.path / "concepts" / "index.md").exists()
     assert (result.path / "project" / "vision.md").is_file()
+
+
+def test_a_group_documents_only_public_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    title, intro, names = docs.API_GROUPS["errors"]
+    monkeypatch.setitem(
+        docs.API_GROUPS, "errors", (title, intro, (*names, "__version__"))
+    )
+    result = docs.stage(ROOT, tmp_path)
+    errors = (result.path / "reference" / "api" / "errors.md").read_text("utf-8")
+    assert "__version__" not in errors
+    assert "group errors names __version__, which is not public" in result.problems
 
 
 def test_staging_leaves_out_only_the_bad_files(
@@ -820,6 +870,16 @@ _REFUSED = [
     ),
     ("private-entity", _page("neolith&#46;_host holds it."), "names a private module"),
     (
+        "private-any-attribute",
+        _page(body='<div data-name="neolith._host"></div>'),
+        "names a private module",
+    ),
+    (
+        "email-in-link-only",
+        _page(_LINK.format("mailto:someone%40example.org")),
+        "the email address someone@example.org",
+    ),
+    (
         "official",
         _page("The official way to declare a contract is shown."),
         "says official",
@@ -1134,6 +1194,16 @@ def test_the_requirement_index_may_list_a_withdrawn_requirement(tmp_path: Path) 
             '<a href="#y">there</a><a name="y"></a> and ' + _GOOD_TEXT,
             id="named-anchor",
         ),
+        pytest.param(
+            "The package is neolith.<div>_private names are not shown.</div> "
+            + _GOOD_TEXT,
+            id="blocks-apart",
+        ),
+        pytest.param(
+            '<img src="../index.html" srcset="../index.html 1x, ../index.html 2x"> '
+            + _GOOD_TEXT,
+            id="srcset-local",
+        ),
     ],
 )
 def test_the_nearest_legitimate_text_passes(tmp_path: Path, text: str) -> None:
@@ -1397,38 +1467,50 @@ def test_the_site_builds_and_passes_every_check(tmp_path: Path) -> None:
 
 # Each entry: a page, or a patch run before the build, and what must be said.
 _BAD_PAGES = {
-    "bad/withdrawn.md": ("As CON-21 says.", "cites withdrawn requirement CON-21"),
-    "bad/requirement.md": ("As CON-9999 says.", "cites unknown requirement CON-9999"),
-    "bad/record.md": ("As ADR 9999 says.", "cites unknown ADR 9999"),
-    "bad/document.md": ("As spec 99 says.", "cites unknown spec document 99"),
-    "bad/step.md": ("```{planned} 99\nIt will ship.\n```", "names roadmap step 99"),
+    "bad/withdrawn.md": (
+        "As CON-21 says.",
+        "3: WARNING: cites withdrawn requirement CON-21",
+    ),
+    "bad/requirement.md": (
+        "As CON-9999 says.",
+        "3: WARNING: cites unknown requirement CON-9999",
+    ),
+    "bad/record.md": ("As ADR 9999 says.", "3: WARNING: cites unknown ADR 9999"),
+    "bad/document.md": (
+        "As spec 99 says.",
+        "3: WARNING: cites unknown spec document 99",
+    ),
+    "bad/step.md": (
+        "```{planned} 99\nIt will ship.\n```",
+        "WARNING: {planned} names roadmap step 99",
+    ),
     "bad/heading.md": (
         "## About CON-9998\n\nText.",
-        "cites unknown requirement CON-9998",
+        "3: WARNING: cites unknown requirement CON-9998",
     ),
     "bad/link-words.md": (
         "See [CON-9997](../index.md).",
-        "cites unknown requirement CON-9997",
+        "3: WARNING: cites unknown requirement CON-9997",
     ),
     "bad/link-anchor.md": (
         "See [the rule](../spec/01-contracts.md#con-21).",
-        "links to withdrawn requirement CON-21",
+        "WARNING: links to withdrawn requirement CON-21",
     ),
     "bad/class.md": (
         "```{note}\n:class: planned\nIt ships.\n```",
-        'the class "planned" belongs to {planned} blocks only',
+        'WARNING: the class "planned" belongs to {planned} blocks only',
     ),
     "bad/raw.md": (
         '<div DATA-NEOLITH-PLANNED="5">It will ship.</div>',
-        "raw HTML is not allowed in a page the site writes",
+        "WARNING: raw HTML is not allowed in a page the site writes",
     ),
     "bad/install.md": (
         "Install it with pip install django-neolith, as shown here.",
-        "bad/install/index.html: shows an install command before a release",
+        "/index.html: shows an install command before a release",
     ),
     "bad/email.md": (
         "Write to someone@example.org about it.",
-        "bad/email.md: an email address on line 3; the page is left out",
+        ": an email address on line 3; the page is left out",
     ),
 }
 _BAD_PATCH = """
@@ -1457,5 +1539,14 @@ def test_one_check_reports_every_problem_of_every_step(tmp_path: Path) -> None:
     said = "\n".join(
         _run(f"docs.check(docs.ROOT, Path({str(tmp_path)!r}), {pages!r})", _BAD_PATCH)
     )
-    for expected in [warning for _, warning in _BAD_PAGES.values()] + _BAD_PATCHED:
+    for path, (_, warning) in _BAD_PAGES.items():
+        # Each is reported where it is found: Sphinx's warnings name the
+        # staged file, and the HTML rules the built page.
+        stem = path.removesuffix(".md")
+        assert re.search(
+            rf"^{re.escape(stem)}(?:\.md|/index\.html)?:?.*{re.escape(warning)}",
+            said,
+            re.MULTILINE,
+        ), (path, said)
+    for expected in _BAD_PATCHED:
         assert expected in said, (expected, said)

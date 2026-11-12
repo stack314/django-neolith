@@ -382,9 +382,17 @@ def same_text(original: str, staged: str) -> str | None:
     new_env: dict[str, object] = {}
     old = _MARKDOWN.parse(original, old_env)
     new = _MARKDOWN.parse(staged, new_env)
-    if old_env.keys() != new_env.keys():
+    if _definitions(old_env) != _definitions(new_env):
         return "link definitions changed"
     return _tokens_differ(old, new, "token")
+
+
+def _definitions(env: Mapping[str, object]) -> dict[str, object]:
+    """Each link definition's label and title: everything but its target."""
+    found = env.get("references")
+    if not isinstance(found, dict):
+        return {}
+    return {label: entry.get("title") for label, entry in found.items()}
 
 
 def email_lines(text: str) -> list[int]:
@@ -1118,6 +1126,7 @@ def _entropy(run: str) -> float:
 
 
 def _secrets(texts: Iterable[str], *, seen: bool) -> set[str]:
+    """The known token forms in ``texts``, and high-entropy runs if ``seen``."""
     found = {match[0] for text in texts for match in _SECRETS.finditer(text)}
     if seen:
         for text in texts:
@@ -1220,7 +1229,7 @@ def _file_problems(
     # A run judged by entropy alone counts on pages the site writes; the
     # mirrored specification holds example tokens as test vectors.
     guessed = path.suffix == ".html" and rel not in mirrored
-    count = len(_secrets([raw, seen], seen=False) | _secrets([seen], seen=guessed))
+    count = len(_secrets([raw], seen=False) | _secrets([seen], seen=guessed))
     if count:
         yield f"{rel}: holds {count} thing(s) shaped like a secret"
     css = raw if path.suffix == ".css" else "\n".join(page.styles)
