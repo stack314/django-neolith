@@ -600,7 +600,7 @@ def test_an_action_that_does_not_take_the_context_is_run_without_it() -> None:
 
 
 @pytest.mark.spec("TRN-30", "TRN-31", "TRN-36")
-def test_a_nested_call_carries_its_parents_context_on() -> None:
+def test_a_nested_call_carries_its_parents_context_on(clock: Clock) -> None:
     inner, inner_provider, inner_carrying = _desk(app="stock")
 
     def then(request: Ask, ctx: CallContext) -> None:
@@ -619,8 +619,10 @@ def test_a_nested_call_carries_its_parents_context_on() -> None:
     assert len({scope.context.span_id, first.span_id, second.span_id}) == 3
     assert first.deadline is not None
     assert second.deadline is not None
-    # A nested call's deadline is never later than its parent's (spec 00).
-    assert second.deadline <= first.deadline <= cast("float", scope.context.deadline)
+    # A nested call's deadline is never later than its parent's (spec 00):
+    # on a clock that does not move, each call is sent all its parent has left.
+    assert inner_carrying.sent[0].budget == 10_000
+    assert second.deadline == first.deadline == scope.context.deadline == 1010.0
     assert inner_carrying.sent[0].caller == "desk"
 
 
@@ -1893,10 +1895,15 @@ def test_the_context_an_action_receives_equals_the_one_its_caller_derived(
     providers: list[Seeing] = []
     carried: list[Carrying] = []
     connectors: list[Any] = []
+    # This host's clock when each call is asked for, and when its action runs.
+    asked: list[float] = []
+    entered: list[float] = []
     for level in range(depth):
 
         def then(request: Ask, ctx: CallContext, level: int = level) -> None:
+            entered.append(_context.now())
             if level + 1 < depth:
+                asked.append(_context.now())
                 connectors[level + 1].ask(Ask(n=level + 1))
 
         connector, provider, carrying = _desk(
@@ -1906,6 +1913,7 @@ def test_the_context_an_action_receives_equals_the_one_its_caller_derived(
         providers.append(provider)
         carried.append(carrying)
     with _root(app, principal=principal, timeout=root) as scope:
+        asked.append(_context.now())
         connectors[0].ask(Ask(), timeout=own)
     deadlines = [scope.context.deadline]
     for level in range(depth):
@@ -1930,8 +1938,19 @@ def test_the_context_an_action_receives_equals_the_one_its_caller_derived(
         assert ctx.trace_id == scope.context.trace_id
         assert ctx.caller == (app if level == 0 else provider_app)
         assert (ctx.deadline is None) == (root is None and own is None)
-        if ctx.deadline is not None and deadlines[-1] is not None:
-            assert ctx.deadline <= deadlines[-1]
+        if ctx.deadline is not None:
+            assert sent.budget is not None
+            # The call's deadline is never later than its parent's (TRN-27):
+            # the budget sent is at most what the parent had left when the
+            # call was asked for. Exact, since the budget is rounded down.
+            if deadlines[-1] is not None:
+                assert sent.budget <= (deadlines[-1] - asked[level]) * 1000
+            # The provider counts the budget from when the call arrived
+            # (TRN-36), between the ask and the action, on this host's clock.
+            # So its deadline can be later than the parent's by the time the
+            # call took to arrive; TRN-38 covers the caller for that.
+            budget = sent.budget / 1000
+            assert asked[level] + budget <= ctx.deadline <= entered[level] + budget
         deadlines.append(ctx.deadline)
     assert _context._OPEN == {}
 
