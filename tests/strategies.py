@@ -25,7 +25,11 @@ def _timestamps(draw: st.DrawFn) -> str:
     instant = draw(_INSTANTS)
     minutes = draw(_OFFSETS)
     local = instant.astimezone(timezone(timedelta(minutes=minutes)))
-    return local.isoformat().replace("+00:00", "Z")
+    text = local.isoformat()
+    if text.endswith("+00:00"):
+        # The pattern admits all three spellings of a zero offset.
+        text = text[:-6] + draw(st.sampled_from(("Z", "+00:00", "-00:00")))
+    return text
 
 
 TIMESTAMPS = _timestamps()
