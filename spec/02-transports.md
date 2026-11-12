@@ -129,7 +129,7 @@ base64url(SHA-256(JCS([parent_key, contract_id, action, base64url(SHA-256(JCS(re
 
 ### The provider's side
 
-**TRN-35.** A provider's host MUST run its checks in the order ADR 0017 Decision 9 gives the provider. Its checks of the calling app join them with the host, in roadmap step 4 (#11).
+**TRN-35.** A provider's host MUST run its checks in the order ADR 0017 Decision 9 gives the provider. Its checks of the calling app are those under [The calling app](#the-calling-app).
 
 **TRN-36.** The provider's side of a transport MUST run the action in a scope that holds the context of the call as it arrived: the principal read from its sent form ([03](03-http-transport.md)), the trace identifier and `tracestate`, a deadline counted from the budget when the call arrived, the call's idempotency key and the calling app.
 
@@ -138,6 +138,22 @@ base64url(SHA-256(JCS([parent_key, contract_id, action, base64url(SHA-256(JCS(re
 Two contexts are equal when their propagated and per-call fields are equal, leaving out the trace's span identifier, which changes at each hop, its `tracestate`, which each tracing system on the path may update, and the deadline's value, which each host holds on its own clock. Whether a deadline is present is compared. A transport carries the context intact (TRN-2) when the context an action receives is equal, in this sense, to the context its caller derived for the call.
 
 A connector retries only an idempotent action, only on `unavailable` and only within the call's one deadline. It never retries or falls back on `timeout`, whose outcome is unknown (TRN-8).
+
+### The calling app
+
+An app's declaration names the contract versions it requires, and, for each contract version it provides, the allow-list of calling apps that may assert a principal on a call to it ([05](05-app-declaration.md), APP-5). The caller checks the first. The provider's host checks that the call has a calling app, then the second ([ADR 0017](../docs/adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md) Decision 6, [ADR 0021](../docs/adr/0021-an-app-declares-itself-on-its-neolithappconfig.md) Decision 9).
+
+**TRN-39.** A call whose parent scope belongs to an app whose declaration does not require the called contract version MUST NOT be sent. It is a mistake in the calling code (CON-29), in every mode. An app with no declaration requires nothing. A scope that belongs to no app has nothing to check here.
+
+**TRN-40.** The caller MUST make the check of TRN-39 once it has found the parent scope and before it resolves the call's principal. A call that fails it resolves no principal and does not count as made (TRN-32).
+
+**TRN-41.** An implementation SHOULD offer a check, runnable before deployment, that reports each place in an app's code that asks for a connector to a contract version the app does not require.
+
+**TRN-42.** A provider's host MUST fail a call that has no calling app with `unauthenticated`. In-process the calling app is not authenticated but known: it is the app the call's parent scope belongs to (TRN-31), so a call made from a scope of no app has none.
+
+**TRN-43.** A provider's host MUST fail a call that carries a principal, from a calling app not on the allow-list of the called contract version, with `permission_denied`, whatever the principal holds.
+
+A call with no principal asserts none, so the allow-list does not apply to it; whether the action admits a call with no principal is the action's own check. TRN-42 and TRN-43 are the provider's first two steps of ADR 0017 Decision 9: a call they refuse is refused before its deadline is checked (TRN-19) or its request read, so its action never runs and the transport's check after the action does not apply. A caller whose own deadline has passed when the refusal comes back gets `timeout` instead (TRN-38).
 
 ## Other transports
 
