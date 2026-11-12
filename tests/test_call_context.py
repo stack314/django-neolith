@@ -43,7 +43,13 @@ from neolith import (
     contract,
     implements,
 )
-from neolith._connector import Connector, Failure, InProcess, internal_message
+from neolith._connector import (
+    Connector,
+    Failure,
+    InProcess,
+    internal_message,
+    mark,
+)
 from neolith._context import Scope, Sent, read_principal
 from neolith._contracts import Action, is_received
 
@@ -870,6 +876,7 @@ _ENDINGS: dict[str, Callable[[], object]] = {
     "a standard error": lambda: ContractError("not_found", "no such desk"),
     "a declared error": lambda: ContractError("gone", "gone", Gone(n=1)),
     "an error it may not raise": lambda: ContractError("unavailable", "down"),
+    "an error it received": lambda: mark(ContractError("not_found", "elsewhere")),
     "a failure": lambda: RuntimeError("the action failed"),
 }
 
@@ -926,7 +933,7 @@ def _ending(clock: Clock, spent: float, ending: str) -> Callable[..., object]:
     return then
 
 
-@pytest.mark.spec("TRN-19", "TRN-20", "TRN-4")
+@pytest.mark.spec("TRN-19", "TRN-20", "TRN-4", "CON-43", "CON-44", "CON-48")
 @pytest.mark.parametrize("ending", list(_ENDINGS), ids=list(_ENDINGS))
 def test_the_transport_discards_an_outcome_after_its_deadline(
     clock: Clock, caplog: pytest.LogCaptureFixture, ending: str
@@ -1041,6 +1048,71 @@ def test_the_caller_discards_what_a_transport_returns_late(
         assert "the caller's deadline passed" in record.getMessage()
         assert f"the {outcome.kind} error" in record.getMessage()
         assert scope.context.trace_id in record.getMessage()
+
+
+# What comes back late is timeout, whatever the rules for what arrives would
+# have made of it in time (TRN-38 comes before them).
+_ARRIVING: dict[str, tuple[Failure | bytes, str]] = {
+    "an unknown kind with a detail": (
+        Failure("moved", "moved", b'{"to":"x"}'),
+        "moved",
+    ),
+    "a standard kind with a detail": (
+        Failure("not_found", "no such desk", b'{"n":1}'),
+        "internal",
+    ),
+    "a declared kind without its detail": (Failure("gone", "gone"), "internal"),
+    "a reply that cannot be read": (b'{"n":"seven"}', "internal"),
+}
+
+
+class Answering:
+    """A transport with no check of its own that takes a while to answer."""
+
+    contract = DESK
+
+    def __init__(self, clock: Clock, takes: float, answer: Failure | bytes) -> None:
+        self._clock = clock
+        self._takes = takes
+        self._answer = answer
+
+    def call(self, action: Action, request: bytes, context: Sent) -> bytes | None:
+        self._clock.time += self._takes
+        if isinstance(self._answer, Failure):
+            raise self._answer
+        return self._answer
+
+
+@pytest.mark.spec("TRN-38", "TRN-18", "CON-28", "CON-49")
+@pytest.mark.parametrize("case", list(_ARRIVING), ids=list(_ARRIVING))
+def test_a_late_outcome_is_timeout_whatever_it_would_have_been_in_time(
+    clock: Clock, caplog: pytest.LogCaptureFixture, case: str
+) -> None:
+    answer, in_time = _ARRIVING[case]
+    with _context.root("shop"), caplog.at_level(logging.CRITICAL, "neolith"):
+        for takes, kind in ((0.5, in_time), (1, "timeout")):
+            connector: Any = Connector(Desk, Answering(clock, takes, answer))
+            with pytest.raises(ContractError) as raised:
+                connector.ask(Ask(), timeout=1)
+            assert raised.value.kind == kind
+    assert raised.value.message == _LATE
+    assert raised.value.data is None
+
+
+@pytest.mark.spec("TRN-38", "CON-48")
+def test_a_nested_error_that_ends_an_action_late_is_timeout(clock: Clock) -> None:
+    def calling(spent: float) -> Any:  # noqa: ANN401
+        missing: Any = Connector(Desk, Slow(clock, spent, Failure("not_found", "x")))
+        # The action lets the error of its own call end it.
+        return _desk(lambda request, ctx: missing.ask(Ask()))[0]
+
+    with _context.root("shop"):
+        with pytest.raises(ContractError) as raised:
+            calling(0.5).ask(Ask(), timeout=1)
+        assert raised.value.kind == "internal"
+        with pytest.raises(ContractError) as raised:
+            calling(1).ask(Ask(), timeout=1)
+    assert (raised.value.kind, raised.value.message) == ("timeout", _LATE)
 
 
 @pytest.mark.spec("TRN-38", "TRN-27")

@@ -49,7 +49,7 @@ Because the action runs in the caller's thread, the in-process transport cannot 
 
 **TRN-19.** The in-process transport MUST check a call's deadline before it dispatches the call, at the step the provider's order gives it (TRN-35), and again when the action has ended and its outcome is ready to return.
 
-**TRN-20.** A call whose deadline has passed at either check MUST fail with `timeout`. At the second check the action's reply, an error it produced or a failure it ended with is discarded, and the provider's host still records a discarded error or failure. The action might have run, so `timeout` leaves the outcome unknown, as it does over a network.
+**TRN-20.** A call whose deadline has passed at either check MUST fail with `timeout`. At the second check the action's reply, an error it produced or a failure it ended with is discarded, and the provider's host still records a discarded error or failure. The action might have run, so `timeout` leaves the outcome unknown, as it does over a network. This comes before what CON-43, CON-44 or TRN-18 would have the provider's host deliver.
 
 **TRN-21.** The in-process transport MUST NOT discard a signal to stop, such as cancellation or the process exiting, whatever the deadline. It is not a failure of the action (CON-45).
 
@@ -109,7 +109,7 @@ The deadline crosses as a *budget*: the time that remains when the call is sent,
 
 **TRN-29.** A budget above 9999999999 ms MUST count as 9999999999, in every mode.
 
-**TRN-38.** A caller MUST NOT receive a reply or an error that comes back after the call's deadline, as the caller's own clock holds it: the call fails with `timeout`, in every mode. Over a network the caller stops waiting at its deadline. In-process the connector checks the caller's deadline when the outcome is back, since the provider's side counts its deadline from the budget when the call arrived (TRN-36), which can be later. A `timeout` that a transport or a provider's host produced is passed on as it is.
+**TRN-38.** A caller MUST NOT receive a reply or an error that comes back after the call's deadline, as the caller's own clock holds it: the call fails with `timeout`, in every mode. Over a network the caller stops waiting at its deadline. In-process the connector checks the caller's deadline when the outcome is back, since the provider's side counts its deadline from the budget when the call arrived (TRN-36), which can be later. A `timeout` that a transport or a provider's host produced is passed on as it is. This comes before what TRN-18, CON-28, CON-48 or CON-49 would have the caller receive.
 
 **TRN-30.** A call MUST carry its parent's principal, trace identifier and `tracestate`, unchanged.
 
@@ -125,7 +125,7 @@ base64url(SHA-256(JCS([parent_key, contract_id, action, base64url(SHA-256(JCS(re
 
 **TRN-33.** When its parent has no key, a call's key MUST be random: 128 bits from a cryptographically secure source, base64url-encoded. A retry of such a parent does not reproduce its children's keys.
 
-**TRN-34.** A caller MUST run its checks in the order ADR 0017 Decision 9 gives the caller, so a call that would fail two of them fails at the earlier one, in every mode.
+**TRN-34.** A caller MUST run its checks in the order ADR 0017 Decision 9 gives the caller, so a call that would fail two of them fails at the earlier one, in every mode. A call that fails one of them is never sent, so nothing comes back for it, and the rules for a reply or an error that arrives (TRN-18, CON-28, CON-48, CON-49) do not apply to it.
 
 ### The provider's side
 
