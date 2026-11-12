@@ -18,13 +18,14 @@ import types
 import weakref
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Protocol, cast
+from datetime import UTC, datetime, timedelta, timezone
+from typing import Any, Literal, Protocol, cast
 
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 from hypothesis_jsonschema import from_schema
-from pydantic import BaseModel
+from pydantic import AwareDatetime, BaseModel
 
 from neolith import (
     Contract,
@@ -686,3 +687,82 @@ def test_a_failure_keeps_no_frame_of_the_provider_alive(where: str) -> None:
     finally:
         logger.disabled = False
         gc.enable()
+
+
+# A reply only the description refuses: Pydantic holds it, the send check does
+# not (TRN-15), so it never crosses.
+
+
+class Wide(BaseModel):
+    """A reply whose type holds values its description refuses."""
+
+    n: int = 0
+    kind: Literal["a", "b"] = "a"
+    at: AwareDatetime = datetime(2000, 1, 1, tzinfo=UTC)
+
+
+class Narrow(BaseModel):
+    pass
+
+
+@contract("described.v1")
+class Described(Protocol):
+    @action
+    def get(self, request: Narrow) -> Wide: ...
+
+
+def _past_literal() -> Wide:
+    reply = Wide()
+    reply.kind = "c"  # type: ignore[assignment]  # set after validation
+    return reply
+
+
+_ONLY_THE_DESCRIPTION_REFUSES: dict[str, Callable[[], Wide]] = {
+    "integer past the portable range": lambda: Wide(n=2**53),
+    "negative integer past the portable range": lambda: Wide(n=-(2**53)),
+    "value outside a literal": _past_literal,
+    "timestamp past year 9999 in UTC": lambda: Wide(
+        at=datetime(9999, 12, 31, 23, tzinfo=timezone(-timedelta(hours=5)))
+    ),
+}
+
+
+@pytest.mark.spec("TRN-18", "TRN-15", "TRN-3")
+@pytest.mark.parametrize(
+    "case", list(_ONLY_THE_DESCRIPTION_REFUSES), ids=list(_ONLY_THE_DESCRIPTION_REFUSES)
+)
+def test_a_reply_only_the_description_refuses_reaches_the_caller_as_internal(
+    case: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    build = _ONLY_THE_DESCRIPTION_REFUSES[case]
+
+    class Replying:
+        def get(self, request: Narrow) -> Wide:
+            return build()
+
+    connector: Any = Connector(Described, InProcess(Described, Replying()))
+    with (
+        caplog.at_level(logging.ERROR, logger="neolith"),
+        pytest.raises(ContractError) as raised,
+    ):
+        connector.get(Narrow())
+    _assert_internal(raised)
+    assert "described.v1, action 'get': the provider failed" in caplog.text
+
+
+@pytest.mark.spec("TRN-18", "TRN-15")
+def test_a_reply_at_the_descriptions_bounds_crosses() -> None:
+    # The nearest legitimate shapes: the largest portable integers, and the
+    # last instant of year 9999 in UTC.
+    for reply in (
+        Wide(n=2**53 - 1),
+        Wide(n=-(2**53 - 1), kind="b"),
+        Wide(at=datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC)),
+    ):
+
+        class Replying:
+            def get(self, request: Narrow) -> Wide:
+                return reply  # noqa: B023  # called before the loop moves on
+
+        connector: Any = Connector(Described, InProcess(Described, Replying()))
+        assert connector.get(Narrow()) == reply
