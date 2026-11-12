@@ -145,7 +145,7 @@ Any other public name is refused, an override of `import_models`, `create`, `get
 
 **The host reads a snapshot.** When the check passes, `__init_subclass__` stores the declaration as one frozen value on the class. The host reads only that value. Rebinding a class attribute afterwards changes nothing the host sees.
 
-**The host reaches the class the way Django does.** Before settings exist, the host reads a declaration with `AppConfig.create(<entry>)`, the call Django's registry makes later for the same entry, so there is one rule for choosing the class and it is Django's. Which entries the host admits, and that the same entries become `INSTALLED_APPS`, is 0022's decision. `create` gives the same class for the same entry, and 0022 has set-up compare `INSTALLED_APPS` with the entries the builder was given, so the class Django registers is the class the host read. An `apps` module that reads Django settings when imported cannot be read before settings exist; 0022 gives that refusal its message.
+**The host reaches the class the way Django does.** Before settings exist, the host reads a declaration with `AppConfig.create(<entry>)`, the call Django's registry makes later for the same entry, so there is one rule for choosing the class and it is Django's. Which entries the host admits, and that the same entries become `INSTALLED_APPS`, is 0022's decision. `create` gives the same class for the same entry. 0022 requires a declaration's `name` to be the entry it was read through, and has set-up compare `INSTALLED_APPS` with what the builder gives for the installed declarations, so the class Django registers is the class the host read. An `apps` module that reads Django settings when imported cannot be read before settings exist; 0022 gives that refusal its message.
 
 Alternatives weighed:
 
@@ -224,7 +224,7 @@ The cost: the implementation's `__init__` runs in every process that loads apps,
 
 ### 6. The allow-list is a required argument of each `Provided`
 
-`principal_from` is a tuple of app names: the calling apps that may assert a principal on calls to this contract (0017 Decision 6). It is keyword-only and has no default. An empty tuple means that no calling app may assert one. Each entry matches `app-name`. There is no wildcard. The providing app gets no exception for itself: a call it makes to its own contract with a principal needs its own name in the list.
+`principal_from` is a tuple of app names: the calling apps that may assert a principal on calls to this contract (0017 Decision 6). It is keyword-only and has no admitted default: leaving it out is refused. An empty tuple means that no calling app may assert one. Each entry matches `app-name`. There is no wildcard. The providing app gets no exception for itself: a call it makes to its own contract with a principal needs its own name in the list.
 
 The host does not check that a listed name is an app it knows. A caller may live in another host, and the provider's host has no list of those.
 
@@ -273,12 +273,14 @@ Every refusal names the app and the field (APP-1, K2). At class definition the a
 | A field that is otherwise not exactly a `tuple` | the field, the type found, and the tuple to write |
 | A field that is an empty tuple | the field, and to remove the line |
 | A `provides` entry that is not a `Provided` | the entry's position and type |
-| A contract argument or `requires` entry that is not a contract class | the value, and that the class carries `@contract` |
-| An `implementation` that is not a `str` in dotted-path form | the contract's identity and the value |
+| A contract argument that is missing, or one, or a `requires` entry, that is not a contract class | the value, and that the class carries `@contract` |
+| An `implementation` that is missing or is not a `str` in dotted-path form | the contract's identity and the value |
 | A `principal_from` that is missing, not a tuple, or holds a non-name, a repeat or `"*"` | the contract's identity and the entry |
 | One identity twice in `provides` or in `requires`, or with two classes in one declaration | the identity and both classes |
 | A `resources` entry other than `"database"`, or a repeat | the entry, and the kinds admitted |
 | A `batteries` entry that is not a `str` in dotted-path form, a repeat, or the app itself | the entry |
+
+**Where a `Provided` is checked.** `Provided(...)` runs in the class body, before the config class exists, so it cannot name the app. It therefore checks nothing: it keeps what it was given, with a private marker for an argument left out, and `__init_subclass__` checks every `Provided` with the rest of the declaration. A missing contract, `implementation` or `principal_from` is then a `DeclarationError` that names the config class, like every other row. Only an argument the signature does not have is refused by Python itself, with its `TypeError` at the call.
 
 `Contract.of` raises `ContractDefinitionError`, a `TypeError`, for a class that is not a contract. The check catches it and raises `DeclarationError` naming the config class and the field, with the original error as its cause, so one error type covers the table.
 
