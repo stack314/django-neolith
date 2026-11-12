@@ -193,7 +193,8 @@ class InProcess:
         self, declaration: type[Any], implementation: object, *, app: str | None = None
     ) -> None:
         """Check the implementation's class against the contract, as
-        ``@implements`` does, and keep the function of each action."""
+        ``@implements`` does, and keep the function of each action.
+        """
         contract = Contract.of(declaration)
         cls = type(implementation)
         contract._check_implementation(cls)
@@ -352,7 +353,8 @@ class InProcess:
         self, action: Action, error: ContractError
     ) -> tuple[str, str, bytes | None] | None:
         """The error as the provider's host delivers it, or ``None`` when it
-        becomes ``internal``; raises when its detail cannot be sent."""
+        becomes ``internal``; raises when its detail cannot be sent.
+        """
         if is_received(error) or error.kind in _TRANSPORT_KINDS:
             return None
         if error.kind in _STANDARD_KINDS:
@@ -591,7 +593,8 @@ class Connector:
         self, action: Action, kind: object, message: object, detail: object
     ) -> ContractError:
         """The error a caller gets for one that arrived; raises when it cannot
-        be read against the contract."""
+        be read against the contract.
+        """
         if type(kind) is not str or type(message) is not str:
             raise TypeError("an error's kind and message are text")
         if detail is not None and type(detail) is not bytes:

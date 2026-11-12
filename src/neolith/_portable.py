@@ -1260,7 +1260,8 @@ def _default_problem(default: object) -> str | None:
 
 def _unchanging(value: object) -> bool:
     """Whether nothing in a default can change: immutable scalars, enum
-    members, and tuples and frozensets of them. Never a record."""
+    members, and tuples and frozensets of them. Never a record.
+    """
     pending = [value]
     while pending:
         item = pending.pop()

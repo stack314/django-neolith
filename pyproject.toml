@@ -42,6 +42,8 @@ Changelog = "https://github.com/stack314/django-neolith/blob/main/CHANGELOG.md"
 # and CI only, never a runtime dependency; pinned so the parse cannot drift.
 # hypothesis, hypothesis-jsonschema and jsonschema: the contract round-trip
 # property test (spec 01, CON-16). Test only.
+# griffe: tests/test_api_docs.py reads the public API's docstrings with it.
+# Test only; pinned so its reading of a docstring cannot drift.
 test = [
     "pytest>=8.4",
     "pytest-django>=4.11",
@@ -53,6 +55,7 @@ test = [
     # The property test checks "date" and "date-time" formats; jsonschema needs
     # this to check "date-time" and otherwise skips it silently.
     "rfc3339-validator>=0.1.4",
+    "griffe==2.4.1",
 ]
 lint = ["ruff>=0.14", "mypy>=1.18", "django-stubs>=5.2", "types-jsonschema>=4.26"]
 dev = [{ include-group = "test" }, { include-group = "lint" }]
@@ -116,10 +119,19 @@ select = [
     "S",            # bandit: secure by default (K9)
     "ANN",          # annotations (K1)
     "FIX", "TD",    # no TODO/FIXME (K3)
+    "D",            # docstrings, in Google sections
 ]
+# D205: a summary may run over two lines in a private helper.
+# tests/test_api_docs.py holds the public API to a one-line summary.
+ignore = ["D205"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101"]
+# Tests are named for what they check, and scripts are not API.
+"tests/**" = ["S101", "D"]
+"scripts/**" = ["D1"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
 
 [tool.ruff.lint.isort]
 known-first-party = ["scripts"]

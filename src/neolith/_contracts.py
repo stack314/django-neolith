@@ -235,7 +235,8 @@ def untyped_problem(value: object) -> str | None:
 
 def mark_received(error: "ContractError") -> None:
     """Mark an error as one a connector raised, so a provider's host that sees
-    it end an action knows the action did not raise it itself."""
+    it end an action knows the action did not raise it itself.
+    """
     error._received = True
 
 
@@ -281,21 +282,37 @@ class ContractError(Exception):
 
     Every such error is a ``ContractError``, told apart by ``kind``: a
     standard kind, such as ``"not_found"`` or ``"conflict"``, or a kind the
-    action declares. ``message`` is text for people. ``data`` is the detail:
-    ``None`` for a standard kind; the kind's detail record for a declared
-    kind. A caller holds a kind it does not know, declared by a newer version
-    of the contract or made standard by a newer version of the specification,
-    with the detail's fields as they arrived, or ``None`` if there are none.
-    Those fields are a read-only copy: maps and lists that compare equal to
-    ``dict`` and ``list`` and are written as JSON like them, but refuse
-    changes. A record is held as given.
+    action declares. A caller holds a kind it does not know, declared by a
+    newer version of the contract or made standard by a newer version of the
+    specification, with the detail's fields as they arrived, or ``None`` if
+    there are none. Those fields are a read-only copy: maps and lists that
+    compare equal to ``dict`` and ``list`` and are written as JSON like them,
+    but refuse changes. A record is held as given.
 
     The fields are read-only, and the class cannot be subclassed: a subclass
     would not survive a transport, so callers could tell the modes apart.
-    Building one wrongly raises ``TypeError`` or ``ValueError``, never a
-    ``ContractError``, so that code handling contract errors does not swallow
-    a bug. A copy or a pickle carries the kind, message and detail, and
-    whether a connector raised the error, but not notes or other attributes.
+    Building one wrongly never raises a ``ContractError``, so that code
+    handling contract errors does not swallow a bug. A copy or a pickle
+    carries the kind, message and detail, and whether a connector raised the
+    error, but not notes or other attributes.
+
+    Args:
+        kind: A standard kind, or a kind the action declares: a lowercase
+            ASCII letter, followed by lowercase ASCII letters, digits or
+            underscores.
+        message: Text for people.
+        data: The detail: ``None`` for a standard kind; the kind's detail
+            record for a declared kind; for a kind the receiver does not
+            know, a ``dict`` of the detail's fields, or ``None``.
+
+    Raises:
+        TypeError: If ``kind`` or ``message`` is not a ``str``, if a standard
+            kind is given a detail, or if ``data`` is not a record, a
+            ``dict`` of JSON values within the limits of CON-30, or ``None``.
+            Building an error a second time, or defining a subclass, raises
+            it too.
+        ValueError: If ``kind`` does not have the form of a kind, or
+            ``message`` holds a lone surrogate.
     """
 
     __slots__ = ("_data", "_kind", "_message", "_received")
@@ -416,9 +433,14 @@ class ContractError(Exception):
 class Action:
     """One action of a contract: its name, idempotency, types and error kinds.
 
-    ``reply`` is ``None`` when the reply is empty. ``errors`` maps each kind
-    the action declares to its detail record, in declaration order; the
-    standard kinds are not listed, since every action has them.
+    Attributes:
+        name: The action's name, which is the name of its method.
+        idempotent: Whether the action is declared idempotent.
+        request: The request record.
+        reply: The reply record; ``None`` when the reply is empty.
+        errors: Maps each kind the action declares to its detail record, in
+            declaration order; the standard kinds are not listed, since every
+            action has them.
     """
 
     name: str
@@ -438,6 +460,13 @@ class Contract:
     """What ``@contract`` records about a declaration class.
 
     Read it with ``Contract.of(Declaration)``.
+
+    Attributes:
+        identity: The contract's identity, ``<name>.v<N>``, such as
+            ``"inventory.v1"``.
+        name: The name in the identity, such as ``"inventory"``.
+        major: The major version in the identity, such as ``1``.
+        declaration: The class marked with ``@contract``.
     """
 
     __slots__ = (
@@ -449,6 +478,10 @@ class Contract:
         "major",
         "name",
     )
+    identity: str
+    name: str
+    major: int
+    declaration: type[Any]
 
     def __init__(
         self,
@@ -456,7 +489,7 @@ class Contract:
         declaration: type[Any],
         actions: Mapping[str, Action],
         description: Mapping[str, Any],
-        codecs: Mapping[type[BaseModel], Codec[Any]],
+        codecs: Mapping[type[BaseModel], object],
     ) -> None:
         self.identity = identity
         self.name, self.major = _parse_identity(identity)
@@ -475,7 +508,12 @@ class Contract:
 
     @classmethod
     def of(cls, declaration: object) -> "Contract":
-        """Return the contract recorded on a class marked with ``@contract``."""
+        """Return the contract recorded on a class marked with ``@contract``.
+
+        Raises:
+            ContractDefinitionError: If ``declaration`` is not a class marked
+                with ``@contract``.
+        """
         found = (
             vars(declaration).get(_CONTRACT_ATTR)
             if inspect.isclass(declaration)
@@ -565,9 +603,19 @@ class Contract:
 def contract[T](identity: str, /) -> Callable[[type[T]], type[T]]:
     """Mark a ``typing.Protocol`` class as the declaration of a contract.
 
-    ``identity`` is ``<name>.v<N>``, for example ``"inventory.v1"``. The class
-    holds only methods marked with ``@action``; names starting with ``_`` are
-    ignored. The class is returned unchanged.
+    The class holds only methods marked with ``@action``; names starting with
+    ``_`` are ignored.
+
+    Args:
+        identity: ``<name>.v<N>``, for example ``"inventory.v1"``.
+
+    Returns:
+        A decorator that takes the class and returns it unchanged.
+
+    Raises:
+        ContractDefinitionError: If ``identity`` is not ``<name>.v<N>``, or,
+            when the class is decorated, if the class, an action or a type it
+            names breaks spec 01.
     """
     _parse_identity(identity)
 
@@ -691,15 +739,26 @@ def action(
 ) -> Any:
     """Mark a method of a contract declaration as an action.
 
-    Use ``@action`` or ``@action(idempotent=True)``. An action is
-    non-idempotent unless declared idempotent.
+    Use ``@action`` or ``@action(idempotent=True)``.
 
-    ``errors`` declares the action's own error kinds, each with its detail
-    record, for example ``errors={"out_of_stock": OutOfStock}``. A kind is
-    lowercase ASCII letters, digits and underscores, starting with a letter,
-    and is not a standard kind. A detail record follows the rules of a request
-    record. ``@contract`` checks them, naming the contract, the action and the
-    kind.
+    Args:
+        function: The method, when the decorator is used bare, as ``@action``.
+        idempotent: Whether the action is idempotent. An action is
+            non-idempotent unless declared idempotent.
+        errors: The action's own error kinds, each with its detail record,
+            for example ``errors={"out_of_stock": OutOfStock}``. A kind is
+            lowercase ASCII letters, digits and underscores, starting with a
+            letter, and is not a standard kind. A detail record follows the
+            rules of a request record. ``@contract`` checks them, naming the
+            contract, the action and the kind.
+
+    Returns:
+        The method, marked, when used bare; otherwise a decorator that marks
+        the method and returns it.
+
+    Raises:
+        ContractDefinitionError: If ``idempotent`` is not a ``bool``, if what
+            is marked is not a function, or if it is marked twice.
     """
     if type(idempotent) is not bool:
         raise ContractDefinitionError(
@@ -730,6 +789,17 @@ def implements[T](declaration: type[Any], /) -> Callable[[type[T]], type[T]]:
     (``None`` for an empty reply). An action that reads the call context takes
     it after the request, as ``(self, request, ctx: CallContext)``. Any other
     public method is an error; helpers start with ``_``.
+
+    Args:
+        declaration: The class marked with ``@contract``.
+
+    Returns:
+        A decorator that takes the class and returns it unchanged.
+
+    Raises:
+        ContractDefinitionError: If ``declaration`` is not a contract, or,
+            when the class is decorated, if the class does not match the
+            contract.
     """
     spec = Contract.of(declaration)
 

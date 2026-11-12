@@ -268,12 +268,15 @@ _BINARY = _Form(
     with_info=True,
 )
 
-# A duration (spec 01): a timedelta below 10**11 seconds, written "1.500s".
+#: A duration (spec 01): a ``timedelta`` below 10**11 seconds, written
+#: ``"1.500s"``.
 Duration = Annotated[timedelta, _DURATION]
-# A decimal (spec 01): a finite Decimal of at most 34 digits, written "-12.50".
+#: A decimal (spec 01): a finite ``Decimal`` of at most 34 digits, written
+#: ``"-12.50"``.
 Decimal128 = Annotated[Decimal, _DECIMAL]
-# Bytes (spec 01): written in base64url with padding, such as "_w==", and read
-# as base64url from JSON text only (ADR 0020); from anything else, bytes only.
+#: Bytes (spec 01): written in base64url with padding, such as ``"_w=="``, and
+#: read as base64url from JSON text only (ADR 0020); from anything else,
+#: ``bytes`` only.
 Binary = Annotated[bytes, _BINARY]
 
 FORMS = (_DURATION, _DECIMAL, _BINARY)

@@ -271,7 +271,8 @@ def _count(rest: dict[str, Any], keyword: str) -> int | None:
 def _whole(rest: dict[str, Any], keyword: str) -> int | None:
     """Take a bound or a multiple of an integer: a whole number, by exact
     type, since pydantic-core would read ``True`` or ``"3"`` as one. Pydantic
-    keeps a whole float as an author wrote it, such as ``ge=1.0``."""
+    keeps a whole float as an author wrote it, such as ``ge=1.0``.
+    """
     value: object = rest.pop(keyword, None)
     if value is None:
         return None
@@ -284,7 +285,8 @@ def _whole(rest: dict[str, Any], keyword: str) -> int | None:
 
 def _double(rest: dict[str, Any], keyword: str) -> float | None:
     """Take a bound of a number: one a double holds exactly, by exact type,
-    since a reader of the description compares against the number written."""
+    since a reader of the description compares against the number written.
+    """
     value: object = rest.pop(keyword, None)
     if value is None:
         return None
@@ -308,7 +310,8 @@ def _existing_day(text: str) -> str:
 
 def _instant(text: str) -> str:
     """A timestamp whose day exists, and whose instant falls in years 0001 to
-    9999 in UTC (CON-40); its pattern has fixed its form."""
+    9999 in UTC (CON-40); its pattern has fixed its form.
+    """
     try:
         TIMES[0].fromisoformat(text).astimezone(UTC)
     except OverflowError:

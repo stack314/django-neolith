@@ -65,16 +65,29 @@ class Principal:
     """On whose behalf a call is made: an issuer, a subject and claims.
 
     A frozen value made of portable types (ADR 0010 Decision 2), never a user
-    model instance. ``claims`` maps a name to a string, an integer, a boolean
-    or a sequence of strings, which is held as a tuple. Two principals are
-    equal when their issuers, subjects and claims are, a claim's value
-    compared with its type, so ``True`` and ``1`` differ, as they do in JSON.
+    model instance. Two principals are equal when their issuers, subjects and
+    claims are, a claim's value compared with its type, so ``True`` and ``1``
+    differ, as they do in JSON.
 
     Building one checks only the types of its parts. Whether it may cross is
     decided when a call is made, from its sent form (spec 03): a principal
     with an empty issuer or subject, a lone surrogate, an integer outside
     ±(2^53 - 1) or an encoding of more than 4096 bytes fails every call made
     for it with ``internal``.
+
+    Args:
+        issuer: Who vouches for the subject, such as an identity provider's
+            URL.
+        subject: Who the principal is, unique within its issuer.
+        claims: What the issuer says of the subject. Maps a name to a string,
+            an integer, a boolean, or a list or tuple of strings, which is
+            held as a tuple.
+
+    Raises:
+        TypeError: If ``issuer`` or ``subject`` is not a ``str``, if
+            ``claims`` is not a mapping, if a claim's name is not a ``str``,
+            or if a claim's value is of another type than those. Defining a
+            subclass raises it too.
     """
 
     __slots__ = ("_claims", "_issuer", "_subject")
@@ -138,7 +151,7 @@ class Principal:
         return self._subject
 
     @property
-    def claims(self) -> Mapping[str, _Claim]:
+    def claims(self) -> Mapping[str, str | int | bool | tuple[str, ...]]:
         """What the issuer says of the subject, as a read-only mapping."""
         return self._claims
 
@@ -281,14 +294,7 @@ class CallContext:
     """The context of one call (ADR 0017 Decision 1).
 
     An action that reads it takes it as a second parameter annotated
-    ``CallContext``. ``principal`` is on whose behalf the call is made, or
-    ``None``. ``trace_id`` is the W3C trace identifier, ``span_id`` the span
-    of this call and ``tracestate`` the W3C ``tracestate`` that goes with
-    them, empty when there is none. ``deadline`` is a ``time.monotonic()``
-    reading on this host, or ``None`` when the call has none.
-    ``idempotency_key`` is this call's key, and ``caller`` the app that made
-    the call; both are ``None`` on a root that is not itself a call.
-    ``scope_id`` names the scope on this host that issued the value.
+    ``CallContext``.
 
     Passed as ``context=`` to a connector call, a value only names its scope:
     the call's context is derived from what that scope holds, so a changed
@@ -299,6 +305,20 @@ class CallContext:
     does. The span identifier, ``tracestate``, the deadline's value and the
     scope id are left out, since each hop or host changes them, so the
     contexts an action sees over two transports compare equal.
+
+    Attributes:
+        principal: On whose behalf the call is made, or ``None``.
+        trace_id: The W3C trace identifier.
+        span_id: The span of this call.
+        tracestate: The W3C ``tracestate`` that goes with them, empty when
+            there is none.
+        deadline: A ``time.monotonic()`` reading on this host, or ``None``
+            when the call has none.
+        idempotency_key: This call's key; ``None`` on a root that is not
+            itself a call.
+        caller: The app that made the call; ``None`` on a root that is not
+            itself a call.
+        scope_id: Names the scope on this host that issued the value.
     """
 
     principal: Principal | None

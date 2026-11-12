@@ -38,7 +38,8 @@ class _Unusual(Exception):
 
 def _quick_number(literal: str) -> int | float:
     """A number written with a fraction or an exponent, as a value the json
-    module writes the way ECMAScript does, or ``_Unusual``."""
+    module writes the way ECMAScript does, or ``_Unusual``.
+    """
     value = float(literal)
     if -(2**53) < value < 2**53:
         if value == int(value):
@@ -67,7 +68,8 @@ def _members(pairs: list[tuple[str, object]]) -> dict[str, object]:
 
 def _quick(text: str) -> bytes | None:
     """The canonical form as the json module writes it, or ``None`` when the
-    text holds something it writes otherwise, or is not I-JSON."""
+    text holds something it writes otherwise, or is not I-JSON.
+    """
     try:
         value = json.loads(text, parse_float=_quick_number, object_pairs_hook=_members)
         written = json.dumps(

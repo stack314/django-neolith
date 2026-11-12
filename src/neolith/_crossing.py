@@ -173,7 +173,8 @@ class Codec[R: BaseModel]:
     def _refusal(self, said: str, behind: Exception) -> ValueError:
         """The refusal to raise for an exception, outside its handler, so that
         the exception is kept only as the cause, and not at all for a record
-        that hides its inputs."""
+        that hides its inputs.
+        """
         kind = type(behind).__name__
         if self._hides:
             return ValueError(f"{said} ({kind})")
@@ -288,7 +289,8 @@ def _converted(dumped: object) -> tuple[object, str | None]:
 def _reader_limit(error: Exception) -> str | None:
     """Which limit of the JSON reader a text is past, if a check refused it
     as not being JSON at all. pydantic-core's reader (jiter) names its limits
-    only in its messages: on depth, and on the digits of an integer."""
+    only in its messages: on depth, and on the digits of an integer.
+    """
     if not isinstance(error, ValidationError):
         return None
     said = [
@@ -420,7 +422,8 @@ def _same(mine: object, theirs: object) -> bool:
 
 def _reshaped(mine: object, theirs: object, trail: object) -> str:
     """Say that a part differs, by its place and the two types, without
-    showing either value."""
+    showing either value.
+    """
     held, read = _type_name(mine), _type_name(theirs)
     other = f"one of type {read}" if held != read else f"another value of type {read}"
     return (
