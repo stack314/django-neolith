@@ -149,6 +149,31 @@ framework_views = {
     "admin changelist": resolve("/admin/shop/basket/").func,
 }
 framework = {name: label_of(view) for name, view in framework_views.items()}
+
+# Django's own wrappers, from contrib apps that are installed: each is the
+# code it wraps.
+from django.contrib.admin.views.decorators import staff_member_required
+from django.contrib.auth.decorators import login_required
+
+from tests import request_site
+from tests.request_admin.shop import views as shop_views
+
+wrapped_views = {
+    "login_required over a project function": login_required(request_site.project_page),
+    "staff_member_required over a project function": staff_member_required(
+        request_site.project_page
+    ),
+    "login_required over a flatpage": login_required(flatpages_views.flatpage),
+    "login_required over a Django CBV": login_required(
+        generic.TemplateView.as_view(template_name="x.html")
+    ),
+    "login_required over a hosted function": login_required(shop_views.page),
+    "staff_member_required over a hosted function": staff_member_required(
+        shop_views.page
+    ),
+    "login_required over a partial": login_required(functools.partial(shop_views.page)),
+}
+wrapped = {name: label_of(view) for name, view in wrapped_views.items()}
 with override_settings(INSTALLED_APPS=["django.contrib.admin", "django.contrib.auth",
         "django.contrib.contenttypes", "django.contrib.sessions",
         "django.contrib.messages"]):
@@ -158,7 +183,7 @@ call_command("check", stdout=printed, stderr=printed)
 print(json.dumps(
     {"results": results, "checks": found, "log": logged.getvalue(),
      "check": printed.getvalue(), "stray": stray, "unhosted": len(unhosted),
-     "framework": framework}
+     "framework": framework, "wrapped": wrapped}
 ))
 """
 
@@ -333,3 +358,24 @@ def test_a_view_the_framework_supplies_is_judged_by_its_own_code(
     """Every kind of view Django supplies, as a project configures it: the
     spec's sentences after TRN-57 predict each result."""
     assert ran["framework"][view] == app
+
+
+@pytest.mark.spec("TRN-57", "TRN-58")
+@pytest.mark.parametrize(
+    ("view", "app"),
+    [
+        ("login_required over a project function", None),
+        ("staff_member_required over a project function", None),
+        ("login_required over a flatpage", "flatpages"),
+        ("login_required over a Django CBV", None),
+        ("login_required over a hosted function", "shop"),
+        ("staff_member_required over a hosted function", "shop"),
+        ("login_required over a partial", "shop"),
+    ],
+)
+def test_a_wrapper_django_supplies_is_the_code_it_wraps(
+    ran: dict[str, Any], view: str, app: str | None
+) -> None:
+    """``auth`` and ``admin`` are installed apps, but their decorators only
+    wrap: a view under them serves as the view's own app."""
+    assert ran["wrapped"][view] == app

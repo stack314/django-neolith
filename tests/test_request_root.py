@@ -1096,35 +1096,44 @@ _OWNERS = {
     "hosted": "tests.host_apps.stock.views",
     "unhosted app": "tests.plain_app.views",
     "project": "tests.request_site",
-    "Django": "django.views.decorators.cache",
-}
-# The app a wrapper's own code serves as, when its link is not followed.
-_OWN_APP = {
-    "hosted": "stock",
-    "unhosted app": "plain_app",
-    "project": None,
-    "Django": None,
+    "Django, in no app": "django.views.decorators.cache",
+    "Django, in a contrib app": "django.contrib.auth.decorators",
 }
 _FORMS = ("no link", "wraps", "wraps(assigned=())", "update_wrapper")
+# Each target's own app, as label_of gives it with no wrapper (the view
+# rules of spec 02 after TRN-57), and whether it is hosted code.
+_TARGETS = {
+    "hosted function": ("web", True),
+    "hosted CBV": ("web", True),
+    "project function": (None, False),
+    "Django function, in no app": (None, False),
+    "Django function, in a contrib app": ("flatpages", False),
+    "Django CBV, in no app": (None, False),
+    "Django CBV, in a contrib app": ("auth", False),
+    "partial": ("web", True),
+    "bound method over a partial": ("web", True),
+}
 
 
-def _targets() -> dict[str, tuple[object, bool]]:
-    """Each target, and whether it is hosted code (the web app's)."""
+def _targets() -> dict[str, object]:
+    from django.contrib.auth.views import LoginView
+    from django.contrib.flatpages.views import flatpage
     from django.views import defaults
     from django.views.generic import TemplateView
 
     from tests.host_apps.web import views as web
 
     return {
-        "hosted function": (web.page, True),
-        "hosted CBV": (web.PageView.as_view(), True),
-        "project function": (request_site.project_page, False),
-        "Django function": (defaults.page_not_found, False),
-        "Django CBV": (TemplateView.as_view(template_name="x.html"), False),
-        "partial": (functools.partial(web.page), True),
-        "bound method over a partial": (
-            types.MethodType(functools.partial(web.Pages.page), web.Pages()),
-            True,
+        "hosted function": web.page,
+        "hosted CBV": web.PageView.as_view(),
+        "project function": request_site.project_page,
+        "Django function, in no app": defaults.page_not_found,
+        "Django function, in a contrib app": flatpage,
+        "Django CBV, in no app": TemplateView.as_view(template_name="x.html"),
+        "Django CBV, in a contrib app": LoginView.as_view(),
+        "partial": functools.partial(web.page),
+        "bound method over a partial": types.MethodType(
+            functools.partial(web.Pages.page), web.Pages()
         ),
     }
 
@@ -1150,30 +1159,101 @@ def _wrapper(owner: str, form: str, target: object) -> object:
     return wrapper
 
 
+def _predicted(owner: str, form: str, target: str) -> str | None:
+    """The app spec 02 predicts for a wrapper (the paragraph after TRN-57)."""
+    own_app, hosted = _TARGETS[target]
+    if form == "no link":
+        # Nothing to follow: the wrapper is its own code, judged as a view.
+        return {
+            "hosted": "stock",
+            "unhosted app": "plain_app",
+            "project": None,
+            "Django, in no app": None,
+            "Django, in a contrib app": "auth",
+        }[owner]
+    if owner.startswith("Django"):
+        # A wrapper the framework supplies is the code it wraps.
+        return own_app
+    if hosted:
+        # A link into hosted code is followed.
+        return "web"
+    if owner in ("hosted", "unhosted app"):
+        # Not followed: the wrapper is its app's code.
+        return "stock" if owner == "hosted" else "plain_app"
+    # Not followed, and project code is in no app: a project wrapper is
+    # known by the __module__ and view_class it carries, which wraps copies
+    # from the target (assigned=() copies only the attributes).
+    copies_module = form != "wraps(assigned=())"
+    is_cbv = "CBV" in target
+    return own_app if copies_module or is_cbv else None
+
+
+@pytest.fixture
+def contrib_site() -> Iterator[None]:
+    """The test host with Django's contrib apps a wrapper or a view can come
+    from installed beside it."""
+    contrib = [
+        "django.contrib.contenttypes",
+        "django.contrib.auth",
+        "django.contrib.sites",
+        "django.contrib.flatpages",
+    ]
+    with override_settings(
+        INSTALLED_APPS=[
+            *contrib,
+            *host_apps.INSTALLED[:-1],
+            "tests.plain_app",
+            "neolith",
+        ]
+    ):
+        yield
+
+
 @pytest.mark.spec("TRN-57", "TRN-58")
-@pytest.mark.parametrize(
-    "target",
-    [
-        "hosted function",
-        "hosted CBV",
-        "project function",
-        "Django function",
-        "Django CBV",
-        "partial",
-        "bound method over a partial",
-    ],
-)
+@pytest.mark.parametrize("target", list(_TARGETS))
 @pytest.mark.parametrize("form", _FORMS)
 @pytest.mark.parametrize("owner", list(_OWNERS))
 def test_every_wrapper_serves_as_the_spec_predicts(
-    site: None, owner: str, form: str, target: str
+    contrib_site: None, owner: str, form: str, target: str
 ) -> None:
-    """A wrapper's link is followed into hosted code; otherwise the wrapper
-    is its own code: the app its module is in, whatever ``functools.wraps``
-    copied onto it, or, for code in no installed app, the ``__module__`` it
-    carries."""
+    """Every wrapper owner (with Django's code both in no app and in a
+    contrib app), every way of writing a wrapper, and every kind of target."""
     from neolith._serving import label_of
 
-    view, hosted = _targets()[target]
-    expected = "web" if form != "no link" and hosted else _OWN_APP[owner]
-    assert label_of(_wrapper(owner, form, view)) == expected
+    view = _targets()[target]
+    assert label_of(view) == _TARGETS[target][0]
+    assert label_of(_wrapper(owner, form, view)) == _predicted(owner, form, target)
+
+
+@pytest.mark.spec("TRN-57", "TRN-58")
+@pytest.mark.parametrize(
+    ("target", "app"),
+    [
+        ("project", None),
+        ("unhosted app", "plain_app"),
+        ("unhosted app, partial", "plain_app"),
+        ("hosted", "web"),
+        ("flatpage", "flatpages"),
+        ("Django CBV", None),
+    ],
+)
+def test_login_required_is_the_code_it_wraps(
+    contrib_site: None, target: str, app: str | None
+) -> None:
+    from django.contrib.auth.decorators import login_required
+    from django.contrib.flatpages.views import flatpage
+    from django.views.generic import TemplateView
+
+    from neolith._serving import label_of
+    from tests.host_apps.web import views as web
+    from tests.plain_app import views as plain
+
+    views: dict[str, Any] = {
+        "project": request_site.project_page,
+        "unhosted app": plain.page,
+        "unhosted app, partial": functools.partial(plain.page),
+        "hosted": web.page,
+        "flatpage": flatpage,
+        "Django CBV": TemplateView.as_view(template_name="x.html"),
+    }
+    assert label_of(login_required(views[target])) == app

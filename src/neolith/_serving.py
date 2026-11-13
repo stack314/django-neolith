@@ -9,10 +9,12 @@ installed app that has a declaration; *framework* code is Django's own.
 
 - A function's own code is in the module whose globals it runs in, which
   ``functools.wraps`` never changes, when that module is in an installed
-  app; so a wrapper an app defines is that app's code, whatever
-  ``__module__`` or ``view_class`` ``wraps`` copied onto it. Otherwise its
-  ``__module__`` says where it belongs, as for Django's own decorators and
-  for project wrappers.
+  app other than Django's; so a wrapper an app defines is that app's code,
+  whatever ``__module__`` or ``view_class`` ``wraps`` copied onto it.
+  Otherwise its ``__module__`` says where it belongs, as for project
+  wrappers. A wrapper Django supplies, in one of its contrib apps, such as
+  ``login_required``, or in none, such as ``never_cache``, only wraps: it
+  follows its ``__wrapped__`` wherever that leads.
 - A function whose own code is in no installed app and that carries a
   ``view_class``, as ``View.as_view``'s does, is that class's code,
   whatever ``as_view`` copied onto it from ``dispatch``.
@@ -91,28 +93,45 @@ def _unwrap(code: object) -> object:
     return None
 
 
-def _own_module(function: types.FunctionType) -> object:
-    """Where a function's own code is: the module whose globals it runs in,
-    which ``functools.wraps`` never changes, when that is in an installed
-    app. Otherwise ``__module__``, which ``wraps`` copies from the code it
-    wraps: the one thing that ties Django's own decorators and project
-    wrappers to the view.
+def _globals_name(function: types.FunctionType) -> object:
+    """The module whose globals the function runs in, which
+    ``functools.wraps`` never changes.
     """
-    own = types.FunctionType.__globals__.__get__(function).get("__name__")
-    if _config(own) is not None:
-        return own
-    return function.__module__
+    return types.FunctionType.__globals__.__get__(function).get("__name__")
+
+
+def _django(module: object) -> bool:
+    """Whether ``module`` is Django's own, in one of its apps or in none."""
+    return type(module) is str and (module == "django" or module.startswith("django."))
+
+
+def _app_code(function: types.FunctionType) -> object:
+    """The module of the installed app the function's own code is in, or
+    ``None``: never Django's, whose contrib packages are installed apps but
+    whose wrappers, such as ``login_required``, only wrap.
+    """
+    own = _globals_name(function)
+    if _django(own) or _config(own) is None:
+        return None
+    return own
+
+
+def _own_module(function: types.FunctionType) -> object:
+    """Where a function's own code is: the app module its globals belong
+    to, when that is an installed app other than Django's; otherwise
+    ``__module__``, which ``functools.wraps`` copies from the code it wraps.
+    """
+    own = _app_code(function)
+    return function.__module__ if own is None else own
 
 
 def _view_class(function: types.FunctionType) -> Any:  # noqa: ANN401
     """The ``view_class`` a function carries, honoured only when the
-    function's own code is in no installed app, as ``View.as_view``'s is:
+    function's own code is not an app's, as ``View.as_view``'s is not:
     ``functools.wraps`` copies it onto a wrapper that an app defines.
     """
     found: Any = vars(function).get("view_class")
-    if not issubclass(type(found), type):
-        return None
-    if _config(types.FunctionType.__globals__.__get__(function).get("__name__")):
+    if not issubclass(type(found), type) or _app_code(function) is not None:
         return None
     return found
 
@@ -184,8 +203,15 @@ def label_of(view: object) -> str | None:
         if admin is not None:
             return admin_code(admin)[0]
         link = _link(view)
-        if link is not None and _hosted(_module(link)):
+        if link is not None and (_hosted(_module(link)) or _django_wrapper(view)):
             view = link
             continue
         return _app(_module(view))
     return None
+
+
+def _django_wrapper(code: object) -> bool:
+    """Whether ``code`` is a function Django supplies, which only wraps: it
+    follows its ``__wrapped__`` wherever that leads.
+    """
+    return type(code) is types.FunctionType and _django(_globals_name(code))
