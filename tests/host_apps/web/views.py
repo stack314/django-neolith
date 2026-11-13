@@ -109,3 +109,75 @@ def _failing() -> Iterator[bytes]:
 
 def fail(request: HttpRequest) -> StreamingHttpResponse:
     return StreamingHttpResponse(_failing())
+
+
+class Pages:
+    """Views that are bound methods of a class of this app."""
+
+    def page(self, request: HttpRequest) -> HttpResponse:
+        return HttpResponse(site.ask())
+
+
+class AppReader:
+    """A file-like object of this app whose ``read`` runs its code, as a
+    storage backend's file may."""
+
+    def __init__(self) -> None:
+        self.done = False
+
+    def read(self, size: int = -1) -> bytes:
+        if self.done:
+            return b""
+        self.done = True
+        return site.ask().encode()
+
+
+def appfile(request: HttpRequest) -> FileResponse:
+    site.hold()
+    return FileResponse(AppReader())
+
+
+async def aappfile(request: HttpRequest) -> FileResponse:
+    site.hold()
+    return FileResponse(AppReader())
+
+
+def realfile(request: HttpRequest) -> FileResponse:
+    site.hold()
+    return FileResponse(open(__file__, "rb"))  # closed by Django
+
+
+def _cleaned() -> Iterator[bytes]:
+    try:
+        yield b"<"
+        yield b">"
+    finally:
+        site.ask()
+
+
+async def _acleaned() -> AsyncIterator[bytes]:
+    site.hold()
+    try:
+        yield b"<"
+        await asyncio.Event().wait()
+        yield b">"
+    finally:
+        site.ask()
+
+
+def cleaned(request: HttpRequest) -> StreamingHttpResponse:
+    return StreamingHttpResponse(_cleaned())
+
+
+def acleaned(request: HttpRequest) -> StreamingHttpResponse:
+    return StreamingHttpResponse(_acleaned())
+
+
+async def _afailing() -> AsyncIterator[bytes]:
+    site.hold()
+    yield b"<"
+    raise RuntimeError("the body failed")
+
+
+async def afail(request: HttpRequest) -> StreamingHttpResponse:
+    return StreamingHttpResponse(_afailing())

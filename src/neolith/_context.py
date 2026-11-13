@@ -20,6 +20,7 @@ receives the principal that check returns, in every mode.
 """
 
 import base64
+import collections
 import contextlib
 import contextvars
 import dataclasses
@@ -525,6 +526,27 @@ _CURRENT: contextvars.ContextVar[Scope | None] = contextvars.ContextVar(
 )
 _OPEN: dict[str, Scope] = {}
 _OPEN_LOCK = threading.Lock()
+# Scope ids closed where no lock may be taken, such as a finalizer, which can
+# run while this thread holds _OPEN_LOCK. Taken off the table the next time
+# the lock is held. A deque's append and popleft take no lock of Python's.
+_CLOSED_LATER: collections.deque[str] = collections.deque()
+
+
+def _forget_closed() -> None:
+    """Take scopes closed without the lock off the table; hold the lock."""
+    while _CLOSED_LATER:
+        try:
+            scope_id = _CLOSED_LATER.popleft()
+        except IndexError:
+            return
+        _OPEN.pop(scope_id, None)
+
+
+def open_scopes() -> list[Scope]:
+    """The scopes on the table that are still open."""
+    with _OPEN_LOCK:
+        _forget_closed()
+        return [scope for scope in _OPEN.values() if not scope.closed]
 
 
 def _hex(size: int) -> str:
@@ -567,6 +589,7 @@ def begin(
         requires,
     )
     with _OPEN_LOCK:
+        _forget_closed()
         _OPEN[scope_id] = scope
     return scope, _CURRENT.set(scope)
 
@@ -575,7 +598,20 @@ def close(scope: Scope) -> None:
     """Close a scope, so that a call made in it or naming it is refused."""
     scope.closed = True
     with _OPEN_LOCK:
+        _forget_closed()
         _OPEN.pop(scope.context.scope_id, None)
+
+
+def close_without_lock(scope: Scope) -> None:
+    """Close a scope without taking a lock, for a finalizer.
+
+    A finalizer runs wherever a collection happens, also while this thread
+    holds ``_OPEN_LOCK``, so it must never take it. The scope is closed at
+    once, which is what refuses its calls; its table entry goes the next
+    time the lock is held.
+    """
+    scope.closed = True
+    _CLOSED_LATER.append(scope.context.scope_id)
 
 
 @contextlib.contextmanager
@@ -757,6 +793,7 @@ def parent(context: object) -> Scope:
             )
         scope_id = context.scope_id
         with _OPEN_LOCK:
+            _forget_closed()
             found = _OPEN.get(scope_id) if type(scope_id) is str else None
         if found is None or found.closed:
             raise UsageError(

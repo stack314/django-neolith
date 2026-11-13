@@ -50,16 +50,20 @@ from django.core.management import call_command
 from django.contrib.auth.models import User
 from django.test import AsyncClient, Client
 
-from tests.request_admin.shop.models import Basket, Item, Order
+from tests.request_admin.shop.models import Basket, Crate, Item, Order, Shelf
 
 call_command("migrate", run_syncdb=True, verbosity=0)
 user = User.objects.create_superuser("admin", "", "admin")
-ids = {m.__name__.lower(): m.objects.create(name="x").pk for m in (Order, Basket, Item)}
+models = (Order, Basket, Item, Shelf, Crate)
+ids = {m.__name__.lower(): m.objects.create(name="x").pk for m in models}
 posts = [
     ("order", "quote"),
     ("order", "quote_everywhere"),
     ("basket", "quote_everywhere"),
     ("item", "quote_everywhere"),
+    ("shelf", "quote_everywhere"),
+    ("crate", "quote_everywhere"),
+    ("crate", "project_quote"),
 ]
 results = {}
 client = Client()
@@ -91,9 +95,13 @@ print(json.dumps(
 ))
 """
 
-_W001 = (
-    "tests.request_admin.project_admin.ItemAdmin: admin class in no installed "
-    "app; its views have no calling app, and a contract call from them is refused"
+_REFUSED = (
+    " in no installed app; its views have no calling app, and a contract call "
+    "from them is refused"
+)
+_W001 = f"tests.request_admin.project_admin.ItemAdmin: admin class{_REFUSED}"
+_W001_OPTION = (
+    f"tests.request_admin.project_admin.project_quote: admin function{_REFUSED}"
 )
 
 
@@ -155,8 +163,10 @@ def test_the_stock_admin_class_serves_as_the_model_s_app(
     ran: dict[str, Any], mode: str
 ) -> None:
     """The stock ``ModelAdmin`` runs no app's code, so its views run as the
-    app whose model they serve."""
+    app whose model they serve; so does the class Django builds for
+    ``register`` with options that hold no app's code."""
     assert ran["results"][f"{mode} basket quote_everywhere"] == [200, "as shop"]
+    assert ran["results"][f"{mode} shelf quote_everywhere"] == [200, "as shop"]
 
 
 @pytest.mark.spec("TRN-58", "TRN-42")
@@ -166,23 +176,28 @@ def test_an_admin_action_on_a_project_admin_class_is_refused(
 ) -> None:
     """Case 8: the same action, on a ``ModelAdmin`` subclass in a project
     module, has no caller and is refused."""
-    assert ran["results"][f"{mode} item quote_everywhere"] == [
-        200,
-        "refused unauthenticated",
-    ]
+    refused = [200, "refused unauthenticated"]
+    assert ran["results"][f"{mode} item quote_everywhere"] == refused
+    # A project function given as an option is the admin's own code.
+    assert ran["results"][f"{mode} crate quote_everywhere"] == refused
+    assert ran["results"][f"{mode} crate project_quote"] == refused
 
 
 @pytest.mark.spec("APP-17")
 def test_the_host_warns_about_an_admin_class_in_no_app(ran: dict[str, Any]) -> None:
-    """Case 8: ``neolith.W001`` names the project's admin class alone, not
-    the shop app's, the stock one or those of ``django.contrib.auth``."""
-    assert ran["checks"] == [["neolith.W001", _W001]]
+    """Case 8: ``neolith.W001`` names the project's admin class and the
+    project function given as an option, by the rule the binding uses, not
+    the shop app's class, the stock ones or those of ``django.contrib.auth``."""
+    assert ran["checks"] == [
+        ["neolith.W001", _W001],
+        ["neolith.W001", _W001_OPTION],
+    ]
 
 
 @pytest.mark.spec("APP-17")
 def test_set_up_logs_the_warning_and_serves(ran: dict[str, Any]) -> None:
     """A warning does not stop the host; set-up logs it once."""
-    assert ran["log"] == f"(neolith.W001) {_W001}\n"
+    assert ran["log"] == (f"(neolith.W001) {_W001}\n(neolith.W001) {_W001_OPTION}\n")
 
 
 def test_manage_py_check_prints_the_warning(ran: dict[str, Any]) -> None:

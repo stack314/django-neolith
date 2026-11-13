@@ -5,44 +5,49 @@ List ``"neolith.middleware.RootMiddleware"`` first in ``MIDDLEWARE``, once
 request deadline (``NEOLITH["REQUEST_DEADLINE"]``, 30 seconds when absent,
 none when ``None``) counted from when the request reaches it. The root
 belongs to no app until the view is resolved; then it belongs to the app
-whose code serves the view. It stays open until the response is done, a
-streamed body included, and then closes, so a call kept past it is refused.
-How each case is met is in the Django host notes (``docs/django-host.md``).
+whose code serves the view (``neolith._serving``). It stays open until the
+response is done, a streamed body included, and then closes, so a call kept
+past it is refused. How each case is met is in the Django host notes
+(``docs/django-host.md``).
 
 State the middleware owns (CONTRIBUTING K6): a private context variable
-that holds, while a request runs, the request and its root, through which
-``process_view`` binds the root. Closing never goes through a context
-variable: the middleware, or the wrapper it puts around a streamed body,
-closes the root through its own reference.
+that holds, while a request runs, its root, through which ``process_view``
+binds it. Closing never goes through a context variable: the middleware, or
+the wrapper it puts around a streamed body, closes the root through its own
+reference.
 """
 
 import contextlib
 import contextvars
 import inspect
-import sys
-import types
+import io
 import weakref
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from typing import Any, Final, final
 
-from django.apps import apps as global_apps
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
-from django.db.models.options import Options
 from django.http import FileResponse, HttpRequest, StreamingHttpResponse
 from django.http.response import HttpResponseBase
+from django.utils.module_loading import import_string
 
 from neolith import _checks, _context, _host
+from neolith._serving import label_of
 
 __all__ = ["RootMiddleware"]
 
 _Respond = Callable[[HttpRequest], HttpResponseBase]
 _ARespond = Callable[[HttpRequest], Awaitable[HttpResponseBase]]
+_Tokens = tuple[
+    contextvars.Token[_context.Scope | None],
+    contextvars.Token[_context.Scope | None],
+]
 
-# While a request runs: the request and its root, so process_view binds the
-# root of its own request. Set and reset by the middleware's call alone.
-_REQUEST: Final[contextvars.ContextVar[tuple[HttpRequest, _context.Scope] | None]] = (
-    contextvars.ContextVar("neolith_request_root", default=None)
+# While a request runs, its root, so process_view binds the root of the
+# request it runs in. Set and reset by the middleware's call alone; a nested
+# handler sets its own.
+_REQUEST: Final[contextvars.ContextVar[_context.Scope | None]] = contextvars.ContextVar(
+    "neolith_request_root", default=None
 )
 _NO_HOST: Final = (
     f"{_checks.ROOT_MIDDLEWARE}: the host is not set up; install neolith as the "
@@ -56,9 +61,11 @@ class RootMiddleware:
 
     Django runs it in the mode of the handler inside it, sync or async, and
     it behaves the same in both. Its constructor refuses a ``MIDDLEWARE``
-    in which it is not the first entry, or is listed more than once, and a
-    process where the host is not set up, so a handler is never built with
-    it in the wrong place.
+    in which it is not the first entry, or in which this class is listed
+    more than once under any path, and a process where the host is not set
+    up, so a handler is never built with it in the wrong place. A request
+    that arrives while the host is not set up, as under an override that
+    leaves neolith out, is refused as well.
 
     Args:
         get_response: The rest of the chain, as Django passes it.
@@ -74,7 +81,10 @@ class RootMiddleware:
 
     def __init__(self, get_response: _Respond | _ARespond) -> None:
         """Check the middleware's place and the host, and keep the chain."""
-        problems = _checks.middleware_problems(getattr(settings, "MIDDLEWARE", None))
+        listed = getattr(settings, "MIDDLEWARE", None)
+        problems = _checks.middleware_problems(listed)
+        if not problems:
+            problems = _listed_again(listed)  # type: ignore[arg-type]
         if problems:
             raise ImproperlyConfigured("\n".join(problems))
         if _host._current() is None:
@@ -93,7 +103,7 @@ class RootMiddleware:
         """Serve one request inside its root."""
         if self._async:
             return self._acall(request)
-        scope, tokens = _open(request)
+        scope, tokens = _open()
         handed = False
         try:
             respond: _Respond = self._get_response  # type: ignore[assignment]
@@ -104,7 +114,7 @@ class RootMiddleware:
             _leave(scope, tokens, handed)
 
     async def _acall(self, request: HttpRequest) -> HttpResponseBase:
-        scope, tokens = _open(request)
+        scope, tokens = _open()
         handed = False
         try:
             respond: _ARespond = self._get_response  # type: ignore[assignment]
@@ -132,7 +142,7 @@ class RootMiddleware:
             view_args: Its positional arguments.
             view_kwargs: Its keyword arguments.
         """
-        _bind(request, view_func)
+        _bind(view_func)
 
     async def _aprocess_view(
         self,
@@ -141,37 +151,41 @@ class RootMiddleware:
         view_args: tuple[Any, ...],
         view_kwargs: dict[str, Any],
     ) -> None:
-        _bind(request, view_func)
+        _bind(view_func)
 
 
-def _open(
-    request: HttpRequest,
-) -> tuple[
-    _context.Scope,
-    tuple[
-        contextvars.Token[_context.Scope | None],
-        contextvars.Token[tuple[HttpRequest, _context.Scope] | None],
-    ],
-]:
+def _listed_again(listed: list[str]) -> list[str]:
+    """Refuse this class under a second path. Django has imported every
+    entry after the first by the time it builds the first, so resolving
+    them imports nothing new.
+    """
+    count = 1
+    for entry in listed[1:]:
+        try:
+            found = import_string(entry)
+        except ImportError:
+            continue
+        if found is RootMiddleware:
+            count += 1
+    if count == 1:
+        return []
+    return [f"MIDDLEWARE: {_checks.ROOT_MIDDLEWARE} is listed {count} times"]
+
+
+def _open() -> tuple[_context.Scope, _Tokens]:
     """Open the request's root, of no app, with the host's request deadline
-    counted from now, and make it current.
+    counted from now, and make it current. A host that is not set up has
+    no deadline to give, so the request is refused.
     """
     host = _host._current()
-    seconds = (
-        _checks.DEFAULT_REQUEST_DEADLINE if host is None else host.request_deadline
-    )
-    scope, token = _context.begin(**_context.root_fields(timeout=seconds))
-    return scope, (token, _REQUEST.set((request, scope)))
+    if host is None:
+        raise ImproperlyConfigured(_NO_HOST)
+    timeout = host.request_deadline
+    scope, token = _context.begin(**_context.root_fields(timeout=timeout))
+    return scope, (token, _REQUEST.set(scope))
 
 
-def _leave(
-    scope: _context.Scope,
-    tokens: tuple[
-        contextvars.Token[_context.Scope | None],
-        contextvars.Token[tuple[HttpRequest, _context.Scope] | None],
-    ],
-    handed: bool,
-) -> None:
+def _leave(scope: _context.Scope, tokens: _Tokens, handed: bool) -> None:
     """Close the root unless a streamed body took it over, and make the
     variables what they were.
     """
@@ -186,12 +200,11 @@ def _leave(
         _context._CURRENT.reset(current)
 
 
-def _bind(request: HttpRequest, view: object) -> None:
-    found = _REQUEST.get()
-    if found is None or found[0] is not request:
+def _bind(view: object) -> None:
+    scope = _REQUEST.get()
+    if scope is None:
         return
-    scope = found[1]
-    label = _label(view)
+    label = label_of(view)
     requires: frozenset[str] | None = None
     host = _host._current()
     if label is not None and host is not None and label in host.apps:
@@ -199,88 +212,79 @@ def _bind(request: HttpRequest, view: object) -> None:
     scope.bind(label, requires)
 
 
-def _label(view: object) -> str | None:
-    """The label of the app whose code serves ``view``, or ``None``.
-
-    Read with ``vars()`` and ``type()``, so no attribute hook of the view's
-    author runs. A view Django's admin wraps carries its ``ModelAdmin``:
-    its class's app, or the model's app for the stock ``ModelAdmin``, which
-    runs no app's code. A class-based view takes its class's module; a
-    function its own ``__module__``, as ``functools.wraps`` leaves it; a
-    bound method its function's; anything else its type's.
+def _plain_file(value: object) -> bool:
+    """Whether reading ``value`` runs no Python code: a file Python opened,
+    buffered or not, or bytes in memory.
     """
-    kind = type(view)
-    if kind is types.FunctionType or kind is types.MethodType:
-        function = view.__func__ if kind is types.MethodType else view  # type: ignore[attr-defined]
-        if type(function) is not types.FunctionType:
-            return _containing(vars(type(function)).get("__module__"))
-        attributes = vars(function)
-        admin = attributes.get("model_admin")
-        if admin is not None:
-            return _admin_label(admin)
-        view_class = attributes.get("view_class")
-        if issubclass(type(view_class), type):
-            return _containing(vars(view_class).get("__module__"))
-        return _containing(function.__module__)
-    return _containing(vars(kind).get("__module__"))
-
-
-def _admin_label(admin: object) -> str | None:
-    klass = type(admin)
-    options = sys.modules.get("django.contrib.admin.options")
-    if options is not None and klass is vars(options).get("ModelAdmin"):
-        model = vars(admin).get("model")
-        meta = vars(model).get("_meta") if issubclass(type(model), type) else None
-        label = meta.app_label if type(meta) is Options else None
-        installed = type(label) is str and label in global_apps.app_configs
-        return label if installed else None
-    return _containing(vars(klass).get("__module__"))
-
-
-def _containing(module: object) -> str | None:
-    if type(module) is not str:
-        return None
-    config = global_apps.get_containing_app_config(module)
-    return None if config is None else config.label
+    kind = type(value)
+    if kind is io.FileIO or kind is io.BytesIO:
+        return True
+    return kind is io.BufferedReader and type(value.raw) is io.FileIO  # type: ignore[attr-defined]
 
 
 def _hand_over(response: HttpResponseBase, scope: _context.Scope) -> bool:
     """Hand the root to a streamed body; return whether it was handed over.
 
-    A ``FileResponse`` that streams a file is left as it is, so the server
-    can still send the file itself (``wsgi.file_wrapper``); reading a file
-    runs no app code, and its root closes when the middleware returns. Any
-    other streamed body is wrapped, and its wrapper closes the root.
+    A ``FileResponse`` over a plain file is left as it is, so the server can
+    still send the file itself (``wsgi.file_wrapper``); reading it runs no
+    Python code, and its root closes when the middleware returns. Any other
+    streamed body is wrapped. The wrapper takes over the closers Django has
+    registered so far, those of the body, and runs them inside the root
+    when the body ends or the response is closed, then closes the root.
     """
     if not isinstance(response, StreamingHttpResponse):
         return False
-    if isinstance(response, FileResponse) and response.file_to_stream is not None:
+    if isinstance(response, FileResponse) and _plain_file(response.file_to_stream):
         return False
+    # Django's own list of what HttpResponseBase.close() runs, the same in
+    # every supported version; the handlers append to it too.
+    registered: list[Callable[[], object]] = response._resource_closers  # type: ignore[attr-defined]
+    closers = list(registered)
+    registered.clear()
     content = response.streaming_content
     if response.is_async:
-        response.streaming_content = _AsyncBody(content, scope)  # type: ignore[arg-type]
+        response.streaming_content = _AsyncBody(content, scope, closers)  # type: ignore[arg-type]
     else:
-        response.streaming_content = _Body(content, scope)  # type: ignore[arg-type]
+        response.streaming_content = _Body(content, scope, closers)  # type: ignore[arg-type]
     return True
 
 
 class _Closing:
-    """What both wrappers share: the root, and closing it once.
+    """What both wrappers share: the root, the body's closers, and closing
+    them once, inside the root.
 
     A finalizer closes the root when the wrapper is collected, for the path
     where the server never closes the response (an ASGI client that
-    disconnects before a streamed 4xx is sent; ADR 0017 Consequences).
+    disconnects before a streamed 4xx is sent; ADR 0017 Consequences). It
+    runs wherever a collection happens, so it takes no lock.
     """
 
-    __slots__ = ("__weakref__", "_close", "_scope")
+    __slots__ = ("__weakref__", "_closers", "_scope")
 
-    def __init__(self, scope: _context.Scope) -> None:
+    def __init__(
+        self, scope: _context.Scope, closers: list[Callable[[], object]]
+    ) -> None:
         self._scope = scope
-        self._close = weakref.finalize(self, _context.close, scope)
+        self._closers = closers
+        # The finalizer's registry keeps it until the wrapper is collected.
+        weakref.finalize(self, _context.close_without_lock, scope)
 
     def close(self) -> None:
-        """Close the root; Django calls it when the response is closed."""
-        self._close()
+        """Run the body's closers inside the root, then close the root;
+        Django calls it when the response is closed.
+        """
+        closers, self._closers = self._closers, []
+        if closers:
+            token = _context._CURRENT.set(self._scope)
+            try:
+                for closer in closers:
+                    # As Django's own close does: one closer's failure stops
+                    # none of the others.
+                    with contextlib.suppress(Exception):
+                        closer()
+            finally:
+                _context._CURRENT.reset(token)
+        _context.close(self._scope)
 
 
 @final
@@ -289,8 +293,13 @@ class _Body(_Closing):
 
     __slots__ = ("_inner",)
 
-    def __init__(self, inner: Iterator[bytes], scope: _context.Scope) -> None:
-        super().__init__(scope)
+    def __init__(
+        self,
+        inner: Iterator[bytes],
+        scope: _context.Scope,
+        closers: list[Callable[[], object]],
+    ) -> None:
+        super().__init__(scope, closers)
         self._inner = inner
 
     def __iter__(self) -> "_Body":
@@ -314,8 +323,13 @@ class _AsyncBody(_Closing):
 
     __slots__ = ("_inner",)
 
-    def __init__(self, inner: AsyncIterator[bytes], scope: _context.Scope) -> None:
-        super().__init__(scope)
+    def __init__(
+        self,
+        inner: AsyncIterator[bytes],
+        scope: _context.Scope,
+        closers: list[Callable[[], object]],
+    ) -> None:
+        super().__init__(scope, closers)
         self._inner = inner
 
     def __aiter__(self) -> "_AsyncBody":

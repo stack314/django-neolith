@@ -3,7 +3,7 @@ from django.db.models import QuerySet
 from django.http import HttpRequest, HttpResponse
 
 from tests import request_site as site
-from tests.request_admin.shop.models import Basket, Order
+from tests.request_admin.shop.models import Basket, Order, Shelf
 
 
 def quote(
@@ -21,6 +21,8 @@ class OrderAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
 
 
 admin.site.register(Basket)
+# Options make Django build a class of its own, in django.contrib.admin.sites.
+admin.site.register(Shelf, list_display=("name",))
 admin.site.add_action(quote, "quote_everywhere")
 
 # A project-level admin module, loaded while the apps load, as one imported

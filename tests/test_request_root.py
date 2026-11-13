@@ -18,7 +18,8 @@ import contextvars
 import gc
 import io
 import threading
-from collections.abc import Callable, Iterator, Mapping
+import warnings
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 from wsgiref.util import setup_testing_defaults
@@ -142,6 +143,7 @@ async def _asgi(
     *,
     disconnect: asyncio.Event | None = None,
     on_send: Callable[[Mapping[str, Any]], None] | None = None,
+    on_send_async: Callable[[Mapping[str, Any]], Awaitable[None]] | None = None,
 ) -> Served:
     """Serve ``path`` through Django's ASGI handler. The client disconnects
     once ``disconnect`` is set, and otherwise stays until the response ends.
@@ -161,6 +163,8 @@ async def _asgi(
         sent.append(message)
         if on_send is not None:
             on_send(message)
+        if on_send_async is not None:
+            await on_send_async(message)
 
     await ASGIHandler()(_scope(path), receive, send)
     status = next(m["status"] for m in sent if m["type"] == "http.response.start")
@@ -198,13 +202,21 @@ def _closed(context: contextvars.Context) -> bool:
         ("/cbv/", "as web"),
         ("/wrapped/", "as web"),
         ("/instance/", "as web"),
+        ("/partial/", "as web"),
+        ("/method/", "as web"),
+        ("/wrapped-partial/", "as web"),
+        ("/method-partial/", "as web"),
         ("/level/", "as stock"),
+        ("/stock-hidden/", "as stock"),
     ],
 )
 def test_a_view_calls_as_the_app_its_code_is_in(
     site: None, mode: str, path: str, outcome: str
 ) -> None:
-    """Case 12: a view from another installed app calls as that app."""
+    """Case 12: a view from another installed app calls as that app. A
+    wrapper is followed through the links it keeps (``__wrapped__``, a
+    partial's function, a bound method's function); one that keeps none,
+    in another app, serves as that app, as spec 02 says after TRN-57."""
     served = serve(mode, path)
     assert (served.status, served.body.decode()) == (200, outcome)
     assert [outcome] == request_site.SEEN
@@ -222,12 +234,12 @@ def test_a_view_of_an_app_with_no_declaration_calls_as_that_app(
 
 @pytest.mark.spec("TRN-58", "TRN-42")
 @pytest.mark.parametrize("mode", MODES)
-@pytest.mark.parametrize("path", ["/project/", "/hidden/", "/partial/"])
+@pytest.mark.parametrize("path", ["/project/", "/hidden/"])
 def test_a_view_in_no_app_has_no_caller_and_is_refused(
     site: None, mode: str, path: str
 ) -> None:
-    """A view in a project module, one whose decorator did not copy its
-    module, and one the host cannot place all serve from no app."""
+    """A view in a project module, and a view wrapped by a project
+    decorator that keeps no link to it, serve from no app."""
     assert serve(mode, path).body == b"refused unauthenticated"
 
 
@@ -438,7 +450,7 @@ def test_a_streamed_4xx_whose_client_goes_before_the_body_closes_on_collection(
     finally:
         gc.enable()
     gc.collect()
-    assert not _context._OPEN
+    assert not _context.open_scopes()
 
 
 async def _asgi_unsent(path: str, gone: asyncio.Event) -> None:
@@ -593,7 +605,7 @@ def test_the_app_is_read_without_running_the_view_s_hooks(site: None) -> None:
     the author's runs, and code in no app has no app."""
     from django.utils.functional import SimpleLazyObject
 
-    from neolith import middleware
+    from neolith._serving import label_of
 
     setups: list[None] = []
 
@@ -605,7 +617,390 @@ def test_the_app_is_read_without_running_the_view_s_hooks(site: None) -> None:
         return None
 
     admin_view.model_admin = SimpleLazyObject(setup)  # type: ignore[attr-defined]
-    assert middleware._label(admin_view) is None
+    assert label_of(admin_view) is None
     assert setups == []
-    assert middleware._label(_Hooked()) is None
+    assert label_of(_Hooked()) is None
     assert _Hooked.reads == 0
+
+
+# Round 1 of review: each way a body ends, the body's own clean-up, file-like
+# objects, and the guards.
+
+
+@pytest.mark.spec("TRN-63")
+def test_a_collection_while_the_table_s_lock_is_held_does_not_deadlock() -> None:
+    """The backstop's finalizer runs wherever a collection happens, also in
+    a thread that holds the lock of the table of open scopes; it takes no
+    lock, and the root it closes is refused at once."""
+    from neolith.middleware import _Body
+
+    def run() -> None:
+        scope, token = _scope_for_body()
+        _context._CURRENT.reset(token)
+        # The body holds its closers' list, which holds the body: a cycle,
+        # so only a collection frees it.
+        closers: list[Any] = []
+        closers.append(_Body(iter([b"x"]), scope, closers))
+        del closers
+        assert not scope.closed
+        with _context._OPEN_LOCK:
+            gc.collect()
+        finished.append(scope.closed)
+
+    finished: list[bool] = []
+    gc.disable()
+    try:
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+        worker.join(30)
+    finally:
+        gc.enable()
+    assert finished == [True]
+    assert not _context.open_scopes()
+
+
+def _scope_for_body() -> tuple[
+    _context.Scope, contextvars.Token[_context.Scope | None]
+]:
+    return _context.begin(**_context.root_fields())
+
+
+def _sync_body(end: str) -> Iterator[bytes]:
+    yield b"<"
+    if end == "fails":
+        raise RuntimeError("the body failed")
+    if end == "interrupted":
+        raise KeyboardInterrupt
+
+
+async def _async_body(end: str) -> Any:  # noqa: ANN401
+    yield b"<"
+    if end == "fails":
+        raise RuntimeError("the body failed")
+    if end == "interrupted":
+        raise asyncio.CancelledError
+
+
+def _is_closed(scope: _context.Scope) -> bool:
+    return scope.closed
+
+
+_ENDS = {
+    "exhausted": StopIteration,
+    "fails": RuntimeError,
+    "interrupted": BaseException,
+}
+
+
+@pytest.mark.spec("TRN-62")
+@pytest.mark.parametrize("end", ["exhausted", "fails", "interrupted", "closed"])
+def test_a_sync_body_closes_its_root_however_it_ends(end: str) -> None:
+    """Before any server closes the response: the body's end alone closes
+    the root, and runs the closers it took over inside it."""
+    from neolith.middleware import _Body
+
+    scope, token = _scope_for_body()
+    _context._CURRENT.reset(token)
+    seen: list[object] = []
+    body = _Body(_sync_body(end), scope, [lambda: seen.append(_context._CURRENT.get())])
+    assert next(body) == b"<"
+    assert not _is_closed(scope)
+    if end == "closed":
+        body.close()
+    else:
+        with pytest.raises(_ENDS[end]):
+            next(body)
+    assert _is_closed(scope)
+    assert seen == [scope]
+    assert _context._CURRENT.get() is None
+
+
+@pytest.mark.spec("TRN-62")
+@pytest.mark.parametrize("end", ["exhausted", "fails", "interrupted", "closed"])
+def test_an_async_body_closes_its_root_however_it_ends(end: str) -> None:
+    from neolith.middleware import _AsyncBody
+
+    scope, token = _scope_for_body()
+    _context._CURRENT.reset(token)
+    seen: list[object] = []
+    body = _AsyncBody(
+        _async_body(end), scope, [lambda: seen.append(_context._CURRENT.get())]
+    )
+
+    async def run() -> None:
+        assert await anext(body) == b"<"
+        assert not scope.closed
+        if end == "closed":
+            body.close()
+        else:
+            expected = StopAsyncIteration if end == "exhausted" else _ENDS[end]
+            with pytest.raises(expected):
+                await anext(body)
+
+    asyncio.run(run())
+    assert scope.closed
+    assert seen == [scope]
+
+
+@pytest.mark.spec("TRN-62")
+def test_an_async_body_that_fails_over_asgi_closes_its_root(site: None) -> None:
+    """Django's ASGI handler raises the body's error before it closes the
+    response, so the wrapper's own close is all that closes the root."""
+    gc.disable()
+    try:
+        with pytest.raises(RuntimeError, match="the body failed"):
+            asgi("/afail/")
+        assert _closed(request_site.HELD[-1])
+    finally:
+        gc.enable()
+    # Django 5.2's handler leaves the request's body file open when the body
+    # raises (6.1 closes it with contextlib.closing); collect it here.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", ResourceWarning)
+        gc.collect()
+
+
+@pytest.mark.spec("TRN-61", "TRN-62")
+def test_a_body_s_clean_up_on_an_early_close_runs_in_the_root(site: None) -> None:
+    """A WSGI server that stops after the first chunk closes the response;
+    the generator's ``finally`` then runs inside the root."""
+    result = WSGIHandler()(_environ("/cleaned/"), Started())
+    assert next(iter(result)) == b"<"
+    result.close()
+    assert request_site.SEEN == ["as web"]
+
+
+@pytest.mark.spec("TRN-61")
+@pytest.mark.parametrize("mode", MODES)
+def test_a_body_s_clean_up_at_its_end_runs_in_the_root(site: None, mode: str) -> None:
+    if mode == "asgi":
+        with pytest.warns(Warning, match=_ADAPTED):
+            assert serve(mode, "/cleaned/").body == b"<>"
+    else:
+        assert serve(mode, "/cleaned/").body == b"<>"
+    assert request_site.SEEN == ["as web"]
+
+
+@pytest.mark.spec("TRN-61", "TRN-62")
+def test_a_disconnect_inside_the_body_s_await_cleans_up_in_the_root(
+    site: None,
+) -> None:
+    """The cancellation lands inside a step the wrapper runs, so the body's
+    ``finally`` runs inside the root, and then the root closes."""
+
+    async def run() -> None:
+        gone = asyncio.Event()
+
+        def on_send(message: Mapping[str, Any]) -> None:
+            if message.get("body") == b"<":
+                gone.set()
+
+        await _asgi("/acleaned/", disconnect=gone, on_send=on_send)
+
+    asyncio.run(run())
+    assert request_site.SEEN == ["as web"]
+    assert _closed(request_site.HELD[-1])
+
+
+@pytest.mark.spec("TRN-25")
+def test_an_async_body_stopped_at_a_yield_cleans_up_after_the_response(
+    site: None,
+) -> None:
+    """A disconnect while the server is sending a chunk stops the body at
+    its ``yield``. The ASGI handler never closes an async generator, so the
+    event loop finishes it after the response is done, and its call is
+    refused, as spec 02 says after TRN-61."""
+
+    async def run() -> None:
+        gone = asyncio.Event()
+
+        async def blocked(message: Mapping[str, Any]) -> None:
+            if message.get("body") == b"<":
+                gone.set()
+                await asyncio.Event().wait()
+
+        await _asgi("/acleaned/", disconnect=gone, on_send_async=blocked)
+
+    asyncio.run(run())
+    assert request_site.SEEN == ["usage error"]
+    assert _closed(request_site.HELD[-1])
+
+
+@pytest.mark.spec("TRN-61", "TRN-60")
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("path", ["/appfile/", "/aappfile/"])
+def test_a_file_response_over_an_app_s_file_like_object_reads_in_the_root(
+    site: None, mode: str, path: str
+) -> None:
+    """Reading a file-like object that is not a plain file may run the
+    app's code, so the body is wrapped and its reads are made in the root."""
+    if mode == "asgi":
+        with pytest.warns(Warning, match=_ADAPTED):
+            served = serve(mode, path)
+    else:
+        environ = _environ(path)
+        environ["wsgi.file_wrapper"] = _FileWrapper
+        result: Any = WSGIHandler()(environ, Started())
+        assert type(result) is not _FileWrapper
+        served = Served(200, b"".join(result))
+        result.close()
+    assert served.body == b"as web"
+    assert _closed(request_site.HELD[-1])
+
+
+@pytest.mark.spec("TRN-60")
+def test_a_file_response_over_a_file_python_opened_is_left_to_the_server(
+    site: None,
+) -> None:
+    environ = _environ("/realfile/")
+    environ["wsgi.file_wrapper"] = _FileWrapper
+    result: object = WSGIHandler()(environ, Started())
+    assert type(result) is _FileWrapper
+    assert _closed(request_site.HELD[-1])
+    result.close()
+
+
+@pytest.mark.parametrize(
+    ("value", "plain"),
+    [
+        (io.BytesIO(b"x"), True),
+        (io.BufferedReader(io.BytesIO(b"x")), False),
+        (io.StringIO("x"), False),
+        (_FileWrapper(io.BytesIO(b"x"), 1), False),
+    ],
+)
+def test_only_a_plain_file_is_left_unwrapped(value: object, plain: bool) -> None:
+    from neolith.middleware import _plain_file
+
+    assert _plain_file(value) is plain
+
+
+def test_a_file_python_opened_is_plain(tmp_path: Any) -> None:  # noqa: ANN401
+    from neolith.middleware import _plain_file
+
+    path = tmp_path / "f"
+    path.write_bytes(b"x")
+    with path.open("rb") as buffered, path.open("rb", buffering=0) as raw:
+        assert _plain_file(buffered)
+        assert _plain_file(raw)
+
+
+@pytest.mark.spec("TRN-57")
+def test_a_middleware_that_copies_the_request_leaves_the_root_bound() -> None:
+    request_site.SEEN.clear()
+    with _site("tests.request_site.copies_request"):
+        assert wsgi("/page/").body == b"as web"
+    request_site.HELD.clear()
+
+
+@pytest.mark.spec("APP-16")
+def test_a_handler_is_not_built_with_the_root_under_a_second_path(
+    site: None,
+) -> None:
+    with (
+        override_settings(MIDDLEWARE=[ROOT, "tests.request_site.Alias"]),
+        pytest.raises(ImproperlyConfigured) as raised,
+    ):
+        WSGIHandler()
+    assert str(raised.value) == f"MIDDLEWARE: {ROOT} is listed 2 times"
+
+
+@pytest.mark.spec("APP-16")
+def test_a_request_that_arrives_once_the_host_is_gone_is_refused(site: None) -> None:
+    handler = WSGIHandler()
+    with override_settings(INSTALLED_APPS=[]):
+        started = Started()
+        result = handler(_environ("/project/"), started)
+        result.close()
+    assert started.status.startswith("500")
+    assert request_site.SEEN == []
+
+
+def test_the_middleware_leaves_no_root_behind_in_its_caller(site: None) -> None:
+    from neolith import middleware
+
+    def respond(request: object) -> Any:  # noqa: ANN401
+        assert middleware._REQUEST.get() is not None
+        return None
+
+    RootMiddleware(respond)(object())  # type: ignore[arg-type]
+    assert middleware._REQUEST.get() is None
+    assert _context._CURRENT.get() is None
+
+
+def test_process_view_runs_in_the_chain_s_mode(site: None) -> None:
+    """In an async chain ``process_view`` is a coroutine function, so Django
+    does not switch threads to call it."""
+    import inspect
+
+    async def arespond(request: object) -> None:
+        return None
+
+    chains: list[Any] = [arespond, lambda request: None]
+    modes = [
+        inspect.iscoroutinefunction(RootMiddleware(c).process_view) for c in chains
+    ]
+    assert modes == [True, False]
+
+
+@pytest.mark.spec("TRN-57")
+def test_a_call_reads_the_app_it_checked(
+    site: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A root bound while a call is under way: the call carries the app
+    whose ``requires`` it checked, never the app bound after the check."""
+    checked = _context.check_required
+
+    def rebound(scope: _context.Scope, identity: str) -> str | None:
+        app = checked(scope, identity)
+        scope.bind("stock", frozenset({"couriers.v3"}))
+        return app
+
+    monkeypatch.setattr(_context, "check_required", rebound)
+    with _context.root("web", requires=("couriers.v3",)):
+        assert request_site.ask() == "as web"
+
+
+def test_check_required_reads_the_owner_once() -> None:
+    class Flipping:
+        reads = 0
+
+        @property
+        def owner(self) -> tuple[str, frozenset[str]]:
+            type(self).reads += 1
+            if self.reads == 1:
+                return ("web", frozenset({"couriers.v3"}))
+            return ("stock", frozenset())
+
+    assert _context.check_required(Flipping(), "couriers.v3") == "web"  # type: ignore[arg-type]
+    assert Flipping.reads == 1
+
+
+@pytest.mark.spec("TRN-57")
+def test_a_wrapper_loop_has_no_app() -> None:
+    from neolith._serving import label_of
+
+    def loop(request: object) -> None:
+        return None
+
+    loop.__wrapped__ = loop  # type: ignore[attr-defined]
+    assert label_of(loop) is None
+
+
+@pytest.mark.spec("TRN-62")
+def test_a_closer_that_fails_stops_neither_the_others_nor_the_close() -> None:
+    from neolith.middleware import _Body
+
+    scope, token = _scope_for_body()
+    _context._CURRENT.reset(token)
+    ran: list[str] = []
+
+    def fails() -> None:
+        ran.append("fails")
+        raise OSError("cannot close")
+
+    body = _Body(iter([b"x"]), scope, [fails, lambda: ran.append("after")])
+    body.close()
+    body.close()
+    assert ran == ["fails", "after"]
+    assert _is_closed(scope)

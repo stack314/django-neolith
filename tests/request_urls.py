@@ -1,6 +1,7 @@
 """The URLconf of the project around the test host (``tests.request_site``)."""
 
 import functools
+import types
 
 from django.urls import path
 
@@ -16,6 +17,21 @@ urlpatterns = [
     path("wrapped/", site.wraps_view(web.page)),
     path("hidden/", site.hides_view(web.page)),
     path("partial/", functools.partial(web.page)),
+    path("method/", web.Pages().page),
+    # functools.wraps finds no __module__ on a partial, so only __wrapped__
+    # leads to the view.
+    path("wrapped-partial/", site.wraps_view(functools.partial(web.page))),
+    path(
+        "method-partial/",
+        types.MethodType(functools.partial(web.Pages.page), web.Pages()),
+    ),
+    path("stock-hidden/", stock_views.hides(web.page)),
+    path("appfile/", web.appfile),
+    path("aappfile/", web.aappfile),
+    path("realfile/", web.realfile),
+    path("cleaned/", web.cleaned),
+    path("acleaned/", web.acleaned),
+    path("afail/", web.afail),
     path("instance/", web.Endpoint()),
     path("level/", stock_views.level),
     path("plain/", plain.page),

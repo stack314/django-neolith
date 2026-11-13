@@ -35,6 +35,10 @@ class MyStr(str):
     __slots__ = ()
 
 
+class MyList(list[str]):
+    pass
+
+
 @pytest.mark.spec("APP-16")
 @pytest.mark.parametrize(
     ("value", "problems"),
@@ -153,6 +157,7 @@ def test_the_deadline_read_from_neolith() -> None:
         ),
         ((ROOT,), ["MIDDLEWARE: expected a list, got tuple"]),
         (UserList([ROOT]), ["MIDDLEWARE: expected a list, got UserList"]),
+        (MyList([ROOT]), ["MIDDLEWARE: expected a list, got MyList"]),
         (ROOT, ["MIDDLEWARE: expected a list, got str"]),
         (None, ["MIDDLEWARE: expected a list, got NoneType"]),
         ([ROOT, 1], ["MIDDLEWARE: entry 1: expected a str, got int"]),
@@ -232,3 +237,19 @@ def test_the_checks_judge_only_a_process_that_hosts(registered: None) -> None:
     neolith's app they find nothing to judge."""
     with override_settings(MIDDLEWARE=[], NEOLITH=[]):
         assert checks.run_checks(tags=["neolith"]) == []
+
+
+@pytest.mark.parametrize("silenced", [False, True])
+def test_set_up_logs_a_warning_unless_it_is_silenced(
+    silenced: bool, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``manage.py check`` drops a silenced message (ADR 0022 fact 1), and
+    so does set-up's log; a warning never stops set-up."""
+    from neolith import _host
+
+    warning = checks.Warning("a warning", id="neolith.W001")
+    names = ["neolith.W001"] if silenced else []
+    with override_settings(SILENCED_SYSTEM_CHECKS=names):
+        assert _host._judge([warning]) == 30.0
+    logged = [r.getMessage() for r in caplog.records if r.name == "neolith.host"]
+    assert logged == ([] if silenced else ["(neolith.W001) a warning"])

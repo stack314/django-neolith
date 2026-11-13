@@ -5,6 +5,7 @@ has no app of its own.
 """
 
 import contextvars
+import copy
 import functools
 from collections.abc import Callable
 
@@ -111,3 +112,18 @@ def hides_view(view: _View) -> _View:
 def project_page(request: HttpRequest) -> HttpResponse:
     """A view in no app."""
     return HttpResponse(ask())
+
+
+def copies_request(
+    get_response: Callable[[HttpRequest], HttpResponseBase],
+) -> Callable[[HttpRequest], HttpResponseBase]:
+    """A middleware that passes a copy of the request on."""
+
+    def middleware(request: HttpRequest) -> HttpResponseBase:
+        return get_response(copy.copy(request))
+
+    return middleware
+
+
+# The root middleware under a second path.
+from neolith.middleware import RootMiddleware as Alias  # noqa: E402, F401

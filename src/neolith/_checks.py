@@ -19,6 +19,8 @@ from django.apps import apps as global_apps
 from django.conf import settings
 from django.core import checks
 
+from neolith._serving import admin_code
+
 __all__ = [
     "DEFAULT_REQUEST_DEADLINE",
     "ROOT_MIDDLEWARE",
@@ -171,9 +173,10 @@ def neolith_check(**kwargs: object) -> list[checks.CheckMessage]:
 
 
 def admin_check(**kwargs: object) -> list[checks.CheckMessage]:
-    """``neolith.W001``: each admin class registered on an admin site whose
-    module is in no installed app. Its views run in a request root of no
-    app, so a contract call from them is refused (ADR 0017 Decision 4).
+    """``neolith.W001``: each admin registered on an admin site whose code
+    is in no installed app, by the rule the root middleware binds with
+    (``neolith._serving``). Its views run in a request root of no app, so a
+    contract call from them is refused (ADR 0017 Decision 4).
 
     Only admin sites that exist are read, and the admin is not imported
     when nothing has imported it.
@@ -189,19 +192,16 @@ def admin_check(**kwargs: object) -> list[checks.CheckMessage]:
         if type(registry) is not dict:
             continue
         for admin in list(registry.values()):
-            klass = type(admin)
-            module = vars(klass).get("__module__")
-            if type(module) is not str:
-                continue
-            if global_apps.get_containing_app_config(module) is None:
-                found.add(f"{module}.{klass.__qualname__}")
+            label, code = admin_code(admin)
+            if label is None and code is not None:
+                found.add(code)
     return [
         checks.Warning(
-            f"{name}: admin class in no installed app; its views have no calling "
-            "app, and a contract call from them is refused",
+            f"{code} in no installed app; its views have no calling app, and a "
+            "contract call from them is refused",
             id="neolith.W001",
         )
-        for name in sorted(found)
+        for code in sorted(found)
     ]
 
 

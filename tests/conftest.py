@@ -15,7 +15,7 @@ def _no_scope_left_open() -> Iterator[None]:
     open changes what a later test finds there.
     """
     yield
-    left = list(_context._OPEN.values())
+    left = _context.open_scopes()
     for scope in left:
         _context.close(scope)
     assert not left, f"{len(left)} scope(s) left open by this test"
