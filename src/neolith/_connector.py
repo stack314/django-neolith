@@ -558,7 +558,7 @@ class Connector:
         # Step 1: the context, and its principal's sent form.
         scope = _context.parent(context)
         # Step 1a: the calling app requires the contract (ADR 0021 Decision 9).
-        _context.check_required(scope, self._contract.identity)
+        caller = _context.check_required(scope, self._contract.identity)
         trace_id = scope.held.trace_id
         problem: Exception | None = None
         try:
@@ -590,7 +590,7 @@ class Connector:
             tracestate=scope.held.tracestate,
             budget=budget,
             idempotency_key=key,
-            caller=scope.app,
+            caller=caller,
         )
         outcome = self._carry(action, text, sent)
         # The caller's own deadline, on its own clock: over a network it

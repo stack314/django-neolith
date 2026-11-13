@@ -10,8 +10,12 @@ every app's models, in Django's global registry only, and sets the host up:
 
 Set-up reports every refusal of both, and every unknown identity a
 ``connect()`` recorded before it, in one ``DeclarationError``, logged before
-it is raised. A set-up that passes publishes its table on the ``neolith`` app
-config that ran it, so the table and the implementation instances belong to
+it is raised. Then it runs the host's system checks, those tagged
+``neolith`` (``neolith._checks``): every error among them is raised in one
+``ImproperlyConfigured``, whatever ``SILENCED_SYSTEM_CHECKS`` says, and each
+warning is logged. A set-up that passes publishes its table, with the
+request deadline read from ``NEOLITH``, on the ``neolith`` app config that
+ran it, so the table and the implementation instances belong to
 that set-up: a later set-up in the same process builds its own, and when an
 ``override_settings`` ends, Django restores the earlier config and its table.
 
@@ -27,6 +31,7 @@ State the host owns (CONTRIBUTING K6), all of it guarded by one lock:
 
 import contextlib
 import contextvars
+import dataclasses
 import importlib
 import inspect
 import logging
@@ -39,10 +44,12 @@ from typing import Any, Final, NoReturn, final
 from django.apps import AppConfig
 from django.apps import apps as global_apps
 from django.apps.registry import Apps
+from django.conf import settings
+from django.core import checks
 from django.core.exceptions import ImproperlyConfigured
 from pydantic import BaseModel
 
-from neolith import _context
+from neolith import _checks, _context
 from neolith._connector import Connector as Bound
 from neolith._connector import InProcess
 from neolith._context import Principal, UsageError
@@ -73,6 +80,9 @@ class Host:
     connectors: Mapping[str, Bound]
     # Each hosted app's label, with the identities its declaration requires.
     apps: Mapping[str, tuple[str, ...]]
+    # The deadline of a request root, in seconds from the request's start, or
+    # None for none: NEOLITH["REQUEST_DEADLINE"] as set-up checked it.
+    request_deadline: float | None = _checks.DEFAULT_REQUEST_DEADLINE
 
 
 _LOCK: Final = threading.Lock()
@@ -93,6 +103,7 @@ class HostConfig(AppConfig):
     verbose_name = "neolith"
 
     def ready(self) -> None:
+        _checks.register()
         set_up(self)
 
 
@@ -154,6 +165,9 @@ def set_up(config: AppConfig) -> None:
     configs = registry.get_app_configs()
     hosted = {c.label: type(c) for c in configs if declaration_of(type(c)) is not None}
     host, refusals = build(registry)
+    # Run outside the lock, which a check must never need; judged inside it,
+    # after Resolve and Validate, so their refusals come first.
+    found = checks.run_checks(tags=[_checks.TAG])
     with _LOCK:
         for identity, places in sorted(_RECORDED.items()):
             if identity not in host.known:
@@ -172,9 +186,35 @@ def set_up(config: AppConfig) -> None:
                     f"{_difference(_first, hosted)}; a process hosts one set of apps"
                 )
             )
+        deadline = _judge(found)
         if _first is None:
             _first = types.MappingProxyType(dict(hosted))
-        setattr(config, _HOST_ATTR, host)
+        published = dataclasses.replace(host, request_deadline=deadline)
+        setattr(config, _HOST_ATTR, published)
+
+
+def _judge(found: list[checks.CheckMessage]) -> float | None:
+    """Judge what the host's system checks found; return the checked request
+    deadline.
+
+    Errors are raised together, sorted, whatever ``SILENCED_SYSTEM_CHECKS``
+    says: silencing hides a message from ``manage.py check``, and a host that
+    serves runs no command. Warnings are logged, each once per set-up, unless
+    silenced, and ``manage.py check`` still prints them.
+    """
+    errors = sorted(f"({m.id}) {m.msg}" for m in found if m.level >= checks.ERROR)
+    if errors:
+        _refuse(
+            ImproperlyConfigured(
+                "host: the settings are refused before the host serves:\n"
+                + "\n".join(errors)
+            )
+        )
+    for message in sorted(found, key=lambda m: (str(m.id), m.msg)):
+        if message.level >= checks.WARNING and not message.is_silenced():
+            with contextlib.suppress(Exception):
+                _log.warning("(%s) %s", message.id, message.msg)
+    return _checks.request_deadline(getattr(settings, "NEOLITH", {}))
 
 
 def _refuse(error: ImproperlyConfigured) -> NoReturn:

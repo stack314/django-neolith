@@ -400,7 +400,9 @@ class Scope:
 
     ``app`` is the app the scope belongs to, the caller of the calls made from
     it, and ``requires`` the identities of the contracts that app's
-    declaration requires, or ``None`` when the app has no declaration.
+    declaration requires, or ``None`` when the app has no declaration. The two
+    are held as one value, ``owner``, which a request root sets once the app
+    is known (``bind``), so a call reads both from one moment.
     ``context`` is the value the scope hands out, and ``held`` its own
     copy of the same fields, which calls are derived from, so nothing done to
     a value that was handed out reaches them. The occurrence counts and the
@@ -412,11 +414,10 @@ class Scope:
         "_counts",
         "_form",
         "_lock",
-        "app",
         "closed",
         "context",
         "held",
-        "requires",
+        "owner",
     )
 
     def __init__(
@@ -429,13 +430,30 @@ class Scope:
         # own copy of its fields, which is all a call is ever derived from.
         self.context = context
         self.held = dataclasses.replace(context)
-        self.app = app
-        self.requires = requires
+        self.owner: tuple[str | None, frozenset[str] | None] = (app, requires)
         self.closed = False
         self._lock = threading.Lock()
         self._counts: dict[tuple[str, str, str], int] = {}
         # Unset until the first call; then the form, or why there is none.
         self._form: tuple[bytes | None, str | None] | None = None
+
+    @property
+    def app(self) -> str | None:
+        """The app the scope belongs to, or ``None``."""
+        return self.owner[0]
+
+    @property
+    def requires(self) -> frozenset[str] | None:
+        """What the scope's app requires, or ``None`` for no declaration."""
+        return self.owner[1]
+
+    def bind(self, app: str | None, requires: frozenset[str] | None) -> None:
+        """Make the scope belong to ``app``, with what it requires.
+
+        One assignment, so a call made meanwhile, in any thread, reads the
+        app and what it requires from one moment: both before or both after.
+        """
+        self.owner = (app, requires)
 
     def principal(self) -> bytes | None:
         """The principal's sent form, or ``None`` when the scope has none.
@@ -768,17 +786,19 @@ def parent(context: object) -> Scope:
     return ambient
 
 
-def check_required(scope: Scope, identity: str) -> None:
+def check_required(scope: Scope, identity: str) -> str | None:
     """Refuse a call outside the calling app's ``requires`` (ADR 0021
-    Decision 9, step 1a).
+    Decision 9, step 1a), and return the calling app.
 
-    A scope of no app has nothing to check; an app with no declaration
-    requires nothing. Raises ``UsageError``, which names the app, the
-    identity and what the app requires.
+    The app and what it requires are read once, as one value, so the app
+    returned is the one checked, even when a request root is bound to its
+    app meanwhile. A scope of no app has nothing to check; an app with no
+    declaration requires nothing. Raises ``UsageError``, which names the
+    app, the identity and what the app requires.
     """
-    app, requires = scope.app, scope.requires
+    app, requires = scope.owner
     if app is None or (requires is not None and identity in requires):
-        return
+        return app
     elsewhere = (
         "code that runs in another app's scope on its own app's account opens "
         'neolith.command_scope("<its label>")'
