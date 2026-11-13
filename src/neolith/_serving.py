@@ -10,11 +10,12 @@ installed app that has a declaration; *framework* code is Django's own.
 - A function ``View.as_view`` made carries its ``view_class``: it is that
   class's code, whatever ``as_view`` copied onto it from ``dispatch``.
 - A bound method is its function's code, and a class is its own module's.
-- A wrapper's links, the ``__wrapped__`` that ``functools.wraps`` leaves
-  and an exact ``functools.partial``'s function, are followed only while
-  they lead into hosted code, so a link into the framework, or into code
-  the view only inherits, never decides. A wrapper that is not followed
-  counts as the code that runs; a partial has no code of its own.
+- An exact ``functools.partial`` runs no code of its own: it is its
+  function's code, wherever that is.
+- The ``__wrapped__`` that ``functools.wraps`` leaves is followed only
+  while it leads into hosted code, so a link into the framework, or into
+  code the view only inherits, never decides. A wrapper whose link is not
+  followed counts as the code that runs.
 - A view Django's admin wraps carries its ``ModelAdmin``. It serves as the
   app of the most derived class in its MRO defined in a hosted app or in
   the project, in no installed app. When there is none, its classes are
@@ -142,6 +143,10 @@ def _name(klass: type) -> str:
 def label_of(view: object) -> str | None:
     """The label of the app whose code serves ``view``, or ``None``."""
     for _ in range(_LINKS):
+        if type(view) is functools.partial:
+            # It runs no code of its own: its function is the code.
+            view = view.func
+            continue
         admin = _admin(view)
         if admin is not None:
             return admin_code(admin)[0]

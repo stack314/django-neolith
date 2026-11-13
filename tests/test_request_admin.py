@@ -28,6 +28,10 @@ INSTALLED = [
     "django.contrib.contenttypes",
     "django.contrib.sessions",
     "django.contrib.messages",
+    "django.contrib.sites",
+    "django.contrib.flatpages",
+    "django.contrib.sitemaps",
+    "django.contrib.syndication",
     "tests.request_admin.shop",
     "tests.request_admin.depot",
     "tests.host_apps.couriers",
@@ -107,6 +111,44 @@ class Stray(models.Model):
 
 
 stray = list(admin_code(admin.ModelAdmin(Stray, admin.site)))
+
+# Views the framework supplies, as a project configures them: each judged by
+# its own code (spec 02, after TRN-57).
+import functools
+
+from django.contrib.auth import views as auth_views
+from django.contrib.flatpages import views as flatpages_views
+from django.contrib.sitemaps import GenericSitemap
+from django.contrib.sitemaps import views as sitemap_views
+from django.contrib.syndication.views import Feed
+from django.urls import resolve
+from django.views import generic
+
+from neolith._serving import label_of
+from tests.request_admin.shop.feeds import OrderFeed
+
+framework_views = {
+    "list view given a model": generic.ListView.as_view(model=Order),
+    "detail view given a queryset": generic.DetailView.as_view(
+        queryset=Order.objects.all()
+    ),
+    "redirect view": generic.RedirectView.as_view(url="/"),
+    "sitemap": sitemap_views.sitemap,
+    "sitemap with its sitemaps": functools.partial(
+        sitemap_views.sitemap,
+        sitemaps={"orders": GenericSitemap({"queryset": Order.objects.all()})},
+    ),
+    "flatpage": flatpages_views.flatpage,
+    "feed of the framework": Feed(),
+    "feed of the shop app": OrderFeed(),
+    "login view": auth_views.LoginView.as_view(),
+    "password change view": auth_views.PasswordChangeView.as_view(),
+    "admin index": resolve("/admin/").func,
+    "admin login": resolve("/admin/login/").func,
+    "admin app index": resolve("/admin/shop/").func,
+    "admin changelist": resolve("/admin/shop/basket/").func,
+}
+framework = {name: label_of(view) for name, view in framework_views.items()}
 with override_settings(INSTALLED_APPS=["django.contrib.admin", "django.contrib.auth",
         "django.contrib.contenttypes", "django.contrib.sessions",
         "django.contrib.messages"]):
@@ -115,7 +157,8 @@ printed = io.StringIO()
 call_command("check", stdout=printed, stderr=printed)
 print(json.dumps(
     {"results": results, "checks": found, "log": logged.getvalue(),
-     "check": printed.getvalue(), "stray": stray, "unhosted": len(unhosted)}
+     "check": printed.getvalue(), "stray": stray, "unhosted": len(unhosted),
+     "framework": framework}
 ))
 """
 
@@ -143,6 +186,7 @@ def ran(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
                 }
             },
             "DEFAULT_AUTO_FIELD": "django.db.models.AutoField",
+            "SITE_ID": 1,
             "MIDDLEWARE": [
                 "neolith.middleware.RootMiddleware",
                 "django.contrib.sessions.middleware.SessionMiddleware",
@@ -257,3 +301,35 @@ def test_the_warning_does_not_import_the_admin() -> None:
     with override_settings(INSTALLED_APPS=host_apps.INSTALLED):
         assert _checks.admin_check() == []
     assert "django.contrib.admin.sites" not in sys.modules
+
+
+@pytest.mark.spec("TRN-57", "TRN-58")
+@pytest.mark.parametrize(
+    ("view", "app"),
+    [
+        # A generic view is the framework's code, whatever model it is given.
+        ("list view given a model", None),
+        ("detail view given a queryset", None),
+        ("redirect view", None),
+        # A view of an installed app of the framework belongs to that app.
+        ("sitemap", "sitemaps"),
+        ("sitemap with its sitemaps", "sitemaps"),
+        ("flatpage", "flatpages"),
+        ("feed of the framework", "syndication"),
+        ("login view", "auth"),
+        ("password change view", "auth"),
+        ("admin index", "admin"),
+        ("admin login", "admin"),
+        ("admin app index", "admin"),
+        # A framework class subclassed by an app is the app's code.
+        ("feed of the shop app", "shop"),
+        # Only the administration site serves a model as the model's app.
+        ("admin changelist", "shop"),
+    ],
+)
+def test_a_view_the_framework_supplies_is_judged_by_its_own_code(
+    ran: dict[str, Any], view: str, app: str | None
+) -> None:
+    """Every kind of view Django supplies, as a project configures it: the
+    spec's sentences after TRN-57 predict each result."""
+    assert ran["framework"][view] == app
