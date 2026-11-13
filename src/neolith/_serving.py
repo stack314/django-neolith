@@ -7,11 +7,17 @@ not of code that only wraps it. Everything is read with ``vars()`` and
 installed app that contains the code's module. *Hosted* code is code in an
 installed app that has a declaration; *framework* code is Django's own.
 
-- A function ``View.as_view`` made carries its ``view_class``: it is that
-  class's code, whatever ``as_view`` copied onto it from ``dispatch``.
-- A bound method is its function's code, and a class is its own module's.
-- An exact ``functools.partial`` runs no code of its own: it is its
-  function's code, wherever that is.
+- A function's own code is in the module whose globals it runs in, which
+  ``functools.wraps`` never changes, when that module is in an installed
+  app; so a wrapper an app defines is that app's code, whatever
+  ``__module__`` or ``view_class`` ``wraps`` copied onto it. Otherwise its
+  ``__module__`` says where it belongs, as for Django's own decorators and
+  for project wrappers.
+- A function whose own code is in no installed app and that carries a
+  ``view_class``, as ``View.as_view``'s does, is that class's code,
+  whatever ``as_view`` copied onto it from ``dispatch``.
+- A bound method and an exact ``functools.partial`` run no code of their
+  own: each is its function's code. A class is its own module's.
 - The ``__wrapped__`` that ``functools.wraps`` leaves is followed only
   while it leads into hosted code, so a link into the framework, or into
   code the view only inherits, never decides. A wrapper whose link is not
@@ -70,43 +76,76 @@ def _class_module(klass: type) -> object:
     return vars(klass).get("__module__")
 
 
-def _module(code: object) -> object:
-    """The module of the code itself, without following any wrapper's link.
-    A partial has no code of its own: its type's module is ``functools``.
+def _unwrap(code: object) -> object:
+    """A bound method's function, and an exact partial's function, which
+    run no code of their own around it, until neither is left.
     """
-    kind = type(code)
-    if kind is types.MethodType:
-        code = code.__func__  # type: ignore[attr-defined]
+    for _ in range(_LINKS):
         kind = type(code)
+        if kind is types.MethodType:
+            code = code.__func__  # type: ignore[attr-defined]
+        elif kind is functools.partial:
+            code = code.func  # type: ignore[attr-defined]
+        else:
+            return code
+    return None
+
+
+def _own_module(function: types.FunctionType) -> object:
+    """Where a function's own code is: the module whose globals it runs in,
+    which ``functools.wraps`` never changes, when that is in an installed
+    app. Otherwise ``__module__``, which ``wraps`` copies from the code it
+    wraps: the one thing that ties Django's own decorators and project
+    wrappers to the view.
+    """
+    own = types.FunctionType.__globals__.__get__(function).get("__name__")
+    if _config(own) is not None:
+        return own
+    return function.__module__
+
+
+def _view_class(function: types.FunctionType) -> Any:  # noqa: ANN401
+    """The ``view_class`` a function carries, honoured only when the
+    function's own code is in no installed app, as ``View.as_view``'s is:
+    ``functools.wraps`` copies it onto a wrapper that an app defines.
+    """
+    found: Any = vars(function).get("view_class")
+    if not issubclass(type(found), type):
+        return None
+    if _config(types.FunctionType.__globals__.__get__(function).get("__name__")):
+        return None
+    return found
+
+
+def _module(code: object) -> object:
+    """The module of the code itself, without following any wrapper's link."""
+    code = _unwrap(code)
+    kind = type(code)
     if kind is types.FunctionType:
-        view_class: Any = vars(code).get("view_class")
-        if issubclass(type(view_class), type):
+        view_class = _view_class(code)  # type: ignore[arg-type]
+        if view_class is not None:
             return _class_module(view_class)
-        return code.__module__
+        return _own_module(code)  # type: ignore[arg-type]
     if issubclass(kind, type):
         return _class_module(code)  # type: ignore[arg-type]
     return _class_module(kind)
 
 
 def _link(code: object) -> object:
-    """The ``__wrapped__`` a function keeps to what it wraps, or ``None``.
-    ``label_of`` has already turned a bound method into its function and a
-    partial into its function, so only a function can keep one here.
+    """The ``__wrapped__`` a function keeps to what it wraps, or ``None``;
+    a function that is its ``view_class``'s code keeps none.
     """
     if type(code) is not types.FunctionType:
         return None
-    attributes = vars(code)
-    if issubclass(type(attributes.get("view_class")), type):
+    if _view_class(code) is not None:
         return None
-    return attributes.get("__wrapped__")
+    return vars(code).get("__wrapped__")
 
 
 def _admin(code: object) -> object:
-    kind = type(code)
-    if kind is types.MethodType:
-        code = code.__func__  # type: ignore[attr-defined]
-        kind = type(code)
-    return vars(code).get("model_admin") if kind is types.FunctionType else None
+    if type(code) is not types.FunctionType:
+        return None
+    return vars(code).get("model_admin")
 
 
 def admin_code(admin: object) -> tuple[str | None, str | None]:
@@ -140,31 +179,13 @@ def _name(klass: type) -> str:
 def label_of(view: object) -> str | None:
     """The label of the app whose code serves ``view``, or ``None``."""
     for _ in range(_LINKS):
-        if type(view) is types.MethodType:
-            # A bound method is its function's code.
-            view = view.__func__
-            continue
-        if type(view) is functools.partial:
-            # It runs no code of its own: its function is the code.
-            view = view.func
-            continue
+        view = _unwrap(view)
         admin = _admin(view)
         if admin is not None:
             return admin_code(admin)[0]
         link = _link(view)
-        if link is not None and _hosted(_first_module(link)):
+        if link is not None and _hosted(_module(link)):
             view = link
             continue
         return _app(_module(view))
-    return None
-
-
-def _first_module(code: object) -> object:
-    """The module a link leads to: through partials, which have no code of
-    their own, to the first code that has one.
-    """
-    for _ in range(_LINKS):
-        if type(code) is not functools.partial:
-            return _module(code)
-        code = code.func
     return None

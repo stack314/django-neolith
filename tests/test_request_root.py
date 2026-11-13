@@ -15,9 +15,11 @@ a sync and an async view. Time is a clock the tests set, never a sleep.
 
 import asyncio
 import contextvars
+import functools
 import gc
 import io
 import threading
+import types
 import warnings
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass
@@ -1084,3 +1086,94 @@ def test_a_signal_to_stop_from_a_closer_still_closes_the_root(
     assert ran == []
     assert _is_closed(scope)
     assert _context._CURRENT.get() is None
+
+
+# The class check for the which-app rule: every wrapper owner, every way of
+# writing a wrapper, and every kind of target, each with the app that
+# spec 02 (TRN-57 and the paragraph after it) predicts.
+
+_OWNERS = {
+    "hosted": "tests.host_apps.stock.views",
+    "unhosted app": "tests.plain_app.views",
+    "project": "tests.request_site",
+    "Django": "django.views.decorators.cache",
+}
+# The app a wrapper's own code serves as, when its link is not followed.
+_OWN_APP = {
+    "hosted": "stock",
+    "unhosted app": "plain_app",
+    "project": None,
+    "Django": None,
+}
+_FORMS = ("no link", "wraps", "wraps(assigned=())", "update_wrapper")
+
+
+def _targets() -> dict[str, tuple[object, bool]]:
+    """Each target, and whether it is hosted code (the web app's)."""
+    from django.views import defaults
+    from django.views.generic import TemplateView
+
+    from tests.host_apps.web import views as web
+
+    return {
+        "hosted function": (web.page, True),
+        "hosted CBV": (web.PageView.as_view(), True),
+        "project function": (request_site.project_page, False),
+        "Django function": (defaults.page_not_found, False),
+        "Django CBV": (TemplateView.as_view(template_name="x.html"), False),
+        "partial": (functools.partial(web.page), True),
+        "bound method over a partial": (
+            types.MethodType(functools.partial(web.Pages.page), web.Pages()),
+            True,
+        ),
+    }
+
+
+def _wrapper(owner: str, form: str, target: object) -> object:
+    """A wrapper around ``target`` whose code is in the owner's module, as
+    if it were written there, in the given form."""
+    import importlib
+
+    def template(request: object) -> object:
+        return target(request)  # type: ignore[operator]
+
+    module = importlib.import_module(_OWNERS[owner])
+    wrapper = types.FunctionType(
+        template.__code__, vars(module), "wrapper", None, template.__closure__
+    )
+    if form == "wraps":
+        return functools.wraps(target)(wrapper)  # type: ignore[arg-type]
+    if form == "wraps(assigned=())":
+        return functools.wraps(target, assigned=())(wrapper)  # type: ignore[arg-type]
+    if form == "update_wrapper":
+        return functools.update_wrapper(wrapper, target)  # type: ignore[arg-type]
+    return wrapper
+
+
+@pytest.mark.spec("TRN-57", "TRN-58")
+@pytest.mark.parametrize(
+    "target",
+    [
+        "hosted function",
+        "hosted CBV",
+        "project function",
+        "Django function",
+        "Django CBV",
+        "partial",
+        "bound method over a partial",
+    ],
+)
+@pytest.mark.parametrize("form", _FORMS)
+@pytest.mark.parametrize("owner", list(_OWNERS))
+def test_every_wrapper_serves_as_the_spec_predicts(
+    site: None, owner: str, form: str, target: str
+) -> None:
+    """A wrapper's link is followed into hosted code; otherwise the wrapper
+    is its own code: the app its module is in, whatever ``functools.wraps``
+    copied onto it, or, for code in no installed app, the ``__module__`` it
+    carries."""
+    from neolith._serving import label_of
+
+    view, hosted = _targets()[target]
+    expected = "web" if form != "no link" and hosted else _OWN_APP[owner]
+    assert label_of(_wrapper(owner, form, view)) == expected
