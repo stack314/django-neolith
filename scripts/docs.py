@@ -100,8 +100,9 @@ API_GROUPS: dict[str, tuple[str, str, tuple[str, ...]]] = {
     ),
     "apps": (
         "Apps and hosts",
-        "Declaring an app, and connecting to a contract (spec 05).",
-        ("NeolithAppConfig", "Provided", "connect", "Connector"),
+        "Declaring an app, connecting to a contract (spec 05), and opening a "
+        "command scope (spec 02).",
+        ("NeolithAppConfig", "Provided", "connect", "Connector", "command_scope"),
     ),
     "call-context": (
         "Call context",
