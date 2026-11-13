@@ -9,7 +9,7 @@ import os
 import subprocess
 import sys
 import textwrap
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 _PREAMBLE = """\
 import json
@@ -17,12 +17,23 @@ import sys
 
 from django.conf import settings
 
-settings.configure(INSTALLED_APPS=json.loads(sys.argv[1]), USE_TZ=True)
+settings.configure(
+    **{
+        "INSTALLED_APPS": json.loads(sys.argv[1]),
+        "MIDDLEWARE": ["neolith.middleware.RootMiddleware"],
+        "NEOLITH": {},
+        "USE_TZ": True,
+        **json.loads(sys.argv[2]),
+    }
+)
 """
 
 
-def in_fresh_process(body: str, installed: Sequence[str]) -> str:
-    """Run ``body`` after configuring ``installed``; return what it printed.
+def in_fresh_process(
+    body: str, installed: Sequence[str], settings: Mapping[str, object] | None = None
+) -> str:
+    """Run ``body`` after configuring ``installed``, and ``settings`` if
+    given, which must be JSON; return what it printed.
 
     ``body`` calls ``django.setup()`` itself, so it can catch what set-up
     raises. Warnings are errors, as in the suite (ADR 0012). A failing run
@@ -36,6 +47,7 @@ def in_fresh_process(body: str, installed: Sequence[str]) -> str:
             "-c",
             _PREAMBLE + textwrap.dedent(body),
             json.dumps(list(installed)),
+            json.dumps(dict(settings or {})),
         ],
         capture_output=True,
         text=True,
