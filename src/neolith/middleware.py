@@ -29,7 +29,6 @@ from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.http import FileResponse, HttpRequest, StreamingHttpResponse
 from django.http.response import HttpResponseBase
-from django.utils.module_loading import import_string
 
 from neolith import _checks, _context, _host
 from neolith._serving import label_of
@@ -81,10 +80,7 @@ class RootMiddleware:
 
     def __init__(self, get_response: _Respond | _ARespond) -> None:
         """Check the middleware's place and the host, and keep the chain."""
-        listed = getattr(settings, "MIDDLEWARE", None)
-        problems = _checks.middleware_problems(listed)
-        if not problems:
-            problems = _listed_again(listed)  # type: ignore[arg-type]
+        problems = _checks.middleware_problems(getattr(settings, "MIDDLEWARE", None))
         if problems:
             raise ImproperlyConfigured("\n".join(problems))
         if _host._current() is None:
@@ -152,24 +148,6 @@ class RootMiddleware:
         view_kwargs: dict[str, Any],
     ) -> None:
         _bind(view_func)
-
-
-def _listed_again(listed: list[str]) -> list[str]:
-    """Refuse this class under a second path. Django has imported every
-    entry after the first by the time it builds the first, so resolving
-    them imports nothing new.
-    """
-    count = 1
-    for entry in listed[1:]:
-        try:
-            found = import_string(entry)
-        except ImportError:
-            continue
-        if found is RootMiddleware:
-            count += 1
-    if count == 1:
-        return []
-    return [f"MIDDLEWARE: {_checks.ROOT_MIDDLEWARE} is listed {count} times"]
 
 
 def _open() -> tuple[_context.Scope, _Tokens]:
@@ -267,24 +245,36 @@ class _Closing:
         self._scope = scope
         self._closers = closers
         # The finalizer's registry keeps it until the wrapper is collected.
-        weakref.finalize(self, _context.close_without_lock, scope)
+        weakref.finalize(self, _context.close, scope)
 
     def close(self) -> None:
         """Run the body's closers inside the root, then close the root;
         Django calls it when the response is closed.
+
+        As Django's own close does, one closer's ``Exception`` stops none of
+        the others. A signal to stop (``KeyboardInterrupt``, ``SystemExit``)
+        from a closer stops the rest, and goes on, never replaced, with a
+        note that says so; the root closes whatever happens. Nothing here
+        takes a lock, since a collection can call it.
         """
         closers, self._closers = self._closers, []
-        if closers:
-            token = _context._CURRENT.set(self._scope)
-            try:
-                for closer in closers:
-                    # As Django's own close does: one closer's failure stops
-                    # none of the others.
-                    with contextlib.suppress(Exception):
-                        closer()
-            finally:
-                _context._CURRENT.reset(token)
-        _context.close(self._scope)
+        token = _context._CURRENT.set(self._scope)
+        try:
+            for index, closer in enumerate(closers):
+                try:
+                    closer()
+                except Exception:  # noqa: S112  # as HttpResponseBase.close
+                    continue
+                except BaseException as signal:
+                    left = len(closers) - index - 1
+                    signal.add_note(
+                        "neolith: the request root closed; "
+                        f"{left} more of the body's closers did not run"
+                    )
+                    raise
+        finally:
+            _context._CURRENT.reset(token)
+            _context.close(self._scope)
 
 
 @final

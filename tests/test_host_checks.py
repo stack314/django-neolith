@@ -161,6 +161,25 @@ def test_the_deadline_read_from_neolith() -> None:
         (ROOT, ["MIDDLEWARE: expected a list, got str"]),
         (None, ["MIDDLEWARE: expected a list, got NoneType"]),
         ([ROOT, 1], ["MIDDLEWARE: entry 1: expected a str, got int"]),
+        # Judged by class: another path, or a subclass, is the same class.
+        ([ROOT, "tests.request_site.Alias"], [f"MIDDLEWARE: {ROOT} is listed 2 times"]),
+        (
+            [ROOT, "tests.request_site.SubRoot"],
+            [f"MIDDLEWARE: {ROOT} is listed 2 times"],
+        ),
+        (
+            [ROOT, "tests.request_site.Alias", ROOT],
+            [f"MIDDLEWARE: {ROOT} is listed 3 times"],
+        ),
+        (
+            ["tests.request_site.Alias"],
+            [f"MIDDLEWARE: {ROOT} must be the first entry"],
+        ),
+        # Django reports an entry that does not import when it builds the
+        # handler.
+        ([ROOT, "tests.no_such_module.Middleware"], []),
+        ([ROOT, "tests.request_site.NoSuchName"], []),
+        ([ROOT, "tests.broken_middleware.Middleware"], []),
         (
             [MyStr(ROOT)],
             [
@@ -195,6 +214,18 @@ def test_set_up_raises_every_error_at_once(registered: None) -> None:
         f"(neolith.E001) NEOLITH: unknown key 'OTHER'; {KEYS}\n"
         f"(neolith.E006) MIDDLEWARE: {ROOT} must be the first entry"
     )
+
+
+@pytest.mark.spec("APP-16")
+def test_set_up_judges_middleware_by_class(registered: None) -> None:
+    """Set-up runs the constructor's one rule: an alias of the root
+    middleware stops it."""
+    with (
+        override_settings(MIDDLEWARE=[ROOT, "tests.request_site.Alias"]),
+        pytest.raises(ImproperlyConfigured, match="is listed 2 times"),
+        override_settings(INSTALLED_APPS=host_apps.INSTALLED),
+    ):
+        pass
 
 
 @pytest.mark.spec("APP-16")

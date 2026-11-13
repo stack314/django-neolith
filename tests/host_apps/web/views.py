@@ -3,6 +3,7 @@ contract through ``tests.request_site.ask`` and answers with what came of it.
 """
 
 import asyncio
+import functools
 import io
 from collections.abc import AsyncIterator, Iterator
 
@@ -13,9 +14,14 @@ from django.http import (
     HttpResponse,
     StreamingHttpResponse,
 )
+from django.shortcuts import render
+from django.utils.decorators import method_decorator
 from django.views import View
+from django.views.decorators.cache import never_cache
+from django.views.decorators.csrf import csrf_exempt
 
 from tests import request_site as site
+from tests.host_apps.stock.views import Guarded
 
 
 def page(request: HttpRequest) -> HttpResponse:
@@ -181,3 +187,46 @@ async def _afailing() -> AsyncIterator[bytes]:
 
 async def afail(request: HttpRequest) -> StreamingHttpResponse:
     return StreamingHttpResponse(_afailing())
+
+
+@method_decorator(csrf_exempt, name="dispatch")
+class ExemptView(View):
+    """Decorated as Django's documentation shows: the inherited dispatch."""
+
+    def get(self, request: HttpRequest) -> HttpResponse:
+        return HttpResponse(site.ask())
+
+
+class OwnDispatchView(View):
+    @method_decorator(never_cache)
+    def dispatch(
+        self, request: HttpRequest, *args: object, **kwargs: object
+    ) -> HttpResponse:
+        return super().dispatch(request, *args, **kwargs)  # type: ignore[return-value]
+
+    def get(self, request: HttpRequest) -> HttpResponse:
+        return HttpResponse(site.ask())
+
+
+class GuardedView(Guarded):
+    """Inherits a decorated dispatch from the stock app."""
+
+    def get(self, request: HttpRequest) -> HttpResponse:
+        return HttpResponse(site.ask())
+
+
+class Viewset:
+    """A class served through a function that wraps it, as DRF's viewsets are."""
+
+    def get(self, request: HttpRequest) -> HttpResponse:
+        return HttpResponse(site.ask())
+
+
+def _framework_wrapper(request: HttpRequest) -> HttpResponse:
+    return HttpResponse(site.ask())
+
+
+# This app's code, linked to a function of Django that it does not run: the
+# link leads into the framework, so it is not followed.
+functools.update_wrapper(_framework_wrapper, render, assigned=())
+wraps_framework = _framework_wrapper

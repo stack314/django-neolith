@@ -18,6 +18,7 @@ from typing import Any, Final
 from django.apps import apps as global_apps
 from django.conf import settings
 from django.core import checks
+from django.utils.module_loading import import_string
 
 from neolith._serving import admin_code
 
@@ -77,6 +78,12 @@ def _shown_number(value: int | float) -> str:
 def middleware_problems(value: object) -> list[str]:
     """Judge ``MIDDLEWARE``: a ``list`` of ``str`` whose first entry is the
     root middleware, which is listed once (ADR 0022, the builder's table).
+
+    Set-up, ``neolith.E006`` and the root middleware's constructor all run
+    this one function. "Once" is judged by class: every entry that imports
+    as the root middleware, under any path, or as a subclass of it, counts.
+    An entry that does not import is Django's to report when it builds the
+    handler. Every problem found is returned.
     """
     if type(value) is not list:
         return [f"MIDDLEWARE: expected a list, got {_type(value)}"]
@@ -86,12 +93,28 @@ def middleware_problems(value: object) -> list[str]:
         for index, entry in enumerate(entries)
         if type(entry) is not str
     ]
-    named = [type(entry) is str and entry == ROOT_MIDDLEWARE for entry in entries]
-    if not named or not named[0]:
+    first = bool(entries) and type(entries[0]) is str and entries[0] == ROOT_MIDDLEWARE
+    if not first:
         problems.append(f"MIDDLEWARE: {ROOT_MIDDLEWARE} must be the first entry")
-    if sum(named) > 1:
-        problems.append(f"MIDDLEWARE: {ROOT_MIDDLEWARE} is listed {sum(named)} times")
+    count = sum(_is_root(entry) for entry in entries)
+    if count > 1:
+        problems.append(f"MIDDLEWARE: {ROOT_MIDDLEWARE} is listed {count} times")
     return problems
+
+
+def _is_root(entry: object) -> bool:
+    if type(entry) is not str:
+        return False
+    if entry == ROOT_MIDDLEWARE:
+        return True
+    # Imported here: neolith.middleware imports this module.
+    from neolith.middleware import RootMiddleware
+
+    try:
+        found = import_string(entry)
+    except Exception:  # Django reports it when it builds the handler
+        return False
+    return issubclass(type(found), type) and issubclass(found, RootMiddleware)
 
 
 def _deadline_problems(value: object) -> list[str]:

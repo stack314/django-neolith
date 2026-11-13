@@ -30,10 +30,15 @@ settings.configure(
 
 
 def in_fresh_process(
-    body: str, installed: Sequence[str], settings: Mapping[str, object] | None = None
+    body: str,
+    installed: Sequence[str],
+    settings: Mapping[str, object] | None = None,
+    *,
+    timeout: float | None = None,
 ) -> str:
     """Run ``body`` after configuring ``installed``, and ``settings`` if
-    given, which must be JSON; return what it printed.
+    given, which must be JSON; return what it printed. A run that takes
+    longer than ``timeout`` seconds fails with ``subprocess.TimeoutExpired``.
 
     ``body`` calls ``django.setup()`` itself, so it can catch what set-up
     raises. Warnings are errors, as in the suite (ADR 0012). A failing run
@@ -52,6 +57,7 @@ def in_fresh_process(
         capture_output=True,
         text=True,
         check=False,
+        timeout=timeout,
         env={"PYTHONPATH": os.pathsep.join(sys.path)},
     )
     assert ran.returncode == 0, ran.stderr[-3000:]

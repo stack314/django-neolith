@@ -125,5 +125,57 @@ def copies_request(
     return middleware
 
 
-# The root middleware under a second path.
-from neolith.middleware import RootMiddleware as Alias  # noqa: E402, F401
+# The root middleware under a second path, and a subclass of it.
+from neolith.middleware import RootMiddleware  # noqa: E402
+
+Alias = RootMiddleware
+
+
+class SubRoot(RootMiddleware):  # type: ignore[misc]  # final for typing only
+    pass
+
+
+def serves_class(klass: type) -> _View:
+    """A view function for a class, linked to it as DRF's ``as_view`` does
+    (``functools.update_wrapper(view, cls, updated=())``)."""
+
+    def view(request: HttpRequest) -> HttpResponseBase:
+        response: HttpResponseBase = klass().get(request)
+        return response
+
+    functools.update_wrapper(view, klass, updated=())
+    return view
+
+
+def serves_class_unnamed(klass: type) -> _View:
+    """As ``serves_class``, but the function keeps this module's name, so
+    only its link leads to the class."""
+
+    def view(request: HttpRequest) -> HttpResponseBase:
+        response: HttpResponseBase = klass().get(request)
+        return response
+
+    functools.update_wrapper(view, klass, assigned=("__name__",), updated=())
+    return view
+
+
+class OddPartial(functools.partial):  # type: ignore[type-arg]
+    """A partial subclass whose function is read through a property."""
+
+    reads = 0
+
+    @property
+    def func(self) -> object:  # type: ignore[override]
+        type(self).reads += 1
+        return super().func
+
+
+def copies_attributes(view: _View) -> _View:
+    """A decorator that copies the view's attributes, and so a class-based
+    view's ``view_class``, but keeps this module as its own."""
+
+    @functools.wraps(view, assigned=("__name__", "__doc__"))
+    def wrapper(request: HttpRequest) -> HttpResponseBase:
+        return view(request)
+
+    return wrapper

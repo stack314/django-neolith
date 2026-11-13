@@ -35,6 +35,7 @@ from neolith import _context
 from neolith.middleware import RootMiddleware
 from tests import host_apps, request_site
 from tests.host_apps.couriers import services as courier_services
+from tests.hosting import in_fresh_process
 
 ROOT = "neolith.middleware.RootMiddleware"
 CALLING = "tests.request_site.Calling"
@@ -205,6 +206,14 @@ def _closed(context: contextvars.Context) -> bool:
         ("/partial/", "as web"),
         ("/method/", "as web"),
         ("/wrapped-partial/", "as web"),
+        ("/exempt/", "as web"),
+        ("/own-dispatch/", "as web"),
+        ("/guarded/", "as web"),
+        ("/viewset/", "as web"),
+        ("/viewset-unnamed/", "as web"),
+        ("/cbv-partly-wrapped/", "as web"),
+        ("/wraps-framework/", "as web"),
+        ("/chain/", "as web"),
         ("/method-partial/", "as web"),
         ("/level/", "as stock"),
         ("/stock-hidden/", "as stock"),
@@ -234,13 +243,24 @@ def test_a_view_of_an_app_with_no_declaration_calls_as_that_app(
 
 @pytest.mark.spec("TRN-58", "TRN-42")
 @pytest.mark.parametrize("mode", MODES)
-@pytest.mark.parametrize("path", ["/project/", "/hidden/"])
+@pytest.mark.parametrize("path", ["/project/", "/hidden/", "/odd-partial/"])
 def test_a_view_in_no_app_has_no_caller_and_is_refused(
     site: None, mode: str, path: str
 ) -> None:
-    """A view in a project module, and a view wrapped by a project
-    decorator that keeps no link to it, serve from no app."""
+    """A view in a project module, a view wrapped by a project decorator
+    that keeps no link to it, and a partial subclass, whose function the
+    host never reads since a property could run code, serve from no app."""
     assert serve(mode, path).body == b"refused unauthenticated"
+
+
+def test_a_partial_subclass_is_judged_by_its_type_alone(site: None) -> None:
+    from neolith._serving import label_of
+    from tests.host_apps.web import views as web
+
+    odd = request_site.OddPartial(web.page)
+    before = request_site.OddPartial.reads
+    assert label_of(odd) is None
+    assert request_site.OddPartial.reads == before
 
 
 @pytest.mark.spec("TRN-55", "TRN-56")
@@ -339,7 +359,7 @@ def test_a_call_held_past_the_response_fails(site: None, mode: str, path: str) -
     the response is done."""
     assert serve(mode, path).body == b"as web"
     assert _closed(request_site.HELD[-1])
-    assert not _context._OPEN
+    assert not _context.open_scopes()
 
 
 @pytest.mark.spec("TRN-60", "TRN-61", "TRN-62")
@@ -446,7 +466,7 @@ def test_a_streamed_4xx_whose_client_goes_before_the_body_closes_on_collection(
     try:
         asyncio.run(run())
         assert not request_site.HELD  # the body never ran
-        assert len(_context._OPEN) == 1
+        assert len(_context.open_scopes()) == 1
     finally:
         gc.enable()
     gc.collect()
@@ -627,36 +647,69 @@ def test_the_app_is_read_without_running_the_view_s_hooks(site: None) -> None:
 # objects, and the guards.
 
 
-@pytest.mark.spec("TRN-63")
-def test_a_collection_while_the_table_s_lock_is_held_does_not_deadlock() -> None:
-    """The backstop's finalizer runs wherever a collection happens, also in
-    a thread that holds the lock of the table of open scopes; it takes no
-    lock, and the root it closes is refused at once."""
-    from neolith.middleware import _Body
+_UNDER_LOCK = """
+import gc
+import threading
 
-    def run() -> None:
-        scope, token = _scope_for_body()
-        _context._CURRENT.reset(token)
-        # The body holds its closers' list, which holds the body: a cycle,
-        # so only a collection frees it.
-        closers: list[Any] = []
-        closers.append(_Body(iter([b"x"]), scope, closers))
-        del closers
-        assert not scope.closed
+import django
+
+django.setup()
+
+from django.test import Client
+
+from neolith import _context
+from neolith.middleware import _Body
+from tests import request_site
+
+gc.disable()
+# A wrapper in a cycle, which only a collection frees, so its finalizer runs
+# inside the collection.
+scope, token = _context.begin(**_context.root_fields())
+_context._CURRENT.reset(token)
+closers = []
+closers.append(_Body(iter([b"x"]), scope, closers))
+del closers
+# The test client's stream wrapper, partly read and dropped: a generator in
+# a cycle whose finally closes the response, and so the body.
+response = Client().get("/cleaned/")
+next(iter(response.streaming_content))
+del response
+
+
+def collect():
+    # A collection runs the dropped body's finally wherever it happens: here
+    # inside an open root, so its call goes through and opens the provider's
+    # scope, which takes the table's lock again in this thread.
+    with _context.root("web", requires=("couriers.v3",)):
         with _context._OPEN_LOCK:
             gc.collect()
-        finished.append(scope.closed)
+    done.append(scope.closed)
 
-    finished: list[bool] = []
-    gc.disable()
-    try:
-        worker = threading.Thread(target=run, daemon=True)
-        worker.start()
-        worker.join(30)
-    finally:
-        gc.enable()
-    assert finished == [True]
-    assert not _context.open_scopes()
+
+done = []
+worker = threading.Thread(target=collect, daemon=True)
+worker.start()
+worker.join(20)
+print("closed" if done == [True] else "deadlock")
+print(len(_context.open_scopes()) if done else "-")
+print(" ".join(request_site.SEEN).replace(" ", "-"))
+"""
+
+
+@pytest.mark.spec("TRN-63", "TRN-62")
+def test_a_collection_while_the_table_s_lock_is_held_does_not_deadlock() -> None:
+    """Nothing a collection runs takes a lock the thread may hold: the
+    backstop's finalizer and the close that a dropped, partly read stream
+    reaches from its generator's ``finally``. Run in a process of its own
+    with a timeout, so a deadlock fails the test and leaves no lock held in
+    the suite."""
+    printed = in_fresh_process(
+        _UNDER_LOCK,
+        host_apps.INSTALLED,
+        {"ROOT_URLCONF": "tests.request_urls", "ALLOWED_HOSTS": ["testserver"]},
+        timeout=60,
+    )
+    assert printed.split() == ["closed", "0", "as-web"]
 
 
 def _scope_for_body() -> tuple[
@@ -746,18 +799,18 @@ def test_an_async_body_closes_its_root_however_it_ends(end: str) -> None:
 def test_an_async_body_that_fails_over_asgi_closes_its_root(site: None) -> None:
     """Django's ASGI handler raises the body's error before it closes the
     response, so the wrapper's own close is all that closes the root."""
-    gc.disable()
-    try:
-        with pytest.raises(RuntimeError, match="the body failed"):
-            asgi("/afail/")
-        assert _closed(request_site.HELD[-1])
-    finally:
-        gc.enable()
     # Django 5.2's handler leaves the request's body file open when the body
-    # raises (6.1 closes it with contextlib.closing); collect it here.
+    # raises (6.1 closes it with contextlib.closing); it is collected here.
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", ResourceWarning)
-        gc.collect()
+        gc.disable()
+        try:
+            with pytest.raises(RuntimeError, match="the body failed"):
+                asgi("/afail/")
+            assert _closed(request_site.HELD[-1])
+        finally:
+            gc.enable()
+            gc.collect()
 
 
 @pytest.mark.spec("TRN-61", "TRN-62")
@@ -1004,3 +1057,30 @@ def test_a_closer_that_fails_stops_neither_the_others_nor_the_close() -> None:
     body.close()
     assert ran == ["fails", "after"]
     assert _is_closed(scope)
+
+
+@pytest.mark.spec("TRN-62")
+@pytest.mark.parametrize("stop", [KeyboardInterrupt, SystemExit])
+def test_a_signal_to_stop_from_a_closer_still_closes_the_root(
+    stop: type[BaseException],
+) -> None:
+    """The signal goes on, never replaced, with a note; the closers after it
+    do not run; the root closes."""
+    from neolith.middleware import _Body
+
+    scope, token = _scope_for_body()
+    _context._CURRENT.reset(token)
+    ran: list[str] = []
+
+    def stops() -> None:
+        raise stop
+
+    body = _Body(iter([b"x"]), scope, [stops, lambda: ran.append("after")])
+    with pytest.raises(stop) as raised:
+        body.close()
+    assert raised.value.__notes__ == [
+        "neolith: the request root closed; 1 more of the body's closers did not run"
+    ]
+    assert ran == []
+    assert _is_closed(scope)
+    assert _context._CURRENT.get() is None

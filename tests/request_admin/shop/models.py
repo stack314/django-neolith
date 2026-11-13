@@ -1,3 +1,4 @@
+from django.contrib.auth.models import Permission
 from django.db import models
 
 
@@ -29,7 +30,7 @@ class Item(models.Model):
 
 
 class Shelf(models.Model):
-    """Served by the stock ModelAdmin with options, which runs no app's code."""
+    """Served by an admin class of the depot app."""
 
     name = models.CharField(max_length=20)
 
@@ -38,9 +39,19 @@ class Shelf(models.Model):
 
 
 class Crate(models.Model):
-    """Served by the stock ModelAdmin with an option that is a project function."""
+    """Served by the class Django builds for register(Crate, **options)."""
 
     name = models.CharField(max_length=20)
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class Team(models.Model):
+    """Served by ``django.contrib.auth``'s GroupAdmin."""
+
+    name = models.CharField(max_length=20)
+    permissions = models.ManyToManyField(Permission, blank=True)
 
     def __str__(self) -> str:
         return self.name

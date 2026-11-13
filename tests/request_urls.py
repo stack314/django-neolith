@@ -10,6 +10,14 @@ from tests.host_apps.stock import views as stock_views
 from tests.host_apps.web import views as web
 from tests.plain_app import views as plain
 
+
+def _chain(view: site._View, links: int) -> site._View:
+    """``view`` under ``links`` decorators that each copy what they wrap."""
+    for _ in range(links):
+        view = site.wraps_view(view)
+    return view
+
+
 urlpatterns = [
     path("page/", web.page),
     path("apage/", web.apage),
@@ -18,6 +26,15 @@ urlpatterns = [
     path("hidden/", site.hides_view(web.page)),
     path("partial/", functools.partial(web.page)),
     path("method/", web.Pages().page),
+    path("exempt/", web.ExemptView.as_view()),
+    path("own-dispatch/", web.OwnDispatchView.as_view()),
+    path("guarded/", web.GuardedView.as_view()),
+    path("viewset/", site.serves_class(web.Viewset)),
+    path("viewset-unnamed/", site.serves_class_unnamed(web.Viewset)),
+    path("cbv-partly-wrapped/", site.copies_attributes(web.PageView.as_view())),
+    path("wraps-framework/", web.wraps_framework),
+    path("chain/", _chain(web.page, 10)),
+    path("odd-partial/", site.OddPartial(web.page)),
     # functools.wraps finds no __module__ on a partial, so only __wrapped__
     # leads to the view.
     path("wrapped-partial/", site.wraps_view(functools.partial(web.page))),

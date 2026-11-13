@@ -225,7 +225,7 @@ def test_a_call_made_in_no_scope_is_a_usage_error_and_is_not_sent() -> None:
     assert carrying.sent == []
     assert provider.seen == []
     # No context was started for it either.
-    assert _context._OPEN == {}
+    assert _context.open_scopes() == []
 
 
 @pytest.mark.spec("TRN-23", "CON-29")
@@ -380,7 +380,7 @@ def test_a_root_closes_however_it_ends(how: str) -> None:
         pass
     ((context, held),) = kept
     assert scope.closed is True
-    assert _context._OPEN == {}
+    assert _context.open_scopes() == []
     with pytest.raises(neolith.UsageError, match="names no open scope") as raised:
         connector.ask(Ask(), context=context)
     assert type(raised.value) is neolith.UsageError
@@ -419,7 +419,9 @@ def test_an_actions_scope_closes_however_the_action_ends(
             connector.ask(Ask())
         (kept,) = provider.seen
         # Only the root is open once the call has ended.
-        assert list(_context._OPEN) == [scope.context.scope_id]
+        assert [s.context.scope_id for s in _context.open_scopes()] == [
+            scope.context.scope_id
+        ]
         with _usage_error("names no open scope"):
             connector.ask(Ask(), context=kept)
         # Work that kept the action's context, as a thread it started would.
@@ -933,7 +935,7 @@ def test_a_deadline_that_passes_before_dispatch_fails_with_timeout(
     assert raised.value.message == "the deadline passed before the action was run"
     assert [sent.budget for sent in carrying.sent] == [1000]
     assert provider.seen == []
-    assert _context._OPEN == {}
+    assert _context.open_scopes() == []
 
 
 @pytest.mark.spec("TRN-19", "TRN-35")
@@ -1415,7 +1417,9 @@ def test_a_signal_to_stop_after_the_deadline_is_not_discarded(
     with _root("shop") as scope:
         with pytest.raises(stop):
             connector.ask(Ask(), timeout=1)
-        assert list(_context._OPEN) == [scope.context.scope_id]
+        assert [s.context.scope_id for s in _context.open_scopes()] == [
+            scope.context.scope_id
+        ]
 
 
 @pytest.mark.spec("TRN-20", "TRN-28")
@@ -1952,7 +1956,7 @@ def test_the_context_an_action_receives_equals_the_one_its_caller_derived(
             budget = sent.budget / 1000
             assert asked[level] + budget <= ctx.deadline <= entered[level] + budget
         deadlines.append(ctx.deadline)
-    assert _context._OPEN == {}
+    assert _context.open_scopes() == []
 
 
 # Concurrent callers of one scope.
@@ -1978,7 +1982,9 @@ def test_concurrent_callers_each_run_in_a_scope_of_their_own() -> None:
                     lambda n: connector.ask(Ask(n=n), context=scope.context), range(8)
                 )
             )
-        assert list(_context._OPEN) == [scope.context.scope_id]
+        assert [s.context.scope_id for s in _context.open_scopes()] == [
+            scope.context.scope_id
+        ]
     assert replies == [Told(n=n) for n in range(8)]
     assert len({scope_id for _, scope_id, _ in scopes}) == 8
     assert len({thread for _, _, thread in scopes}) == 8
@@ -2136,7 +2142,7 @@ def test_a_declaration_does_not_take_the_context() -> None:
 
 
 def _scopes() -> Iterator[Scope]:
-    yield from _context._OPEN.values()
+    yield from _context.open_scopes()
 
 
 def test_no_scope_is_left_open_by_this_module() -> None:

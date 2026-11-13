@@ -29,6 +29,7 @@ INSTALLED = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "tests.request_admin.shop",
+    "tests.request_admin.depot",
     "tests.host_apps.couriers",
     "neolith",
 ]
@@ -50,27 +51,38 @@ from django.core.management import call_command
 from django.contrib.auth.models import User
 from django.test import AsyncClient, Client
 
-from tests.request_admin.shop.models import Basket, Crate, Item, Order, Shelf
+from django.contrib import admin
+from django.db import models
+from django.test import override_settings
+
+from neolith import _checks
+from neolith._serving import admin_code
+from tests.request_admin.depot.models import Bin, Pallet
+from tests.request_admin.shop.models import Basket, Crate, Item, Order, Shelf, Team
 
 call_command("migrate", run_syncdb=True, verbosity=0)
 user = User.objects.create_superuser("admin", "", "admin")
-models = (Order, Basket, Item, Shelf, Crate)
-ids = {m.__name__.lower(): m.objects.create(name="x").pk for m in models}
+made = (Order, Basket, Item, Shelf, Crate, Team, Pallet, Bin)
+ids = {m.__name__.lower(): m.objects.create(name="x").pk for m in made}
 posts = [
-    ("order", "quote"),
-    ("order", "quote_everywhere"),
-    ("basket", "quote_everywhere"),
-    ("item", "quote_everywhere"),
-    ("shelf", "quote_everywhere"),
-    ("crate", "quote_everywhere"),
-    ("crate", "project_quote"),
+    ("shop", "order", "quote"),
+    ("shop", "order", "quote_everywhere"),
+    ("shop", "order", "project_quote"),
+    ("shop", "basket", "quote_everywhere"),
+    ("shop", "team", "quote_everywhere"),
+    ("shop", "item", "quote_everywhere"),
+    ("shop", "crate", "quote_everywhere"),
+    ("shop", "crate", "project_quote"),
+    ("shop", "shelf", "quote_everywhere"),
+    ("depot", "pallet", "quote_everywhere"),
+    ("depot", "bin", "quote_everywhere"),
 ]
 results = {}
 client = Client()
 client.force_login(user)
-for model, action in posts:
+for app, model, action in posts:
     answer = client.post(
-        f"/admin/shop/{model}/", {"action": action, "_selected_action": [ids[model]]}
+        f"/admin/{app}/{model}/", {"action": action, "_selected_action": [ids[model]]}
     )
     results[f"wsgi {model} {action}"] = [answer.status_code, answer.content.decode()]
 
@@ -78,31 +90,43 @@ for model, action in posts:
 async def over_asgi():
     aclient = AsyncClient()
     await aclient.aforce_login(user)
-    for model, action in posts:
+    for app, model, action in posts:
         data = {"action": action, "_selected_action": [ids[model]]}
-        answer = await aclient.post(f"/admin/shop/{model}/", data)
+        answer = await aclient.post(f"/admin/{app}/{model}/", data)
         content = answer.content.decode()
         results[f"asgi {model} {action}"] = [answer.status_code, content]
 
 
 asyncio.run(over_asgi())
 found = [[m.id, m.msg] for m in checks.run_checks(tags=["neolith"])]
+
+
+class Stray(models.Model):
+    class Meta:
+        app_label = "nowhere"
+
+
+stray = list(admin_code(admin.ModelAdmin(Stray, admin.site)))
+with override_settings(INSTALLED_APPS=["django.contrib.admin", "django.contrib.auth",
+        "django.contrib.contenttypes", "django.contrib.sessions",
+        "django.contrib.messages"]):
+    unhosted = _checks.admin_check()
 printed = io.StringIO()
 call_command("check", stdout=printed, stderr=printed)
 print(json.dumps(
     {"results": results, "checks": found, "log": logged.getvalue(),
-     "check": printed.getvalue()}
+     "check": printed.getvalue(), "stray": stray, "unhosted": len(unhosted)}
 ))
 """
 
 _REFUSED = (
-    " in no installed app; its views have no calling app, and a contract call "
-    "from them is refused"
+    ": admin class in no installed app; its views have no calling app, and a "
+    "contract call from them is refused"
 )
-_W001 = f"tests.request_admin.project_admin.ItemAdmin: admin class{_REFUSED}"
-_W001_OPTION = (
-    f"tests.request_admin.project_admin.project_quote: admin function{_REFUSED}"
-)
+_W001 = [
+    f"tests.request_admin.project_admin.ItemAdmin{_REFUSED}",
+    f"tests.request_admin.project_admin.OtherItemAdmin{_REFUSED}",
+]
 
 
 @pytest.fixture(scope="module")
@@ -146,59 +170,90 @@ def ran(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
     return found
 
 
-@pytest.mark.spec("TRN-57")
-@pytest.mark.parametrize("mode", ["wsgi", "asgi"])
-@pytest.mark.parametrize("action", ["quote", "quote_everywhere"])
-def test_an_admin_action_calls_as_the_app_of_its_admin_class(
-    ran: dict[str, Any], mode: str, action: str
-) -> None:
-    """Case 7: the action is registered in the shop app's ``admin.py``, on
-    its ``ModelAdmin``, so it calls as shop, not as ``django.contrib.admin``."""
-    assert ran["results"][f"{mode} order {action}"] == [200, "as shop"]
+MODES = ["wsgi", "asgi"]
 
 
 @pytest.mark.spec("TRN-57")
-@pytest.mark.parametrize("mode", ["wsgi", "asgi"])
-def test_the_stock_admin_class_serves_as_the_model_s_app(
-    ran: dict[str, Any], mode: str
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize(
+    ("post", "outcome"),
+    [
+        # Case 7: an action of the shop app's admin class calls as shop, not
+        # as django.contrib.admin, whichever module the action is in.
+        ("order quote", "as shop"),
+        ("order quote_everywhere", "as shop"),
+        ("order project_quote", "as shop"),
+        # The admin class's app beats the model's, both ways.
+        ("pallet quote_everywhere", "as shop"),
+        ("shelf quote_everywhere", "as depot"),
+        # No class of the app's own: the model's app.
+        ("basket quote_everywhere", "as shop"),
+        ("bin quote_everywhere", "as depot"),
+        ("team quote_everywhere", "as shop"),
+        ("crate quote_everywhere", "as shop"),
+        ("crate project_quote", "as shop"),
+    ],
+)
+def test_an_admin_view_calls_as_the_app_of_its_admin_class(
+    ran: dict[str, Any], mode: str, post: str, outcome: str
 ) -> None:
-    """The stock ``ModelAdmin`` runs no app's code, so its views run as the
-    app whose model they serve; so does the class Django builds for
-    ``register`` with options that hold no app's code."""
-    assert ran["results"][f"{mode} basket quote_everywhere"] == [200, "as shop"]
-    assert ran["results"][f"{mode} shelf quote_everywhere"] == [200, "as shop"]
+    """The most derived admin class in a hosted app decides; with none, as
+    for the stock admin, Django's ``GroupAdmin`` and the class Django builds
+    for ``register(Model, **options)``, the model's app does."""
+    assert ran["results"][f"{mode} {post}"] == [200, outcome]
 
 
 @pytest.mark.spec("TRN-58", "TRN-42")
-@pytest.mark.parametrize("mode", ["wsgi", "asgi"])
+@pytest.mark.parametrize("mode", MODES)
 def test_an_admin_action_on_a_project_admin_class_is_refused(
     ran: dict[str, Any], mode: str
 ) -> None:
-    """Case 8: the same action, on a ``ModelAdmin`` subclass in a project
-    module, has no caller and is refused."""
-    refused = [200, "refused unauthenticated"]
-    assert ran["results"][f"{mode} item quote_everywhere"] == refused
-    # A project function given as an option is the admin's own code.
-    assert ran["results"][f"{mode} crate quote_everywhere"] == refused
-    assert ran["results"][f"{mode} crate project_quote"] == refused
+    """Case 8: an action on a ``ModelAdmin`` subclass in a project module
+    has no caller and is refused."""
+    assert ran["results"][f"{mode} item quote_everywhere"] == [
+        200,
+        "refused unauthenticated",
+    ]
 
 
 @pytest.mark.spec("APP-17")
-def test_the_host_warns_about_an_admin_class_in_no_app(ran: dict[str, Any]) -> None:
-    """Case 8: ``neolith.W001`` names the project's admin class and the
-    project function given as an option, by the rule the binding uses, not
-    the shop app's class, the stock ones or those of ``django.contrib.auth``."""
-    assert ran["checks"] == [
-        ["neolith.W001", _W001],
-        ["neolith.W001", _W001_OPTION],
-    ]
+def test_the_host_warns_about_each_admin_class_in_no_app(ran: dict[str, Any]) -> None:
+    """Case 8: ``neolith.W001`` names the project's admin classes, on every
+    admin site, by the rule the binding uses, and no other."""
+    assert ran["checks"] == [["neolith.W001", m] for m in _W001]
 
 
 @pytest.mark.spec("APP-17")
 def test_set_up_logs_the_warning_and_serves(ran: dict[str, Any]) -> None:
     """A warning does not stop the host; set-up logs it once."""
-    assert ran["log"] == (f"(neolith.W001) {_W001}\n(neolith.W001) {_W001_OPTION}\n")
+    assert ran["log"] == "".join(f"(neolith.W001) {m}\n" for m in _W001)
 
 
 def test_manage_py_check_prints_the_warning(ran: dict[str, Any]) -> None:
-    assert f"(neolith.W001) {_W001}" in ran["check"]
+    assert all(f"(neolith.W001) {m}" in ran["check"] for m in _W001)
+
+
+def test_a_stock_admin_of_a_model_in_no_installed_app_has_no_app(
+    ran: dict[str, Any],
+) -> None:
+    assert ran["stray"] == [None, None]
+
+
+def test_the_warning_judges_only_a_process_that_hosts(ran: dict[str, Any]) -> None:
+    assert ran["unhosted"] == 0
+
+
+def test_the_warning_does_not_import_the_admin() -> None:
+    """In a process that never imported the admin, the check finds nothing
+    and imports nothing."""
+    import sys
+
+    from django.test import override_settings
+
+    from neolith import _checks
+    from tests import host_apps
+
+    assert "django.contrib.admin.sites" not in sys.modules
+    with override_settings(INSTALLED_APPS=host_apps.INSTALLED):
+        assert _checks.admin_check() == []
+    assert "django.contrib.admin.sites" not in sys.modules

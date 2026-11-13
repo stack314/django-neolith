@@ -1,9 +1,12 @@
 from django.contrib import admin
+from django.contrib.auth.admin import GroupAdmin
 from django.db.models import QuerySet
 from django.http import HttpRequest, HttpResponse
 
 from tests import request_site as site
-from tests.request_admin.shop.models import Basket, Order, Shelf
+from tests.request_admin import project_admin
+from tests.request_admin.depot.models import Pallet
+from tests.request_admin.shop.models import Basket, Order, Team
 
 
 def quote(
@@ -17,14 +20,16 @@ def quote(
 
 @admin.register(Order)
 class OrderAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
-    actions = (quote,)
+    # A project function among its actions: the class is the shop app's.
+    actions = (quote, project_admin.project_quote)
+
+
+@admin.register(Pallet)
+class PalletAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
+    """The shop app's admin class for a model of the depot app."""
 
 
 admin.site.register(Basket)
-# Options make Django build a class of its own, in django.contrib.admin.sites.
-admin.site.register(Shelf, list_display=("name",))
+# An admin class of an app with no declaration, from Django itself.
+admin.site.register(Team, GroupAdmin)  # type: ignore[misc]
 admin.site.add_action(quote, "quote_everywhere")
-
-# A project-level admin module, loaded while the apps load, as one imported
-# from an app's admin module is.
-from tests.request_admin import project_admin  # noqa: E402, F401

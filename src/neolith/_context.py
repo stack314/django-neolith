@@ -525,28 +525,34 @@ _CURRENT: contextvars.ContextVar[Scope | None] = contextvars.ContextVar(
     "neolith_scope", default=None
 )
 _OPEN: dict[str, Scope] = {}
-_OPEN_LOCK = threading.Lock()
-# Scope ids closed where no lock may be taken, such as a finalizer, which can
-# run while this thread holds _OPEN_LOCK. Taken off the table the next time
-# the lock is held. A deque's append and popleft take no lock of Python's.
-_CLOSED_LATER: collections.deque[str] = collections.deque()
+# Nothing a garbage collection can trigger takes a lock another frame of the
+# same thread may hold. Closing a scope takes none: it marks the scope closed,
+# which is what refuses its calls, and queues its id, which the next holder
+# of the lock takes off the table. Opening a scope and naming one with
+# context= do take the lock, and app code that a collection runs, such as a
+# generator's finally that makes a call, can do either; so the lock is
+# re-entrant, and nothing done under it lets a collection see the table half
+# changed (each step is one dict operation). A deque's append and popleft
+# take no lock of Python's.
+_OPEN_LOCK = threading.RLock()
+_CLOSED: collections.deque[str] = collections.deque()
 
 
 def _forget_closed() -> None:
-    """Take scopes closed without the lock off the table; hold the lock."""
-    while _CLOSED_LATER:
+    """Take closed scopes off the table; hold ``_OPEN_LOCK``."""
+    while _CLOSED:
         try:
-            scope_id = _CLOSED_LATER.popleft()
+            scope_id = _CLOSED.popleft()
         except IndexError:
             return
         _OPEN.pop(scope_id, None)
 
 
 def open_scopes() -> list[Scope]:
-    """The scopes on the table that are still open."""
+    """The scopes on the table, all of them open."""
     with _OPEN_LOCK:
         _forget_closed()
-        return [scope for scope in _OPEN.values() if not scope.closed]
+        return list(_OPEN.values())
 
 
 def _hex(size: int) -> str:
@@ -595,23 +601,15 @@ def begin(
 
 
 def close(scope: Scope) -> None:
-    """Close a scope, so that a call made in it or naming it is refused."""
-    scope.closed = True
-    with _OPEN_LOCK:
-        _forget_closed()
-        _OPEN.pop(scope.context.scope_id, None)
+    """Close a scope, so that a call made in it or naming it is refused.
 
-
-def close_without_lock(scope: Scope) -> None:
-    """Close a scope without taking a lock, for a finalizer.
-
-    A finalizer runs wherever a collection happens, also while this thread
-    holds ``_OPEN_LOCK``, so it must never take it. The scope is closed at
-    once, which is what refuses its calls; its table entry goes the next
-    time the lock is held.
+    Takes no lock, so it is safe wherever a collection runs it: from a
+    finalizer, a ``__del__`` or a generator finalized by the collector, also
+    while this thread holds ``_OPEN_LOCK``. The table entry goes the next
+    time the lock is taken.
     """
     scope.closed = True
-    _CLOSED_LATER.append(scope.context.scope_id)
+    _CLOSED.append(scope.context.scope_id)
 
 
 @contextlib.contextmanager
