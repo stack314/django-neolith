@@ -139,7 +139,7 @@ A host that serves ordinary requests, such as web pages, opens a root for each o
 
 **TRN-57.** Once the host has found the code that serves the request, the request root MUST belong to the app that code is in: the app whose own code runs for the request, not the app of code that only wraps it. Where the framework serves an app's data through generic code of its own, with no code of an app, the root belongs to the app whose data it serves.
 
-The host finds the code that runs by following each link a wrapper keeps to what it wraps, as far as the language keeps one. A wrapper that keeps none counts as the code that runs, so a view wrapped that way in another app's code serves as that app.
+The host finds the code that runs by following each link a wrapper keeps to what it wraps, while the link leads into code of an app the host holds, never into the framework's own code or code the view only inherits. A wrapper whose link is not followed counts as the code that runs, so a view wrapped by another app's code that keeps no link serves as that app. Generic code of the framework includes the framework's own apps, so an administration class that the framework or an app with no declaration supplies serves the app whose data it shows.
 
 **TRN-58.** A request root whose serving code is in no app MUST belong to no app, so a call made in it is refused as TRN-56 says.
 
