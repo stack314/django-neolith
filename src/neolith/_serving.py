@@ -89,19 +89,16 @@ def _module(code: object) -> object:
 
 
 def _link(code: object) -> object:
-    """The one link a wrapper keeps to what it wraps, or ``None``."""
-    kind = type(code)
-    if kind is types.MethodType:
-        code = code.__func__  # type: ignore[attr-defined]
-        kind = type(code)
-    if kind is types.FunctionType:
-        attributes = vars(code)
-        if issubclass(type(attributes.get("view_class")), type):
-            return None
-        return attributes.get("__wrapped__")
-    if kind is functools.partial:
-        return code.func  # type: ignore[attr-defined]
-    return None
+    """The ``__wrapped__`` a function keeps to what it wraps, or ``None``.
+    ``label_of`` has already turned a bound method into its function and a
+    partial into its function, so only a function can keep one here.
+    """
+    if type(code) is not types.FunctionType:
+        return None
+    attributes = vars(code)
+    if issubclass(type(attributes.get("view_class")), type):
+        return None
+    return attributes.get("__wrapped__")
 
 
 def _admin(code: object) -> object:
@@ -143,6 +140,10 @@ def _name(klass: type) -> str:
 def label_of(view: object) -> str | None:
     """The label of the app whose code serves ``view``, or ``None``."""
     for _ in range(_LINKS):
+        if type(view) is types.MethodType:
+            # A bound method is its function's code.
+            view = view.__func__
+            continue
         if type(view) is functools.partial:
             # It runs no code of its own: its function is the code.
             view = view.func
