@@ -139,13 +139,17 @@ A host that serves ordinary requests, such as web pages, opens a root for each o
 
 **TRN-57.** Once the host has found the code that serves the request, the request root MUST belong to the app that code is in: the app whose own code runs for the request, not the app of code that only wraps it. Where the framework serves an app's data through generic code of its own, with no code of an app, the root belongs to the app whose data it serves.
 
+The host finds the code that runs by following each link a wrapper keeps to what it wraps, as far as the language keeps one. A wrapper that keeps none counts as the code that runs, so a view wrapped that way in another app's code serves as that app.
+
 **TRN-58.** A request root whose serving code is in no app MUST belong to no app, so a call made in it is refused as TRN-56 says.
 
 **TRN-59.** A request root MUST have the host's request deadline, counted from when the request starts: 30 seconds unless the host is configured with another duration, or none when the host is configured with none.
 
 **TRN-60.** A request root MUST stay open until the response is done, including while a body is produced after the code that handles the request has returned. A body whose production runs no code, such as a file the server sends as it is, needs no root.
 
-**TRN-61.** A call made while the response's body is produced MUST be made in the request root, wherever the server produces the body.
+**TRN-61.** A call made while the response's body is produced, or while the body is closed, MUST be made in the request root, wherever the server does either.
+
+A server may stop an asynchronous body before its end without closing it, as it may when a client disconnects. The body's own clean-up then runs when its event loop finishes it, after the response is done, and a call made there is refused (TRN-25).
 
 **TRN-62.** A host MUST close a request root when the response is done, however it ends, a client that disconnects included (TRN-24).
 

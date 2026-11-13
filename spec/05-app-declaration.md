@@ -76,7 +76,9 @@ A host running one app is a detached deployment. A host running several is a sha
 
 **APP-16.** A host MUST stop before it serves when an input of its configuration is outside the set it admits, with a diagnostic that names the input.
 
-**APP-17.** Before it serves, a host MUST warn about each piece of code it finds that serves requests from outside every app, since a call made from it has no calling app and is refused ([02](02-transports.md), TRN-58).
+**APP-17.** When it loads its apps, a host MUST warn about each registration of the framework's generic data views, such as an administration site, whose code is in no app, since a call made from those views has no calling app and is refused ([02](02-transports.md), TRN-58).
+
+Other code in no app that serves requests is found by the checks that later steps add: when the host boots, and before deployment ([ADR 0022](../docs/adr/0022-the-app-host-builds-settings-and-checks-before-it-serves.md) Decisions 5 and 7).
 
 ### Resolve and Validate
 
