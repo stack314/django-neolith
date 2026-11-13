@@ -85,7 +85,7 @@ Decision records: [0014](../docs/adr/0014-pluggable-connector-transports.md), [0
 
 How the call context of [00](00-overview.md) moves from call to call follows [ADR 0017](../docs/adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md).
 
-A host opens a *scope* for each root and around each action it runs. A scope holds a context, and the calls made in it derive theirs from it. A *root* is a scope that starts a context: the provider side of a transport, a request the host serves, a scope opened explicitly for a command or background work, or a test harness. A transport never fabricates a context. A request root for an ordinary request the host serves gets the host's default deadline, 30 seconds unless the host is configured otherwise, or none if it is configured so. A call that arrives over a transport without a deadline has none. A command or background scope, and a test harness, have no deadline unless they are given one. The request root becomes a requirement with the host, in roadmap step 4 (#11); the explicit root for commands and background work is under [Explicit roots](#explicit-roots).
+A host opens a *scope* for each root and around each action it runs. A scope holds a context, and the calls made in it derive theirs from it. A *root* is a scope that starts a context: the provider side of a transport, a request the host serves, a scope opened explicitly for a command or background work, or a test harness. A transport never fabricates a context. A request root for an ordinary request the host serves gets the host's default deadline, 30 seconds unless the host is configured otherwise, or none if it is configured so. A call that arrives over a transport without a deadline has none. A command or background scope, and a test harness, have no deadline unless they are given one. The request root is under [Request roots](#request-roots), and the explicit root for commands and background work under [Explicit roots](#explicit-roots).
 
 ### The parent scope
 
@@ -128,6 +128,28 @@ An explicit root is opened and closed in one flow of execution, such as a thread
 **TRN-52.** A host MUST refuse to open one explicit root a second time, while it is open or after it has closed, as TRN-45 refuses.
 
 An explicit root closes when the code it was opened for ends, by return or by an error (TRN-24), and a call made in it afterwards is refused (TRN-25).
+
+### Request roots
+
+A host that serves ordinary requests, such as web pages, opens a root for each one ([ADR 0017](../docs/adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md) Decision 4, [ADR 0022](../docs/adr/0022-the-app-host-builds-settings-and-checks-before-it-serves.md) Decision 6). The code that handles the request runs in it, and so does a body the response produces after that code has returned. The root's principal and trace are the subject of the principal backends ([ADR 0023](../docs/adr/0023-a-request-principal-comes-from-ordered-backends.md)).
+
+**TRN-55.** A host MUST open a request root for each ordinary request it serves when it starts to handle the request, before any other code that handles the request runs.
+
+**TRN-56.** A request root MUST belong to no app until the host has found the code that serves the request, so a call made before then has no calling app (TRN-31) and is refused (TRN-42).
+
+**TRN-57.** Once the host has found the code that serves the request, the request root MUST belong to the app that code is in: the app whose own code runs for the request, not the app of code that only wraps it. Where the framework serves an app's data through generic code of its own, with no code of an app, the root belongs to the app whose data it serves.
+
+**TRN-58.** A request root whose serving code is in no app MUST belong to no app, so a call made in it is refused as TRN-56 says.
+
+**TRN-59.** A request root MUST have the host's request deadline, counted from when the request starts: 30 seconds unless the host is configured with another duration, or none when the host is configured with none.
+
+**TRN-60.** A request root MUST stay open until the response is done, including while a body is produced after the code that handles the request has returned. A body whose production runs no code, such as a file the server sends as it is, needs no root.
+
+**TRN-61.** A call made while the response's body is produced MUST be made in the request root, wherever the server produces the body.
+
+**TRN-62.** A host MUST close a request root when the response is done, however it ends, a client that disconnects included (TRN-24).
+
+**TRN-63.** Where the server gives the host no signal that the response is done, the host MUST close the request root when it next detects that the response will not be produced.
 
 ### The context of a call
 
