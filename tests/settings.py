@@ -11,4 +11,6 @@ INSTALLED_APPS: list[str] = []
 MIDDLEWARE = ["neolith.middleware.RootMiddleware"]
 NEOLITH: dict[str, object] = {}
 DATABASES = {"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}}
+# The one router of a host (ADR 0009 Decision 6).
+DATABASE_ROUTERS = ["neolith.routers.AppRouter"]
 USE_TZ = True

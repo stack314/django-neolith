@@ -66,6 +66,7 @@ def home(label: str) -> str:
 _ROUTER = ["neolith.routers.AppRouter"]
 
 _BODY = """
+import contextlib
 import json
 import sqlite3
 import types
@@ -86,7 +87,8 @@ from neolith.routers import AppRouter
 from tests.app_db.billing.models import Invoice
 from tests.app_db.ledger.models import Account, Entry, Tag
 
-real_default = bool(settings.DATABASES["default"])
+# Django fills a blank default in with its dummy backend.
+real_default = settings.DATABASES["default"]["ENGINE"] != "django.db.backends.dummy"
 ALIASES = list(settings.DATABASES)
 DBS = [*ALIASES, "notes", "other"]
 LABELS = json.loads(sys.argv[3])
@@ -100,7 +102,7 @@ def outcome(run):
 
 
 def tables(alias):
-    with sqlite3.connect(settings.DATABASES[alias]["NAME"]) as db:
+    with contextlib.closing(sqlite3.connect(settings.DATABASES[alias]["NAME"])) as db:
         return sorted(
             row[0]
             for row in db.execute(
@@ -115,7 +117,8 @@ def count(table):
     for alias in ALIASES:
         if alias == "default" and not real_default:
             continue
-        with sqlite3.connect(settings.DATABASES[alias]["NAME"]) as db:
+        name = settings.DATABASES[alias]["NAME"]
+        with contextlib.closing(sqlite3.connect(name)) as db:
             if db.execute(
                 "select 1 from sqlite_master where name = ?", (table,)
             ).fetchone():
@@ -145,7 +148,8 @@ fake_apps = Apps([])
 
 def fake(label):
     meta = type("Meta", (), {"app_label": label, "apps": fake_apps})
-    return type(f"Fake_{label}", (models.Model,), {"__module__": __name__, "Meta": meta})
+    attrs = {"__module__": __name__, "Meta": meta}
+    return type(f"Fake_{label}", (models.Model,), attrs)
 
 
 questioned = list(apps.get_models(include_auto_created=True))
@@ -337,9 +341,7 @@ def test_a_read_or_a_write_goes_to_the_home_of_the_models_label(
 
 
 @pytest.mark.spec("APP-18")
-def test_each_hosted_app_with_a_database_has_an_alias_apart_from_every_other() -> (
-    None
-):
+def test_each_hosted_app_with_a_database_has_an_alias_apart_from_every_other() -> None:
     homes = [home(label) for label in HOSTED_WITH_DATABASE]
     assert len(set(homes)) == len(homes)
     assert "default" not in homes
@@ -386,7 +388,9 @@ def test_each_alias_holds_the_tables_of_the_labels_it_is_home_to(
 ) -> None:
     found = ran[host]
     for alias, tables in found["schema"].items():
-        expected = {table for label, table in found["model_tables"] if home(label) == alias}
+        expected = {
+            table for label, table in found["model_tables"] if home(label) == alias
+        }
         assert set(tables) - {"django_migrations"} == expected, alias
     if host == "closed":
         # Django's dummy default refuses the migrate that names no alias.
@@ -433,7 +437,10 @@ def test_a_transaction_covers_only_the_writes_to_its_own_database(
     tables = {"ledger_account": "ledger", "billing_invoice": "billing"}
     if host == "real default":
         tables["legacy_memo"] = "default"
-    for opener in [*HOSTED_WITH_DATABASE, *(["default"] if host == "real default" else [])]:
+    for opener in [
+        *HOSTED_WITH_DATABASE,
+        *(["default"] if host == "real default" else []),
+    ]:
         ran_as, kept = covered[opener]
         assert ran_as == "rolled back"
         # Its own write is rolled back; every other database keeps its row.
@@ -456,7 +463,9 @@ def test_an_operation_that_names_no_database_reaches_no_apps_database(
         return
     assert raw["cursor"] == ["ok", 1]
     assert raw["on_commit"] == ["ok", None]
-    on_default = {table for label, table in found["model_tables"] if home(label) == "default"}
+    on_default = {
+        table for label, table in found["model_tables"] if home(label) == "default"
+    }
     assert set(raw["tables"][1]) - {"django_migrations"} == on_default
     # A bare transaction is default's: it rolls back the write there and
     # leaves the apps' own writes in place (ADR 0009 Decision 3, the cost).
@@ -554,11 +563,15 @@ def test_the_database_check_judges_the_registry_it_is_given() -> None:
     assert _checks.table_name_check() == []
 
 
-_SHORT = "app {}: the table name of {} was shortened to fit the default database; set db_table"
+_SHORT = (
+    "app {}: the table name of {} was shortened to fit the default database; "
+    "set db_table"
+)
 
 
-def _limited(limit: int | None) -> Any:
-    return mock.patch.object(connection.ops, "max_name_length", lambda: limit)
+def _limited(limit: int | None) -> "mock._patch[mock.Mock]":
+    """Give ``default`` a limit on names while models are built."""
+    return mock.patch.object(connection.ops, "max_name_length", return_value=limit)
 
 
 # Each row: what the hosted app defines, under a default whose limit is 10,
@@ -660,7 +673,9 @@ def _through(label: str) -> object:
 
 
 @pytest.mark.spec("APP-25")
-@pytest.mark.parametrize(("case", "define", "shortened"), _TABLES, ids=[r[0] for r in _TABLES])
+@pytest.mark.parametrize(
+    ("case", "define", "shortened"), _TABLES, ids=[r[0] for r in _TABLES]
+)
 @pytest.mark.parametrize("label", ["archive", "plain_app"])
 def test_a_table_name_the_default_database_shortened_is_refused(
     isolated: Apps,
@@ -679,7 +694,9 @@ def test_a_table_name_the_default_database_shortened_is_refused(
 
 
 @pytest.mark.spec("APP-25")
-@pytest.mark.parametrize(("case", "define", "shortened"), _TABLES, ids=[r[0] for r in _TABLES])
+@pytest.mark.parametrize(
+    ("case", "define", "shortened"), _TABLES, ids=[r[0] for r in _TABLES]
+)
 def test_no_table_name_is_refused_under_a_default_with_no_limit(
     isolated: Apps, case: str, define: Callable[[str], object], shortened: list[str]
 ) -> None:
@@ -707,7 +724,9 @@ _IDENTIFIER = st.from_regex(r"[A-Z][a-z0-9]{0,30}", fullmatch=True).filter(
 @given(
     name=_IDENTIFIER,
     field=st.from_regex(r"[a-z][a-z0-9_]{0,30}", fullmatch=True).filter(
-        lambda f: not f.endswith("_") and "__" not in f and f not in ("id", "pk", "objects")
+        lambda f: (
+            not f.endswith("_") and "__" not in f and f not in ("id", "pk", "objects")
+        )
     ),
     db_table=st.one_of(st.none(), st.from_regex(r"[a-z]{1,40}", fullmatch=True)),
     limit=st.sampled_from([10, 16, 30, 63]),

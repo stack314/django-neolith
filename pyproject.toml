@@ -154,6 +154,8 @@ ignore = ["D205"]
 # Tests are named for what they check, and scripts are not API.
 "tests/**" = ["S101", "D"]
 "scripts/**" = ["D1"]
+# Migrations are written by Django's makemigrations, as Django writes them.
+"tests/**/migrations/*" = ["RUF012"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"

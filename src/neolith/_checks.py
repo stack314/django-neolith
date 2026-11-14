@@ -7,19 +7,25 @@ input: set-up, through the system checks registered under the tag
 input is stated in its function; anything else is a problem, never a pass.
 
 The ids are the ones this step fixes from ADR 0022's working numbers:
-``neolith.E001`` for ``NEOLITH``, ``neolith.E006`` for ``MIDDLEWARE`` and
+``neolith.E001`` for ``NEOLITH``, ``neolith.E006`` for ``MIDDLEWARE``,
+``neolith.E014`` for a hosted app with models and no database,
+``neolith.E017`` for a table name that ``default`` shortened (ADR 0009) and
 ``neolith.W001`` for an admin class in no installed app.
 """
 
 import math
 import sys
+from collections.abc import Iterable
 from typing import Any, Final
 
+from django.apps import AppConfig
 from django.apps import apps as global_apps
 from django.conf import settings
 from django.core import checks
+from django.db.backends.utils import strip_quotes
 from django.utils.module_loading import import_string
 
+from neolith._declaration import declaration_of
 from neolith._serving import admin_code
 
 __all__ = [
@@ -27,12 +33,16 @@ __all__ = [
     "ROOT_MIDDLEWARE",
     "TAG",
     "admin_check",
+    "database_check",
+    "database_problems",
     "middleware_check",
     "middleware_problems",
     "neolith_check",
     "neolith_problems",
     "register",
     "request_deadline",
+    "table_name_check",
+    "table_name_problems",
 ]
 
 TAG: Final = "neolith"
@@ -228,9 +238,127 @@ def admin_check(**kwargs: object) -> list[checks.CheckMessage]:
     ]
 
 
+def _hosted(configs: Iterable[AppConfig]) -> list[tuple[AppConfig, bool]]:
+    """The configs with a declaration, each with whether it declares the
+    ``database`` resource.
+    """
+    found: list[tuple[AppConfig, bool]] = []
+    for config in configs:
+        declaration = declaration_of(type(config))
+        if declaration is not None:
+            found.append((config, "database" in declaration.resources))
+    return found
+
+
+def database_problems(configs: Iterable[AppConfig]) -> list[str]:
+    """Judge each hosted app's models against its ``database`` resource: an
+    app that does not declare one has no model in the registry at all, of
+    any kind, proxy, unmanaged or many-to-many table included (ADR 0009, the
+    admitted set). An app with no declaration is not judged here.
+    """
+    return [
+        f"app {config.label}: has models but declares no database resource"
+        for config, has_database in _hosted(configs)
+        if not has_database
+        and any(config.get_models(include_auto_created=True, include_swapped=True))
+    ]
+
+
+def table_name_problems(configs: Iterable[AppConfig]) -> list[str]:
+    """Judge each hosted app's table names: each is stated by the app or is
+    the whole name Django derives, never one that ``default``'s backend
+    shortened (ADR 0009 Decision 8).
+
+    Django cuts a derived name to the limit of the ``default`` connection
+    when it builds the class (``Options.contribute_to_class`` and
+    ``ManyToManyField._get_m2m_db_table``), so the name it holds is compared
+    with the whole one. A model's name is stated when its ``Meta`` sets a
+    ``db_table``, inherited ones included; a many-to-many table's when its
+    field sets ``db_table``. A proxy has the table of its concrete model,
+    judged there, and a ``through`` model is judged as a model. An app with
+    no declaration lives on ``default`` and is not judged.
+    """
+    problems = []
+    for config, _ in _hosted(configs):
+        for model in config.get_models():
+            options = model._meta
+            if options.proxy:
+                continue
+            if not options.original_attrs.get("db_table"):
+                whole = f"{options.app_label}_{options.model_name}"
+                if options.db_table != whole:
+                    problems.append(_shortened(config, options.object_name))
+            for field in options.local_many_to_many:
+                # Resolved once the models are loaded; a string is a model
+                # that never loaded, which Django's own checks report.
+                through: Any = field.remote_field.through
+                if (
+                    not issubclass(type(through), type)
+                    or not through._meta.auto_created
+                ):
+                    continue
+                if vars(field).get("db_table"):
+                    continue
+                whole = f"{strip_quotes(options.db_table)}_{field.name}"
+                if through._meta.db_table != whole:
+                    problems.append(
+                        _shortened(config, f"{options.object_name}.{field.name}")
+                    )
+    return sorted(problems)
+
+
+def _shortened(config: AppConfig, name: object) -> str:
+    return (
+        f"app {config.label}: the table name of {name} was shortened to fit the "
+        "default database; set db_table"
+    )
+
+
+def _configs(app_configs: object) -> Iterable[AppConfig]:
+    """The configs Django asks a check about: those named, or every one."""
+    if app_configs is None:
+        return global_apps.get_app_configs()
+    named: Iterable[AppConfig] = app_configs  # type: ignore[assignment]
+    return named
+
+
+def database_check(
+    app_configs: object = None, **kwargs: object
+) -> list[checks.CheckMessage]:
+    """``neolith.E014``: a hosted app with models and no ``database``
+    resource.
+    """
+    if not _hosting() and app_configs is None:
+        return []
+    return [
+        checks.Error(problem, id="neolith.E014")
+        for problem in database_problems(_configs(app_configs))
+    ]
+
+
+def table_name_check(
+    app_configs: object = None, **kwargs: object
+) -> list[checks.CheckMessage]:
+    """``neolith.E017``: a hosted app's table name that ``default``'s
+    backend shortened.
+    """
+    if not _hosting() and app_configs is None:
+        return []
+    return [
+        checks.Error(problem, id="neolith.E017")
+        for problem in table_name_problems(_configs(app_configs))
+    ]
+
+
 def register() -> None:
     """Register the host's checks under the tag ``neolith``; registering
     again changes nothing.
     """
-    for check in (neolith_check, middleware_check, admin_check):
+    for check in (
+        neolith_check,
+        middleware_check,
+        admin_check,
+        database_check,
+        table_name_check,
+    ):
         checks.register(check, TAG)
