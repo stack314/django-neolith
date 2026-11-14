@@ -1,6 +1,6 @@
 # 05. App declaration and lifecycle
 
-**Status:** outline, except the form of a declaration, Resolve and Validate, and the checks before Serve, which are specified. The rest of the lifecycle becomes requirements with the host (#11).
+**Status:** outline, except the form of a declaration, Resolve and Validate, the checks before Serve and an app's database, which are specified. The rest of the lifecycle becomes requirements with the host (#11).
 
 ## Declaration
 
@@ -79,6 +79,28 @@ A host running one app is a detached deployment. A host running several is a sha
 **APP-17.** When it loads its apps, a host MUST warn about each registration of the framework's generic data views, such as an administration site, whose code is in no app, since a call made from those views has no calling app and is refused ([02](02-transports.md), TRN-58).
 
 Other code in no app that serves requests is found by the checks that later steps add: when the host boots, and before deployment ([ADR 0022](../docs/adr/0022-the-app-host-builds-settings-and-checks-before-it-serves.md) Decisions 5 and 7).
+
+### An app's database
+
+An app that declares a database resource owns its data in every host ([ADR 0004](../docs/adr/0004-each-app-owns-its-data.md)). Apps attached in one host therefore meet the same database behaviour they meet when each runs alone: no transaction, relation or schema joins two of them ([ADR 0009](../docs/adr/0009-one-database-alias-per-app.md)). Below, an app's *own database* is the database its host gives it for that resource.
+
+**APP-18.** A host MUST give each app that declares a database resource a database of its own, apart from every other app's.
+
+**APP-19.** A read or write of an app's records that names no database MUST go to the app's own database.
+
+**APP-20.** A transaction opened on one app's own database MUST NOT cover a write to another database.
+
+**APP-21.** A database operation that is not about an app's records and names no database MUST NOT reach any app's own database.
+
+**APP-22.** A host MUST refuse a relation between two records that live in different databases.
+
+**APP-23.** A host MUST create an app's schema in the app's own database only, and nothing else there.
+
+An app's table names are the same in every host, so that the app finds its tables when it moves.
+
+**APP-24.** A host MUST stop before it serves when an app that declares no database resource defines stored records.
+
+**APP-25.** A host MUST stop before it serves when the name of one of an app's tables, derived by the framework rather than stated by the app, was shortened to fit a database other than the app's own.
 
 ### Resolve and Validate
 
