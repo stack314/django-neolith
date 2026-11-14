@@ -70,6 +70,7 @@ _BODY = """
 import contextlib
 import json
 import sqlite3
+from pathlib import Path
 import types
 
 import django
@@ -79,7 +80,7 @@ django.setup()
 
 from django.apps import apps
 from django.apps.registry import Apps
-from django.core import checks
+from django import forms
 from django.core.cache.backends.db import Options as CacheOptions
 from django.core.management import call_command
 from django.db import connection, connections, models, router, transaction
@@ -280,6 +281,10 @@ class Holder(models.Model):
         Tag, null=True, on_delete=models.CASCADE, db_constraint=False,
         related_name="+",
     )
+    back = models.ForeignKey(
+        Tag, null=True, on_delete=models.CASCADE, db_constraint=False,
+        related_name="holders",
+    )
     links = models.ManyToManyField(Tag, related_name="+")
     loose_links = models.ManyToManyField(Tag, db_constraint=False, related_name="+")
 
@@ -302,10 +307,90 @@ def link(field):
     getattr(holder, field).add(Tag.objects.create(name="far"))
 
 
-def by_id():
-    tag = Tag.objects.create(name="far")
-    holder = Holder.objects.create(loose_id=tag.pk)
-    return [holder._state.db, Holder.objects.get(pk=holder.pk).loose.name]
+def far():
+    return Tag.objects.create(name="far")
+
+
+def held(pk):
+    holder = Holder.objects.get(pk=pk)
+    return [holder._state.db, holder.loose.name]
+
+
+class HolderForm(forms.ModelForm):
+    class Meta:
+        model = Holder
+        fields = ["loose"]
+
+
+def form_save():
+    form = HolderForm(data={"loose": far().pk})
+    form.is_valid()
+    return form.save().pk
+
+
+def updated(**values):
+    holder = Holder.objects.create()
+    Holder.objects.filter(pk=holder.pk).update(**values)
+    return held(holder.pk)
+
+
+def bulk_updated():
+    holder = Holder.objects.create()
+    holder.loose_id = far().pk
+    Holder.objects.bulk_update([holder], ["loose"])
+    return held(holder.pk)
+
+
+def loaded():
+    fixture = Path(settings.DATABASES["billing"]["NAME"]).parent / "holder.json"
+    fixture.write_text(json.dumps(
+        [{"model": "billing.holder", "pk": 500, "fields": {"loose": far().pk}}]
+    ))
+    call_command("loaddata", str(fixture), database="billing", verbosity=0)
+    return held(500)
+
+
+def written(run):
+    try:
+        found = run()
+    except ValueError as error:
+        return ["refused", "router prevents this relation" in str(error)
+                or "instance is on database" in str(error)]
+    except Exception as error:
+        return ["failed", type(error).__name__, str(error)]
+    return ["stored", found]
+
+
+# Every Django API that writes a foreign key column, from billing to ledger.
+writes = {
+    "descriptor": lambda: setattr(Holder(), "loose", far()),
+    "Model.__init__": lambda: Holder(loose=far()),
+    "QuerySet.create": lambda: Holder.objects.create(loose=far()),
+    "QuerySet.get_or_create": lambda: Holder.objects.get_or_create(
+        pk=900, defaults={"loose": far()}),
+    "QuerySet.update_or_create": lambda: Holder.objects.update_or_create(
+        pk=901, defaults={"loose": far()}),
+    "QuerySet.bulk_create of a record": lambda: Holder.objects.bulk_create(
+        [Holder(loose=far())]),
+    "reverse manager add": lambda: far().holders.add(Holder.objects.create()),
+    "reverse manager set": lambda: far().holders.set([Holder.objects.create()]),
+    "reverse manager create": lambda: far().holders.create(),
+    "many-to-many add": lambda: Holder.objects.create().loose_links.add(far()),
+    "many-to-many set": lambda: Holder.objects.create().loose_links.set([far()]),
+    "many-to-many create": lambda: Holder.objects.create().loose_links.create(
+        name="far"),
+    "ModelForm.save": form_save,
+    "QuerySet.update with a record": lambda: updated(loose=far()),
+    "QuerySet.update by id": lambda: updated(loose_id=far().pk),
+    "QuerySet.create by id": lambda: held(Holder.objects.create(loose_id=far().pk).pk),
+    "QuerySet.bulk_create by id": lambda: held(
+        Holder.objects.bulk_create([Holder(pk=600, loose_id=far().pk)])[0].pk),
+    "QuerySet.bulk_update by id": bulk_updated,
+    "loaddata by id": loaded,
+}
+writes = {name: written(run) for name, run in writes.items()}
+# No many-to-many row was written by any of them.
+writes["many-to-many rows"] = Holder.loose_links.through.objects.count()
 
 
 descriptors = {
@@ -315,7 +400,6 @@ descriptors = {
     "one-to-one, no constraint": outcome(lambda: assign("loose_one", Tag())),
     "many-to-many": outcome(lambda: link("links")),
     "many-to-many, no constraint": outcome(lambda: link("loose_links")),
-    "by id": outcome(by_id),
     "within": outcome(lambda: Entry(account=Account())._state.db),
 }
 if real_default:
@@ -353,7 +437,7 @@ print(json.dumps({
     "migrated": migrated, "schema": schema, "model_tables": model_tables,
     "routes": routes, "migrations": migrations, "relations": relations,
     "querysets": querysets, "placed": placed, "covered": covered, "raw": raw,
-    "descriptors": descriptors, "proxies": proxies,
+    "descriptors": descriptors, "proxies": proxies, "writes": writes,
 }))
 """
 
@@ -474,16 +558,82 @@ def test_setting_a_relation_within_one_home_is_admitted(
         assert descriptors["default"] == ["ok", "default"]
 
 
-@pytest.mark.parametrize("host", HOSTS)
-def test_a_foreign_key_held_by_id_across_homes_is_left_to_the_check_before_deployment(
-    ran: dict[str, dict[str, Any]], host: str
+# Every Django API that writes a foreign key column, and how a relation
+# across homes fares in it: the router is asked and refuses it, or the API
+# writes a key the host is never asked about, which spec 05 leaves to the
+# check before deployment, after APP-22.
+ROUTER_ASKED = [
+    "descriptor",
+    "Model.__init__",
+    "QuerySet.create",
+    "QuerySet.get_or_create",
+    "QuerySet.update_or_create",
+    "QuerySet.bulk_create of a record",
+    "reverse manager add",
+    "reverse manager set",
+    "reverse manager create",
+    "many-to-many add",
+    "ModelForm.save",
+]
+# The source record's database lacks the target's table, so these fail
+# before anything is written: set reads the current targets through a join,
+# and create makes the target on the source record's database.
+FAILS_FIRST = ["many-to-many set", "many-to-many create"]
+CARVED_OUT = [
+    "QuerySet.update with a record",
+    "QuerySet.update by id",
+    "QuerySet.create by id",
+    "QuerySet.bulk_create by id",
+    "QuerySet.bulk_update by id",
+    "loaddata by id",
+]
+
+
+def test_every_foreign_key_writer_is_classified(
+    ran: dict[str, dict[str, Any]],
 ) -> None:
-    """Not APP-22, which covers setting a relation: a key stored by id sets
-    none, so the host stores and follows it. ADR 0004 gives declared
-    cross-app foreign keys to the neolith check (step 7, #14), which refuses
-    the model, as spec 05 says after APP-22.
+    for host in HOSTS:
+        assert set(ran[host]["writes"]) == {
+            *ROUTER_ASKED,
+            *FAILS_FIRST,
+            *CARVED_OUT,
+            "many-to-many rows",
+        }
+    lists = [ROUTER_ASKED, FAILS_FIRST, CARVED_OUT]
+    assert sum(map(len, lists)) == len(set().union(*lists))
+
+
+@pytest.mark.spec("APP-22")
+@pytest.mark.parametrize("writer", ROUTER_ASKED)
+@pytest.mark.parametrize("host", HOSTS)
+def test_a_writer_that_sets_a_relation_across_homes_is_refused_by_the_router(
+    ran: dict[str, dict[str, Any]], host: str, writer: str
+) -> None:
+    assert ran[host]["writes"][writer] == ["refused", True]
+
+
+@pytest.mark.spec("APP-22")
+@pytest.mark.parametrize("writer", FAILS_FIRST)
+@pytest.mark.parametrize("host", HOSTS)
+def test_a_writer_that_reads_the_target_on_the_source_database_fails_unwritten(
+    ran: dict[str, dict[str, Any]], host: str, writer: str
+) -> None:
+    writes = ran[host]["writes"]
+    assert writes[writer] == ["failed", "OperationalError", "no such table: ledger_tag"]
+    assert writes["many-to-many rows"] == 0
+
+
+@pytest.mark.parametrize("writer", CARVED_OUT)
+@pytest.mark.parametrize("host", HOSTS)
+def test_a_key_written_without_the_router_is_left_to_the_check_before_deployment(
+    ran: dict[str, dict[str, Any]], host: str, writer: str
+) -> None:
+    """Not APP-22, which covers setting a relation on a record: a key stored
+    by id, or set by an update of many records at once, never asks the host,
+    so it is stored and followed. ADR 0004 gives declared cross-app foreign
+    keys to the neolith check (step 7, #14), as spec 05 says after APP-22.
     """
-    assert ran[host]["descriptors"]["by id"] == ["ok", ["billing", "far"]]
+    assert ran[host]["writes"][writer] == ["stored", ["billing", "far"]]
 
 
 @pytest.mark.spec("APP-19", "APP-22")
