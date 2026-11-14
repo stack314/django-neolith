@@ -215,8 +215,31 @@ over_admin = {
     f"{owner} {form} {name}": label_of(owned_wrapper(module, form, view))
     for owner, module in owners.items()
     for form in ("wraps", "wraps(assigned=())", "update_wrapper")
-    for name, view in (("group", group_view), ("order", order_view))
+    for name, view in (
+        ("group", group_view),
+        ("order", order_view),
+        ("basket", resolve("/admin/shop/basket/").func),
+        ("team", resolve("/admin/shop/team/").func),
+        ("bin", resolve("/admin/depot/bin/").func),
+    )
 }
+# An app's wrapper over a wrapper that is the code it wraps, over a view of
+# the stock admin: the question passes through the middle wrapper.
+basket_view = resolve("/admin/shop/basket/").func
+through = {
+    "project wrapper": owned_wrapper("tests.request_site", "wraps", basket_view),
+    "login_required": login_required(basket_view),
+    "partial": functools.partial(basket_view),
+    "bound method": types.MethodType(basket_view, object()),
+}
+over_admin.update(
+    {
+        f"depot over {name} over basket": label_of(
+            owned_wrapper("tests.request_admin.depot.models", "wraps", middle)
+        )
+        for name, middle in through.items()
+    }
+)
 # A project function that carries a copied model_admin and no link to the
 # admin's function: the copy decides nothing.
 unlinked = owned_wrapper("tests.request_site", "wraps", order_view)
@@ -438,9 +461,16 @@ def test_a_wrapper_django_supplies_is_the_code_it_wraps(
         # does not hold is its own app's code, whatever model_admin it copied.
         ("shop", "group", "shop"),
         ("plain_app", "group", "plain_app"),
-        # Over an admin view that serves as a hosted app, it follows.
+        # Over an admin view whose class is in a hosted app, it follows.
         ("depot", "order", "shop"),
         ("shop", "order", "shop"),
+        # Over a view of the stock admin or GroupAdmin for a hosted model,
+        # which runs none of the model's app's code, it does not.
+        ("depot", "basket", "depot"),
+        ("plain_app", "team", "plain_app"),
+        ("shop", "bin", "shop"),
+        ("project", "basket", "shop"),
+        ("project", "bin", "depot"),
         # A project wrapper is the code it wraps.
         ("project", "group", "auth"),
         ("project", "order", "shop"),
@@ -457,3 +487,26 @@ def test_a_copied_model_admin_without_its_link_decides_nothing(
     ran: dict[str, Any],
 ) -> None:
     assert ran["over_admin"]["project, its link removed, order"] is None
+
+
+@pytest.mark.spec("TRN-57")
+@pytest.mark.parametrize("form", ["wraps", "wraps(assigned=())", "update_wrapper"])
+@pytest.mark.parametrize("owner", ["shop", "depot", "plain_app"])
+@pytest.mark.parametrize("view", ["group", "basket", "team", "bin"])
+def test_an_app_s_wrapper_over_a_generic_admin_view_is_its_own_code(
+    ran: dict[str, Any], owner: str, form: str, view: str
+) -> None:
+    """``label_of(W(x)) == W's own app`` for every app wrapper ``W`` and
+    every view ``x`` of the stock admin or ``GroupAdmin``: the model's app
+    names no code that runs, so the link is not followed."""
+    assert ran["over_admin"][f"{owner} {form} {view}"] == owner
+
+
+@pytest.mark.spec("TRN-57")
+@pytest.mark.parametrize(
+    "middle", ["project wrapper", "login_required", "partial", "bound method"]
+)
+def test_the_question_passes_through_a_wrapper_that_is_the_code_it_wraps(
+    ran: dict[str, Any], middle: str
+) -> None:
+    assert ran["over_admin"][f"depot over {middle} over basket"] == "depot"

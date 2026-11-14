@@ -157,16 +157,21 @@ def _name(klass: type) -> str:
     return f"{_class_module(klass)}.{qualname}"
 
 
-def label_of(view: object, _depth: int = 0) -> str | None:
-    """The label of the app whose code serves ``view``, or ``None``."""
+def label_of(view: object, _depth: int = 0, _ran: bool = False) -> str | None:
+    """The label of the app whose code serves ``view``, or ``None``.
+
+    With ``_ran``, as an app's wrapper asks of its link, an admin view that
+    serves as its model's app, which runs none of that app's code, serves
+    as no app.
+    """
     if _depth > _LINKS:
         return None
     deeper = _depth + 1
     kind = type(view)
     if kind is types.MethodType:
-        return label_of(view.__func__, deeper)  # type: ignore[attr-defined]
+        return label_of(view.__func__, deeper, _ran)  # type: ignore[attr-defined]
     if kind is functools.partial:
-        return label_of(view.func, deeper)  # type: ignore[attr-defined]
+        return label_of(view.func, deeper, _ran)  # type: ignore[attr-defined]
     if issubclass(kind, type):
         return _app(_class_module(view))  # type: ignore[arg-type]
     if kind is not types.FunctionType:
@@ -175,9 +180,9 @@ def label_of(view: object, _depth: int = 0) -> str | None:
     attributes = vars(function)
     link = attributes.get("__wrapped__")
     if _app_code(function):
-        # An app's code: what it wraps, when that is a hosted app's.
+        # An app's code: what it wraps, when that runs a hosted app's code.
         if link is not None:
-            inner = label_of(link, deeper)
+            inner = label_of(link, deeper, True)
             if _hosted_label(inner):
                 return inner
         return _app(_globals_name(function))
@@ -187,7 +192,8 @@ def label_of(view: object, _depth: int = 0) -> str | None:
         if issubclass(type(view_class), type):
             return _app(_class_module(view_class))
     if _sets(function, _ADMIN_VIEW) and "model_admin" in attributes:
-        return admin_code(attributes["model_admin"])[0]
+        label, code = admin_code(attributes["model_admin"])
+        return None if _ran and code is None else label
     if link is not None:
-        return label_of(link, deeper)
+        return label_of(link, deeper, _ran)
     return _app(_globals_name(function))
