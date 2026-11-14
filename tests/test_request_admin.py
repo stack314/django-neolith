@@ -35,6 +35,7 @@ INSTALLED = [
     "tests.request_admin.shop",
     "tests.request_admin.depot",
     "tests.host_apps.couriers",
+    "tests.plain_app",
     "neolith",
 ]
 
@@ -174,6 +175,53 @@ wrapped_views = {
     "login_required over a partial": login_required(functools.partial(shop_views.page)),
 }
 wrapped = {name: label_of(view) for name, view in wrapped_views.items()}
+
+# A wrapper over an admin view: model_admin, which functools.wraps copies, is
+# trusted only on the function Django's admin built.
+import importlib
+import types
+
+from django.contrib.auth.admin import GroupAdmin
+from django.contrib.auth.models import Group
+
+
+def owned_wrapper(module, form, target):
+    def template(request):
+        return target(request)
+
+    wrapper = types.FunctionType(
+        template.__code__,
+        vars(importlib.import_module(module)),
+        "wrapper",
+        None,
+        template.__closure__,
+    )
+    if form == "wraps":
+        return functools.wraps(target)(wrapper)
+    if form == "wraps(assigned=())":
+        return functools.wraps(target, assigned=())(wrapper)
+    return functools.update_wrapper(wrapper, target)
+
+
+group_view = GroupAdmin(Group, admin.site).get_urls()[0].callback
+order_view = resolve("/admin/shop/order/").func
+owners = {
+    "shop": "tests.request_admin.shop.views",
+    "depot": "tests.request_admin.depot.models",
+    "plain_app": "tests.plain_app.views",
+    "project": "tests.request_site",
+}
+over_admin = {
+    f"{owner} {form} {name}": label_of(owned_wrapper(module, form, view))
+    for owner, module in owners.items()
+    for form in ("wraps", "wraps(assigned=())", "update_wrapper")
+    for name, view in (("group", group_view), ("order", order_view))
+}
+# A project function that carries a copied model_admin and no link to the
+# admin's function: the copy decides nothing.
+unlinked = owned_wrapper("tests.request_site", "wraps", order_view)
+del unlinked.__wrapped__
+over_admin["project, its link removed, order"] = label_of(unlinked)
 with override_settings(INSTALLED_APPS=["django.contrib.admin", "django.contrib.auth",
         "django.contrib.contenttypes", "django.contrib.sessions",
         "django.contrib.messages"]):
@@ -183,7 +231,7 @@ call_command("check", stdout=printed, stderr=printed)
 print(json.dumps(
     {"results": results, "checks": found, "log": logged.getvalue(),
      "check": printed.getvalue(), "stray": stray, "unhosted": len(unhosted),
-     "framework": framework, "wrapped": wrapped}
+     "framework": framework, "wrapped": wrapped, "over_admin": over_admin}
 ))
 """
 
@@ -379,3 +427,33 @@ def test_a_wrapper_django_supplies_is_the_code_it_wraps(
     """``auth`` and ``admin`` are installed apps, but their decorators only
     wrap: a view under them serves as the view's own app."""
     assert ran["wrapped"][view] == app
+
+
+@pytest.mark.spec("TRN-57")
+@pytest.mark.parametrize("form", ["wraps", "wraps(assigned=())", "update_wrapper"])
+@pytest.mark.parametrize(
+    ("owner", "view", "app"),
+    [
+        # An app's wrapper over an admin view that serves as an app the host
+        # does not hold is its own app's code, whatever model_admin it copied.
+        ("shop", "group", "shop"),
+        ("plain_app", "group", "plain_app"),
+        # Over an admin view that serves as a hosted app, it follows.
+        ("depot", "order", "shop"),
+        ("shop", "order", "shop"),
+        # A project wrapper is the code it wraps.
+        ("project", "group", "auth"),
+        ("project", "order", "shop"),
+    ],
+)
+def test_model_admin_is_trusted_only_on_the_admin_s_own_function(
+    ran: dict[str, Any], owner: str, form: str, view: str, app: str
+) -> None:
+    assert ran["over_admin"][f"{owner} {form} {view}"] == app
+
+
+@pytest.mark.spec("TRN-57", "TRN-58")
+def test_a_copied_model_admin_without_its_link_decides_nothing(
+    ran: dict[str, Any],
+) -> None:
+    assert ran["over_admin"]["project, its link removed, order"] is None

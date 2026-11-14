@@ -1,35 +1,41 @@
 """Which app's code serves a view (ADR 0017 Decision 4, spec 02 TRN-57).
 
-One rule, used by the root middleware to bind a request's root and by the
-``neolith.W001`` check: the app is that of the code that runs for the view,
-not of code that only wraps it. Everything is read with ``vars()`` and
-``type()``, never through the author's attribute hooks, and judged by the
-installed app that contains the code's module. *Hosted* code is code in an
-installed app that has a declaration; *framework* code is Django's own.
+One recursive rule, used by the root middleware to bind a request's root and
+by the ``neolith.W001`` check: the app is that of the code that runs for the
+view, not of code that only wraps it. Every question of where a link leads
+is answered by the rule itself, so wrappers compose: a wrapper that is the
+code it wraps can be put anywhere in a stack without changing the answer.
+Everything is read with ``vars()`` and ``type()``, never through the
+author's attribute hooks. *Hosted* code is code in an installed app that
+has a declaration; Django's own code is never an app's code, though its
+contrib packages are installed apps.
 
+- A bound method and an exact ``functools.partial`` run no code of their
+  own: each is the code of its function.
 - A function's own code is in the module whose globals it runs in, which
   ``functools.wraps`` never changes. A copied attribute is trusted only on
-  the function that set it: ``__module__`` never is, and ``view_class``
-  only on the function ``View.as_view`` builds, which is that class's code
-  whatever ``as_view`` copied onto it from ``dispatch``.
-- A bound method and an exact ``functools.partial`` run no code of their
-  own: each is its function's code. A class is its own module's.
-- A wrapper an app defines (in an installed app other than Django's own)
-  follows its ``__wrapped__`` only while it leads into hosted code, so a
-  link into the framework, into another app or into code the view only
-  inherits, never decides; a wrapper whose link is not followed is its
-  app's code. A wrapper whose code is no app's, one Django supplies, in a
-  contrib app such as ``login_required`` or in none such as
-  ``never_cache``, or one in the project, only wraps: it follows its
-  ``__wrapped__`` wherever that leads.
+  the function that set it: ``__module__`` never is, ``view_class`` only on
+  the function ``View.as_view`` builds, and ``model_admin`` only on the
+  function Django's admin builds for a ``ModelAdmin`` view.
+- A function whose code is an app's (in an installed app other than
+  Django's own) serves as what its ``__wrapped__`` serves as, when that is
+  a hosted app; otherwise as its own app. So an app's wrapper follows a
+  link into hosted code, past any wrapper that is the code it wraps, and is
+  its own app's code over anything else.
+- A function whose code is no app's (Django's, or the project's) only
+  wraps. The function ``as_view`` builds serves as its ``view_class``'s
+  app; the admin's view function as ``admin_code`` decides; any other
+  serves as what its ``__wrapped__`` serves as, or, with none, as the app
+  its module is in (a view of a contrib app, such as ``flatpage``), or as
+  no app.
+- A class is its own module's code, and any other callable its type's.
 - A view Django's admin wraps carries its ``ModelAdmin``. It serves as the
   app of the most derived class in its MRO defined in a hosted app or in
   the project, in no installed app. When there is none, its classes are
   the framework's or an unhosted app's, such as ``UserAdmin``, and it
-  serves the app whose model it shows. Options given
-  to ``admin.site.register`` are configuration of the class Django builds,
-  so they decide nothing.
-- Any other callable is its type's code.
+  serves the app whose model it shows. Options given to
+  ``admin.site.register`` are configuration of the class Django builds, so
+  they decide nothing.
 """
 
 import functools
@@ -44,14 +50,21 @@ from neolith._declaration import declaration_of
 
 __all__ = ["admin_code", "label_of"]
 
-# The code of the function View.as_view builds: the only Django function
-# whose view_class is its own.
 # A function's code, read through the slot of the function type itself, so
 # no hook of the author's runs.
 _CODE: Final[Any] = vars(types.FunctionType)["__code__"]
+_GLOBALS: Final[Any] = vars(types.FunctionType)["__globals__"]
+# The code of the function View.as_view builds: the only Django function
+# whose view_class is its own.
 _AS_VIEW: Final = _CODE.__get__(View.as_view())
+# Where Django's admin builds the function that sets model_admin
+# (ModelAdmin.get_urls), named without importing the admin.
+_ADMIN_VIEW: Final = (
+    "django.contrib.admin.options",
+    "ModelAdmin.get_urls.<locals>.wrap.<locals>.wrapper",
+)
 
-# Far more links than any real chain of wrappers; a longer chain, or a loop,
+# Far more links than any real stack of wrappers; a deeper one, or a loop,
 # has no app.
 _LINKS: Final = 64
 
@@ -73,6 +86,11 @@ def _hosted(module: object) -> bool:
     return config is not None and declaration_of(type(config)) is not None
 
 
+def _hosted_label(label: str | None) -> bool:
+    config = global_apps.app_configs.get(label) if label is not None else None
+    return config is not None and declaration_of(type(config)) is not None
+
+
 def _project(module: object) -> bool:
     """Whether ``module`` is project code, in no installed app. A builtin
     class, such as ``object``, names no module of its own and is not.
@@ -84,26 +102,11 @@ def _class_module(klass: type) -> object:
     return vars(klass).get("__module__")
 
 
-def _unwrap(code: object) -> object:
-    """A bound method's function, and an exact partial's function, which
-    run no code of their own around it, until neither is left.
-    """
-    for _ in range(_LINKS):
-        kind = type(code)
-        if kind is types.MethodType:
-            code = code.__func__  # type: ignore[attr-defined]
-        elif kind is functools.partial:
-            code = code.func  # type: ignore[attr-defined]
-        else:
-            return code
-    return None
-
-
 def _globals_name(function: types.FunctionType) -> object:
     """The module whose globals the function runs in: where its own code
     is, which ``functools.wraps`` never changes.
     """
-    return types.FunctionType.__globals__.__get__(function).get("__name__")
+    return _GLOBALS.__get__(function).get("__name__")
 
 
 def _django(module: object) -> bool:
@@ -113,53 +116,17 @@ def _django(module: object) -> bool:
 
 def _app_code(function: types.FunctionType) -> bool:
     """Whether the function's own code is an app's: in an installed app
-    other than Django's own, whose contrib packages are installed apps but
-    whose wrappers, such as ``login_required``, only wrap.
+    other than Django's own.
     """
     own = _globals_name(function)
     return not _django(own) and _config(own) is not None
 
 
-def _view_class(function: types.FunctionType) -> Any:  # noqa: ANN401
-    """The ``view_class`` the function set itself, which only the function
-    ``View.as_view`` builds does; ``functools.wraps`` copies it onto every
-    wrapper above, where it describes the view wrapped, not the wrapper.
+def _sets(function: types.FunctionType, where: tuple[str, str]) -> bool:
+    """Whether the function is the one Django builds at ``where`` (its
+    module and the qualified name of its code).
     """
-    found: Any = vars(function).get("view_class")
-    if issubclass(type(found), type) and _CODE.__get__(function) is _AS_VIEW:
-        return found
-    return None
-
-
-def _module(code: object) -> object:
-    """The module of the code itself, without following any wrapper's link."""
-    code = _unwrap(code)
-    kind = type(code)
-    if kind is types.FunctionType:
-        view_class = _view_class(code)  # type: ignore[arg-type]
-        if view_class is not None:
-            return _class_module(view_class)
-        return _globals_name(code)  # type: ignore[arg-type]
-    if issubclass(kind, type):
-        return _class_module(code)  # type: ignore[arg-type]
-    return _class_module(kind)
-
-
-def _link(code: object) -> object:
-    """The ``__wrapped__`` a function keeps to what it wraps, or ``None``;
-    the function ``View.as_view`` builds is its class's code and keeps none.
-    """
-    if type(code) is not types.FunctionType:
-        return None
-    if _view_class(code) is not None:
-        return None
-    return vars(code).get("__wrapped__")
-
-
-def _admin(code: object) -> object:
-    if type(code) is not types.FunctionType:
-        return None
-    return vars(code).get("model_admin")
+    return (_globals_name(function), _CODE.__get__(function).co_qualname) == where
 
 
 def admin_code(admin: object) -> tuple[str | None, str | None]:
@@ -190,16 +157,37 @@ def _name(klass: type) -> str:
     return f"{_class_module(klass)}.{qualname}"
 
 
-def label_of(view: object) -> str | None:
+def label_of(view: object, _depth: int = 0) -> str | None:
     """The label of the app whose code serves ``view``, or ``None``."""
-    for _ in range(_LINKS):
-        view = _unwrap(view)
-        admin = _admin(view)
-        if admin is not None:
-            return admin_code(admin)[0]
-        link = _link(view)
-        if link is not None and (_hosted(_module(link)) or not _app_code(view)):  # type: ignore[arg-type]
-            view = link
-            continue
-        return _app(_module(view))
-    return None
+    if _depth > _LINKS:
+        return None
+    deeper = _depth + 1
+    kind = type(view)
+    if kind is types.MethodType:
+        return label_of(view.__func__, deeper)  # type: ignore[attr-defined]
+    if kind is functools.partial:
+        return label_of(view.func, deeper)  # type: ignore[attr-defined]
+    if issubclass(kind, type):
+        return _app(_class_module(view))  # type: ignore[arg-type]
+    if kind is not types.FunctionType:
+        return _app(_class_module(kind))
+    function: types.FunctionType = view  # type: ignore[assignment]
+    attributes = vars(function)
+    link = attributes.get("__wrapped__")
+    if _app_code(function):
+        # An app's code: what it wraps, when that is a hosted app's.
+        if link is not None:
+            inner = label_of(link, deeper)
+            if _hosted_label(inner):
+                return inner
+        return _app(_globals_name(function))
+    # Code that is no app's only wraps.
+    if _CODE.__get__(function) is _AS_VIEW:
+        view_class: Any = attributes.get("view_class")
+        if issubclass(type(view_class), type):
+            return _app(_class_module(view_class))
+    if _sets(function, _ADMIN_VIEW) and "model_admin" in attributes:
+        return admin_code(attributes["model_admin"])[0]
+    if link is not None:
+        return label_of(link, deeper)
+    return _app(_globals_name(function))

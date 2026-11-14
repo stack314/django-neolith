@@ -1325,6 +1325,125 @@ def test_an_app_s_wrapper_follows_only_into_hosted_code(
     inner = _wrapper(*cell[:2], _targets()[cell[2]])
     outer = _wrapper(app_wrapper, form, inner)
     own_app = "stock" if app_wrapper == "hosted" else "plain_app"
-    inner_is_hosted = cell[0] == "hosted"
+    # The inner wrapper serves as a hosted app when its code is hosted, or
+    # when it is followed into hosted code: a wrapper that is the code it
+    # wraps, or an app's wrapper, keeping a link to a hosted target.
+    following = (
+        "project",
+        "Django, in no app",
+        "Django, in a contrib app",
+        "unhosted app",
+    )
+    inner_is_hosted = cell[0] == "hosted" or (
+        cell[0] in following and cell[1] != "no link" and _TARGETS[cell[2]][1]
+    )
     expected = label_of(inner) if inner_is_hosted else own_app
     assert label_of(outer) == expected
+
+
+def _transparent() -> dict[str, Callable[[Any], Any]]:
+    """Each wrapper that is the code it wraps: Django's, the project's, a
+    partial and a bound method."""
+    from django.contrib.auth.decorators import login_required
+    from django.views.decorators.cache import never_cache
+    from django.views.decorators.csrf import csrf_exempt
+    from django.views.decorators.http import require_POST
+
+    return {
+        "login_required": login_required,
+        "never_cache": never_cache,
+        "csrf_exempt": csrf_exempt,
+        "require_POST": require_POST,
+        "project wraps": lambda x: _wrapper("project", "wraps", x),
+        "partial": functools.partial,
+        "bound method": lambda x: types.MethodType(x, object()),
+    }
+
+
+@pytest.mark.spec("TRN-57")
+@pytest.mark.parametrize("form", ["wraps", "wraps(assigned=())", "update_wrapper"])
+@pytest.mark.parametrize("app_wrapper", ["hosted", "unhosted app"])
+@pytest.mark.parametrize(
+    "transparent",
+    [
+        "login_required",
+        "never_cache",
+        "csrf_exempt",
+        "require_POST",
+        "project wraps",
+        "partial",
+        "bound method",
+    ],
+)
+def test_a_wrapper_that_is_the_code_it_wraps_is_transparent_under_an_app_s(
+    contrib_site: None, transparent: str, app_wrapper: str, form: str
+) -> None:
+    """``label_of(W(T(x))) == label_of(W(x))``: an app's wrapper ``W`` sees
+    past a wrapper ``T`` that is the code it wraps, for every matrix cell and
+    every target used as ``x``."""
+    from neolith._serving import label_of
+
+    wrap = _transparent()[transparent]
+    targets = _targets()
+    inner_views = [targets[name] for name in _TARGETS] + [
+        _wrapper(owner, cell_form, targets[target])
+        for owner, cell_form, target in _CELLS
+    ]
+    wrong = [
+        index
+        for index, x in enumerate(inner_views)
+        if label_of(_wrapper(app_wrapper, form, wrap(x)))
+        != label_of(_wrapper(app_wrapper, form, x))
+    ]
+    assert wrong == []
+
+
+@pytest.mark.spec("TRN-57")
+@pytest.mark.parametrize(
+    ("view", "app"),
+    [
+        ("stock_gate(web.page)", "web"),
+        ("stock_gate(login_required(web.page))", "web"),
+        ("plain_gate(require_POST(web.page))", "web"),
+        ("stock_gate(project_wrap(web.page))", "web"),
+        ("stock_gate(login_required(project_wrap(web.page)))", "web"),
+        ("stock_gate(login_required(plain.page))", "stock"),
+        ("plain_gate(never_cache(project_page))", "plain_app"),
+    ],
+)
+def test_an_app_s_wrapper_judges_its_link_past_transparent_wrappers(
+    contrib_site: None, view: str, app: str
+) -> None:
+    from django.contrib.auth.decorators import login_required
+    from django.views.decorators.cache import never_cache
+    from django.views.decorators.http import require_POST
+
+    from neolith._serving import label_of
+    from tests.host_apps.web import views as web
+    from tests.plain_app import views as plain
+
+    def stock_gate(x: object) -> object:
+        return _wrapper("hosted", "wraps", x)
+
+    def plain_gate(x: object) -> object:
+        return _wrapper("unhosted app", "wraps", x)
+
+    def project_wrap(x: object) -> object:
+        return _wrapper("project", "wraps", x)
+
+    views = {
+        "stock_gate(web.page)": stock_gate(web.page),
+        "stock_gate(login_required(web.page))": stock_gate(login_required(web.page)),
+        "plain_gate(require_POST(web.page))": plain_gate(require_POST(web.page)),
+        "stock_gate(project_wrap(web.page))": stock_gate(project_wrap(web.page)),
+        "stock_gate(login_required(project_wrap(web.page)))": stock_gate(
+            login_required(project_wrap(web.page))  # type: ignore[call-overload]
+        ),
+        "stock_gate(login_required(plain.page))": stock_gate(
+            login_required(plain.page)
+        ),
+        "plain_gate(never_cache(project_page))": plain_gate(
+            never_cache(request_site.project_page)
+        ),
+    }
+    assert label_of(views[view]) == app
