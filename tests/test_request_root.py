@@ -1171,21 +1171,15 @@ def _predicted(owner: str, form: str, target: str) -> str | None:
             "Django, in no app": None,
             "Django, in a contrib app": "auth",
         }[owner]
-    if owner.startswith("Django"):
-        # A wrapper the framework supplies is the code it wraps.
+    if owner == "project" or owner.startswith("Django"):
+        # A wrapper whose code is no app's only wraps: it is the code it
+        # wraps, wherever its link leads.
         return own_app
     if hosted:
-        # A link into hosted code is followed.
+        # An app's wrapper follows a link into hosted code.
         return "web"
-    if owner in ("hosted", "unhosted app"):
-        # Not followed: the wrapper is its app's code.
-        return "stock" if owner == "hosted" else "plain_app"
-    # Not followed, and project code is in no app: a project wrapper is
-    # known by the __module__ and view_class it carries, which wraps copies
-    # from the target (assigned=() copies only the attributes).
-    copies_module = form != "wraps(assigned=())"
-    is_cbv = "CBV" in target
-    return own_app if copies_module or is_cbv else None
+    # Not followed: the wrapper is its app's code.
+    return "stock" if owner == "hosted" else "plain_app"
 
 
 @pytest.fixture
@@ -1257,3 +1251,80 @@ def test_login_required_is_the_code_it_wraps(
         "Django CBV": TemplateView.as_view(template_name="x.html"),
     }
     assert label_of(login_required(views[target])) == app
+
+
+# The sentences after TRN-57 as equations, each checked over every cell of
+# the matrix used as the inner view, so a rule that holds one layer deep but
+# not when wrappers compose fails here.
+
+_CELLS = [
+    (owner, form, target) for owner in _OWNERS for form in _FORMS for target in _TARGETS
+]
+
+
+def _django_wrappers() -> dict[str, Callable[[Any], Any]]:
+    from django.contrib.auth.decorators import login_required
+    from django.views.decorators.cache import never_cache
+
+    return {"login_required": login_required, "never_cache": never_cache}
+
+
+@pytest.mark.spec("TRN-57")
+@pytest.mark.parametrize("cell", _CELLS, ids=lambda c: "-".join(c))
+@pytest.mark.parametrize("django_wrapper", ["login_required", "never_cache"])
+def test_a_django_wrapper_is_the_code_it_wraps(
+    contrib_site: None, django_wrapper: str, cell: tuple[str, str, str]
+) -> None:
+    """``label_of(D(x)) == label_of(x)``: a wrapper the framework supplies is
+    the code it wraps, wherever its link leads."""
+    from neolith._serving import label_of
+
+    inner = _wrapper(*cell[:2], _targets()[cell[2]])
+    outer = _django_wrappers()[django_wrapper](inner)
+    assert label_of(outer) == label_of(inner)
+
+
+@pytest.mark.spec("TRN-57")
+@pytest.mark.parametrize("cell", _CELLS, ids=lambda c: "-".join(c))
+def test_a_partial_is_its_function_s_code(
+    contrib_site: None, cell: tuple[str, str, str]
+) -> None:
+    """``label_of(partial(x)) == label_of(x)``: a wrapper that runs no code
+    of its own is the code it wraps."""
+    from neolith._serving import label_of
+
+    inner = _wrapper(*cell[:2], _targets()[cell[2]])
+    assert label_of(functools.partial(inner)) == label_of(inner)  # type: ignore[arg-type,operator,misc]
+
+
+@pytest.mark.spec("TRN-57")
+@pytest.mark.parametrize("cell", _CELLS, ids=lambda c: "-".join(c))
+def test_a_bound_method_is_its_function_s_code(
+    contrib_site: None, cell: tuple[str, str, str]
+) -> None:
+    """``label_of(MethodType(x, obj)) == label_of(x)``."""
+    from neolith._serving import label_of
+
+    inner = _wrapper(*cell[:2], _targets()[cell[2]])
+    assert label_of(types.MethodType(inner, object())) == label_of(inner)  # type: ignore[arg-type]
+
+
+@pytest.mark.spec("TRN-57")
+@pytest.mark.parametrize("cell", _CELLS, ids=lambda c: "-".join(c))
+@pytest.mark.parametrize("app_wrapper", ["hosted", "unhosted app"])
+@pytest.mark.parametrize("form", ["wraps", "wraps(assigned=())", "update_wrapper"])
+def test_an_app_s_wrapper_follows_only_into_hosted_code(
+    contrib_site: None, app_wrapper: str, form: str, cell: tuple[str, str, str]
+) -> None:
+    """``label_of(W(x)) == label_of(x)`` when ``x``'s own code is hosted,
+    and ``W``'s app otherwise: an app's wrapper follows its link only into
+    code of an app the host holds, and is its own app's code when it does
+    not, whatever the code it wraps carries."""
+    from neolith._serving import label_of
+
+    inner = _wrapper(*cell[:2], _targets()[cell[2]])
+    outer = _wrapper(app_wrapper, form, inner)
+    own_app = "stock" if app_wrapper == "hosted" else "plain_app"
+    inner_is_hosted = cell[0] == "hosted"
+    expected = label_of(inner) if inner_is_hosted else own_app
+    assert label_of(outer) == expected
