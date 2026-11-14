@@ -35,6 +35,7 @@ import pytest
 from django.apps.registry import Apps
 from django.core import checks
 from django.db import connection, models
+from django.test import override_settings
 from django.test.utils import isolate_apps
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -81,7 +82,7 @@ from django.apps.registry import Apps
 from django.core import checks
 from django.core.cache.backends.db import Options as CacheOptions
 from django.core.management import call_command
-from django.db import connection, models, router, transaction
+from django.db import connection, connections, models, router, transaction
 
 from neolith.routers import AppRouter
 from tests.app_db.billing.models import Invoice
@@ -254,13 +255,40 @@ raw = {
     "on_commit": outcome(lambda: transaction.on_commit(lambda: None)),
 }
 
-# A relation Django refuses by asking the router: a billing model's foreign
-# key to a ledger model, assigned on unsaved instances, so nothing is read.
+# Relations from billing models to ledger's records, in each form, with and
+# without a database constraint. Card is only built; Holder, whose own row
+# carries no constraint, gets a table on billing alone.
 class Card(models.Model):
     tag = models.ForeignKey(Tag, null=True, on_delete=models.CASCADE)
+    loose = models.ForeignKey(
+        Tag, null=True, on_delete=models.CASCADE, db_constraint=False,
+        related_name="+",
+    )
+    one = models.OneToOneField(Tag, null=True, on_delete=models.CASCADE,
+                               related_name="+")
+    loose_one = models.OneToOneField(
+        Tag, null=True, on_delete=models.CASCADE, db_constraint=False,
+        related_name="+",
+    )
 
     class Meta:
         app_label = "billing"
+
+
+class Holder(models.Model):
+    loose = models.ForeignKey(
+        Tag, null=True, on_delete=models.CASCADE, db_constraint=False,
+        related_name="+",
+    )
+    links = models.ManyToManyField(Tag, related_name="+")
+    loose_links = models.ManyToManyField(Tag, db_constraint=False, related_name="+")
+
+    class Meta:
+        app_label = "billing"
+
+
+with connections["billing"].schema_editor() as editor:
+    editor.create_model(Holder)
 
 
 def assign(field, value):
@@ -269,18 +297,63 @@ def assign(field, value):
     return card._state.db
 
 
+def link(field):
+    holder = Holder.objects.create()
+    getattr(holder, field).add(Tag.objects.create(name="far"))
+
+
+def by_id():
+    tag = Tag.objects.create(name="far")
+    holder = Holder.objects.create(loose_id=tag.pk)
+    return [holder._state.db, Holder.objects.get(pk=holder.pk).loose.name]
+
+
 descriptors = {
-    "across": outcome(lambda: assign("tag", Tag())),
+    "foreign key": outcome(lambda: assign("tag", Tag())),
+    "foreign key, no constraint": outcome(lambda: assign("loose", Tag())),
+    "one-to-one": outcome(lambda: assign("one", Tag())),
+    "one-to-one, no constraint": outcome(lambda: assign("loose_one", Tag())),
+    "many-to-many": outcome(lambda: link("links")),
+    "many-to-many, no constraint": outcome(lambda: link("loose_links")),
+    "by id": outcome(by_id),
     "within": outcome(lambda: Entry(account=Account())._state.db),
 }
 if real_default:
     descriptors["default"] = outcome(lambda: Memo(author=User())._state.db)
 
+
+# Proxies route by their own label (ADR 0009 Decision 4): a hosted app's
+# proxy of another app's model, and an undeclared app's proxy of a hosted
+# app's model.
+class AccountView(Account):
+    class Meta:
+        proxy = True
+        app_label = "legacy" if real_default else "notes"
+
+
+proxied = [AccountView]
+if real_default:
+    class StaffUser(User):
+        class Meta:
+            proxy = True
+            app_label = "billing"
+
+    proxied.append(StaffUser)
+proxies = {
+    model._meta.label: [
+        router.db_for_read(model),
+        router.db_for_write(model),
+        router.allow_relation(model(), model._meta.concrete_model()),
+        outcome(lambda: model.objects.count()),
+    ]
+    for model in proxied
+}
+
 print(json.dumps({
     "migrated": migrated, "schema": schema, "model_tables": model_tables,
     "routes": routes, "migrations": migrations, "relations": relations,
     "querysets": querysets, "placed": placed, "covered": covered, "raw": raw,
-    "descriptors": descriptors,
+    "descriptors": descriptors, "proxies": proxies,
 }))
 """
 
@@ -369,16 +442,85 @@ def test_a_relation_is_allowed_only_within_one_home(
         assert allowed is (home(first) == home(second)), (first, second, asker)
 
 
+_SET_FORMS = [
+    "foreign key",
+    "foreign key, no constraint",
+    "one-to-one",
+    "one-to-one, no constraint",
+    "many-to-many",
+    "many-to-many, no constraint",
+]
+
+
+@pytest.mark.spec("APP-22")
+@pytest.mark.parametrize("form", _SET_FORMS)
+@pytest.mark.parametrize("host", HOSTS)
+def test_setting_a_relation_across_homes_is_refused_in_every_form(
+    ran: dict[str, dict[str, Any]], host: str, form: str
+) -> None:
+    # Django asks the router before it sets or adds the related record, with
+    # a database constraint or without one.
+    assert ran[host]["descriptors"][form] == ["raised", "ValueError"]
+
+
 @pytest.mark.spec("APP-22")
 @pytest.mark.parametrize("host", HOSTS)
-def test_django_refuses_a_foreign_key_across_homes_and_admits_one_within(
+def test_setting_a_relation_within_one_home_is_admitted(
     ran: dict[str, dict[str, Any]], host: str
 ) -> None:
     descriptors = ran[host]["descriptors"]
-    assert descriptors["across"] == ["raised", "ValueError"]
     assert descriptors["within"] == ["ok", "ledger"]
     if host == "real default":
         assert descriptors["default"] == ["ok", "default"]
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_a_foreign_key_held_by_id_across_homes_is_left_to_the_check_before_deployment(
+    ran: dict[str, dict[str, Any]], host: str
+) -> None:
+    """Not APP-22, which covers setting a relation: a key stored by id sets
+    none, so the host stores and follows it. ADR 0004 gives declared
+    cross-app foreign keys to the neolith check (step 7, #14), which refuses
+    the model, as spec 05 says after APP-22.
+    """
+    assert ran[host]["descriptors"]["by id"] == ["ok", ["billing", "far"]]
+
+
+@pytest.mark.spec("APP-19", "APP-22")
+@pytest.mark.parametrize("host", HOSTS)
+def test_a_proxy_routes_by_its_own_label(
+    ran: dict[str, dict[str, Any]], host: str
+) -> None:
+    """ADR 0009 Decision 4 keys every answer on the label the question
+    names, so a proxy of another app's model goes to its own label's home,
+    where that table is not: the read ADR 0004 forbids fails instead of
+    reading another app's table.
+    """
+    proxies = ran[host]["proxies"]
+    if host == "real default":
+        assert proxies == {
+            "legacy.AccountView": [
+                "default",
+                "default",
+                False,
+                ["raised", "OperationalError"],
+            ],
+            "billing.StaffUser": [
+                "billing",
+                "billing",
+                False,
+                ["raised", "OperationalError"],
+            ],
+        }
+    else:
+        assert proxies == {
+            "notes.AccountView": [
+                "default",
+                "default",
+                False,
+                ["raised", "ImproperlyConfigured"],
+            ],
+        }
 
 
 @pytest.mark.spec("APP-23")
@@ -518,6 +660,9 @@ def _defines(
             _model(label, "Elsewhere")
         elif shape == "abstract only":
             _model(label, "Thing", meta={"abstract": True})
+        elif shape == "swapped model":
+            model = _model(label, "Thing", meta={"swappable": "NEOLITH_TEST_SWAP"})
+            assert model._meta.swapped
         else:
             assert shape == "nothing"
 
@@ -537,28 +682,38 @@ _MODELS_MESSAGE = "app {}: has models but declares no database resource"
         "unmanaged",
         "proxy of another app's model",
         "model defined in another module",
+        "swapped model",
     ],
 )
 @pytest.mark.parametrize("label", ["notes", "archive", "plain_app"])
 def test_an_app_with_models_and_no_database_is_refused(
     isolated: Apps, shape: str, label: str
 ) -> None:
-    _defines(shape)(label)
-    refused = label == "notes" and shape not in ("nothing", "abstract only")
-    assert database_problems(isolated.get_app_configs()) == (
-        [_MODELS_MESSAGE.format("notes")] if refused else []
-    )
+    # A swapped model has no table here, and still counts.
+    with override_settings(NEOLITH_TEST_SWAP="elsewhere.Thing"):
+        _defines(shape)(label)
+        refused = label == "notes" and shape not in ("nothing", "abstract only")
+        assert database_problems(isolated.get_app_configs()) == (
+            [_MODELS_MESSAGE.format("notes")] if refused else []
+        )
 
 
-@pytest.mark.spec("APP-24")
-def test_the_database_check_judges_the_registry_it_is_given() -> None:
-    with isolate_apps("tests.app_db.notes") as registry:
+@pytest.mark.spec("APP-24", "APP-25")
+def test_each_database_check_judges_the_registry_it_is_given() -> None:
+    with isolate_apps("tests.app_db.notes", "tests.app_db.archive") as registry:
         assert registry is not None
         _model("notes", "Thing")
-        assert _checks.database_check(app_configs=registry.get_app_configs()) == [
+        with _limited(10):
+            _model("archive", "Abc")
+        configs = registry.get_app_configs()
+        assert _checks.database_check(app_configs=configs) == [
             checks.Error(_MODELS_MESSAGE.format("notes"), id="neolith.E014")
         ]
-    # The suite's own registry hosts nothing.
+        assert _checks.table_name_check(app_configs=configs) == [
+            checks.Error(_SHORT.format("archive", "Abc"), id="neolith.E017")
+        ]
+    # With no configs named, each judges Django's registry, which hosts
+    # nothing in this process.
     assert _checks.database_check() == []
     assert _checks.table_name_check() == []
 
@@ -644,6 +799,50 @@ _TABLES: list[tuple[str, Callable[[str], object], list[str]]] = [
         lambda label: _through(label),
         ["Membership" * 3],
     ),
+    (
+        "many-to-many on a model with a quoted db_table",
+        lambda label: _model(
+            label,
+            "Ab",
+            meta={"db_table": '"q"'},
+            fields={"links": models.ManyToManyField(_model(label, "Ac"))},
+        ),
+        [],
+    ),
+    (
+        "multi-table child of a parent with a many-to-many",
+        lambda label: _model(
+            label,
+            "Ad",
+            bases=(
+                _model(
+                    label,
+                    "Ab",
+                    meta={"db_table": "t"},
+                    fields={"links": models.ManyToManyField(_model(label, "Ac"))},
+                ),
+            ),
+        ),
+        [],
+    ),
+    (
+        "many-to-many through a model that never loads",
+        lambda label: _model(
+            label,
+            "Ab",
+            fields={
+                "links": models.ManyToManyField(
+                    _model(label, "Ac"), through=f"{label}.Missing"
+                )
+            },
+        ),
+        [],
+    ),
+    (
+        "two names shortened, reported in order",
+        lambda label: (_model(label, "Xyz"), _model(label, "Abc")),
+        ["Abc", "Xyz"],
+    ),
 ]
 
 
@@ -689,7 +888,7 @@ def test_a_table_name_the_default_database_shortened_is_refused(
     expected = [_SHORT.format("archive", name) for name in shortened]
     # An app with no declaration lives on default, whose limit it shares.
     assert table_name_problems(isolated.get_app_configs()) == (
-        sorted(expected) if label == "archive" else []
+        expected if label == "archive" else []
     )
 
 

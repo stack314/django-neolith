@@ -240,7 +240,9 @@ def admin_check(**kwargs: object) -> list[checks.CheckMessage]:
 
 def _hosted(configs: Iterable[AppConfig]) -> list[tuple[AppConfig, bool]]:
     """The configs with a declaration, each with whether it declares the
-    ``database`` resource.
+    ``database`` resource. A registry without neolith's app holds none, since
+    a declared app refuses to load there (ADR 0021 Decision 8), so the two
+    database checks need no test of their own for a process with no host.
     """
     found: list[tuple[AppConfig, bool]] = []
     for config in configs:
@@ -328,8 +330,6 @@ def database_check(
     """``neolith.E014``: a hosted app with models and no ``database``
     resource.
     """
-    if not _hosting() and app_configs is None:
-        return []
     return [
         checks.Error(problem, id="neolith.E014")
         for problem in database_problems(_configs(app_configs))
@@ -342,8 +342,6 @@ def table_name_check(
     """``neolith.E017``: a hosted app's table name that ``default``'s
     backend shortened.
     """
-    if not _hosting() and app_configs is None:
-        return []
     return [
         checks.Error(problem, id="neolith.E017")
         for problem in table_name_problems(_configs(app_configs))

@@ -16,6 +16,14 @@ answers ``None``:
 - ``allow_migrate``: true only on the home of the label;
 - ``allow_relation``: true only when both labels have one home.
 
+A proxy model routes by its own label, not by its concrete model's: a
+hosted app's proxy of an ``auth`` model goes to the app's alias, and a proxy
+in an app with no declaration of a hosted app's model goes to ``default``.
+Either reads another app's table, which ADR 0004 forbids, so the query fails
+on a database that lacks the table instead of reading it; such a model, like
+a foreign key to another app's model stored by its id, is left to the check
+before deployment (ADR 0004).
+
 Two apps on two aliases cannot share a transaction: ``transaction.atomic``
 and ``on_commit`` act on one alias, so app code names its own,
 ``transaction.atomic(using="<label>")``. An operation that names no alias,

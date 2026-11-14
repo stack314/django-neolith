@@ -92,7 +92,9 @@ An app that declares a database resource owns its data in every host ([ADR 0004]
 
 **APP-21.** A database operation that is not about an app's records and names no database MUST NOT reach any app's own database.
 
-**APP-22.** A host MUST refuse a relation between two records that live in different databases.
+**APP-22.** A host MUST refuse to set a relation from one record to another record that lives in a different database.
+
+A relation declared in an app's data model to another app's records, which a record can also hold by the other record's identifier alone, is found by the check before deployment ([ADR 0004](../docs/adr/0004-each-app-owns-its-data.md)), not when the host sets a relation.
 
 **APP-23.** A host MUST create an app's schema in the app's own database only, and nothing else there.
 
