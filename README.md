@@ -15,7 +15,7 @@
 <a href="https://pypi.org/project/django-neolith/"><img alt="PyPI version" src="https://img.shields.io/pypi/v/django-neolith"></a>
 <a href="https://pypi.org/project/django-neolith/"><img alt="Python versions" src="https://img.shields.io/pypi/pyversions/django-neolith"></a>
 <a href="https://pypi.org/project/django-neolith/"><img alt="Django versions" src="https://img.shields.io/pypi/frameworkversions/django/django-neolith"></a>
-<a href="LICENSE"><img alt="License: BSD-3-Clause" src="https://img.shields.io/badge/license-BSD--3--Clause-blue"></a>
+<a href="https://github.com/stack314/django-neolith/blob/main/LICENSE"><img alt="License: BSD-3-Clause" src="https://img.shields.io/badge/license-BSD--3--Clause-blue"></a>
 <a href="https://github.com/astral-sh/ruff"><img alt="Code style: Ruff" src="https://img.shields.io/badge/code%20style-ruff-261230"></a>
 <a href="https://mypy-lang.org/"><img alt="Checked with mypy" src="https://img.shields.io/badge/mypy-checked-2a6db2"></a>
 </p>
@@ -30,17 +30,17 @@ pip install --pre django-neolith
 
 ## What it is
 
-Neolith makes the Django app, not the Django project, the unit of deployment. An app can run inside a shared process or on its own as a service, with its models, migrations, admin and tests intact, and without changing its code. Apps talk to each other only through typed contracts, so the same code and the same tests hold in both arrangements. Neolith is defined by a [specification](spec/README.md) that is independent of Django and of Python, and django-neolith is its reference implementation.
+Neolith makes the Django app, not the Django project, the unit of deployment. An app can run inside a shared process or on its own as a service, with its models, migrations, admin and tests intact, and without changing its code. Apps talk to each other only through typed contracts, so the same code and the same tests hold in both arrangements. Neolith is defined by a [specification](https://github.com/stack314/django-neolith/blob/main/spec/README.md) that is independent of Django and of Python, and django-neolith is its reference implementation.
 
 ## Features
 
-What works on `main` today. The [changelog](CHANGELOG.md) has the details.
+What works on `main` today. The [changelog](https://github.com/stack314/django-neolith/blob/main/CHANGELOG.md) has the details.
 
 - **Typed contracts.** A contract is a `Protocol` class with `@contract` and `@action`, and an implementation is marked with `@implements`. Request and reply types are Pydantic models in a portable type system, and every check runs when the module is imported.
 - **Typed errors.** `ContractError` carries a `kind`, a message and a detail. An action can declare its own error kinds with their detail records.
 - **Calls cross as JSON, in-process too.** Every request, reply and error detail is written and read through its declared type, so an in-process call carries exactly what a remote one will.
 - **App declaration.** An app declares what it provides, requires and owns on its `NeolithAppConfig`, and the declaration is checked when the class is defined.
-- **Checks before serving.** At start-up the host resolves every required contract to a provider, validates each implementation and runs its system checks, and reports every problem at once.
+- **Checks before serving.** At start-up the host resolves every required contract to a provider and validates each implementation, listing every refusal in one error; once those pass, it runs its system checks on the settings and reports all their errors together.
 - **One database per app.** `neolith.routers.AppRouter` keeps each app's data on a database alias of its own.
 - **Call context.** A principal, a trace, a deadline and the calling app travel with each call. A root is opened for each request by `RootMiddleware`, and for a command or background work by `command_scope`.
 
@@ -105,7 +105,7 @@ class InventoryConfig(NeolithAppConfig):
         Provided(
             Inventory,
             implementation="inventory.services.InventoryService",
-            principal_from=("shop",),
+            principal_from=("shop",),  # apps that may pass a principal on their calls
         ),
     )
 
@@ -155,17 +155,17 @@ With these, a view in the shop app can call `place_order` directly; a command op
 
 ## Roadmap
 
-The steps to 0.1 are in the [roadmap](docs/roadmap.md).
+The steps to 0.1 are in the [roadmap](https://github.com/stack314/django-neolith/blob/main/docs/roadmap.md).
 
 ## Links
 
-- [Vision](VISION.md)
-- [Specification](spec/README.md) (draft 0.1)
-- [Roadmap to 0.1](docs/roadmap.md)
-- [Guiding principles](docs/principles.md)
-- [Architecture decision records](docs/adr/README.md)
-- [Open questions](docs/open-questions.md)
-- [Contributing](CONTRIBUTING.md)
-- [Code of conduct](CODE_OF_CONDUCT.md)
+- [Vision](https://github.com/stack314/django-neolith/blob/main/VISION.md)
+- [Specification](https://github.com/stack314/django-neolith/blob/main/spec/README.md) (draft 0.1)
+- [Roadmap to 0.1](https://github.com/stack314/django-neolith/blob/main/docs/roadmap.md)
+- [Guiding principles](https://github.com/stack314/django-neolith/blob/main/docs/principles.md)
+- [Architecture decision records](https://github.com/stack314/django-neolith/blob/main/docs/adr/README.md)
+- [Open questions](https://github.com/stack314/django-neolith/blob/main/docs/open-questions.md)
+- [Contributing](https://github.com/stack314/django-neolith/blob/main/CONTRIBUTING.md)
+- [Code of conduct](https://github.com/stack314/django-neolith/blob/main/CODE_OF_CONDUCT.md)
 
-Licensed under the [BSD 3-Clause License](LICENSE).
+Licensed under the [BSD 3-Clause License](https://github.com/stack314/django-neolith/blob/main/LICENSE).

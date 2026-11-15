@@ -6,6 +6,10 @@ adds only what Django needs and the README leaves to the project (a secret
 key, a database and a URLconf), and runs them in a fresh process, since a
 process hosts one set of apps (ADR 0022 Decision 5). So the example and the
 host's checks before it serves cannot drift apart.
+
+README.md is also the package's description on PyPI, where a relative link
+resolves under the project's page and leads nowhere, so every link and image
+in it is absolute.
 """
 
 import os
@@ -13,12 +17,14 @@ import re
 import subprocess
 import sys
 import textwrap
+from html.parser import HTMLParser
 from pathlib import Path
 
 from markdown_it import MarkdownIt
 
 README = Path(__file__).resolve().parents[1] / "README.md"
 _HEADER = re.compile(r"^# (\S+\.py)$")
+_ABSOLUTE = re.compile(r"^https://")
 
 # What the README leaves to the project; nothing here is a neolith setting.
 _PROJECT = """
@@ -125,3 +131,47 @@ def test_the_readme_example_runs_under_its_settings(tmp_path: Path) -> None:
     )
     assert ran.returncode == 0, ran.stderr[-3000:]
     assert ran.stdout.splitlines() == ["command 2", "view 200 4"]
+
+
+class _Attributes(HTMLParser):
+    """Every ``href`` and ``src`` in a piece of HTML."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.found: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        # srcset is left out: only <source> carries it, and PyPI strips <source>,
+        # so it is read on GitHub alone, where a relative path resolves.
+        self.found.extend(v or "" for k, v in attrs if k in ("href", "src"))
+
+
+def links(text: str) -> list[str]:
+    """Every link and image destination in ``text``, Markdown and HTML."""
+    found: list[str] = []
+    html = _Attributes()
+    for token in MarkdownIt("commonmark").parse(text):
+        if token.type == "html_block":
+            html.feed(token.content)
+        for child in token.children or ():
+            if child.type == "link_open":
+                found.append(str(child.attrGet("href")))
+            elif child.type == "image":
+                found.append(str(child.attrGet("src")))
+            elif child.type == "html_inline":
+                html.feed(child.content)
+    return found + html.found
+
+
+def test_every_readme_link_is_absolute() -> None:
+    found = links(README.read_text(encoding="utf-8"))
+    assert any(link.endswith("/LICENSE") for link in found)
+    assert [link for link in found if not _ABSOLUTE.match(link)] == []
+
+
+def test_relative_links_are_found_in_markdown_and_html() -> None:
+    sample = (
+        '[a](VISION.md) ![b](c.png) <a href="LICENSE">d</a>\n\n'
+        '<p><img src="x.svg"></p>\n'
+    )
+    assert sorted(links(sample)) == ["LICENSE", "VISION.md", "c.png", "x.svg"]
