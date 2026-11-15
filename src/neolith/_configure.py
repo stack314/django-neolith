@@ -80,15 +80,18 @@ def configure(apps: object, deployer: object) -> dict[str, Any]:
             its input.
     """
     paths = _listed(apps)
-    declarations = [_read(path) for path in paths]
-    _refuse(_compared(paths, declarations))
+    read = [(path, _read(path)) for path in paths]
+    problems = [found for _, found in read if type(found) is str]
+    pairs = [(path, found) for path, found in read if type(found) is Declaration]
+    _refuse(problems + _compared(pairs))
+    declarations = [declaration for _, declaration in pairs]
     from neolith._host import resolve
 
     _, refusals = resolve(declarations)
     if refusals:
         raise DeclarationError("\n".join(sorted(refusals)))
-    names = _names(deployer)
-    _refuse(_deployer_problems(names, declarations))
+    names, problems = _names(deployer)
+    _refuse(problems + _deployer_problems(names, declarations))
     return {**names, **built_settings(declarations, names["NEOLITH"])}
 
 
@@ -113,9 +116,15 @@ def _listed(apps: object) -> list[str]:
     return [str(entry) for entry in entries]
 
 
-def _read(path: str) -> Declaration:
+def _read(path: str) -> Declaration | str:
     """Read one hosted app's declaration through Django's ``AppConfig.create``,
     noting whether the import read a Django setting.
+
+    An app that cannot be read stops the build, since Python stops there:
+    an error from the import, 0021's ``DeclarationError``, or a read of a
+    setting. What is found by comparing what was read, such as a config
+    with no declaration, is returned as a refusal, so it is reported with
+    the others of its phase.
     """
     where = f"app {_shown(path)}"
     was = settings.configured
@@ -135,23 +144,22 @@ def _read(path: str) -> Declaration:
     cls = type(config)
     declaration = declaration_of(cls)
     if declaration is None:
-        raise ImproperlyConfigured(f"{where}: has no declaration")
+        return f"{where}: has no declaration"
     if declaration.name != path:
         if path == f"{cls.__module__}.{cls.__qualname__}":
-            raise ImproperlyConfigured(
-                f"{where}: name the app's package, not its config class"
-            )
-        raise ImproperlyConfigured(
+            return f"{where}: name the app's package, not its config class"
+        return (
             f"{where}: its declaration names {_shown(declaration.name)}; name the "
             "package the declaration names"
         )
     return declaration
 
 
-def _compared(paths: Sequence[str], declarations: Sequence[Declaration]) -> list[str]:
+def _compared(pairs: Sequence[tuple[str, Declaration]]) -> list[str]:
     problems: list[str] = []
     labels: dict[str, str] = {}
-    for path, declaration in zip(paths, declarations, strict=True):
+    paths = [path for path, _ in pairs]
+    for path, declaration in pairs:
         label = declaration.label
         first = labels.setdefault(label, path)
         if first != path:
@@ -171,9 +179,10 @@ def _compared(paths: Sequence[str], declarations: Sequence[Declaration]) -> list
     return problems
 
 
-def _names(deployer: object) -> dict[str, Any]:
-    """The deployer's settings: the upper-case names of the mapping, as
-    Django reads a settings module.
+def _names(deployer: object) -> tuple[dict[str, Any], list[str]]:
+    """The deployer's settings, the upper-case names of the mapping as
+    Django reads a settings module, and the refusal of each name that is not
+    a ``str``, which Configure reports with its other refusals.
     """
     if type(deployer) is not dict:
         raise ImproperlyConfigured(
@@ -185,8 +194,12 @@ def _names(deployer: object) -> dict[str, Any]:
         for name in entries
         if type(name) is not str
     ]
-    _refuse(problems)
-    return {str(name): value for name, value in entries.items() if str(name).isupper()}
+    names = {
+        name: value
+        for name, value in entries.items()
+        if type(name) is str and name.isupper()
+    }
+    return names, problems
 
 
 def _deployer_problems(

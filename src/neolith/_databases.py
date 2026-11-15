@@ -8,11 +8,12 @@ mapping that passed.
 
 What is compared for "one database" (ADR 0009 Decision 5):
 
-- SQLite: a path. A plain ``NAME``, a ``str`` or a path, is made absolute
-  from the working directory, with symbolic links followed. A ``file:`` URI
-  gives its path, percent-decoded and resolved the same way, with the query
-  ignored, since Django opens SQLite with ``uri=True``. Only the literal
-  ``:memory:`` is exempt, being one database per connection.
+- SQLite, a backend whose vendor is ``sqlite``: a path. A plain ``NAME``,
+  a ``str`` or a path, is made absolute from the working directory, with
+  symbolic links followed. A ``file:`` URI gives its path, percent-decoded
+  and resolved the same way, with the query ignored, since Django opens
+  SQLite with ``uri=True``. Only the literal ``:memory:`` is exempt, being
+  one database per connection.
 - Any other backend: ``(ENGINE, HOST, PORT, NAME)``.
 """
 
@@ -34,11 +35,6 @@ __all__ = [
 DEFAULT: Final = "default"
 MEMORY: Final = ":memory:"
 _DUMMY: Final = frozenset({"django.db.backends.dummy", "django.db.backends."})
-# The backends that open a SQLite file: Django's own, and GeoDjango's, which
-# subclasses it. Any other engine is compared as a server.
-_SQLITE: Final = frozenset(
-    {"django.db.backends.sqlite3", "django.contrib.gis.db.backends.spatialite"}
-)
 _KEY: Final = 'NEOLITH["DATABASES"]'
 
 
@@ -57,8 +53,21 @@ def _shown(value: object) -> str:
 
 
 def is_sqlite(engine: object) -> bool:
-    """Whether ``engine`` names a backend that opens a SQLite file."""
-    return type(engine) is str and engine in _SQLITE
+    """Whether ``engine`` names a backend that opens a SQLite file: one whose
+    connection class says its vendor is ``sqlite``, as Django's own, GeoDjango's
+    and a project's subclass of either do. The backend is imported, not
+    connected. An engine that cannot be imported is Django's to report when
+    it connects, and is compared as a server.
+    """
+    if type(engine) is not str:
+        return False
+    from django.db.utils import load_backend
+
+    try:
+        wrapper = load_backend(engine).DatabaseWrapper
+    except Exception:  # Django reports it at the first connection
+        return False
+    return getattr(wrapper, "vendor", None) == "sqlite"
 
 
 def _is_memory(name: object) -> bool:
