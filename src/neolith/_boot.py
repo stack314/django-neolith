@@ -27,10 +27,14 @@ The schema read, with the ids of ADR 0022's Boot table:
 - ``neolith.E018``: a SQLite alias with no database, or one with no schema.
 
 The checks of the code (E008, E011, E013) need no database and run for every
-hosted app; E013 reads what each migration declares. An app whose own
+hosted app; E013 reads every edge between two labels in Django's graph, and
+each label's own ``run_before`` of another. An app whose own
 migrations do not load, or break Django's graph, is left out of the graph
 with its own E010, so it hides no other app. SQLite is known by the backend's
-vendor, so a project's subclass of Django's backend is judged the same.
+vendor, so a project's subclass of Django's backend is judged the same; an
+alias of any other vendor gets no state check, and is judged by the
+migrations read on it (E009 to E012). A server database that no migration
+is read from, such as one that holds only a database cache, is not opened.
 
 It runs on a thread of its own and closes, on that thread, every connection
 it opened. It writes nothing of its own: for a SQLite alias it opens no
@@ -368,15 +372,21 @@ class _Loader(MigrationLoader):
         found: tuple[str | None, bool] = super().migrations_module(app_label)
         return found
 
+    @property
+    def excluded(self) -> frozenset[str]:
+        """The labels left out of the graph."""
+        return self._excluded
+
     def add_external_dependencies(self, key: Any, migration: Any) -> None:  # noqa: ANN401
-        kept = migration.dependencies
-        migration.dependencies = [d for d in kept if d[0] not in self._excluded]
+        kept = migration.dependencies, migration.run_before
+        migration.dependencies = [d for d in kept[0] if d[0] not in self._excluded]
+        migration.run_before = [d for d in kept[1] if d[0] not in self._excluded]
         try:
             super().add_external_dependencies(key, migration)
         except Exception as error:
             raise _Broken(key[0], error) from error
         finally:
-            migration.dependencies = kept
+            migration.dependencies, migration.run_before = kept
 
 
 class _Broken(Exception):
@@ -404,7 +414,7 @@ def _failing_label(excluded: frozenset[str]) -> str | None:
     return None
 
 
-def _code_graph() -> tuple[MigrationLoader | None, dict[str, str], str | None]:
+def _code_graph() -> tuple[_Loader | None, dict[str, str], str | None]:
     """The migration graph of the installed apps, read from the code alone;
     the labels left out because their own migrations do not load or break
     the graph, each with the cause; and a cause that no label can be given,
@@ -441,7 +451,7 @@ def _has_nodes(graph_of: MigrationLoader, label: str) -> bool:
     return any(key[0] == label for key in graph_of.graph.nodes)
 
 
-def _code_messages(code: MigrationLoader, label: str) -> list[checks.CheckMessage]:
+def _code_messages(code: _Loader, label: str) -> list[checks.CheckMessage]:
     """The checks of a hosted app's migrations that need no database: some
     exist (a package with no migration in it counts as none), none depends
     on another label, and no two conflict.
@@ -453,20 +463,45 @@ def _code_messages(code: MigrationLoader, label: str) -> list[checks.CheckMessag
                 f"{where}: has a database and no migrations", id="neolith.E008"
             )
         ]
-    # Read from what each migration declares, so that a dependency on an app
-    # left out of the graph is reported too.
     messages = [
-        checks.Error(
-            f"{where}: migration {name} depends on {other}",
-            id="neolith.E013",
-        )
-        for (owner, name), migration in sorted(code.disk_migrations.items())
-        if owner == label
-        for other in sorted(
-            {str(d[0]) for d in migration.dependencies if d[0] != label}
-        )
+        checks.Error(f"{where}: {edge}", id="neolith.E013")
+        for edge in sorted(_cross_label(code, label))
     ]
     return messages + _conflicts(code, label)
+
+
+def _cross_label(code: _Loader, label: str) -> set[str]:
+    """Every edge between a migration of ``label`` and one of another label
+    (ADR 0009 Decision 7), read from Django's graph, which holds each
+    migration's ``dependencies`` (``__first__``, ``__latest__`` and a
+    swappable setting resolved) and every ``run_before``, with squashed
+    migrations in place of those they replace; and from what the label's
+    own migrations declare: a ``run_before`` of another label, and a
+    dependency on an app left out of the graph. A dependency on an app with
+    no migrations makes no edge in Django's graph, and is not one.
+    """
+    graph = code.graph
+    edges = {
+        f"migration {key[1]} depends on {parent.key[0]}"
+        for key in graph.nodes
+        if key[0] == label
+        for parent in graph.node_map[key].parents
+        if parent.key[0] != label
+    }
+    for (owner, name), migration in code.disk_migrations.items():
+        if owner != label:
+            continue
+        edges.update(
+            f"migration {name} depends on {other[0]}"
+            for other in migration.dependencies
+            if other[0] in code.excluded
+        )
+        edges.update(
+            f"migration {name} runs before {other[0]}"
+            for other in migration.run_before
+            if other[0] != label
+        )
+    return edges
 
 
 def _conflicts(code: MigrationLoader, label: str) -> list[checks.CheckMessage]:

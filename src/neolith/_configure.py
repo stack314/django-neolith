@@ -24,17 +24,26 @@ installed declarations and ``settings.NEOLITH``, and compared with the
 settings Django holds (``neolith.E005``).
 """
 
+import copy
 from collections.abc import Iterable, Sequence
 from typing import Any, Final
 
 from django.apps import AppConfig
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
+from django.db.utils import ConnectionHandler
 
 from neolith import _checks, _databases
 from neolith._declaration import Declaration, DeclarationError, declaration_of
 
-__all__ = ["HOST_NAMES", "ROUTER", "built_settings", "configure", "settings_problems"]
+__all__ = [
+    "HOST_NAMES",
+    "ROUTER",
+    "built_settings",
+    "configure",
+    "databases_difference",
+    "settings_problems",
+]
 
 ROUTER: Final = "neolith.routers.AppRouter"
 # The settings the host builds, each with where the deployer says it instead.
@@ -45,7 +54,6 @@ HOST_NAMES: Final = {
 }
 # Labels the host reserves (ADR 0009, the admitted set).
 _RESERVED: Final = ("default", "django_cache")
-_DUMMY: Final = "django.db.backends.dummy"
 _SHOWN: Final = 160
 
 
@@ -249,10 +257,13 @@ def settings_problems(configs: Iterable[AppConfig]) -> list[str]:
     """Compare the settings Django holds with what the host builds for the
     installed declarations and ``settings.NEOLITH`` (``neolith.E005``).
 
-    ``INSTALLED_APPS`` and ``DATABASE_ROUTERS`` are compared whole. In
-    ``DATABASES``, the aliases are compared, and every key the host wrote
-    with its value; keys Django filled in are not (ADR 0022 fact 11). A
-    ``NEOLITH`` that its own check refuses is reported there and not here.
+    ``INSTALLED_APPS`` and ``DATABASE_ROUTERS`` are compared whole.
+    ``DATABASES`` is compared once Django's defaults are filled into both
+    sides, as ``ConnectionHandler.configure_settings`` fills them, by every
+    key at every depth: the keys Django fills in are equal on both sides
+    (ADR 0022 fact 11), and any other key added after the builder is
+    refused. A ``NEOLITH`` that its own check refuses is reported there and
+    not here.
     """
     hosted = _checks.hosted_declarations(list(configs))
     neolith = getattr(settings, "NEOLITH", None)
@@ -260,28 +271,12 @@ def settings_problems(configs: Iterable[AppConfig]) -> list[str]:
         return []
     expected = built_settings(hosted, neolith)
     problems: list[str] = []
-    databases = getattr(settings, "DATABASES", None)
-    if (
-        not expected["DATABASES"][_databases.DEFAULT]
-        and type(databases) is dict
-        and isinstance(databases.get(_databases.DEFAULT), dict)
-    ):
-        # A closed host's default is {}, into which Django writes the dummy
-        # backend's ENGINE, and nothing else of a connection.
-        default: dict[str, Any] = databases[_databases.DEFAULT]
-        engine = default.get("ENGINE", _DUMMY)
-        if type(engine) is not str or engine != _DUMMY:
-            problems.append(
-                "settings: DATABASES differs from what the host builds: "
-                "['default'] is a database, the host builds {} since "
-                f'{_databases.DEFAULT} is not in NEOLITH["DATABASES"]; build '
-                "settings with neolith.host.build_settings, and change them "
-                "through NEOLITH"
-            )
-            return problems
     for name in ("INSTALLED_APPS", "DATABASES", "DATABASE_ROUTERS"):
         found = getattr(settings, name, _checks.MISSING)
-        difference = _difference(found, expected[name])
+        if name == "DATABASES":
+            difference = databases_difference(found, expected[name])
+        else:
+            difference = _difference(found, expected[name])
         if difference is not None:
             problems.append(
                 f"settings: {name} differs from what the host builds: {difference}; "
@@ -291,6 +286,38 @@ def settings_problems(configs: Iterable[AppConfig]) -> list[str]:
     return problems
 
 
+def _filled(databases: dict[str, Any]) -> dict[str, Any]:
+    """``databases`` as Django serves with it: a copy, with the defaults
+    ``ConnectionHandler.configure_settings`` fills in.
+    """
+    filled: dict[str, Any] = ConnectionHandler().configure_settings(
+        copy.deepcopy(databases)
+    )
+    return filled
+
+
+def databases_difference(found: object, built: dict[str, Any]) -> str | None:
+    """The first difference between ``DATABASES`` and what the host builds,
+    with Django's defaults filled into both, or ``None``.
+    """
+    if found is _checks.MISSING:
+        return "it is absent"
+    if type(found) is not dict:
+        return f"it is a {_type(found)}, the host builds a dict"
+    entries: dict[object, object] = found
+    missing = [alias for alias in built if alias not in entries]
+    if missing:
+        return f"alias {missing[0]!r} is missing"
+    extra = [alias for alias in entries if alias not in built]
+    if extra:
+        return f"alias {_repr(extra[0])} is not one the host builds"
+    try:
+        have = _filled(found)
+    except Exception as error:
+        return f"it cannot be read as Django reads it: {_cause(error)}"
+    return _difference(have, _filled(built), whole=True)
+
+
 def _repr(value: object) -> str:
     try:
         return _shown(repr(value))
@@ -298,9 +325,12 @@ def _repr(value: object) -> str:
         return f"a value of type {_type(value)}"
 
 
-def _difference(found: object, expected: object, where: str = "") -> str | None:
+def _difference(
+    found: object, expected: object, where: str = "", *, whole: bool = False
+) -> str | None:
     """The first difference between a setting and what the host builds, or
-    ``None``. A mapping the host built is compared by its own keys only.
+    ``None``. A mapping the host built is compared by its own keys only,
+    unless ``whole``, when a key on either side alone is a difference.
     """
     if found is _checks.MISSING:
         return "it is absent"
@@ -319,9 +349,13 @@ def _difference(found: object, expected: object, where: str = "") -> str | None:
             inner = f"{where}[{key!r}]"
             if key not in found:
                 return f"{inner} is missing"
-            difference = _difference(found[key], value, inner)
+            difference = _difference(found[key], value, inner, whole=whole)
             if difference is not None:
                 return difference
+        if whole:
+            for key in found:
+                if key not in own:
+                    return f"{where}[{_repr(key)}] is not one the host builds"
         return None
     if type(expected) is list:
         if type(found) is not list:
