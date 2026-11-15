@@ -42,7 +42,7 @@ from hypothesis import strategies as st
 
 from neolith import _checks
 from neolith._checks import database_problems, table_name_problems
-from tests.hosting import in_fresh_process
+from tests.hosting import in_built_host
 
 # A hosted app with a database lives on its own alias, named by its label;
 # everything else lives on default (ADR 0009 Decisions 2 to 4).
@@ -63,8 +63,6 @@ LABELS = (
 def home(label: str) -> str:
     return label if label in HOSTED_WITH_DATABASE else "default"
 
-
-_ROUTER = ["neolith.routers.AppRouter"]
 
 _BODY = """
 import contextlib
@@ -454,20 +452,18 @@ def _run(root: Path, *, real_default: bool) -> dict[str, Any]:
         return {"ENGINE": "django.db.backends.sqlite3", "NAME": str(root / name)}
 
     databases = {
-        "default": sqlite("default.sqlite3") if real_default else {},
+        **({"default": sqlite("default.sqlite3")} if real_default else {}),
         "ledger": sqlite("ledger.sqlite3"),
         "billing": sqlite("billing.sqlite3"),
     }
-    installed = [*(_UNDECLARED if real_default else []), *_HOSTED, "neolith"]
+    neolith: dict[str, object] = {"DATABASES": databases}
+    if real_default:
+        neolith["UNDECLARED_APPS"] = _UNDECLARED
     body = _BODY.replace("LABELS = json.loads(sys.argv[3])", f"LABELS = {LABELS!r}")
-    printed = in_fresh_process(
+    printed = in_built_host(
         "import sys\nimport itertools\n" + body,
-        installed,
-        {
-            "DATABASES": databases,
-            "DATABASE_ROUTERS": _ROUTER,
-            "DEFAULT_AUTO_FIELD": "django.db.models.AutoField",
-        },
+        _HOSTED,
+        {"NEOLITH": neolith, "DEFAULT_AUTO_FIELD": "django.db.models.AutoField"},
     )
     found: dict[str, Any] = json.loads(printed.splitlines()[-1])
     return found
@@ -1114,6 +1110,11 @@ def test_an_app_that_passes_has_the_same_table_names_under_every_default(
 
 # The checks through set-up: each refusal stops the host.
 
+
+def _sqlite(path: Path) -> dict[str, str]:
+    return {"ENGINE": "django.db.backends.sqlite3", "NAME": str(path)}
+
+
 _SET_UP = """
 import django
 from django.core.exceptions import ImproperlyConfigured
@@ -1129,17 +1130,20 @@ else:
 
 @pytest.mark.spec("APP-24", "APP-25")
 def test_set_up_stops_the_host_on_each_check(tmp_path: Path) -> None:
-    printed = in_fresh_process(
+    printed = in_built_host(
         _SET_UP,
-        [*_UNDECLARED, "tests.app_db.ledger", "tests.app_db.stray", "neolith"],
+        ["tests.app_db.ledger", "tests.app_db.stray"],
         {
-            "DATABASES": {
-                "default": {
-                    "ENGINE": "tests.app_db.short_names",
-                    "NAME": str(tmp_path / "default.sqlite3"),
+            "NEOLITH": {
+                "DATABASES": {
+                    "default": {
+                        "ENGINE": "tests.app_db.short_names",
+                        "NAME": str(tmp_path / "default.sqlite3"),
+                    },
+                    "ledger": _sqlite(tmp_path / "ledger.sqlite3"),
                 },
+                "UNDECLARED_APPS": _UNDECLARED,
             },
-            "DATABASE_ROUTERS": _ROUTER,
             "DEFAULT_AUTO_FIELD": "django.db.models.AutoField",
         },
     )
@@ -1155,17 +1159,17 @@ def test_set_up_stops_the_host_on_each_check(tmp_path: Path) -> None:
 
 
 def test_the_same_apps_set_up_under_a_default_with_no_limit(tmp_path: Path) -> None:
-    printed = in_fresh_process(
+    printed = in_built_host(
         _SET_UP,
-        [*_UNDECLARED, "tests.app_db.ledger", "neolith"],
+        ["tests.app_db.ledger"],
         {
-            "DATABASES": {
-                "default": {
-                    "ENGINE": "django.db.backends.sqlite3",
-                    "NAME": str(tmp_path / "default.sqlite3"),
+            "NEOLITH": {
+                "DATABASES": {
+                    "default": _sqlite(tmp_path / "default.sqlite3"),
+                    "ledger": _sqlite(tmp_path / "ledger.sqlite3"),
                 },
+                "UNDECLARED_APPS": _UNDECLARED,
             },
-            "DATABASE_ROUTERS": _ROUTER,
             "DEFAULT_AUTO_FIELD": "django.db.models.AutoField",
         },
     )

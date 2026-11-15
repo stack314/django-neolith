@@ -6,7 +6,15 @@ from collections.abc import Iterator
 
 import pytest
 
-from neolith import _context
+from neolith import _context, testing
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _booted() -> None:
+    """The test host boots once, without reading a schema: the test runner
+    builds each test database itself (ADR 0022 Decision 7).
+    """
+    testing.boot()
 
 
 @pytest.fixture(autouse=True)

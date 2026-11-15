@@ -344,7 +344,7 @@ def test_a_request_root_has_the_host_s_request_deadline(
     ``NEOLITH``, and Django loads the apps of an override before it applies
     the override's settings, so ``NEOLITH`` is overridden first."""
     request_site.SEEN.clear()
-    with override_settings(NEOLITH=neolith), _site():
+    with override_settings(NEOLITH={**host_apps.NEOLITH, **neolith}), _site():
         assert serve(mode, "/page/").body == b"as web"
     assert courier_services.CONTEXTS[-1].deadline == deadline
     request_site.HELD.clear()
@@ -591,7 +591,7 @@ def test_a_handler_is_not_built_with_the_root_out_of_place(
 @pytest.mark.spec("APP-16")
 def test_a_handler_is_not_built_where_the_host_is_not_set_up() -> None:
     with (
-        override_settings(MIDDLEWARE=[ROOT]),
+        override_settings(INSTALLED_APPS=[], MIDDLEWARE=[ROOT]),
         pytest.raises(ImproperlyConfigured, match="the host is not set up"),
     ):
         WSGIHandler()
@@ -707,7 +707,7 @@ def test_a_collection_while_the_table_s_lock_is_held_does_not_deadlock() -> None
     the suite."""
     printed = in_fresh_process(
         _UNDER_LOCK,
-        host_apps.INSTALLED,
+        [*host_apps.HOSTED, "neolith"],
         {"ROOT_URLCONF": "tests.request_urls", "ALLOWED_HOSTS": ["testserver"]},
         timeout=60,
     )
@@ -1187,7 +1187,6 @@ def contrib_site() -> Iterator[None]:
     """The test host with Django's contrib apps a wrapper or a view can come
     from installed beside it."""
     contrib = [
-        "django.contrib.contenttypes",
         "django.contrib.auth",
         "django.contrib.sites",
         "django.contrib.flatpages",

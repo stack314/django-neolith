@@ -53,7 +53,7 @@ from tests.declaration_contracts import (
     StockV2,
     Unmarked,
 )
-from tests.hosting import in_fresh_process
+from tests.hosting import in_built_host, in_fresh_process
 from tests.test_contract_round_trip import _HYPOTHESIS
 
 Namespace = dict[str, Any]
@@ -1457,6 +1457,19 @@ class StockService:
 # The app that provides the contract _APPS requires, for a host to set up.
 _COURIERS = "tests.host_apps.couriers"
 
+
+def _neolith(package: str) -> dict[str, object]:
+    """The deployer's NEOLITH for a host of ``package``, whose declaration
+    lists the ``database`` resource, and the couriers app."""
+    return {
+        "NEOLITH": {
+            "DATABASES": {
+                package: {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}
+            }
+        }
+    }
+
+
 MakeApp = Callable[..., str]
 
 
@@ -1560,15 +1573,12 @@ def test_a_declaration_is_read_in_a_fresh_process_before_settings_exist(
     assert (ran.stdout.strip(), ran.stderr[-600:]) == ("StockConfig stock.v1", "")
 
 
-@pytest.mark.parametrize("entry", ["{package}", "{package}.apps.StockConfig"])
-@pytest.mark.parametrize("neolith_first", [False, True])
 def test_a_declared_app_loads_in_the_global_registry_beside_neolith(
-    make_app: MakeApp, entry: str, neolith_first: bool
+    make_app: MakeApp,
 ) -> None:
     # A process hosts one set of apps, so each set loads in its own.
     package = make_app()
-    entries = [entry.replace("{package}", package), _COURIERS, "neolith"]
-    printed = in_fresh_process(
+    printed = in_built_host(
         f"""
         import django
         from django.apps import apps
@@ -1588,28 +1598,83 @@ def test_a_declared_app_loads_in_the_global_registry_beside_neolith(
         assert apps.get_app_config({package!r}) is config
         print("loaded")
         """,
-        entries[::-1] if neolith_first else entries,
+        [package, _COURIERS],
+        _neolith(package),
     )
     assert printed == "loaded\n"
 
 
-def test_a_config_class_kept_outside_the_apps_module_is_an_entry(
+_HAND_WRITTEN = """
+import django
+from django.core.exceptions import ImproperlyConfigured
+
+try:
+    django.setup()
+except ImproperlyConfigured as error:
+    print(error)
+"""
+
+
+@pytest.mark.spec("APP-29")
+@pytest.mark.parametrize(
+    ("entry", "neolith_first", "difference"),
+    [
+        (
+            "{package}.apps.StockConfig",
+            False,
+            "entry 0 is '{package}.apps.StockConfig', the host builds '{package}'",
+        ),
+        ("{package}", True, f"entry 0 is 'neolith', the host builds '{_COURIERS}'"),
+    ],
+    ids=["config class", "neolith first"],
+)
+def test_installed_apps_written_otherwise_than_the_host_builds_is_refused(
+    make_app: MakeApp, entry: str, neolith_first: bool, difference: str
+) -> None:
+    """A declared app is named by its package, and neolith comes last: other
+    forms that Django would load stop the host at its first set-up."""
+    package = make_app()
+    entries = [entry.replace("{package}", package), _COURIERS, "neolith"]
+    built = {
+        "default": {},
+        package: {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": ":memory:",
+            "TEST": {"DEPENDENCIES": []},
+        },
+    }
+    printed = in_fresh_process(
+        _HAND_WRITTEN,
+        entries[::-1] if neolith_first else entries,
+        {**_neolith(package), "DATABASES": built},
+    )
+    assert printed.splitlines() == [
+        "host: the settings are refused before the host serves:",
+        "(neolith.E005) settings: INSTALLED_APPS differs from what the host "
+        f"builds: {difference.replace('{package}', package)}; build settings "
+        "with neolith.host.build_settings, and change them through NEOLITH",
+    ]
+
+
+def test_a_config_class_kept_outside_the_apps_module_is_not_a_hosted_app(
     make_app: MakeApp,
 ) -> None:
+    """The builder reads an app by its package, where Django finds no
+    declaration outside the apps module; naming the class is refused."""
+    from neolith._configure import configure
+
     package = make_app(apps="", config=_APPS)
-    printed = in_fresh_process(
-        f"""
-        import django
-        from django.apps import apps
-
-        from {package}.config import StockConfig
-
-        django.setup()
-        print(type(apps.get_app_config({package!r})) is StockConfig)
-        """,
-        [f"{package}.config.StockConfig", _COURIERS, "neolith"],
-    )
-    assert printed == "True\n"
+    for entry, refusal in (
+        (package, f"app {package}: has no declaration"),
+        (
+            f"{package}.config.StockConfig",
+            f"app {package}.config.StockConfig: name the app's package, not its "
+            "config class",
+        ),
+    ):
+        with pytest.raises(ImproperlyConfigured) as raised:
+            configure([entry, _COURIERS], {"NEOLITH": {}})
+        assert str(raised.value) == refusal
 
 
 @pytest.mark.spec("APP-1")
@@ -1631,7 +1696,7 @@ def test_a_declared_app_in_the_global_registry_needs_neolith_installed(
         assert _installed() == before
     # Following the advice loads the app, beside the provider of the
     # contract it requires, in a process of its own.
-    printed = in_fresh_process(
+    printed = in_built_host(
         f"""
         import django
         from django.apps import apps
@@ -1639,7 +1704,8 @@ def test_a_declared_app_in_the_global_registry_needs_neolith_installed(
         django.setup()
         print(apps.is_installed({package!r}))
         """,
-        [package, _COURIERS, "neolith"],
+        [package, _COURIERS],
+        _neolith(package),
     )
     assert printed == "True\n"
 
@@ -1691,7 +1757,7 @@ def test_the_models_module_of_a_declared_app_is_imported(make_app: MakeApp) -> N
     package = make_app(
         models="from django.db import models\n\n\nclass Note(models.Model):\n    pass\n"
     )
-    printed = in_fresh_process(
+    printed = in_built_host(
         f"""
         import sys
 
@@ -1703,7 +1769,8 @@ def test_the_models_module_of_a_declared_app_is_imported(make_app: MakeApp) -> N
         assert config.models_module is sys.modules[{package!r} + ".models"]
         print(config.get_model("Note")._meta.app_label)
         """,
-        [package, _COURIERS, "neolith"],
+        [package, _COURIERS],
+        _neolith(package),
     )
     assert printed == f"{package}\n"
 

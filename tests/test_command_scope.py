@@ -12,6 +12,7 @@ import contextlib
 import contextvars
 import copy
 import decimal
+import json
 import math
 import pickle
 import threading
@@ -38,7 +39,7 @@ from neolith._connector import Connector, InProcess
 from tests import host_apps
 from tests.declaration_contracts import Sku
 from tests.host_apps.couriers import services as courier_services
-from tests.hosting import in_fresh_process
+from tests.hosting import in_built_host, in_fresh_process
 from tests.test_calling_app import FRONT, Ask, Front, Recording, Told
 from tests.test_host import WriteApp, _apps_module
 from tests.test_host import write_app as write_app
@@ -858,14 +859,64 @@ def test_a_long_label_is_clipped_in_the_refusal() -> None:
     assert len(str(raised.value)) < 1000
 
 
-@pytest.mark.spec("TRN-45", "CON-29")
-def test_a_command_scope_before_the_host_is_set_up_is_refused() -> None:
-    with pytest.raises(UsageError) as raised, command_scope("web"):
+_BEFORE_SET_UP = """
+import json
+
+import django
+
+from neolith import UsageError, _context, command_scope, connect
+from tests.declaration_contracts import Sku
+from tests.host_apps.couriers import services
+
+found = {}
+couriers = connect("couriers.v3")
+
+
+def refused(run):
+    try:
+        run()
+    except UsageError as error:
+        return str(error)
+    return "passed"
+
+
+def enter(scope):
+    with scope:
         pass
-    assert str(raised.value).startswith(
+
+
+early = command_scope("web")
+found["scope"] = refused(lambda: enter(command_scope("web")))
+found["ambient"] = _context._CURRENT.get() is None
+found["early"] = refused(lambda: enter(early))
+found["call"] = refused(lambda: couriers.quote(Sku(sku="ab")))
+django.setup()
+with early:
+    couriers.quote(Sku(sku="ab"))
+found["caller"] = services.CONTEXTS[-1].caller
+print(json.dumps(found))
+"""
+
+
+@pytest.fixture(scope="module")
+def before_set_up() -> dict[str, Any]:
+    """The test host is set up when the suite starts, so the state before
+    set-up is met in a process of its own."""
+    printed = in_built_host(
+        _BEFORE_SET_UP, host_apps.HOSTED, {"NEOLITH": host_apps.NEOLITH}
+    )
+    found: dict[str, Any] = json.loads(printed.splitlines()[-1])
+    return found
+
+
+@pytest.mark.spec("TRN-45", "CON-29")
+def test_a_command_scope_before_the_host_is_set_up_is_refused(
+    before_set_up: dict[str, Any],
+) -> None:
+    assert before_set_up["scope"].startswith(
         "command_scope('web'): the host is not set up yet"
     )
-    assert _ambient() is None
+    assert before_set_up["ambient"] is True
 
 
 @pytest.mark.spec("TRN-45")
@@ -884,13 +935,12 @@ def test_a_command_scope_while_an_override_leaves_neolith_out_is_refused() -> No
 
 
 @pytest.mark.spec("TRN-44", "TRN-45")
-def test_a_scope_built_before_set_up_opens_once_the_host_is_set_up() -> None:
-    scope = command_scope("web")
+def test_a_scope_built_before_set_up_opens_once_the_host_is_set_up(
+    before_set_up: dict[str, Any],
+) -> None:
     # A refused entry opens nothing, so the same scope opens later.
-    with pytest.raises(UsageError, match="not set up yet"), scope:
-        pass
-    with override_settings(INSTALLED_APPS=host_apps.INSTALLED), scope:
-        assert _quote().caller == "web"
+    assert "not set up yet" in before_set_up["early"]
+    assert before_set_up["caller"] == "web"
 
 
 # Sync and async.
@@ -1184,11 +1234,11 @@ def test_every_usage_error_is_in_the_docstrings(
         assert on_connect in _words(connect.__doc__)
 
 
-def test_the_states_before_set_up_are_in_the_docstrings() -> None:
-    with pytest.raises(UsageError, match="not set up yet"):
-        couriers.quote(Sku(sku="ab"))
-    with pytest.raises(UsageError, match="not set up yet"), command_scope("web"):
-        pass
+def test_the_states_before_set_up_are_in_the_docstrings(
+    before_set_up: dict[str, Any],
+) -> None:
+    assert "not set up yet" in before_set_up["call"]
+    assert "not set up yet" in before_set_up["scope"]
     for phrase in ("before set-up has finished", "leaves neolith's app out"):
         assert phrase in _words(UsageError.__doc__)
     assert "before set-up has finished" in _words(connect.__doc__)

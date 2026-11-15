@@ -20,9 +20,14 @@ from typing import Any
 
 import pytest
 
-from tests.hosting import in_fresh_process
+from tests.hosting import in_built_host
 
-INSTALLED = [
+HOSTED = [
+    "tests.request_admin.shop",
+    "tests.request_admin.depot",
+    "tests.host_apps.couriers",
+]
+UNDECLARED = [
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
@@ -32,11 +37,7 @@ INSTALLED = [
     "django.contrib.flatpages",
     "django.contrib.sitemaps",
     "django.contrib.syndication",
-    "tests.request_admin.shop",
-    "tests.request_admin.depot",
-    "tests.host_apps.couriers",
     "tests.plain_app",
-    "neolith",
 ]
 
 _BODY = """
@@ -65,7 +66,13 @@ from neolith._serving import admin_code
 from tests.request_admin.depot.models import Bin, Pallet
 from tests.request_admin.shop.models import Basket, Crate, Item, Order, Shelf, Team
 
-call_command("migrate", run_syncdb=True, verbosity=0)
+for alias in ("default", "shop", "depot"):
+    call_command("migrate", run_syncdb=True, verbosity=0, database=alias)
+# The hosted apps here have no migrations, which Boot refuses; the session
+# boots as a test session does.
+from neolith import testing
+
+testing.boot()
 user = User.objects.create_superuser("admin", "", "admin")
 made = (Order, Basket, Item, Shelf, Crate, Team, Pallet, Bin)
 ids = {m.__name__.lower(): m.objects.create(name="x").pk for m in made}
@@ -270,16 +277,20 @@ _W001 = [
 
 @pytest.fixture(scope="module")
 def ran(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
-    database: Path = tmp_path_factory.mktemp("admin") / "db.sqlite3"
-    printed = in_fresh_process(
+    root: Path = tmp_path_factory.mktemp("admin")
+    printed = in_built_host(
         _BODY,
-        INSTALLED,
+        HOSTED,
         {
-            "DATABASES": {
-                "default": {
-                    "ENGINE": "django.db.backends.sqlite3",
-                    "NAME": str(database),
-                }
+            "NEOLITH": {
+                "DATABASES": {
+                    alias: {
+                        "ENGINE": "django.db.backends.sqlite3",
+                        "NAME": str(root / f"{alias}.sqlite3"),
+                    }
+                    for alias in ("default", "shop", "depot")
+                },
+                "UNDECLARED_APPS": UNDECLARED,
             },
             "DEFAULT_AUTO_FIELD": "django.db.models.AutoField",
             "SITE_ID": 1,

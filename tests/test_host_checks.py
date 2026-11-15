@@ -8,12 +8,15 @@ error in one ``ImproperlyConfigured``. ``neolith.W001`` is in
 ``test_request_admin.py``, since it needs Django's admin.
 """
 
+import contextlib
 import decimal
 import math
 from collections import OrderedDict, UserList
+from collections.abc import Iterator
 from datetime import timedelta
 
 import pytest
+from django.conf import settings
 from django.core import checks
 from django.core.exceptions import ImproperlyConfigured
 from django.test import override_settings
@@ -28,7 +31,7 @@ ROOT = "neolith.middleware.RootMiddleware"
 OTHER = "django.middleware.common.CommonMiddleware"
 DEADLINE = 'NEOLITH["REQUEST_DEADLINE"]'
 RANGE = "is outside 0.001 to 9999999.999 seconds"
-KEYS = "the keys are REQUEST_DEADLINE"
+KEYS = "the keys are DATABASES, REQUEST_DEADLINE, UNDECLARED_APPS"
 
 
 class MyStr(str):
@@ -54,7 +57,11 @@ class MyList(list[str]):
         (OrderedDict(), ["NEOLITH: expected a dict, got OrderedDict"]),
         (None, ["NEOLITH: expected a dict, got NoneType"]),
         ({"REQUEST_DEADLIN": 30}, [f"NEOLITH: unknown key 'REQUEST_DEADLIN'; {KEYS}"]),
-        ({"DATABASES": {}}, [f"NEOLITH: unknown key 'DATABASES'; {KEYS}"]),
+        ({"DATABASES": {}}, ['NEOLITH["DATABASES"]: is empty; leave the key out']),
+        (
+            {"PRINCIPAL_BACKENDS": []},
+            [f"NEOLITH: unknown key 'PRINCIPAL_BACKENDS'; {KEYS}"],
+        ),
         ({1: 30}, [f"NEOLITH: unknown key of type int; {KEYS}"]),
         (
             {MyStr("REQUEST_DEADLINE"): 30},
@@ -199,12 +206,22 @@ def registered() -> None:
     _checks.register()
 
 
+@contextlib.contextmanager
+def _in_place(**changed: object) -> Iterator[None]:
+    """Settings changed in place, with no ``setting_changed``, which an
+    override of ``NEOLITH`` after set-up would refuse; restored on exit."""
+    with override_settings():
+        for name, value in changed.items():
+            setattr(settings, name, value)
+        yield
+
+
 @pytest.mark.spec("APP-16")
 def test_set_up_raises_every_error_at_once(registered: None) -> None:
     """Django loads an override's apps before it applies the override's
-    settings, so the settings to judge are overridden first."""
+    settings, so the settings to judge are changed first."""
     with (
-        override_settings(NEOLITH={"OTHER": 1}, MIDDLEWARE=[OTHER, ROOT]),
+        _in_place(NEOLITH={"OTHER": 1}, MIDDLEWARE=[OTHER, ROOT]),
         pytest.raises(ImproperlyConfigured) as raised,
         override_settings(INSTALLED_APPS=host_apps.INSTALLED),
     ):
@@ -243,7 +260,7 @@ def test_a_silenced_error_still_stops_set_up(
     serves runs no command, so set-up raises it anyway."""
     silenced = ["neolith.E001", "neolith.E006"]
     with (
-        override_settings(SILENCED_SYSTEM_CHECKS=silenced, **settings),
+        _in_place(SILENCED_SYSTEM_CHECKS=silenced, **settings),
         pytest.raises(ImproperlyConfigured, match=r"\(neolith\.E00[16]\)"),
         override_settings(INSTALLED_APPS=host_apps.INSTALLED),
     ):
@@ -266,7 +283,7 @@ def test_set_up_with_neolith_missing_is_refused(registered: None) -> None:
 def test_the_checks_judge_only_a_process_that_hosts(registered: None) -> None:
     """Registered once, the checks stay registered; in a registry without
     neolith's app they find nothing to judge."""
-    with override_settings(MIDDLEWARE=[], NEOLITH=[]):
+    with override_settings(INSTALLED_APPS=[]), _in_place(MIDDLEWARE=[], NEOLITH=[]):
         assert checks.run_checks(tags=["neolith"]) == []
 
 

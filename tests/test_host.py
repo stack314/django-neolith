@@ -58,7 +58,7 @@ from tests.declaration_contracts import (
 )
 from tests.host_apps.couriers import services as courier_services
 from tests.host_apps.web.apps import WebConfig
-from tests.hosting import in_fresh_process
+from tests.hosting import in_built_host, in_fresh_process
 from tests.test_contract_round_trip import _HYPOTHESIS
 
 _COUNTER = itertools.count()
@@ -574,11 +574,16 @@ def test_a_call_from_an_implementation_init_is_refused_as_not_set_up(
         + "        from tests.declaration_contracts import Sku\n"
         + '        connect("couriers.v3").quote(Sku(sku="x"))\n',
     )
-    assert _refusals(package) == [
+    # Set up in a process of its own: the suite's own host is set up already.
+    printed = in_fresh_process(
+        _SET_UP_FAILS, [package, "tests.host_apps.couriers", "neolith"]
+    )
+    assert printed.splitlines()[:2] == [
+        "DeclarationError",
         f"app {package}: provides: billing.invoices.v1: implementation "
         f"'{package}.services.InvoiceService': building it with no arguments "
         "raised UsageError: connector to couriers.v3: the host is not set up "
-        "yet. Calls begin once Django ha..."
+        "yet. Calls begin once Django ha...",
     ]
 
 
@@ -637,26 +642,51 @@ def test_after_set_up_a_call_reaches_the_provider_as_its_app() -> None:
         assert courier_services.CALLS[-1][0] == "stock"
 
 
+_BEFORE_SET_UP = """
+import django
+
+from neolith import ContractError, UsageError, connect
+from tests.host_apps.couriers import services
+
+couriers = connect("couriers.v3")
+try:
+    couriers.quote
+except UsageError as error:
+    print(isinstance(error, RuntimeError), ContractError in type(error).__mro__)
+    print(error)
+django.setup()
+print(len(services.CALLS))
+"""
+
+
 @pytest.mark.spec("APP-13", "CON-29")
 def test_a_call_before_set_up_is_a_usage_error_and_not_sent() -> None:
-    before = len(courier_services.CALLS)
-    couriers = connect("couriers.v3")
-    with pytest.raises(UsageError) as raised:
-        couriers.quote  # noqa: B018
-    assert str(raised.value).startswith(
-        "connector to couriers.v3: the host is not set up yet."
+    """The test host is set up when the suite starts, so the state before
+    set-up is met in a process of its own."""
+    printed = in_built_host(
+        _BEFORE_SET_UP, host_apps.HOSTED, {"NEOLITH": host_apps.NEOLITH}
     )
-    assert isinstance(raised.value, RuntimeError)
-    assert ContractError not in type(raised.value).__mro__
+    lines = printed.splitlines()
+    assert lines[0] == "True False"
+    assert lines[1].startswith("connector to couriers.v3: the host is not set up yet.")
+    assert lines[-1] == "0"
+
+
+@pytest.mark.spec("APP-13")
+def test_an_action_read_during_set_up_is_refused_once_the_host_is_gone() -> None:
+    couriers = connect("couriers.v3")
     with override_settings(INSTALLED_APPS=host_apps.INSTALLED):
         quote = couriers.quote
-    # An action read during set-up is refused once the host is gone again.
-    with _web(), pytest.raises(UsageError, match="not set up"):
+    with (
+        override_settings(INSTALLED_APPS=[]),
+        _web(),
+        pytest.raises(UsageError, match="calls resume when that ends"),
+    ):
         quote(Sku(sku="x"))
-    assert len(courier_services.CALLS) == before
 
 
 def test_set_up_twice_with_the_same_apps_builds_a_fresh_table() -> None:
+    base = _current()
     couriers = connect("couriers.v3")
     with override_settings(INSTALLED_APPS=host_apps.INSTALLED):
         first = _current()
@@ -683,7 +713,7 @@ def test_set_up_twice_with_the_same_apps_builds_a_fresh_table() -> None:
         with _web():
             couriers.quote(Sku(sku="c"))
         assert courier_services.CALLS[-1] == ("web", first_instance)
-    assert _current() is None
+    assert _current() is base
 
 
 def test_an_override_that_leaves_neolith_out_holds_no_host_until_it_ends() -> None:
@@ -711,10 +741,11 @@ def test_an_undeclared_app_may_come_and_go_in_a_later_set_up() -> None:
 
 
 def test_isolate_apps_with_the_hosted_apps_and_neolith_sets_nothing_up() -> None:
+    base = _current()
     with isolate_apps(*host_apps.INSTALLED) as isolated:
         assert isolated is not None
         assert "_neolith_host" not in vars(isolated.get_app_config("neolith"))
-        assert _current() is None
+        assert _current() is base
     # Nor inside a host: the global registry's set-up is untouched.
     with override_settings(INSTALLED_APPS=host_apps.INSTALLED):
         host = _current()
@@ -939,7 +970,7 @@ def test_connect_before_set_up_to_an_unknown_identity_stops_the_host(
 
 @pytest.mark.spec("APP-14")
 def test_connect_racing_set_up_is_either_recorded_and_checked_or_refused() -> None:
-    printed = in_fresh_process(
+    printed = in_built_host(
         """
         import threading
 
@@ -975,7 +1006,8 @@ def test_connect_racing_set_up_is_either_recorded_and_checked_or_refused() -> No
         # after is refused at once. None is admitted unseen.
         print(passed, "recorded" in outcomes if passed else True)
         """,
-        host_apps.INSTALLED,
+        host_apps.HOSTED,
+        {"NEOLITH": host_apps.NEOLITH},
     )
     assert printed == "False True\n" or printed == "True False\n"
 
@@ -996,7 +1028,7 @@ def test_a_later_set_up_with_other_hosted_apps_is_refused(
         + "    requires = (c.Couriers,)\n",
         encoding="utf-8",
     )
-    printed = in_fresh_process(
+    printed = in_built_host(
         f"""
         import django
         from django.core.exceptions import ImproperlyConfigured
@@ -1024,7 +1056,8 @@ def test_a_later_set_up_with_other_hosted_apps_is_refused(
         with override_settings(INSTALLED_APPS=installed):
             print("the same apps are admitted")
         """,
-        host_apps.INSTALLED,
+        host_apps.HOSTED,
+        {"NEOLITH": host_apps.NEOLITH},
     )
     message = "ImproperlyConfigured host: the hosted apps changed after set-up: "
     assert printed.splitlines() == [
@@ -1193,7 +1226,7 @@ def test_connect_in_an_override_without_neolith_checks_the_restored_table() -> N
 
 @pytest.mark.spec("APP-14")
 def test_set_up_empties_the_record_it_checked() -> None:
-    printed = in_fresh_process(
+    printed = in_built_host(
         """
         import django
 
@@ -1204,7 +1237,8 @@ def test_set_up_empties_the_record_it_checked() -> None:
         django.setup()
         print(sorted(_host._RECORDED))
         """,
-        host_apps.INSTALLED,
+        host_apps.HOSTED,
+        {"NEOLITH": host_apps.NEOLITH},
     )
     assert printed == "['stock.v1']\n[]\n"
 
@@ -1331,7 +1365,7 @@ def test_connect_during_a_later_set_up_is_refused_in_either_phase(
     package = write_app("", **{place: _UNDECLARED_CONNECTS})
     installed = list(host_apps.INSTALLED)
     added = [package, *installed] if before_neolith else [*installed, package]
-    printed = in_fresh_process(
+    printed = in_built_host(
         f"""
         import django
         from django.test.utils import override_settings
@@ -1344,7 +1378,8 @@ def test_connect_during_a_later_set_up_is_refused_in_either_phase(
             print(type(error).__name__)
             print(error)
         """,
-        installed,
+        host_apps.HOSTED,
+        {"NEOLITH": host_apps.NEOLITH},
     )
     where = tmp_path / package / f"{place}.py"
     knows = (
@@ -1384,7 +1419,7 @@ def test_a_refused_later_set_up_leaves_no_record_its_table_knew(
         ),
         services=connects + _INVOICES,
     )
-    printed = in_fresh_process(
+    printed = in_built_host(
         f"""
         import django
         from django.test.utils import override_settings
@@ -1400,7 +1435,8 @@ def test_a_refused_later_set_up_leaves_no_record_its_table_knew(
             with override_settings(INSTALLED_APPS=installed):
                 print("the first apps are admitted")
         """,
-        host_apps.INSTALLED,
+        host_apps.HOSTED,
+        {"NEOLITH": host_apps.NEOLITH},
     )
     assert printed.splitlines() == [
         "ImproperlyConfigured",
