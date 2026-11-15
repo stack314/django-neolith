@@ -57,8 +57,8 @@ jobs:
             echo "::error::Tag $TAG does not match __version__ $version"
             exit 1
           fi
-      # Every tool that writes or checks the published files, the build
-      # backend included, at the exact version the constraints file names.
+      # The tools that build the files and check their description, and the
+      # build backend, at the exact versions the constraints file names.
       - name: Install the build tools
         run: python -m pip install pip build twine
       # The wheel is built from the sdist, so a file missing from the sdist

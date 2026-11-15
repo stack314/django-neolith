@@ -1,10 +1,16 @@
 # Exact versions for the release build (.github/workflows/release.yml): the
-# installer, the build front end and twine, and the build backend with its
+# installer; build and the hooks it calls the backend through; twine and the
+# packages its description check renders with; and the build backend with its
 # dependencies, which the isolated build reads through PIP_CONSTRAINT.
 # pyproject.toml keeps hatchling>=1.27 for anyone building from the sdist.
 pip==26.3
 build==1.6.1
+pyproject_hooks==1.3.3
 twine==7.0.0
+readme-renderer==46.0
+docutils==0.23
+nh3==0.3.7
+pygments==2.21.0
 hatchling==1.33.0
 packaging==26.3
 pathspec==1.1.1
