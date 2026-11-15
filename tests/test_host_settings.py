@@ -124,6 +124,23 @@ def test_the_list_of_apps_has_one_form(apps: object, message: str) -> None:
     assert configure(HOSTED, deployer())["INSTALLED_APPS"][:3] == HOSTED
 
 
+def test_every_refusal_found_by_reading_the_apps_is_reported_together() -> None:
+    """Only an app that cannot be read stops the walk; what is found by
+    reading the others is reported with it in one diagnostic."""
+    apps = [
+        "django.contrib.humanize",
+        "tests.host_apps.stock.apps.StockConfig",
+        "django.contrib.sitemaps",
+        *HOSTED[1:],
+    ]
+    assert refusal(apps, deployer()).splitlines() == [
+        "app django.contrib.humanize: has no declaration",
+        "app django.contrib.sitemaps: has no declaration",
+        "app tests.host_apps.stock.apps.StockConfig: name the app's package, not "
+        "its config class",
+    ]
+
+
 def test_an_app_that_cannot_be_read_is_refused_with_its_error() -> None:
     message = refusal([*HOSTED, "tests.no_such_app"], deployer())
     assert message.startswith(
@@ -198,6 +215,15 @@ def test_resolve_runs_in_the_builder() -> None:
 )
 def test_the_deployer_s_mapping_is_a_dict_of_names(given: object, message: str) -> None:
     assert refusal(HOSTED, given) == message
+
+
+def test_a_name_that_is_not_a_str_is_reported_with_the_other_refusals() -> None:
+    given = _with_key(1)
+    given["INSTALLED_APPS"] = []
+    assert refusal(HOSTED, given).splitlines() == [
+        'settings: INSTALLED_APPS is built by the host; see NEOLITH["UNDECLARED_APPS"]',
+        "settings: a setting name is a str, got int",
+    ]
 
 
 def test_names_that_are_not_upper_case_are_ignored() -> None:
@@ -422,6 +448,20 @@ def test_each_database_row_refuses_by_name(
     aliases.update(change)
     aliases = {alias: entry for alias, entry in aliases.items() if entry is not None}
     assert _db_refusal(**aliases) == [message]
+
+
+@pytest.mark.parametrize(
+    "neolith", [{}, {"REQUEST_DEADLINE": 5}], ids=["empty", "other keys"]
+)
+def test_an_app_with_a_database_needs_its_connection_settings(
+    neolith: dict[str, object],
+) -> None:
+    """Also when NEOLITH has no DATABASES key at all."""
+    found = refusal([*HOSTED, LEDGER, BILLING], deployer(NEOLITH=neolith))
+    assert found.splitlines() == [
+        "app billing: no connection settings for its database",
+        "app ledger: no connection settings for its database",
+    ]
 
 
 def test_a_non_str_alias_is_refused() -> None:
@@ -847,6 +887,16 @@ _DATABASE_CACHE = {
             [],
         ),
         ([*HOSTED, "neolith"], {}, {"c": {"BACKEND": "no.such.Cache"}}, [], []),
+        (
+            [*HOSTED, "neolith"],
+            {},
+            {"c": {"BACKEND": "tests.lite.cache.ProjectCache"}},
+            [],
+            [
+                "cache c: a database cache needs a default database, and this host "
+                "has none"
+            ],
+        ),
     ],
     ids=[
         "default unused",
@@ -855,6 +905,7 @@ _DATABASE_CACHE = {
         "a database cache in a closed host",
         "another cache",
         "a cache that does not import",
+        "a subclass of the database cache",
     ],
 )
 def test_what_lives_on_default_is_judged(
@@ -976,6 +1027,114 @@ def test_hand_written_settings_that_differ_are_refused_at_set_up(
         f"(neolith.E005) settings: {difference}; build settings with "
         "neolith.host.build_settings, and change them through NEOLITH",
     ]
+
+
+class _Name(str):
+    __slots__ = ()
+
+
+_LEDGER = {"ENGINE": SQLITE, "NAME": "/l", "TEST": {"DEPENDENCIES": []}}
+_BUILT_DATABASES = {"default": {}, "ledger": _LEDGER}
+
+
+@pytest.mark.parametrize(
+    ("found", "expected", "difference"),
+    [
+        ({"default": {}}, _BUILT_DATABASES, "alias 'ledger' is missing"),
+        (
+            {**_BUILT_DATABASES, "x": {}},
+            _BUILT_DATABASES,
+            "alias 'x' is not one the host builds",
+        ),
+        (
+            {"default": {}, "ledger": {**_LEDGER, "TEST": {}}},
+            _BUILT_DATABASES,
+            "['ledger']['TEST']['DEPENDENCIES'] is missing",
+        ),
+        (
+            {"default": {}, "ledger": {**_LEDGER, "TEST": []}},
+            _BUILT_DATABASES,
+            "['ledger']['TEST'] is a list, the host builds a dict",
+        ),
+        ([("default", {})], _BUILT_DATABASES, "it is a list, the host builds a dict"),
+        (
+            {"default": {}, "ledger": {**_LEDGER, "NAME": b"/l"}},
+            _BUILT_DATABASES,
+            "['ledger']['NAME'] is b'/l', the host builds '/l'",
+        ),
+        (
+            {
+                "default": {"ENGINE": "django.db.backends.dummy"},
+                "ledger": {
+                    **_LEDGER,
+                    "HOST": "",
+                    "TEST": {"DEPENDENCIES": [], "CHARSET": None},
+                },
+            },
+            _BUILT_DATABASES,
+            None,
+        ),
+        (("neolith",), ["neolith"], "it is a tuple, the host builds a list"),
+        (["neolith", "x"], ["neolith"], "it has 2 entries, the host builds 1"),
+        ([1], ["1"], "entry 0 is 1, the host builds '1'"),
+        (
+            [_Name("neolith")],
+            ["neolith"],
+            "entry 0 is 'neolith', the host builds 'neolith'",
+        ),
+        (["neolith"], ["neolith"], None),
+    ],
+    ids=[
+        "an alias missing",
+        "an alias added",
+        "a nested key missing",
+        "a mapping replaced",
+        "the setting replaced",
+        "a value of another type",
+        "keys Django fills in",
+        "a tuple for a list",
+        "an entry added",
+        "an entry of another type",
+        "an entry of a subclass",
+        "equal",
+    ],
+)
+@pytest.mark.spec("APP-29")
+def test_the_first_difference_from_what_the_host_builds_is_named(
+    found: object, expected: object, difference: str | None
+) -> None:
+    from neolith._configure import _difference
+
+    assert _difference(found, expected) == difference
+
+
+def test_a_default_with_test_settings_sets_up_again_unchanged(tmp_path: Path) -> None:
+    """Django fills ``TEST`` in place in ``DATABASES``; the host gave it a
+    copy, so ``NEOLITH`` still passes its own check at a later set-up."""
+    printed = in_built_host(
+        """
+        import django
+        from django.conf import settings
+        from django.test.utils import override_settings
+
+        django.setup()
+        with override_settings(INSTALLED_APPS=list(settings.INSTALLED_APPS)):
+            print(settings.NEOLITH["DATABASES"]["default"]["TEST"])
+        """,
+        HOSTED,
+        {
+            "NEOLITH": {
+                "DATABASES": {
+                    "default": {
+                        **sqlite(str(tmp_path / "d")),
+                        "TEST": {"CHARSET": "UTF8"},
+                    }
+                },
+                "UNDECLARED_APPS": ["django.contrib.contenttypes"],
+            }
+        },
+    )
+    assert printed.splitlines() == ["{'CHARSET': 'UTF8'}"]
 
 
 def test_hand_written_settings_that_match_are_admitted() -> None:

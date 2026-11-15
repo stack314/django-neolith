@@ -80,8 +80,8 @@ def filled(**entry: object) -> dict[str, Any]:
     return found
 
 
-def read(**entry: object) -> list[tuple[str, str]]:
-    found, readable = _boot.state_messages({"default": filled(ENGINE=SQLITE, **entry)})
+def read(engine: str = SQLITE, **entry: object) -> list[tuple[str, str]]:
+    found, readable = _boot.state_messages({"default": filled(ENGINE=engine, **entry)})
     assert readable == ([] if found else ["default"])
     return [(str(m.id), m.msg) for m in found]
 
@@ -203,14 +203,55 @@ def test_a_file_with_a_schema_is_read_and_left_as_it_was(tmp_path: Path) -> None
     assert path.read_bytes() == before
 
 
+@pytest.mark.spec("APP-31", "APP-36")
+def test_a_zero_byte_file_is_refused_before_any_connection(tmp_path: Path) -> None:
+    """An ``init_command`` would write to the file on connecting; Boot does
+    not connect to it."""
+    path = tmp_path / "empty.sqlite3"
+    path.touch()
+    wal = {"init_command": "PRAGMA journal_mode=WAL"}
+    assert read(NAME=str(path), OPTIONS=wal)[0][0] == "neolith.E018"
+    assert path.stat().st_size == 0
+    assert not (tmp_path / "empty.sqlite3-wal").exists()
+
+
+@pytest.mark.spec("APP-31", "APP-32", "APP-36")
+def test_a_project_s_own_sqlite_backend_is_judged_as_sqlite(tmp_path: Path) -> None:
+    """SQLite is known by the backend's vendor, not by its name."""
+    lite = "tests.lite"
+    missing = tmp_path / "missing.sqlite3"
+    assert read(lite, NAME=str(missing)) == [
+        ("neolith.E018", f"database default: no database at {missing}; {NO_FILE}")
+    ]
+    assert not missing.exists()
+    assert read(lite, NAME=":memory:") == [
+        ("neolith.E007", f"database default: {IN_MEMORY}")
+    ]
+    real = tmp_path / "real.sqlite3"
+    migrated(real, "contenttypes")
+    assert read(lite, NAME=f"file:{real}?mode=memory&cache=shared") == [
+        ("neolith.E007", f"database default: {IN_MEMORY}")
+    ]
+    assert read(lite, NAME=str(real)) == []
+
+
+def test_an_alias_on_another_backend_is_left_to_the_migration_read() -> None:
+    """Only SQLite has the states before a schema; no connection is opened."""
+    entry = filled(ENGINE="django.db.backends.postgresql", NAME="x", HOST="nowhere")
+    assert _boot.state_messages({"default": entry}) == ([], ["default"])
+
+
 # Migrations, in a process that hosts the apps of tests.boot_apps.
 
-_HOSTED = [f"tests.boot_apps.{app}" for app in ("fresh", "bare", "forked", "leaning")]
+_HOSTED = [
+    f"tests.boot_apps.{app}" for app in ("fresh", "bare", "forked", "leaning", "empty")
+]
 
 _MIGRATIONS = """
 import json
 import sqlite3
 import sys
+import threading
 
 import django
 
@@ -242,6 +283,26 @@ def content(name):
         return file.read()
 
 
+seen = []
+original = _boot._read
+
+
+def spy(databases, *args):
+    # On the thread Boot reads on, once it is done: which connections of
+    # that thread are still open.
+    found = original(databases, *args)
+    seen.append(
+        [
+            threading.current_thread().name,
+            [alias for alias in databases if connections[alias].connection is not None],
+        ]
+    )
+    return found
+
+
+_boot._read = spy
+
+
 def read():
     return sorted([m.id, m.msg] for m in _boot.schema_messages())
 
@@ -252,13 +313,12 @@ record("fresh", [("fresh", "0001_initial"), *other])
 record("bare", [])
 record("forked", [("forked", "0001_initial")])
 record("leaning", [])
+record("empty", [])
 record("default", [("elsewhere", "0001_initial")])
 before = {name: content(name) for name in ("fresh", "default", "bare")}
 found["each"] = read()
 found["unchanged"] = all(content(name) == kept for name, kept in before.items())
-found["closed"] = all(
-    connections[alias].connection is None for alias in ("default", "fresh", "bare")
-)
+found["closed"] = seen[-1]
 record("fresh", [("fresh", "0002_more"), ("fresh", "9999_ahead")])
 record(
     "default",
@@ -304,6 +364,7 @@ def test_each_state_of_an_app_s_migrations_has_its_id(
     assert migrations["each"] == sorted(
         [
             ["neolith.E008", "app bare: has a database and no migrations"],
+            ["neolith.E008", "app empty: has a database and no migrations"],
             ["neolith.E011", "app forked: conflicting migrations 0002_a, 0002_b"],
             [
                 "neolith.E009",
@@ -330,7 +391,7 @@ def test_the_read_writes_nothing_and_closes_its_connections(
     migrations: dict[str, Any],
 ) -> None:
     assert migrations["unchanged"] is True
-    assert migrations["closed"] is True
+    assert migrations["closed"] == ["neolith-boot", []]
 
 
 @pytest.mark.spec("APP-33", "APP-37")
@@ -566,3 +627,280 @@ def test_the_test_session_booted_without_reading_a_schema() -> None:
     assert kept.refusal is None
     # The suite's default is in memory, which Boot's read would refuse.
     assert settings.DATABASES["default"]["NAME"] == ":memory:"
+
+
+# No refusal hides another.
+
+_ALL = """
+import json
+import sqlite3
+import sys
+
+import django
+
+django.setup()
+
+from neolith import _boot
+
+ROOT, RECORDS = sys.argv[3:5]
+
+
+def record(name, rows, schema=RECORDS):
+    connection = sqlite3.connect(ROOT + "/" + name + ".sqlite3")
+    connection.execute(schema)
+    if rows:
+        connection.executemany(
+            "INSERT INTO django_migrations (app, name, applied) VALUES (?, ?, "
+            "'2026-01-01 00:00:00')",
+            rows,
+        )
+    connection.commit()
+    connection.close()
+
+
+FILL
+print(json.dumps(sorted([m.id, m.msg] for m in _boot.schema_messages())))
+"""
+
+
+def _schema(tmp_path: Path, hosted: list[str], fill: str) -> list[list[str]]:
+    databases = {
+        app.rpartition(".")[2]: {
+            "ENGINE": SQLITE,
+            "NAME": str(tmp_path / f"{app.rpartition('.')[2]}.sqlite3"),
+        }
+        for app in hosted
+    }
+    body = _ALL.replace("sys.argv[3:5]", repr([str(tmp_path), RECORDS])).replace(
+        "FILL", fill
+    )
+    printed = in_built_host(body, hosted, {"NEOLITH": {"DATABASES": databases}})
+    found: list[list[str]] = json.loads(printed.splitlines()[-1])
+    return found
+
+
+@pytest.mark.spec("APP-31", "APP-34", "APP-35")
+def test_a_refused_alias_hides_no_check_of_the_code(tmp_path: Path) -> None:
+    """E008 and E013 need no database, so an alias with no database still
+    gets them, beside its own E018."""
+    found = _schema(
+        tmp_path,
+        ["tests.boot_apps.fresh", "tests.boot_apps.bare", "tests.boot_apps.leaning"],
+        'record("fresh", [("fresh", "0001_initial"), ("fresh", "0002_more")])',
+    )
+    assert [id_ for id_, _ in found] == [
+        "neolith.E008",
+        "neolith.E013",
+        "neolith.E018",
+        "neolith.E018",
+    ]
+    assert found[1][1] == "app leaning: migration 0001_initial depends on fresh"
+
+
+@pytest.mark.spec("APP-34")
+def test_one_app_s_broken_graph_hides_no_other_app(tmp_path: Path) -> None:
+    found = _schema(
+        tmp_path,
+        ["tests.boot_apps.fresh", "tests.boot_apps.dangling"],
+        'record("fresh", [("fresh", "0001_initial")])\nrecord("dangling", [])',
+    )
+    assert [id_ for id_, _ in found] == ["neolith.E009", "neolith.E010"]
+    assert found[0][1].startswith("app fresh: database fresh has 1 unapplied")
+    assert found[1][1].startswith(
+        "app dangling: its migrations cannot be loaded: NodeNotFoundError: "
+    )
+
+
+def test_a_database_that_cannot_be_read_is_refused_for_each_label_on_it(
+    tmp_path: Path,
+) -> None:
+    found = _schema(
+        tmp_path,
+        ["tests.boot_apps.fresh", "tests.boot_apps.forked"],
+        'record("fresh", [], schema="CREATE TABLE django_migrations (x INTEGER)")\n'
+        'record("forked", [("forked", "0001_initial")])',
+    )
+    assert found[0] == [
+        "neolith.E011",
+        "app forked: conflicting migrations 0002_a, 0002_b",
+    ]
+    assert found[1][0] == "neolith.E012"
+    assert found[1][1].startswith("app fresh: database fresh cannot be read: ")
+
+
+# E010 is Django's own judgement, on the rows Django reads.
+
+_SQUASHED = """
+import itertools
+import json
+import sqlite3
+import sys
+
+import django
+
+django.setup()
+
+from django.db import connections
+from django.db.migrations.exceptions import InconsistentMigrationHistory
+from django.db.migrations.loader import MigrationLoader
+
+from neolith import _boot
+
+ROOT, RECORDS = sys.argv[3:5]
+PATH = ROOT + "/squashed.sqlite3"
+NAMES = ["0001_initial", "0002_two", "0001_squashed_0002_two", "0003_three"]
+found = []
+for size in range(len(NAMES) + 1):
+    for rows in itertools.combinations(NAMES, size):
+        connection = sqlite3.connect(PATH)
+        connection.execute(RECORDS)
+        connection.execute("DELETE FROM django_migrations")
+        connection.executemany(
+            "INSERT INTO django_migrations (app, name, applied) VALUES "
+            "('squashed', ?, '2026-01-01 00:00:00')",
+            [(name,) for name in rows],
+        )
+        connection.commit()
+        connection.close()
+        boot = [m.msg for m in _boot.schema_messages() if m.id == "neolith.E010"]
+        try:
+            MigrationLoader(connections["squashed"]).check_consistent_history(
+                connections["squashed"]
+            )
+        except InconsistentMigrationHistory as error:
+            django_says = ["app squashed: database squashed: " + str(error)]
+        else:
+            django_says = []
+        connections["squashed"].close()
+        found.append([list(rows), boot, django_says])
+print(json.dumps(found))
+"""
+
+
+@pytest.mark.spec("APP-34")
+def test_boot_judges_a_history_as_django_does_over_every_set_of_rows(
+    tmp_path: Path,
+) -> None:
+    """Every subset of a squashed app's rows: Boot refuses exactly the
+    histories Django's ``check_consistent_history`` refuses."""
+    path = tmp_path / "squashed.sqlite3"
+    record(path, [])
+    body = _SQUASHED.replace("sys.argv[3:5]", repr([str(tmp_path), RECORDS]))
+    printed = in_built_host(
+        body,
+        ["tests.boot_apps.squashed"],
+        {"NEOLITH": {"DATABASES": {"squashed": {"ENGINE": SQLITE, "NAME": str(path)}}}},
+    )
+    cases = json.loads(printed.splitlines()[-1])
+    assert len(cases) == 16
+    for rows, boot, django_says in cases:
+        assert boot == django_says, rows
+    # Both outcomes occur, so the comparison is not empty.
+    assert any(boot for _, boot, _ in cases)
+    assert any(not boot for _, boot, _ in cases)
+
+
+# Boot cannot hang, and always keeps an outcome.
+
+
+def test_a_handler_built_while_the_urlconf_loads_is_refused(tmp_path: Path) -> None:
+    record(tmp_path / "fresh.sqlite3", FRESH)
+    lines = _handler(tmp_path, ROOT_URLCONF="tests.reentrant_urls")
+    assert lines[0][:3] == ["1", "ImproperlyConfigured", "host: the host cannot boot:"]
+    assert lines[0][3] == (
+        "settings: ROOT_URLCONF tests.reentrant_urls cannot be imported: "
+        "ImproperlyConfigured: host: a handler was built while the host was "
+        "booting, such as by the URLconf as it was imported; build handlers once "
+        "Boot has ended"
+    )
+
+
+@pytest.mark.parametrize("raised", [KeyboardInterrupt, SystemExit, RuntimeError])
+def test_whatever_ends_boot_leaves_a_kept_outcome(
+    monkeypatch: pytest.MonkeyPatch, raised: type[BaseException]
+) -> None:
+    def run(*, schema: bool) -> str | None:
+        raise raised("stopped")
+
+    monkeypatch.setattr(_boot, "_kept", None)
+    monkeypatch.setattr(_boot, "_run", run)
+    expected = ImproperlyConfigured if issubclass(raised, Exception) else raised
+    with pytest.raises(expected):
+        _boot.boot()
+    kept = _boot._kept
+    assert kept is not None
+    assert kept.refusal is not None
+    assert f"{raised.__qualname__}: stopped" in kept.refusal
+    with pytest.raises(ImproperlyConfigured, match="stopped"):
+        _boot.boot()
+
+
+@pytest.mark.spec("APP-1")
+def test_a_urlconf_refusal_hides_no_schema_refusal(tmp_path: Path) -> None:
+    record(tmp_path / "fresh.sqlite3", [("fresh", "0001_initial")])
+    lines = _handler(tmp_path, ROOT_URLCONF="tests.no_such_urls")
+    assert lines[0][2:] == [
+        "host: the host cannot boot:",
+        "settings: ROOT_URLCONF tests.no_such_urls cannot be imported: "
+        "ModuleNotFoundError: No module named 'tests.no_such_urls'",
+        "(neolith.E009) app fresh: database fresh has 1 unapplied migrations, the "
+        "first is 0002_more; run the migrate step",
+    ]
+
+
+# neolith.W001 at set-up and again at Boot: each registration warned once,
+# or never when silenced.
+
+_WARNED = """
+import json
+import logging
+
+import django
+from django.core.handlers.wsgi import WSGIHandler
+
+logged = []
+
+
+class Keep(logging.Handler):
+    def emit(self, record):
+        logged.append(record.getMessage())
+
+
+logging.getLogger("neolith.host").addHandler(Keep())
+django.setup()
+at_set_up = list(logged)
+WSGIHandler()
+WSGIHandler()
+print(json.dumps([at_set_up, logged[len(at_set_up):]]))
+"""
+
+
+@pytest.mark.spec("APP-17", "APP-26")
+@pytest.mark.parametrize("silenced", [False, True])
+def test_each_admin_registration_is_warned_once_or_silenced(
+    tmp_path: Path, silenced: bool
+) -> None:
+    path = tmp_path / "default.sqlite3"
+    migrated(path, "contenttypes")
+    printed = in_built_host(
+        _WARNED,
+        host_apps.HOSTED,
+        {
+            "NEOLITH": {
+                "DATABASES": {"default": {"ENGINE": SQLITE, "NAME": str(path)}},
+                "UNDECLARED_APPS": ["django.contrib.contenttypes", "tests.boot_admin"],
+            },
+            "ROOT_URLCONF": "tests.boot_urls",
+            "SILENCED_SYSTEM_CHECKS": ["neolith.W001"] if silenced else [],
+        },
+    )
+    at_set_up, at_boot = json.loads(printed.splitlines()[-1])
+    warning = (
+        "(neolith.W001) tests.{}: admin class in no installed app; its views have "
+        "no calling app, and a contract call from them is refused"
+    )
+    if silenced:
+        assert (at_set_up, at_boot) == ([], [])
+    else:
+        assert at_set_up == [warning.format("boot_project_admin.LoadingAdmin")]
+        assert at_boot == [warning.format("boot_urls.ProjectAdmin")]
