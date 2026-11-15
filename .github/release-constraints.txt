@@ -1,0 +1,13 @@
+# Exact versions for the release build (.github/workflows/release.yml): the
+# installer, the build front end and twine, and the build backend with its
+# dependencies, which the isolated build reads through PIP_CONSTRAINT.
+# pyproject.toml keeps hatchling>=1.27 for anyone building from the sdist.
+pip==26.3
+build==1.6.1
+twine==7.0.0
+hatchling==1.33.0
+packaging==26.3
+pathspec==1.1.1
+pluggy==1.7.0
+tomlkit==0.15.2
+trove-classifiers==2026.9.21.13
