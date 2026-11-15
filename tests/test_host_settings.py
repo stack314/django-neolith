@@ -1023,9 +1023,9 @@ def test_set_up_refuses_a_silenced_host_error() -> None:
         ),
         (
             {"DATABASES": {"default": sqlite("/x")}},
-            "DATABASES differs from what the host builds: ['default'] is a "
-            "database, the host builds {} since default is not in "
-            'NEOLITH["DATABASES"]',
+            "DATABASES differs from what the host builds: ['default']['ENGINE'] is "
+            "'django.db.backends.sqlite3', the host builds "
+            "'django.db.backends.dummy'",
         ),
     ],
     ids=["routers", "an alias", "a real default"],
@@ -1050,29 +1050,45 @@ _BUILT_DATABASES = {"default": {}, "ledger": _LEDGER}
 
 
 @pytest.mark.parametrize(
-    ("found", "expected", "difference"),
+    ("found", "difference"),
     [
-        ({"default": {}}, _BUILT_DATABASES, "alias 'ledger' is missing"),
-        (
-            {**_BUILT_DATABASES, "x": {}},
-            _BUILT_DATABASES,
-            "alias 'x' is not one the host builds",
-        ),
+        ({"default": {}}, "alias 'ledger' is missing"),
+        ({**_BUILT_DATABASES, "x": {}}, "alias 'x' is not one the host builds"),
         (
             {"default": {}, "ledger": {**_LEDGER, "TEST": {}}},
-            _BUILT_DATABASES,
             "['ledger']['TEST']['DEPENDENCIES'] is missing",
         ),
         (
             {"default": {}, "ledger": {**_LEDGER, "TEST": []}},
-            _BUILT_DATABASES,
-            "['ledger']['TEST'] is a list, the host builds a dict",
+            "it cannot be read as Django reads it: AttributeError: ",
         ),
-        ([("default", {})], _BUILT_DATABASES, "it is a list, the host builds a dict"),
+        ([("default", {})], "it is a list, the host builds a dict"),
         (
             {"default": {}, "ledger": {**_LEDGER, "NAME": b"/l"}},
-            _BUILT_DATABASES,
             "['ledger']['NAME'] is b'/l', the host builds '/l'",
+        ),
+        (
+            {"default": {}, "ledger": {**_LEDGER, "ATOMIC_REQUESTS": True}},
+            "['ledger']['ATOMIC_REQUESTS'] is True, the host builds False",
+        ),
+        (
+            {
+                "default": {},
+                "ledger": {
+                    **_LEDGER,
+                    "TEST": {"DEPENDENCIES": [], "MIRROR": "default"},
+                },
+            },
+            "['ledger']['TEST']['MIRROR'] is 'default', the host builds None",
+        ),
+        (
+            {"default": {}, "ledger": {**_LEDGER, "SHARDS": 2}},
+            "['ledger']['SHARDS'] is not one the host builds",
+        ),
+        (
+            {"default": {"ENGINE": SQLITE, "NAME": "/d"}, "ledger": _LEDGER},
+            "['default']['ENGINE'] is 'django.db.backends.sqlite3', the host builds "
+            "'django.db.backends.dummy'",
         ),
         (
             {
@@ -1083,9 +1099,71 @@ _BUILT_DATABASES = {"default": {}, "ledger": _LEDGER}
                     "TEST": {"DEPENDENCIES": [], "CHARSET": None},
                 },
             },
-            _BUILT_DATABASES,
             None,
         ),
+    ],
+    ids=[
+        "an alias missing",
+        "an alias added",
+        "a nested key missing",
+        "a mapping replaced",
+        "the setting replaced",
+        "a value of another type",
+        "a key Django refuses in NEOLITH",
+        "a nested key Django refuses in NEOLITH",
+        "a key of no one",
+        "a real default in a closed host",
+        "keys Django fills in, with their default values",
+    ],
+)
+@pytest.mark.spec("APP-29")
+def test_databases_are_compared_as_django_serves_with_them(
+    found: object, difference: str | None
+) -> None:
+    from neolith._configure import databases_difference
+
+    found_difference = databases_difference(found, _BUILT_DATABASES)
+    if difference is None or not difference.endswith(": "):
+        assert found_difference == difference
+    else:
+        assert found_difference is not None
+        assert found_difference.startswith(difference)
+
+
+def _filled_keys() -> list[tuple[str, ...]]:
+    """Every key Django fills into an alias, at every depth."""
+    from django.db.utils import ConnectionHandler
+
+    filled = ConnectionHandler().configure_settings({"default": {}})["default"]
+    keys: list[tuple[str, ...]] = []
+    for key, value in filled.items():
+        if type(value) is dict and value:
+            keys.extend((key, inner) for inner in value)
+        else:
+            keys.append((key,))
+    return keys
+
+
+@pytest.mark.spec("APP-29")
+@pytest.mark.parametrize("path", _filled_keys(), ids=lambda path: ".".join(path))
+def test_every_key_django_fills_in_is_compared(path: tuple[str, ...]) -> None:
+    """A value other than Django's default, written after the builder, for
+    every key ``configure_settings`` fills in."""
+    from neolith._configure import databases_difference
+
+    found: dict[str, Any] = copy.deepcopy(_BUILT_DATABASES)
+    target: dict[str, Any] = found["ledger"]
+    for part in path[:-1]:
+        target = target.setdefault(part, {})
+    target[path[-1]] = object()
+    difference = databases_difference(found, _BUILT_DATABASES)
+    assert difference is not None
+    assert "".join(f"[{part!r}]" for part in path) in difference
+
+
+@pytest.mark.parametrize(
+    ("found", "expected", "difference"),
+    [
         (("neolith",), ["neolith"], "it is a tuple, the host builds a list"),
         (["neolith", "x"], ["neolith"], "it has 2 entries, the host builds 1"),
         ([1], ["1"], "entry 0 is 1, the host builds '1'"),
@@ -1097,13 +1175,6 @@ _BUILT_DATABASES = {"default": {}, "ledger": _LEDGER}
         (["neolith"], ["neolith"], None),
     ],
     ids=[
-        "an alias missing",
-        "an alias added",
-        "a nested key missing",
-        "a mapping replaced",
-        "the setting replaced",
-        "a value of another type",
-        "keys Django fills in",
         "a tuple for a list",
         "an entry added",
         "an entry of another type",
@@ -1456,8 +1527,14 @@ def test_a_read_at_import_is_refused_by_django_where_no_settings_exist(
         (
             'DATABASES["default"] = {"ENGINE": "django.db.backends.sqlite3", '
             '"NAME": "x"}\n',
-            "DATABASES differs from what the host builds: ['default'] is a database, "
-            'the host builds {} since default is not in NEOLITH["DATABASES"]',
+            "DATABASES differs from what the host builds: ['default']['ENGINE'] is "
+            "'django.db.backends.sqlite3', the host builds "
+            "'django.db.backends.dummy'",
+        ),
+        (
+            'DATABASES["default"]["ATOMIC_REQUESTS"] = True\n',
+            "DATABASES differs from what the host builds: "
+            "['default']['ATOMIC_REQUESTS'] is True, the host builds False",
         ),
         (
             "DATABASE_ROUTERS = []\n",
@@ -1465,7 +1542,12 @@ def test_a_read_at_import_is_refused_by_django_where_no_settings_exist(
             "the host builds 1",
         ),
     ],
-    ids=["INSTALLED_APPS", "DATABASES", "DATABASE_ROUTERS"],
+    ids=[
+        "INSTALLED_APPS",
+        "DATABASES",
+        "a key of DATABASES the host did not write",
+        "DATABASE_ROUTERS",
+    ],
 )
 def test_a_settings_module_changed_after_the_builder_call_stops_the_host(
     project: Callable[..., Path], below: str, difference: str

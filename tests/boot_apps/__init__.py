@@ -13,7 +13,12 @@
 - ``leandang``: a migration that depends on one of ``dangling``;
 - ``unknowndep``: a migration that depends on an app that is not installed;
 - ``cyca`` and ``cycb``: two apps whose migrations depend on each other;
-- ``handlerbuilt``: a migration module that builds a handler.
+- ``handlerbuilt``: a migration module that builds a handler;
+- ``pusher``: a migration that runs before one of ``fresh``;
+- ``latest``, ``firstdep`` and ``swapper``: a migration that depends on
+  ``fresh``'s ``__latest__``, on its ``__first__``, and on the user model's
+  app through a swappable setting;
+- ``unmigdep``: a migration that depends on an app with no migrations.
 
 None has models: Boot reads migration records, not tables.
 """

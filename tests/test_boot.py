@@ -235,9 +235,22 @@ def test_a_project_s_own_sqlite_backend_is_judged_as_sqlite(tmp_path: Path) -> N
     assert read(lite, NAME=str(real)) == []
 
 
-def test_an_alias_on_another_backend_is_left_to_the_migration_read() -> None:
-    """Only SQLite has the states before a schema; no connection is opened."""
-    entry = filled(ENGINE="django.db.backends.postgresql", NAME="x", HOST="nowhere")
+@pytest.mark.parametrize(
+    "engine",
+    [
+        "django.db.backends.postgresql",
+        "django.db.backends.mysql",
+        "django.db.backends.oracle",
+        "django.contrib.gis.db.backends.postgis",
+    ],
+)
+def test_an_alias_on_another_backend_is_left_to_the_migration_read(
+    engine: str,
+) -> None:
+    """Only SQLite has the states before a schema that APP-31 names; an
+    alias of any other vendor is judged by its migrations (APP-33), and no
+    connection is opened here."""
+    entry = filled(ENGINE=engine, NAME="x", HOST="nowhere")
     assert _boot.state_messages({"default": entry}) == ([], ["default"])
 
 
@@ -1059,4 +1072,53 @@ def test_conflicting_migrations_of_an_undeclared_app_on_default_are_refused(
             "neolith.E011",
             "app boot_undeclared: conflicting migrations 0002_a, 0002_b",
         ]
+    ]
+
+
+# E013 reads every edge Django's graph holds between two labels.
+
+_EDGES = """
+import json
+
+import django
+
+django.setup()
+
+from neolith import _boot
+
+edges = [m.msg for m in _boot.schema_messages() if m.id == "neolith.E013"]
+print(json.dumps(sorted(edges)))
+"""
+
+
+@pytest.mark.spec("APP-35")
+def test_every_edge_between_two_apps_is_refused(tmp_path: Path) -> None:
+    """Each source of an edge in Django's graph: a dependency by name, by
+    ``__latest__``, by ``__first__`` and through a swappable setting, and a
+    ``run_before``, from either side; a squash keeps to its own app. A
+    dependency on an app with no migrations makes no edge, and is not one."""
+    apps = ["fresh", "pusher", "latest", "firstdep", "swapper", "unmigdep", "squashed"]
+    printed = in_built_host(
+        _EDGES,
+        [f"tests.boot_apps.{app}" for app in apps],
+        {
+            "NEOLITH": {
+                "DATABASES": {
+                    alias: {"ENGINE": SQLITE, "NAME": str(tmp_path / alias)}
+                    for alias in ["default", *apps]
+                },
+                "UNDECLARED_APPS": [
+                    "django.contrib.contenttypes",
+                    "django.contrib.auth",
+                    "tests.plain_app",
+                ],
+            },
+        },
+    )
+    assert json.loads(printed.splitlines()[-1]) == [
+        "app firstdep: migration 0001_initial depends on fresh",
+        "app fresh: migration 0001_initial depends on pusher",
+        "app latest: migration 0001_initial depends on fresh",
+        "app pusher: migration 0001_initial runs before fresh",
+        "app swapper: migration 0001_initial depends on auth",
     ]
