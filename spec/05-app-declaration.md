@@ -78,7 +78,7 @@ A host running one app is a detached deployment. A host running several is a sha
 
 **APP-17.** When it loads its apps, a host MUST warn about each registration of the framework's generic data views, such as an administration site, whose code is in no app, since a call made from those views has no calling app and is refused ([02](02-transports.md), TRN-58).
 
-**APP-26.** When it boots, a host MUST warn again about each such registration, including those made while it loaded the code that maps requests to views.
+**APP-26.** When it boots, a host MUST warn about each such registration it has not warned about yet, such as one made while it loaded the code that maps requests to views.
 
 Other code in no app that serves requests is found by the check before deployment, which a later step adds ([ADR 0022](../docs/adr/0022-the-app-host-builds-settings-and-checks-before-it-serves.md) Decisions 5 and 7).
 
