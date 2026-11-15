@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-2 -2 305.0 64" width="457.5" height="96" role="img" aria-label="neolith">
+  <title>neolith</title>
+  
+  <path d="M1 60L0 15L9 3L25 0L33 8L34 60Z" fill="#5fbfa8"/>
+  <g fill="none" stroke="#e6edf3" stroke-width="7.0" stroke-linecap="butt" stroke-linejoin="miter">
+    <path d="M55.5 20V60"/>
+    <path d="M55.5 60V40A16.5 16.5 0 0 1 88.5 40V60"/>
+    <path d="M104.5 40H137.5A16.5 16.5 0 1 0 133.26 51.04"/>
+    <path d="M153.5 40A16.5 16.5 0 1 1 186.5 40A16.5 16.5 0 1 1 153.5 40Z"/>
+    <path d="M202.5 0V60"/>
+    <path d="M218.5 20V60"/>
+    <path d="M239.5 4V60"/>
+    <path d="M231.0 23.5H252.0"/>
+    <path d="M264.5 0V60"/>
+    <path d="M264.5 60V40A16.5 16.5 0 0 1 297.5 40V60"/>
+  </g>
+  <circle cx="218.5" cy="8.5" r="4.5" fill="#5fbfa8"/>
+</svg>
