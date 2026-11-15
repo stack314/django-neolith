@@ -2,11 +2,7 @@
 
 Deploy Django apps, not Django projects.
 
-**Status: alpha, before 0.1. The API may change in any release.**
-
-```
-pip install --pre django-neolith
-```
+**Status: pre-alpha. Nothing is installable yet.**
 
 Neolith lets a Django app run inside a shared process or as its own service without changing its code. Apps talk to each other only through typed contracts, so the same code and the same tests hold in both arrangements.
 
