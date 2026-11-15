@@ -141,6 +141,18 @@ def test_every_refusal_found_by_reading_the_apps_is_reported_together() -> None:
     ]
 
 
+def test_refusals_of_reading_and_of_comparing_are_reported_together(
+    write_app: WriteApp,
+) -> None:
+    first = _declared(write_app, label='"twin"')
+    second = _declared(write_app, label='"twin"')
+    found = refusal([*HOSTED, "django.contrib.humanize", first, second], deployer())
+    assert found.splitlines() == [
+        "app django.contrib.humanize: has no declaration",
+        f"apps {first} and {second}: both have the label twin",
+    ]
+
+
 def test_an_app_that_cannot_be_read_is_refused_with_its_error() -> None:
     message = refusal([*HOSTED, "tests.no_such_app"], deployer())
     assert message.startswith(

@@ -449,13 +449,19 @@ print("logged", len(logged), sep="|")
 """
 
 
-def _handler(root: Path, fix: str = "pass", **deployer: object) -> list[list[str]]:
+def _handler(
+    root: Path, fix: str = "pass", *, extra: str = "", **deployer: object
+) -> list[list[str]]:
+    labels = ["fresh", *([extra] if extra else [])]
     neolith = {
-        "DATABASES": {"fresh": {"ENGINE": SQLITE, "NAME": str(root / "fresh.sqlite3")}}
+        "DATABASES": {
+            label: {"ENGINE": SQLITE, "NAME": str(root / f"{label}.sqlite3")}
+            for label in labels
+        }
     }
     printed = in_built_host(
         _HANDLER.replace("FIX", fix),
-        ["tests.boot_apps.fresh"],
+        [f"tests.boot_apps.{label}" for label in labels],
         {"NEOLITH": neolith, "ROOT_URLCONF": "tests.empty_urls", **deployer},
     )
     return [line.split("|") for line in printed.splitlines()]
@@ -698,16 +704,60 @@ def test_a_refused_alias_hides_no_check_of_the_code(tmp_path: Path) -> None:
 
 
 @pytest.mark.spec("APP-34")
-def test_one_app_s_broken_graph_hides_no_other_app(tmp_path: Path) -> None:
+def test_one_app_s_broken_migrations_hide_no_other_app(tmp_path: Path) -> None:
+    """Each app whose migrations do not load, or break the graph, gets its
+    own E010; an app that depends on one keeps its own E013; the others are
+    read as if the broken apps were absent."""
+    apps = [
+        "fresh",
+        "empty",
+        "dangling",
+        "leandang",
+        "importbroken",
+        "noclass",
+        "unknowndep",
+    ]
+    fill = "\n".join(f"record({app!r}, [])" for app in apps[1:])
     found = _schema(
         tmp_path,
-        ["tests.boot_apps.fresh", "tests.boot_apps.dangling"],
-        'record("fresh", [("fresh", "0001_initial")])\nrecord("dangling", [])',
+        [f"tests.boot_apps.{app}" for app in apps],
+        f'record("fresh", [("fresh", "0001_initial")])\n{fill}',
     )
-    assert [id_ for id_, _ in found] == ["neolith.E009", "neolith.E010"]
-    assert found[0][1].startswith("app fresh: database fresh has 1 unapplied")
-    assert found[1][1].startswith(
-        "app dangling: its migrations cannot be loaded: NodeNotFoundError: "
+    assert [(id_, msg.split(":")[0]) for id_, msg in found] == [
+        ("neolith.E008", "app empty"),
+        ("neolith.E009", "app fresh"),
+        ("neolith.E009", "app leandang"),
+        ("neolith.E010", "app dangling"),
+        ("neolith.E010", "app importbroken"),
+        ("neolith.E010", "app noclass"),
+        ("neolith.E010", "app unknowndep"),
+        ("neolith.E013", "app leandang"),
+    ]
+    causes = {msg.split(":")[0]: msg for id_, msg in found if id_ == "neolith.E010"}
+    assert "NodeNotFoundError" in causes["app dangling"]
+    assert "a migration module that does not import" in causes["app importbroken"]
+    assert "BadMigrationError" in causes["app noclass"]
+    assert "Dependency on unknown app: nosuchapp" in causes["app unknowndep"]
+    assert [
+        "neolith.E013",
+        "app leandang: migration 0001_initial depends on dangling",
+    ] in found
+
+
+@pytest.mark.spec("APP-34")
+def test_a_graph_no_app_can_be_given_stops_every_migration_read(
+    tmp_path: Path,
+) -> None:
+    """Two apps whose migrations depend on each other: no one label is to
+    blame, so one E010 stands for the graph, and no migration is read."""
+    found = _schema(
+        tmp_path,
+        ["tests.boot_apps.cyca", "tests.boot_apps.cycb", "tests.boot_apps.fresh"],
+        'record("fresh", [])\nrecord("cyca", [])\nrecord("cycb", [])',
+    )
+    assert [id_ for id_, _ in found] == ["neolith.E010"]
+    assert found[0][1].startswith(
+        "host: the migrations cannot be loaded: CircularDependencyError: "
     )
 
 
@@ -742,6 +792,7 @@ django.setup()
 
 from django.db import connections
 from django.db.migrations.exceptions import InconsistentMigrationHistory
+from django.db.migrations.executor import MigrationExecutor
 from django.db.migrations.loader import MigrationLoader
 
 from neolith import _boot
@@ -762,27 +813,47 @@ for size in range(len(NAMES) + 1):
         )
         connection.commit()
         connection.close()
-        boot = [m.msg for m in _boot.schema_messages() if m.id == "neolith.E010"]
+        boot = [
+            [m.id, m.msg]
+            for m in _boot.schema_messages()
+            if m.id in ("neolith.E009", "neolith.E010")
+        ]
+        connection = connections["squashed"]
         try:
-            MigrationLoader(connections["squashed"]).check_consistent_history(
-                connections["squashed"]
-            )
+            MigrationLoader(connection).check_consistent_history(connection)
         except InconsistentMigrationHistory as error:
-            django_says = ["app squashed: database squashed: " + str(error)]
+            django_says = [
+                ["neolith.E010", "app squashed: database squashed: " + str(error)]
+            ]
         else:
-            django_says = []
-        connections["squashed"].close()
+            executor = MigrationExecutor(connection)
+            plan = [
+                m.name
+                for m, backwards in executor.migration_plan(
+                    executor.loader.graph.leaf_nodes("squashed")
+                )
+                if not backwards
+            ]
+            django_says = [
+                [
+                    "neolith.E009",
+                    f"app squashed: database squashed has {len(plan)} unapplied "
+                    f"migrations, the first is {plan[0]}; run the migrate step",
+                ]
+            ] if plan else []
+        connection.close()
         found.append([list(rows), boot, django_says])
 print(json.dumps(found))
 """
 
 
-@pytest.mark.spec("APP-34")
+@pytest.mark.spec("APP-33", "APP-34")
 def test_boot_judges_a_history_as_django_does_over_every_set_of_rows(
     tmp_path: Path,
 ) -> None:
     """Every subset of a squashed app's rows: Boot refuses exactly the
-    histories Django's ``check_consistent_history`` refuses."""
+    histories Django's ``check_consistent_history`` refuses (E010), and
+    finds unapplied exactly what Django's own planner would apply (E009)."""
     path = tmp_path / "squashed.sqlite3"
     record(path, [])
     body = _SQUASHED.replace("sys.argv[3:5]", repr([str(tmp_path), RECORDS]))
@@ -795,8 +866,9 @@ def test_boot_judges_a_history_as_django_does_over_every_set_of_rows(
     assert len(cases) == 16
     for rows, boot, django_says in cases:
         assert boot == django_says, rows
-    # Both outcomes occur, so the comparison is not empty.
-    assert any(boot for _, boot, _ in cases)
+    # Every outcome occurs, so the comparison is not empty.
+    ids = {found[0] for _, boot, _ in cases for found in boot}
+    assert ids == {"neolith.E009", "neolith.E010"}
     assert any(not boot for _, boot, _ in cases)
 
 
@@ -815,6 +887,43 @@ def test_a_handler_built_while_the_urlconf_loads_is_refused(tmp_path: Path) -> N
     )
 
 
+def test_a_handler_built_by_a_migration_module_is_refused(tmp_path: Path) -> None:
+    """The migrations are read on Boot's own thread, which the guard covers
+    too: the module's import fails, and only its app is refused for it."""
+    lines = _handler(tmp_path, extra="handlerbuilt")
+    assert lines[0][:3] == ["1", "ImproperlyConfigured", "host: the host cannot boot:"]
+    assert any(
+        line.startswith(
+            "(neolith.E010) app handlerbuilt: its migrations cannot be loaded: "
+            "ImproperlyConfigured: host: a handler was built while the host was "
+            "booting"
+        )
+        for line in lines[0][3:]
+    ), lines[0]
+
+
+def test_testing_boot_inside_boot_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    ran: list[str] = []
+
+    def run(*, schema: bool) -> str | None:
+        try:
+            testing.boot()
+        except ImproperlyConfigured as error:
+            ran.append(str(error))
+        return None
+
+    monkeypatch.setattr(_boot, "_kept", None)
+    monkeypatch.setattr(_boot, "_run", run)
+    worker = threading.Thread(target=_boot.boot, daemon=True)
+    worker.start()
+    worker.join(30)
+    assert not worker.is_alive(), "Boot waited on itself"
+    assert ran == [
+        "host: a handler was built while the host was booting, such as by the "
+        "URLconf as it was imported; build handlers once Boot has ended"
+    ]
+
+
 @pytest.mark.parametrize("raised", [KeyboardInterrupt, SystemExit, RuntimeError])
 def test_whatever_ends_boot_leaves_a_kept_outcome(
     monkeypatch: pytest.MonkeyPatch, raised: type[BaseException]
@@ -830,9 +939,25 @@ def test_whatever_ends_boot_leaves_a_kept_outcome(
     kept = _boot._kept
     assert kept is not None
     assert kept.refusal is not None
+    assert not kept.tests
     assert f"{raised.__qualname__}: stopped" in kept.refusal
     with pytest.raises(ImproperlyConfigured, match="stopped"):
         _boot.boot()
+
+
+def test_a_stopped_test_boot_is_kept_as_a_test_boot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def run(*, schema: bool) -> str | None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(_boot, "_kept", None)
+    monkeypatch.setattr(_boot, "_run", run)
+    with pytest.raises(KeyboardInterrupt):
+        testing.boot()
+    kept = _boot._kept
+    assert kept is not None
+    assert kept.tests
 
 
 @pytest.mark.spec("APP-1")
@@ -904,3 +1029,34 @@ def test_each_admin_registration_is_warned_once_or_silenced(
     else:
         assert at_set_up == [warning.format("boot_project_admin.LoadingAdmin")]
         assert at_boot == [warning.format("boot_urls.ProjectAdmin")]
+
+
+@pytest.mark.spec("APP-34")
+def test_conflicting_migrations_of_an_undeclared_app_on_default_are_refused(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "default.sqlite3"
+    migrated(path, "contenttypes")
+    record(path, [("boot_undeclared", "0001_initial")])
+    body = _ALL.replace("sys.argv[3:5]", repr([str(tmp_path), RECORDS])).replace(
+        "FILL", ""
+    )
+    printed = in_built_host(
+        body,
+        host_apps.HOSTED,
+        {
+            "NEOLITH": {
+                "DATABASES": {"default": {"ENGINE": SQLITE, "NAME": str(path)}},
+                "UNDECLARED_APPS": [
+                    "django.contrib.contenttypes",
+                    "tests.boot_undeclared",
+                ],
+            }
+        },
+    )
+    assert json.loads(printed.splitlines()[-1]) == [
+        [
+            "neolith.E011",
+            "app boot_undeclared: conflicting migrations 0002_a, 0002_b",
+        ]
+    ]
