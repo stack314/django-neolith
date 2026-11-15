@@ -1,6 +1,6 @@
 # 05. App declaration and lifecycle
 
-**Status:** outline, except the form of a declaration, Resolve and Validate, the checks before Serve and an app's database, which are specified. The rest of the lifecycle becomes requirements with the host (#11).
+**Status:** outline, except the form of a declaration, Resolve and Validate, the checks before Serve, Configure, Boot and an app's database, which are specified. Serve and Drain become requirements with the host (#11).
 
 ## Declaration
 
@@ -78,7 +78,39 @@ A host running one app is a detached deployment. A host running several is a sha
 
 **APP-17.** When it loads its apps, a host MUST warn about each registration of the framework's generic data views, such as an administration site, whose code is in no app, since a call made from those views has no calling app and is refused ([02](02-transports.md), TRN-58).
 
-Other code in no app that serves requests is found by the checks that later steps add: when the host boots, and before deployment ([ADR 0022](../docs/adr/0022-the-app-host-builds-settings-and-checks-before-it-serves.md) Decisions 5 and 7).
+**APP-26.** When it boots, a host MUST warn again about each such registration, including those made while it loaded the code that maps requests to views.
+
+Other code in no app that serves requests is found by the check before deployment, which a later step adds ([ADR 0022](../docs/adr/0022-the-app-host-builds-settings-and-checks-before-it-serves.md) Decisions 5 and 7).
+
+### Configure
+
+The host builds its configuration from two inputs: the declarations of the apps it hosts, and what the deployer supplies. A part of the configuration that the declarations determine is the host's to build, never the deployer's to write.
+
+**APP-27.** A host MUST derive from the declarations which apps it installs, and which database each app's records live in.
+
+**APP-28.** A host MUST stop before it serves when the deployer's input states a part of the configuration that the host derives.
+
+**APP-29.** A host MUST stop before it serves when the configuration it would serve with differs, in a part it derives, from what it derived.
+
+**APP-30.** A deployer's instruction to silence a diagnostic MUST NOT silence a refusal that stops the host.
+
+### Boot
+
+Boot reads the state of each database the host was configured with, and of each app's schema in its own database. It reads only; schema changes are the separate step of the lifecycle above.
+
+**APP-31.** A host MUST stop before it serves when one of its databases holds no schema, such as a database that nothing has created yet.
+
+**APP-32.** A host MUST stop before it serves when one of its databases is held in memory, since it is empty for a new connection or gone once its last connection closes.
+
+**APP-33.** A host MUST stop before it serves when a schema change of one of its apps has not been applied to the app's own database.
+
+**APP-34.** A host MUST stop before it serves when an app that declares a database resource has no schema changes, when its applied changes are inconsistent with the changes it ships, or when two of its changes conflict.
+
+**APP-35.** A host MUST stop before it serves when a schema change of an app depends on a schema change of another app.
+
+**APP-36.** A host MUST NOT write to a database while it checks the database and its schemas, beyond what the deployer's own connection settings run on each new connection.
+
+**APP-37.** A database that is ahead of an app's schema changes, holding changes the app does not ship, MAY be admitted, so that a host of the previous release can start during a rolling deployment.
 
 ### An app's database
 
