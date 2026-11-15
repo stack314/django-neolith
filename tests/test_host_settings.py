@@ -1130,6 +1130,73 @@ def test_databases_are_compared_as_django_serves_with_them(
         assert found_difference.startswith(difference)
 
 
+class _Opaque:
+    """A value that compares by identity and refuses to be copied, as an
+    SSL context does."""
+
+    def __deepcopy__(self, memo: object) -> "_Opaque":
+        raise TypeError("an opaque value is not copied")
+
+    def __reduce__(self) -> tuple[object, ...]:
+        raise TypeError("an opaque value is not pickled")
+
+
+def _places(value: object) -> list[dict[str, Any]]:
+    """``DATABASES`` with ``value`` at each place a deployer can put one."""
+    return [
+        {"default": {}, "ledger": {**_LEDGER, "OPTIONS": {"ssl": value}}},
+        {"default": {}, "ledger": {**_LEDGER, "OPTIONS": value}},
+        {"default": {"ENGINE": SQLITE, "NAME": "/d", "OPTIONS": {"c": [value]}}},
+        {
+            "default": {},
+            "ledger": {**_LEDGER, "TEST": {"DEPENDENCIES": [], "CHARSET": value}},
+        },
+    ]
+
+
+@pytest.mark.spec("APP-29")
+@pytest.mark.parametrize("place", range(4))
+def test_every_normalisation_keeps_one_value_equal_to_itself(place: int) -> None:
+    """E005 fills Django's defaults into both sides; a value given once is
+    the same object on both sides, so it is never a difference, however it
+    compares or copies."""
+    from neolith._configure import _difference, databases_difference
+
+    value = _Opaque()
+    databases = _places(value)[place]
+    assert databases_difference(databases, _places(value)[place]) is None
+    assert _difference([value], [value]) is None
+
+
+@pytest.mark.spec("APP-29")
+def test_an_options_value_that_compares_by_identity_builds_and_sets_up(
+    project: Callable[..., Path],
+) -> None:
+    """``OPTIONS`` values are compared as given, not copied, so a value that
+    compares by identity, such as an SSL context, sets up."""
+    directory = project(
+        _BUILD.format(apps=HOSTED),
+        above=textwrap.dedent(
+            """\
+            import ssl
+
+            NEOLITH = {
+                "DATABASES": {
+                    "default": {
+                        "ENGINE": "django.db.backends.sqlite3",
+                        "NAME": "unused.sqlite3",
+                        "OPTIONS": {"ssl": ssl.create_default_context()},
+                    }
+                },
+                "UNDECLARED_APPS": ["django.contrib.contenttypes"],
+            }
+            """
+        ),
+    )
+    ran = _run(directory, "manage.py", "check")
+    assert ran.returncode == 0, ran.stderr[-2000:]
+
+
 def _filled_keys() -> list[tuple[str, ...]]:
     """Every key Django fills into an alias, at every depth."""
     from django.db.utils import ConnectionHandler
