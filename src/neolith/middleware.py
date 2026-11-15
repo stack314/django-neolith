@@ -30,7 +30,7 @@ from django.core.exceptions import ImproperlyConfigured
 from django.http import FileResponse, HttpRequest, StreamingHttpResponse
 from django.http.response import HttpResponseBase
 
-from neolith import _checks, _context, _host
+from neolith import _boot, _checks, _context, _host
 from neolith._serving import label_of
 
 __all__ = ["RootMiddleware"]
@@ -62,7 +62,10 @@ class RootMiddleware:
     it behaves the same in both. Its constructor refuses a ``MIDDLEWARE``
     in which it is not the first entry, or in which this class is listed
     more than once under any path, and a process where the host is not set
-    up, so a handler is never built with it in the wrong place. A request
+    up, so a handler is never built with it in the wrong place. Then it
+    boots the host, once per process (ADR 0022 Decision 7): ``ROOT_URLCONF``
+    is set and imports, and every schema is current; a refusal is kept, so
+    every later handler in the process is refused alike. A request
     that arrives while the host is not set up, as under an override that
     leaves neolith out, is refused as well.
 
@@ -71,8 +74,9 @@ class RootMiddleware:
 
     Raises:
         ImproperlyConfigured: If ``MIDDLEWARE`` is not a list of str whose
-            first entry is this class, listed once, or if no set-up of the
-            host has passed.
+            first entry is this class, listed once, if no set-up of the
+            host has passed, or if Boot refuses, now or earlier in the
+            process.
     """
 
     sync_capable = True
@@ -85,6 +89,7 @@ class RootMiddleware:
             raise ImproperlyConfigured("\n".join(problems))
         if _host._current() is None:
             raise ImproperlyConfigured(_NO_HOST)
+        _boot.boot()
         self._get_response = get_response
         self._async = inspect.iscoroutinefunction(get_response)
         if self._async:

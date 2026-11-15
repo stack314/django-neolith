@@ -26,7 +26,18 @@ State the host owns (CONTRIBUTING K6), all of it guarded by one lock:
   dropping those its table knows; an unknown one stays, so the next set-up
   reports it again;
 - the hosted apps of the first set-up that passed, since a process hosts one
-  set of apps (ADR 0022 Decision 5).
+  set of apps (ADR 0022 Decision 5);
+- the ``NEOLITH`` that first set-up checked, without ``REQUEST_DEADLINE``,
+  which an override of ``NEOLITH`` is compared with: only the request
+  deadline may change after set-up (ADR 0022 Decision 3).
+
+The first set-up in a process also compares the settings Django holds with
+what the host builds for the installed declarations and ``settings.NEOLITH``
+(``neolith.E005``), so a change made after the builder ran stops the host.
+A receiver of ``setting_changed`` refuses an override of ``DATABASES`` or
+``DATABASE_ROUTERS`` after set-up, and an override of ``NEOLITH`` that the
+builder's table refuses or that changes a key other than
+``REQUEST_DEADLINE``; the request deadline follows an override that passes.
 """
 
 import contextlib
@@ -47,9 +58,10 @@ from django.apps.registry import Apps
 from django.conf import settings
 from django.core import checks
 from django.core.exceptions import ImproperlyConfigured
+from django.core.signals import setting_changed
 from pydantic import BaseModel
 
-from neolith import _checks, _context
+from neolith import _checks, _configure, _context
 from neolith._connector import Connector as Bound
 from neolith._connector import InProcess
 from neolith._context import Principal, UsageError
@@ -83,6 +95,8 @@ class Host:
     # The deadline of a request root, in seconds from the request's start, or
     # None for none: NEOLITH["REQUEST_DEADLINE"] as set-up checked it.
     request_deadline: float | None = _checks.DEFAULT_REQUEST_DEADLINE
+    # The warnings set-up logged, which Boot does not log again.
+    warned: frozenset[str] = frozenset()
 
 
 _LOCK: Final = threading.Lock()
@@ -91,6 +105,11 @@ _LOCK: Final = threading.Lock()
 _RECORDED: dict[str, dict[str, None]] = {}
 # The hosted apps of the first set-up that passed: label to config class.
 _first: Mapping[str, type[AppConfig]] | None = None
+# The NEOLITH the first set-up checked, without REQUEST_DEADLINE.
+_first_neolith: Mapping[str, object] | None = None
+_DEADLINE_KEY: Final = "REQUEST_DEADLINE"
+# The settings that cannot change after set-up, besides NEOLITH's keys.
+_FIXED: Final = ("DATABASES", "DATABASE_ROUTERS")
 
 
 @final
@@ -104,6 +123,7 @@ class HostConfig(AppConfig):
 
     def ready(self) -> None:
         _checks.register()
+        setting_changed.connect(_setting_changed, dispatch_uid="neolith.host")
         set_up(self)
 
 
@@ -158,7 +178,7 @@ def set_up(config: AppConfig) -> None:
     Acts only in Django's global registry: any other registry, such as one
     ``isolate_apps`` builds, is not a host (ADR 0021 Decision 8).
     """
-    global _first
+    global _first, _first_neolith
     registry = config.apps
     if registry is not global_apps:
         return
@@ -168,6 +188,15 @@ def set_up(config: AppConfig) -> None:
     # Run outside the lock, which a check must never need; judged inside it,
     # after Resolve and Validate, so their refusals come first.
     found = checks.run_checks(tags=[_checks.TAG])
+    with _LOCK:
+        first = _first is None
+    if first:
+        # Only at the first set-up: Django changes DATABASES in place later
+        # (ADR 0022 fact 11).
+        found += [
+            checks.Error(problem, id="neolith.E005")
+            for problem in _configure.settings_problems(configs)
+        ]
     with _LOCK:
         for identity, places in sorted(_RECORDED.items()):
             if identity not in host.known:
@@ -189,8 +218,66 @@ def set_up(config: AppConfig) -> None:
         deadline = _judge(found)
         if _first is None:
             _first = types.MappingProxyType(dict(hosted))
-        published = dataclasses.replace(host, request_deadline=deadline)
+            neolith: dict[str, object] = getattr(settings, "NEOLITH", {})
+            _first_neolith = types.MappingProxyType(
+                {k: v for k, v in neolith.items() if k != _DEADLINE_KEY}
+            )
+        warned = frozenset(
+            m.msg for m in found if m.level == checks.WARNING and not m.is_silenced()
+        )
+        published = dataclasses.replace(host, request_deadline=deadline, warned=warned)
         setattr(config, _HOST_ATTR, published)
+
+
+def _setting_changed(
+    *, setting: str, value: object, enter: bool, **kwargs: object
+) -> None:
+    """Keep the host's view of ``NEOLITH`` in step with an override, and
+    refuse an override of what cannot change after set-up (ADR 0022
+    Decision 3). Django ends an override whose receiver raises on entry.
+    """
+    if setting != "NEOLITH" and setting not in _FIXED:
+        return
+    with _LOCK:
+        baseline = _first_neolith
+    if baseline is None:
+        return
+    if setting in _FIXED:
+        if enter:
+            raise ImproperlyConfigured(
+                f"settings: {setting} cannot change after set-up"
+            )
+        return
+    hosted = _checks.hosted_declarations(global_apps.get_app_configs())
+    problems = _checks.neolith_problems(value, hosted)
+    if not problems:
+        given: dict[str, object] = value  # type: ignore[assignment]  # checked
+        others = {k: v for k, v in given.items() if k != _DEADLINE_KEY}
+        problems = [
+            f'NEOLITH["{key}"]: cannot change after set-up'
+            for key in sorted(baseline.keys() | others.keys())
+            if key not in baseline
+            or key not in others
+            or not _same(baseline[key], others[key])
+        ]
+    if problems:
+        if enter:
+            raise ImproperlyConfigured("\n".join(sorted(problems)))
+        return
+    config = global_apps.app_configs.get(_LABEL)
+    host = _host_of(config)
+    deadline = _checks.request_deadline(value)  # type: ignore[arg-type]
+    if host is not None and host.request_deadline != deadline:
+        setattr(
+            config, _HOST_ATTR, dataclasses.replace(host, request_deadline=deadline)
+        )
+
+
+def _same(first: object, second: object) -> bool:
+    try:
+        return type(first) is type(second) and bool(first == second)
+    except Exception:
+        return False
 
 
 def _judge(found: list[checks.CheckMessage]) -> float | None:

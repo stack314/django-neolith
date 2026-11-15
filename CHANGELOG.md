@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Host settings (spec 05, [ADR 0022](docs/adr/0022-the-app-host-builds-settings-and-checks-before-it-serves.md), [ADR 0009](docs/adr/0009-one-database-alias-per-app.md)): a settings module ends with `globals().update(neolith.host.build_settings([...], globals()))`. The builder reads each hosted app's declaration before settings exist and builds `INSTALLED_APPS` (hosted apps, `NEOLITH["UNDECLARED_APPS"]`, batteries, then `neolith`), `DATABASES` (`default`, `{}` in a closed host, and one alias per app with a database, from `NEOLITH["DATABASES"]`) and `DATABASE_ROUTERS`; it refuses those three in the deployer's input, an unknown `NEOLITH` key, an app whose import reads a setting and a silenced `neolith.E` id. A refusal is final for the process and leaves Django without settings. The first set-up compares the settings Django holds with what the host builds (`neolith.E005`), and set-up adds `neolith.E002` to `E004`, `E015` and `E016`; after set-up an override of `NEOLITH` may change `REQUEST_DEADLINE` only, and `DATABASES` and `DATABASE_ROUTERS` cannot change.
+- Boot (spec 05, [ADR 0022](docs/adr/0022-the-app-host-builds-settings-and-checks-before-it-serves.md) Decision 7): the root middleware's constructor boots the host once per process: `ROOT_URLCONF` is set and imports, `neolith.W001` runs again once the URLconf is loaded, and every schema is read, each hosted app's on its own alias and each app with migrations on a real `default`, refusing an in-memory or missing SQLite database, an unapplied, inconsistent or conflicting migration, a hosted app with a database and no migrations, and a migration that depends on another app (`neolith.E007` to `E013`, `E018`). The refusal is kept for the process. `neolith.testing.boot()` boots a test session without the schema read.
+
 ## [0.1.0a1] - 2026-11-16
 
 ### Added

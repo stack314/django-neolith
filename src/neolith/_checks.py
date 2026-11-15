@@ -7,15 +7,22 @@ input: set-up, through the system checks registered under the tag
 input is stated in its function; anything else is a problem, never a pass.
 
 The ids are the ones this step fixes from ADR 0022's working numbers:
-``neolith.E001`` for ``NEOLITH``, ``neolith.E006`` for ``MIDDLEWARE``,
+``neolith.E001`` for ``NEOLITH``, ``neolith.E002`` for
+``SILENCED_SYSTEM_CHECKS``, ``neolith.E003`` for a declared app installed
+as an undeclared app or a battery, ``neolith.E004`` for an undeclared app
+with models in a closed host, ``neolith.E006`` for ``MIDDLEWARE``,
 ``neolith.E014`` for a hosted app with models and no database,
-``neolith.E017`` for a table name that ``default`` shortened (ADR 0009) and
-``neolith.W001`` for an admin class in no installed app.
+``neolith.E015`` for a ``default`` that nothing lives on, ``neolith.E016``
+for a database cache in a closed host, ``neolith.E017`` for a table name
+that ``default`` shortened (ADR 0009) and ``neolith.W001`` for an admin
+class in no installed app. ``neolith.E005``, the comparison of the settings
+the host builds, runs at the first set-up only (``neolith._configure``),
+and Boot's ids are in ``neolith._boot``.
 """
 
 import math
 import sys
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import Any, Final
 
 from django.apps import AppConfig
@@ -25,24 +32,36 @@ from django.core import checks
 from django.db.backends.utils import strip_quotes
 from django.utils.module_loading import import_string
 
-from neolith._declaration import declaration_of
+from neolith import _databases
+from neolith._declaration import Declaration, declaration_of
 from neolith._serving import admin_code
 
 __all__ = [
     "DEFAULT_REQUEST_DEADLINE",
+    "KEYS",
+    "MISSING",
     "ROOT_MIDDLEWARE",
     "TAG",
     "admin_check",
+    "batteries",
     "database_check",
     "database_problems",
+    "default_check",
+    "default_problems",
+    "hosted_declarations",
+    "installed_check",
+    "installed_problems",
     "middleware_check",
     "middleware_problems",
     "neolith_check",
     "neolith_problems",
     "register",
     "request_deadline",
+    "silenced_check",
+    "silenced_problems",
     "table_name_check",
     "table_name_problems",
+    "with_database",
 ]
 
 TAG: Final = "neolith"
@@ -55,10 +74,13 @@ DEFAULT_REQUEST_DEADLINE: Final = 30.0
 _SHORTEST: Final = 0.001
 _LONGEST: Final = 9999999.999
 _DEADLINE: Final = 'NEOLITH["REQUEST_DEADLINE"]'
-# The keys of NEOLITH that exist so far. Later steps add theirs (ADR 0022
-# Decision 3).
-_KEYS: Final = ("REQUEST_DEADLINE",)
-_MISSING: Final = object()
+# The key table of NEOLITH (ADR 0022 Decision 3). ADR 0023 adds its key with
+# the principal backends.
+KEYS: Final = ("DATABASES", "REQUEST_DEADLINE", "UNDECLARED_APPS")
+# Stands for a setting that is absent.
+MISSING: Final = object()
+_MISSING: Final = MISSING
+_UNDECLARED: Final = 'NEOLITH["UNDECLARED_APPS"]'
 _SHOWN: Final = 80
 
 
@@ -85,16 +107,22 @@ def _shown_number(value: int | float) -> str:
     return repr(value)
 
 
-def middleware_problems(value: object) -> list[str]:
+def middleware_problems(value: object, *, by_class: bool = True) -> list[str]:
     """Judge ``MIDDLEWARE``: a ``list`` of ``str`` whose first entry is the
     root middleware, which is listed once (ADR 0022, the builder's table).
+    Pass ``MISSING`` for a setting that is absent.
 
-    Set-up, ``neolith.E006`` and the root middleware's constructor all run
-    this one function. "Once" is judged by class: every entry that imports
-    as the root middleware, under any path, or as a subclass of it, counts.
-    An entry that does not import is Django's to report when it builds the
-    handler. Every problem found is returned.
+    The builder, set-up (``neolith.E006``) and the root middleware's
+    constructor all run this one function. "Once" is judged by class: every
+    entry that imports as the root middleware, under any path, or as a
+    subclass of it, counts. An entry that does not import is Django's to
+    report when it builds the handler. The builder passes ``by_class=False``
+    and counts the root middleware's own path only, since it runs before
+    settings exist and imports nothing a deployer listed; set-up judges by
+    class before the host serves. Every problem found is returned.
     """
+    if value is MISSING:
+        return [f"MIDDLEWARE: is required; its first entry is {ROOT_MIDDLEWARE}"]
     if type(value) is not list:
         return [f"MIDDLEWARE: expected a list, got {_type(value)}"]
     entries: list[object] = value
@@ -106,7 +134,9 @@ def middleware_problems(value: object) -> list[str]:
     first = bool(entries) and type(entries[0]) is str and entries[0] == ROOT_MIDDLEWARE
     if not first:
         problems.append(f"MIDDLEWARE: {ROOT_MIDDLEWARE} must be the first entry")
-    count = sum(_is_root(entry) for entry in entries)
+    count = sum(
+        _is_root(entry) if by_class else entry == ROOT_MIDDLEWARE for entry in entries
+    )
     if count > 1:
         problems.append(f"MIDDLEWARE: {ROOT_MIDDLEWARE} is listed {count} times")
     return problems
@@ -145,10 +175,13 @@ def _deadline_problems(value: object) -> list[str]:
     return []
 
 
-def neolith_problems(value: object = _MISSING) -> list[str]:
+def neolith_problems(
+    value: object = _MISSING, hosted: Sequence[Declaration] = ()
+) -> list[str]:
     """Judge ``NEOLITH``: present, a ``dict`` whose keys are in the key
-    table, each with its one form (ADR 0022 Decision 3). Leave ``value`` out
-    when the setting is absent.
+    table, each with its one form (ADR 0022 Decision 3), against the
+    declarations of the hosted apps. Leave ``value`` out when the setting is
+    absent.
     """
     if value is _MISSING:
         return ["settings: NEOLITH is required; it is {} when nothing is set"]
@@ -158,13 +191,100 @@ def neolith_problems(value: object = _MISSING) -> list[str]:
     # Items are read, never looked up, so no key's own hooks run.
     entries: dict[object, object] = value
     for key, item in entries.items():
-        if type(key) is not str or key not in _KEYS:
+        if type(key) is not str or key not in KEYS:
             problems.append(
                 f"NEOLITH: unknown key {_shown_key(key)}; the keys are "
-                + ", ".join(sorted(_KEYS))
+                + ", ".join(sorted(KEYS))
             )
         elif key == "REQUEST_DEADLINE":
             problems.extend(_deadline_problems(item))
+        elif key == "DATABASES":
+            problems.extend(_databases.databases_problems(item, with_database(hosted)))
+        elif key == "UNDECLARED_APPS":
+            problems.extend(_undeclared_problems(item, hosted))
+    if "DATABASES" not in entries:
+        problems.extend(
+            f"app {label}: no connection settings for its database"
+            for label in with_database(hosted)
+        )
+    return problems
+
+
+def with_database(hosted: Iterable[Declaration]) -> list[str]:
+    """The labels of the hosted apps that declare the ``database``
+    resource, in order.
+    """
+    return [d.label for d in hosted if "database" in d.resources]
+
+
+def batteries(hosted: Iterable[Declaration]) -> dict[str, str]:
+    """Each battery, in the order the hosted apps name them, with the label
+    of the first app that names it.
+    """
+    found: dict[str, str] = {}
+    for declaration in hosted:
+        for battery in declaration.batteries:
+            found.setdefault(battery, declaration.label)
+    return found
+
+
+def _undeclared_problems(value: object, hosted: Sequence[Declaration]) -> list[str]:
+    """``NEOLITH["UNDECLARED_APPS"]``: a ``list`` of one or more ``str``,
+    each an ``INSTALLED_APPS`` entry, none twice, none a hosted app, a
+    battery or ``neolith``, each compared as written.
+    """
+    if type(value) is not list:
+        return [f"{_UNDECLARED}: expected a list of str, got {_type(value)}"]
+    entries: list[object] = value
+    if not entries:
+        return [f"{_UNDECLARED}: is empty; leave the key out"]
+    names = {d.name for d in hosted}
+    named = batteries(hosted)
+    problems: list[str] = []
+    seen: set[str] = set()
+    for index, entry in enumerate(entries):
+        if type(entry) is not str:
+            problems.append(
+                f"{_UNDECLARED}: entry {index}: expected a str, got {_type(entry)}"
+            )
+            continue
+        if entry in seen:
+            problems.append(f"{_UNDECLARED}: {entry} listed twice")
+            continue
+        seen.add(entry)
+        if entry == TAG:
+            problems.append(f"{_UNDECLARED}: neolith is installed by the host")
+        elif entry in names:
+            problems.append(f"{_UNDECLARED}: {entry} is a hosted app")
+        elif entry in named:
+            problems.append(
+                f"{_UNDECLARED}: {entry} is installed as a battery of {named[entry]}"
+            )
+    return problems
+
+
+def silenced_problems(value: object) -> list[str]:
+    """Judge ``SILENCED_SYSTEM_CHECKS``: absent, or a ``list`` of ``str`` with
+    no id of a host error, which stops the host and cannot be silenced (ADR
+    0022 Decision 2). Pass ``MISSING`` for a setting that is absent.
+    """
+    if value is MISSING:
+        return []
+    if type(value) is not list:
+        return [f"SILENCED_SYSTEM_CHECKS: expected a list, got {_type(value)}"]
+    problems: list[str] = []
+    entries: list[object] = value
+    for index, entry in enumerate(entries):
+        if type(entry) is not str:
+            problems.append(
+                f"SILENCED_SYSTEM_CHECKS: entry {index}: expected a str, got "
+                f"{_type(entry)}"
+            )
+        elif entry.startswith("neolith.E"):
+            problems.append(
+                f"SILENCED_SYSTEM_CHECKS: {_shown_key(entry)} is a host error and "
+                "cannot be silenced"
+            )
     return problems
 
 
@@ -195,14 +315,177 @@ def middleware_check(**kwargs: object) -> list[checks.CheckMessage]:
     ]
 
 
+def hosted_declarations(configs: Iterable[AppConfig]) -> list[Declaration]:
+    """The declarations of the installed apps that have one, in order."""
+    return [
+        found
+        for config in configs
+        if (found := declaration_of(type(config))) is not None
+    ]
+
+
 def neolith_check(**kwargs: object) -> list[checks.CheckMessage]:
     """``neolith.E001``: the ``NEOLITH`` setting."""
     if not _hosting():
         return []
+    hosted = hosted_declarations(global_apps.get_app_configs())
     return [
         checks.Error(problem, id="neolith.E001")
-        for problem in neolith_problems(getattr(settings, "NEOLITH", _MISSING))
+        for problem in neolith_problems(getattr(settings, "NEOLITH", _MISSING), hosted)
     ]
+
+
+def silenced_check(**kwargs: object) -> list[checks.CheckMessage]:
+    """``neolith.E002``: ``SILENCED_SYSTEM_CHECKS`` names no host error."""
+    if not _hosting():
+        return []
+    return [
+        checks.Error(problem, id="neolith.E002")
+        for problem in silenced_problems(
+            getattr(settings, "SILENCED_SYSTEM_CHECKS", MISSING)
+        )
+    ]
+
+
+def _checked_neolith() -> dict[str, Any] | None:
+    """``settings.NEOLITH`` when its form is one the checks below can read,
+    else ``None``, and ``neolith.E001`` reports it.
+    """
+    value = getattr(settings, "NEOLITH", MISSING)
+    if type(value) is not dict:
+        return None
+    hosted = hosted_declarations(global_apps.get_app_configs())
+    if neolith_problems(value, hosted):
+        return None
+    checked: dict[str, Any] = value
+    return checked
+
+
+def _has_models(config: AppConfig) -> bool:
+    return any(config.get_models(include_auto_created=True, include_swapped=True))
+
+
+def installed_problems(
+    configs: Iterable[AppConfig], neolith: dict[str, Any]
+) -> tuple[list[str], list[str]]:
+    """Judge the kinds of installed app against a checked ``NEOLITH``
+    (ADR 0022, the set-up table): ``neolith.E003`` problems, an app with a
+    declaration installed as an undeclared app or as a battery, and
+    ``neolith.E004`` problems, an app with models and no declaration in a
+    closed host, a host whose ``NEOLITH["DATABASES"]`` has no ``default``.
+    """
+    configs = list(configs)
+    hosted = hosted_declarations(configs)
+    named = batteries(hosted)
+    undeclared = set(neolith.get("UNDECLARED_APPS", ()))
+    closed = _databases.DEFAULT not in neolith.get("DATABASES", {})
+    declared: list[str] = []
+    stray: list[str] = []
+    for config in configs:
+        cls = type(config)
+        if declaration_of(cls) is not None:
+            entries = {config.name, f"{cls.__module__}.{cls.__qualname__}"}
+            if entries & undeclared:
+                declared.append(
+                    f"app {config.label}: has a declaration and is listed in "
+                    f"{_UNDECLARED}; name it among the host's apps"
+                )
+            if config.name in named:
+                declared.append(
+                    f"app {config.label}: has a declaration and is named as a "
+                    f"battery of {named[config.name]}; name it among the host's apps"
+                )
+        elif closed and config.label != TAG and _has_models(config):
+            battery = (
+                f"; it is a battery of {named[config.name]}"
+                if config.name in named
+                else ""
+            )
+            stray.append(
+                f"app {config.label}: has models and no declaration, and this host "
+                f"has no default database{battery}"
+            )
+    return sorted(declared), sorted(stray)
+
+
+def installed_check(**kwargs: object) -> list[checks.CheckMessage]:
+    """``neolith.E003`` and ``neolith.E004``: the kinds of installed app."""
+    if not _hosting():
+        return []
+    neolith = _checked_neolith()
+    if neolith is None:
+        return []
+    declared, stray = installed_problems(global_apps.get_app_configs(), neolith)
+    found: list[checks.CheckMessage] = [
+        checks.Error(p, id="neolith.E003") for p in declared
+    ]
+    return found + [checks.Error(p, id="neolith.E004") for p in stray]
+
+
+def _database_caches(caches: object) -> list[str]:
+    """The aliases of ``CACHES`` whose backend is Django's database cache or
+    a subclass of it. A backend that does not import is Django's to report
+    when the cache is first used, and is not one found here.
+    """
+    if type(caches) is not dict:
+        return []
+    from django.core.cache.backends.db import DatabaseCache
+
+    found: list[str] = []
+    entries: dict[object, object] = caches
+    for alias, entry in entries.items():
+        if type(alias) is not str or type(entry) is not dict:
+            continue
+        backend = entry.get("BACKEND")
+        if type(backend) is not str:
+            continue
+        try:
+            cls = import_string(backend)
+        except Exception:  # noqa: S112  # Django reports it at the cache's first use
+            continue
+        if issubclass(type(cls), type) and issubclass(cls, DatabaseCache):
+            found.append(alias)
+    return found
+
+
+def default_problems(
+    configs: Iterable[AppConfig], neolith: dict[str, Any], caches: object
+) -> tuple[list[str], list[str]]:
+    """Judge ``default`` against what lives on it (ADR 0009, the admitted
+    set): ``neolith.E015`` problems, a real ``default`` that no undeclared
+    app with models and no database cache lives on, and ``neolith.E016``
+    problems, a database cache in a closed host.
+    """
+    configs = list(configs)
+    cached = _database_caches(caches)
+    if _databases.DEFAULT in neolith.get("DATABASES", {}):
+        used = cached or any(
+            declaration_of(type(config)) is None and _has_models(config)
+            for config in configs
+        )
+        unused = [] if used else ["database default: nothing in this host lives on it"]
+        return unused, []
+    return [], [
+        f"cache {alias}: a database cache needs a default database, and this host "
+        "has none"
+        for alias in sorted(cached)
+    ]
+
+
+def default_check(**kwargs: object) -> list[checks.CheckMessage]:
+    """``neolith.E015`` and ``neolith.E016``: what lives on ``default``."""
+    if not _hosting():
+        return []
+    neolith = _checked_neolith()
+    if neolith is None:
+        return []
+    unused, cached = default_problems(
+        global_apps.get_app_configs(), neolith, getattr(settings, "CACHES", None)
+    )
+    found: list[checks.CheckMessage] = [
+        checks.Error(p, id="neolith.E015") for p in unused
+    ]
+    return found + [checks.Error(p, id="neolith.E016") for p in cached]
 
 
 def admin_check(**kwargs: object) -> list[checks.CheckMessage]:
@@ -354,9 +637,12 @@ def register() -> None:
     """
     for check in (
         neolith_check,
+        silenced_check,
+        installed_check,
         middleware_check,
         admin_check,
         database_check,
+        default_check,
         table_name_check,
     ):
         checks.register(check, TAG)
