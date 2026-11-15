@@ -24,7 +24,6 @@ installed declarations and ``settings.NEOLITH``, and compared with the
 settings Django holds (``neolith.E005``).
 """
 
-import copy
 from collections.abc import Iterable, Sequence
 from typing import Any, Final
 
@@ -287,12 +286,22 @@ def settings_problems(configs: Iterable[AppConfig]) -> list[str]:
 
 
 def _filled(databases: dict[str, Any]) -> dict[str, Any]:
-    """``databases`` as Django serves with it: a copy, with the defaults
+    """``databases`` as Django serves with it, with the defaults
     ``ConnectionHandler.configure_settings`` fills in.
+
+    Only the levels that function writes are copied: each alias's dict, and
+    its ``TEST`` dict when that is a dict. Every other value, ``OPTIONS``
+    among them, is the one given, so a value that compares by identity, or
+    cannot be copied, such as an SSL context, is still equal to itself.
     """
-    filled: dict[str, Any] = ConnectionHandler().configure_settings(
-        copy.deepcopy(databases)
-    )
+    copied: dict[str, Any] = {}
+    for alias, entry in databases.items():
+        if type(entry) is dict:
+            entry = dict(entry)
+            if type(entry.get("TEST")) is dict:
+                entry["TEST"] = dict(entry["TEST"])
+        copied[alias] = entry
+    filled: dict[str, Any] = ConnectionHandler().configure_settings(copied)
     return filled
 
 
