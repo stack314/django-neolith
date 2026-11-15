@@ -284,9 +284,11 @@ def test_the_option_works_when_the_report_already_exists(
     for source in [
         ROOT / "pyproject.toml",
         *ROOT.glob("scripts/*.py"),
+        # The suite's settings build the test host from its apps, so every
+        # module but the tests themselves comes along.
         *(
             path
-            for path in ROOT.glob("tests/*.py")
+            for path in ROOT.glob("tests/**/*.py")
             if not path.name.startswith("test_")
         ),
     ]:
