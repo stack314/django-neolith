@@ -98,7 +98,7 @@ The host builds its configuration from two inputs: the declarations of the apps 
 
 Boot reads the state of each database the host was configured with, and of each app's schema in its own database. It reads only; schema changes are the separate step of the lifecycle above.
 
-**APP-31.** A host MUST stop before it serves when one of its databases holds no schema, such as a database that nothing has created yet.
+**APP-31.** A host MUST stop before it serves when one of its SQLite databases holds no schema, such as a file that nothing has created yet.
 
 **APP-32.** A host MUST stop before it serves when one of its databases is held in memory, since it is empty for a new connection or gone once its last connection closes.
 
