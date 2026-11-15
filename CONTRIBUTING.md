@@ -2,7 +2,7 @@
 
 Thank you for considering a contribution. This document is the standard every pull request is reviewed against, including the maintainer's own. Each rule has an ID such as **K2**, so a review can say exactly which rule a change meets or misses.
 
-Neolith is young. Nothing is installable yet, and the specification and the reference implementation are being written together. That makes design discussion as valuable as code right now.
+Neolith is young. It is in alpha, and the specification and the reference implementation are being written together. That makes design discussion as valuable as code right now.
 
 Everyone taking part is expected to follow the [code of conduct](CODE_OF_CONDUCT.md).
 

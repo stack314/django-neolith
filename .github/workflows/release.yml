@@ -1,0 +1,138 @@
+name: Release
+
+# A pushed tag vX publishes version X to PyPI, once the built files pass the
+# checks below. Trusted publishing only: PyPI trusts this workflow and the
+# "release" environment, so no token is stored anywhere.
+on:
+  push:
+    tags: ["v*"]
+
+# Least privilege: nothing by default; each job asks for what it needs.
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  build:
+    name: Build and check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: The tag names the version in the source
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=$(python - <<'EOF'
+          import pathlib, re
+          text = pathlib.Path("src/neolith/__init__.py").read_text(encoding="utf-8")
+          print(re.search(r'^__version__ = "([^"]+)"$', text, re.MULTILINE)[1])
+          EOF
+          )
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::Tag $TAG does not match __version__ $version"
+            exit 1
+          fi
+      - name: Install the build tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "build==1.6.1" "twine==7.0.0"
+      # The wheel is built from the sdist, so a file missing from the sdist
+      # fails here.
+      - name: Build the sdist and the wheel
+        run: python -m build
+      - name: Check the metadata
+        run: python -m twine check --strict dist/*
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  smoke:
+    # ADR 0012: the floor and the newest supported pair, as in CI.
+    name: Smoke test, Python ${{ matrix.python }}, Django ${{ matrix.django }}
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions: {}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - python: "3.12"
+            django: "5.2"
+          - python: "3.15"
+            django: "6.1"
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist/
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+      # No checkout: the wheel is the only copy of neolith on this runner.
+      - name: Install the wheel into a clean venv
+        run: |
+          python -m venv venv
+          venv/bin/python -m pip install dist/*.whl "Django~=${{ matrix.django }}.0"
+      - name: Import neolith and set up Django with it
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          venv/bin/python - <<'EOF'
+          import importlib.metadata
+          import os
+          import pathlib
+
+          import django
+          from django.conf import settings
+
+          import neolith
+
+          version = os.environ["TAG"].removeprefix("v")
+          assert neolith.__version__ == version, neolith.__version__
+          assert importlib.metadata.version("django-neolith") == version
+          assert "site-packages" in pathlib.Path(neolith.__file__).parts
+
+          settings.configure(
+              INSTALLED_APPS=["neolith"],
+              MIDDLEWARE=["neolith.middleware.RootMiddleware"],
+              NEOLITH={},
+          )
+          django.setup()
+          print(f"neolith {neolith.__version__} on Django {django.get_version()}")
+          EOF
+
+  publish:
+    name: Publish to PyPI
+    needs: [build, smoke]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: release
+      url: https://pypi.org/project/django-neolith/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          attestations: true

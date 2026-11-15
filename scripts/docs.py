@@ -544,11 +544,11 @@ def requirements_page(
 
 
 def repo_url(root: Path) -> str:
-    """The repository on GitHub, from ``project.urls.Source``."""
+    """The repository on GitHub, from ``project.urls.Repository``."""
     with (root / "pyproject.toml").open("rb") as file:
-        url = tomllib.load(file)["project"]["urls"]["Source"]
+        url = tomllib.load(file)["project"]["urls"]["Repository"]
     if not isinstance(url, str):
-        raise DocsError("pyproject.toml: project.urls.Source is not a string")
+        raise DocsError("pyproject.toml: project.urls.Repository is not a string")
     return url.rstrip("/")
 
 

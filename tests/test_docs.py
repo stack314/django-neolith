@@ -1579,6 +1579,9 @@ _BAD_PAGES = {
     ),
 }
 _BAD_PATCH = """
+# Checked as a development build whatever __version__ says, so the rules that
+# hold only before a release (bad/install.md) are checked too.
+docs.development = lambda root: True
 site_init = neolith_docs._Site.__init__
 def patched(self, root):
     site_init(self, root)

@@ -17,7 +17,7 @@ requires-python = ">=3.12"
 # been run against.
 dependencies = ["Django>=5.2", "pydantic>=2.12,<3"]
 classifiers = [
-    "Development Status :: 2 - Pre-Alpha",
+    "Development Status :: 3 - Alpha",
     "Framework :: Django",
     "Framework :: Django :: 5.2",
     "Framework :: Django :: 6.1",
@@ -33,7 +33,7 @@ classifiers = [
 ]
 
 [project.urls]
-Source = "https://github.com/stack314/django-neolith"
+Repository = "https://github.com/stack314/django-neolith"
 Issues = "https://github.com/stack314/django-neolith/issues"
 Changelog = "https://github.com/stack314/django-neolith/blob/main/CHANGELOG.md"
 
