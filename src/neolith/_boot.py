@@ -27,8 +27,9 @@ The schema read, with the ids of ADR 0022's Boot table:
 - ``neolith.E018``: a SQLite alias with no database, or one with no schema.
 
 The checks of the code (E008, E011, E013) need no database and run for every
-hosted app; an app whose own migrations break Django's graph is left out of
-the graph, so it hides no other app. SQLite is known by the backend's
+hosted app; E013 reads what each migration declares. An app whose own
+migrations do not load, or break Django's graph, is left out of the graph
+with its own E010, so it hides no other app. SQLite is known by the backend's
 vendor, so a project's subclass of Django's backend is judged the same.
 
 It runs on a thread of its own and closes, on that thread, every connection
@@ -54,6 +55,7 @@ from django.core import checks
 from django.core.exceptions import ImproperlyConfigured
 from django.db import connections
 from django.db.migrations.exceptions import NodeNotFoundError
+from django.db.migrations.executor import MigrationExecutor
 from django.db.migrations.loader import MigrationLoader
 from django.db.migrations.recorder import MigrationRecorder
 from django.db.utils import load_backend
@@ -66,10 +68,11 @@ __all__ = ["boot", "boot_for_tests", "schema_messages", "state_messages"]
 
 _log = logging.getLogger("neolith.host")
 _LOCK: Final = threading.Lock()
-# Set on the thread that runs Boot, so a handler built while Boot runs on
-# that thread, such as one the URLconf builds at import, is refused instead
-# of waiting on the lock its own thread holds.
-_BOOTING: Final = threading.local()
+# The threads Boot runs on while it runs: the one that holds the lock and
+# the one that reads the schema. A handler built on either, such as by the
+# URLconf or a migration module as it is imported, is refused instead of
+# waiting on the lock that Boot holds.
+_BOOTING: Final[set[int]] = set()
 _SHOWN: Final = 300
 _NO_FILE: Final = (
     "the database is in memory, or nothing has created it yet (the migrate "
@@ -124,7 +127,7 @@ def boot() -> None:
 
 
 def _not_booting() -> None:
-    if getattr(_BOOTING, "active", False):
+    if threading.get_ident() in _BOOTING:
         raise ImproperlyConfigured(
             "host: a handler was built while the host was booting, such as by "
             "the URLconf as it was imported; build handlers once Boot has ended"
@@ -136,7 +139,7 @@ def _kept_run(*, schema: bool) -> str:
     ends the run, an outcome is kept: an unforeseen error, or a signal to
     stop, becomes the refusal, and the signal goes on.
     """
-    _BOOTING.active = True
+    _BOOTING.add(threading.get_ident())
     try:
         return _run(schema=schema) or ""
     except Exception as error:
@@ -148,7 +151,7 @@ def _kept_run(*, schema: bool) -> str:
         )
         raise
     finally:
-        _BOOTING.active = False
+        _BOOTING.discard(threading.get_ident())
 
 
 def boot_for_tests() -> None:
@@ -254,10 +257,13 @@ def schema_messages() -> list[checks.CheckMessage]:
     failure: list[BaseException] = []
 
     def read() -> None:
+        _BOOTING.add(threading.get_ident())
         try:
             outcome.append(_read(databases, hosted, undeclared))
         except BaseException as error:  # handed to the caller's thread
             failure.append(error)
+        finally:
+            _BOOTING.discard(threading.get_ident())
 
     thread = threading.Thread(target=read, name="neolith-boot")
     thread.start()
@@ -340,51 +346,88 @@ def _read(
 
 class _Loader(MigrationLoader):
     """Django's migration loader, leaving out the migrations of the labels
-    in ``excluded``, so that one app's broken graph hides no other app.
+    in ``excluded``, so that one app whose migrations break the graph hides
+    no other app. A dependency on a label left out is dropped from the
+    graph; it is still reported, from the migration's own declaration
+    (``neolith.E013``).
     """
 
-    def __init__(self, connection: Any, excluded: frozenset[str]) -> None:  # noqa: ANN401
+    def __init__(
+        self,
+        connection: Any,  # noqa: ANN401
+        excluded: frozenset[str],
+        *,
+        load: bool = True,
+    ) -> None:
         self._excluded = excluded
-        super().__init__(connection)
+        super().__init__(connection, load=load)
 
-    def load_disk(self) -> None:
-        super().load_disk()
-        for key in [k for k in self.disk_migrations if k[0] in self._excluded]:
-            del self.disk_migrations[key]
+    def migrations_module(self, app_label: str) -> tuple[str | None, bool]:  # type: ignore[override]
+        if app_label in self._excluded:
+            return None, False
+        found: tuple[str | None, bool] = super().migrations_module(app_label)
+        return found
+
+    def add_external_dependencies(self, key: Any, migration: Any) -> None:  # noqa: ANN401
+        kept = migration.dependencies
+        migration.dependencies = [d for d in kept if d[0] not in self._excluded]
+        try:
+            super().add_external_dependencies(key, migration)
+        except Exception as error:
+            raise _Broken(key[0], error) from error
+        finally:
+            migration.dependencies = kept
 
 
-def _origin(error: BaseException) -> str | None:
-    """The label of the migration whose dependency is missing, from Django's
-    ``NodeNotFoundError`` or the one it was raised from.
+class _Broken(Exception):
+    """An error in building the graph, with the label it belongs to."""
+
+    def __init__(self, label: str, error: Exception) -> None:
+        super().__init__(label)
+        self.label = label
+        self.cause = _cause(error)
+
+
+def _failing_label(excluded: frozenset[str]) -> str | None:
+    """The first label whose migrations do not load on their own, such as
+    a migration module that raises on import or holds no ``Migration``.
     """
-    for found in (error, error.__cause__):
-        origin = getattr(found, "origin", None)
-        label = getattr(origin, "app_label", None)
-        if type(label) is str:
+    labels = [config.label for config in global_apps.get_app_configs()]
+    for label in labels:
+        if label in excluded:
+            continue
+        others = frozenset(labels) - {label}
+        try:
+            _Loader(None, others, load=False).load_disk()
+        except Exception:
             return label
-        if type(origin) is tuple and origin and type(origin[0]) is str:
-            first: str = origin[0]
-            return first
     return None
 
 
 def _code_graph() -> tuple[MigrationLoader | None, dict[str, str], str | None]:
     """The migration graph of the installed apps, read from the code alone;
-    the labels left out because their own migrations break the graph, each
-    with the cause; and a cause that no label can be given, which leaves no
-    graph.
+    the labels left out because their own migrations do not load or break
+    the graph, each with the cause; and a cause that no label can be given,
+    which leaves no graph.
     """
     broken: dict[str, str] = {}
     for _ in range(len(list(global_apps.get_app_configs())) + 1):
+        excluded = frozenset(broken)
         try:
-            return _Loader(None, frozenset(broken)), broken, None
+            return _Loader(None, excluded), broken, None
+        except _Broken as error:
+            label: str | None = error.label
+            cause = error.cause
         except NodeNotFoundError as error:
-            label = _origin(error)
-            if label is None or label in broken:
-                return None, broken, _cause(error)
-            broken[label] = _cause(error)
+            # Django names the migration whose dependency is missing.
+            origin = getattr(error, "origin", None)
+            found = getattr(origin, "app_label", None)
+            label, cause = (found if type(found) is str else None), _cause(error)
         except Exception as error:
-            return None, broken, _cause(error)
+            label, cause = _failing_label(excluded), _cause(error)
+        if label is None:
+            return None, broken, cause
+        broken[label] = cause
     return None, broken, "the graph could not be built"
 
 
@@ -410,15 +453,18 @@ def _code_messages(code: MigrationLoader, label: str) -> list[checks.CheckMessag
                 f"{where}: has a database and no migrations", id="neolith.E008"
             )
         ]
-    graph = code.graph
+    # Read from what each migration declares, so that a dependency on an app
+    # left out of the graph is reported too.
     messages = [
         checks.Error(
-            f"{where}: migration {key[1]} depends on {parent.key[0]}",
+            f"{where}: migration {name} depends on {other}",
             id="neolith.E013",
         )
-        for key in sorted(k for k in graph.nodes if k[0] == label)
-        for parent in sorted(graph.node_map[key].parents, key=lambda n: n.key)
-        if parent.key[0] != label
+        for (owner, name), migration in sorted(code.disk_migrations.items())
+        if owner == label
+        for other in sorted(
+            {str(d[0]) for d in migration.dependencies if d[0] != label}
+        )
     ]
     return messages + _conflicts(code, label)
 
@@ -478,18 +524,25 @@ def _recorded(
     return messages
 
 
-def _unapplied(loader: MigrationLoader, label: str) -> list[str]:
-    """The names of the label's migrations that a forward migrate to its
-    leaves would apply, in order, as ``MigrationExecutor.migration_plan``
-    plans forwards: each node on the way to a leaf that is not applied.
+class _Executor(MigrationExecutor):
+    """Django's migration executor on a loader already built, so that its
+    own planner judges what is unapplied.
     """
-    applied = loader.applied_migrations
-    plan: list[tuple[str, str]] = []
-    for target in loader.graph.leaf_nodes(label):
-        for key in loader.graph.forwards_plan(target):
-            if key not in applied and key not in plan:
-                plan.append(key)
-    return [name for app, name in plan if app == label]
+
+    def __init__(self, connection: Any, loader: MigrationLoader) -> None:  # noqa: ANN401
+        self.connection = connection
+        self.loader = loader
+        self.recorder = MigrationRecorder(connection)
+        self.progress_callback = None
+
+
+def _unapplied(loader: MigrationLoader, label: str) -> list[str]:
+    """The names of the label's migrations that Django's own planner would
+    apply to reach the label's leaves, in order.
+    """
+    executor = _Executor(loader.connection, loader)
+    plan = executor.migration_plan(loader.graph.leaf_nodes(label))
+    return [m.name for m, backwards in plan if m.app_label == label and not backwards]
 
 
 def _state(
