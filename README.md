@@ -142,7 +142,16 @@ def place_order(sku: str, qty: int) -> int:
     return reply.reserved
 ```
 
-With `"inventory"`, `"shop"` and `"neolith"` in `INSTALLED_APPS`, a view in the shop app can call `place_order` directly; a command opens its root first, with `neolith.command_scope("shop")`.
+The settings neolith checks before the host serves, beside the project's usual ones such as `DATABASES`:
+
+```python
+# settings.py
+INSTALLED_APPS = ["inventory", "shop", "neolith"]
+MIDDLEWARE = ["neolith.middleware.RootMiddleware"]  # first, and listed once
+NEOLITH = {}
+```
+
+With these, a view in the shop app can call `place_order` directly; a command opens its root first, with `neolith.command_scope("shop")`. A test runs every Python block on this page under these settings.
 
 ## Roadmap
 
