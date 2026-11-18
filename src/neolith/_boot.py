@@ -362,8 +362,10 @@ def code_messages(
     ``E010``, ``E011`` and ``E013``; for each label of ``undeclared``, apps
     without a declaration on a real ``default``, ``E010``, ``E011``, and
     ``E013`` for a migration that depends on one of ``hosted``, whose records
-    live in another database. Also returns the labels of ``undeclared`` that
-    have migrations, in order.
+    live in another database. Django's ``migrate`` loads the whole graph and
+    judges conflicts over it, so ``E010`` and ``E011`` are given for every
+    other installed app as well. Also returns the labels of ``undeclared``
+    that have migrations, in order.
     """
     messages: list[checks.CheckMessage] = []
     code, broken, failure = _code_graph()
@@ -389,6 +391,14 @@ def code_messages(
             )
             messages.extend(_conflicts(code, label))
             migrated.append(label)
+    judged = {*hosted, *undeclared}
+    for config in global_apps.get_app_configs():
+        if config.label in judged:
+            continue
+        if config.label in broken:
+            messages.append(_unloadable(config.label, broken[config.label]))
+        elif code is not None:
+            messages.extend(_conflicts(code, config.label))
     return messages, migrated
 
 

@@ -27,9 +27,12 @@ in the arguments prints usage with status 2.
 import argparse
 import importlib
 import ipaddress
+import logging
 import os
 import re
+import socket
 import sys
+import traceback
 from collections.abc import Sequence
 from typing import Any, Final
 
@@ -41,15 +44,21 @@ __all__ = ["main", "parse_bind"]
 _DEFAULT_BIND: Final = "127.0.0.1:8000"
 _PORT: Final = re.compile(r"0|[1-9][0-9]{0,4}")
 _LABEL: Final = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
-_DIGITS: Final = re.compile(r"[0-9]+")
+# A label that a URL parser or the C resolver reads as a number (WHATWG
+# "ends in a number"), such as 1 or 0x7f.
+_NUMBER: Final = re.compile(r"[0-9]+|0[xX][0-9A-Fa-f]*")
+_SETTINGS: Final = "DJANGO_SETTINGS_MODULE"
+_UNSET: Final = "neolith._unset"
 _SHOWN: Final = 300
 
 
 def parse_bind(text: str) -> tuple[str, int, bool]:
     """Read ``--bind``: the host, the port, and whether the host is IPv6.
 
-    The host is an IPv4 address, a host name of RFC 1123 labels whose last
-    label is not all digits, or an IPv6 address in brackets with no zone.
+    The host is an IPv4 address in dotted decimal, a host name of RFC 1123
+    labels whose last label is not a number and which the C resolver does
+    not read as an IPv4 address in another spelling (``0x7f000001``), or an
+    IPv6 address in brackets with no zone.
     The port is 0 to 65535 in decimal with no leading zero; 0 lets the
     system choose.
 
@@ -89,11 +98,17 @@ def _host_name_or_ipv4(host: str) -> bool:
     else:
         return True
     labels = host.split(".")
-    return (
-        len(host) <= 253
-        and all(_LABEL.fullmatch(label) for label in labels)
-        and not _DIGITS.fullmatch(labels[-1])
-    )
+    if (
+        len(host) > 253
+        or not all(_LABEL.fullmatch(label) for label in labels)
+        or _NUMBER.fullmatch(labels[-1])
+    ):
+        return False
+    try:
+        socket.inet_aton(host)
+    except OSError:
+        return True
+    return False
 
 
 def _shown(text: str) -> str:
@@ -168,10 +183,46 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+class _SettingRead(ImproperlyConfigured):
+    """A setting was read while the command line read the deployer's module
+    or the apps' declarations, before settings exist.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "a setting was read before settings exist; neolith run and neolith "
+            "migrate read the deployer's module and each app's declaration "
+            "first, so neither may read a setting at import"
+        )
+
+
+class _HostLog(logging.Handler):
+    """The host's log under the command line. A refusal is printed once,
+    from the error raised, so an error the host logs is printed only for
+    the traceback it carries; a warning is printed as a line of its own.
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        from neolith import _server
+
+        try:
+            if record.levelno < logging.ERROR:
+                for line in record.getMessage().splitlines():
+                    _server.say(sys.stderr, f"neolith: warning: {line}")
+            elif record.exc_info:
+                _server.say(
+                    sys.stderr,
+                    "".join(traceback.format_exception(*record.exc_info)).rstrip(),
+                )
+        except Exception:
+            self.handleError(record)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the ``neolith`` command line; return the exit status."""
     arguments = _parser().parse_args(argv)
-    os.environ.pop("DJANGO_SETTINGS_MODULE", None)
+    os.environ.pop(_SETTINGS, None)
+    logging.getLogger("neolith.host").addHandler(_HostLog())
     try:
         if arguments.command == "run":
             return _run(arguments)
@@ -182,10 +233,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _report(refusal: BaseException) -> None:
+    from neolith import _server
+
     for line in str(refusal).splitlines() or [type(refusal).__qualname__]:
         if line:
-            sys.stderr.write(f"neolith: {line}\n")
-    sys.stderr.flush()
+            _server.say(sys.stderr, f"neolith: {line}")
 
 
 def _cause(error: BaseException) -> str:
@@ -203,12 +255,33 @@ def _set_up(arguments: argparse.Namespace, *, serving: bool) -> None:
     import django
     from django.conf import settings
 
+    name: str = arguments.settings
+    # Until settings exist, a read of a setting imports this module, which
+    # raises: Django's own advice, to set DJANGO_SETTINGS_MODULE, does not
+    # apply here.
+    os.environ[_SETTINGS] = _UNSET
+    try:
+        built = _built(name, list(arguments.apps))
+    finally:
+        os.environ.pop(_SETTINGS, None)
+    settings.configure(**built)
+    django.setup(set_prefix=not serving)
+
+
+def _built(name: str, apps: list[str]) -> dict[str, Any]:
+    """Import the deployer's module ``name`` and build the settings."""
+    from django.conf import settings
+
     from neolith import host
 
-    name: str = arguments.settings
     with host._deployer_import(name):
         try:
             module = importlib.import_module(name)
+        except _SettingRead as error:
+            raise ImproperlyConfigured(
+                f"settings: {_shown(name)} reads Django settings at import; it "
+                "holds the deployer's names, which are read before settings exist"
+            ) from error
         except ImproperlyConfigured as error:
             if error is host._refused:
                 raise
@@ -225,9 +298,7 @@ def _set_up(arguments: argparse.Namespace, *, serving: bool) -> None:
             "imported; it holds the deployer's names, which are read before "
             "settings exist"
         )
-    built = host._build(list(arguments.apps), vars(module), closed=True)
-    settings.configure(**built)
-    django.setup(set_prefix=not serving)
+    return host._build(apps, vars(module), closed=True)
 
 
 def _migrate(arguments: argparse.Namespace) -> int:
@@ -256,10 +327,8 @@ def _run(arguments: argparse.Namespace) -> int:
     server.set_app(handler)
     current = _host._current()
     bound = _server.drain_bound(current.request_deadline if current else None)
-    sys.stdout.write(
-        f"neolith: serving {', '.join(arguments.apps)} at "
-        f"http://{shown}:{server.server_port}/ with Django's development server, "
-        "which is not for production\n"
+    serving = (
+        f"serving {', '.join(arguments.apps)} at http://{shown}:{server.server_port}/ "
+        "with Django's development server, which is not for production"
     )
-    sys.stdout.flush()
-    return _server.serve(server, bound, sys.stdout, sys.stderr)
+    return _server.serve(server, bound, sys.stdout, sys.stderr, serving)

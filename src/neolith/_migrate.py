@@ -16,11 +16,15 @@ global registry, and refuses before it touches any database:
   migrations is migrated there, after the hosted apps, with the same
   ``E010`` and ``E011``, and ``E013`` for a migration that depends on a
   hosted app's, whose records live in another database; one without
-  migrations is skipped with a line that says so.
+  migrations is skipped with a line that says so;
+- every other installed app gets ``E010`` and ``E011`` too, since Django's
+  ``migrate`` loads the whole graph and judges conflicts over it.
 
 Then it runs Django's ``migrate <label> --database=<alias>`` for each, and
-stops at the first that fails, naming the labels migrated and not
-migrated. It neither boots nor serves.
+stops at the first that fails, naming the labels migrated, the label that
+failed with the migrations its database records as applied, which Django
+keeps for each migration that completed, and the labels not migrated. It
+neither boots nor serves.
 """
 
 from collections.abc import Callable, Sequence
@@ -32,6 +36,8 @@ from django.conf import settings
 from django.core import checks
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from django.db import connections
+from django.db.migrations.recorder import MigrationRecorder
 
 from neolith import _boot, _databases
 from neolith._declaration import declaration_of
@@ -107,7 +113,7 @@ def migrate(out: TextIOBase, *, verbosity: int) -> None:
             )
         except Exception as error:
             raise CommandError(
-                _failed(label, alias, error, done, [s[0] for s in steps[index:]])
+                _failed(label, alias, error, done, [s[0] for s in steps[index + 1 :]])
             ) from error
         done.append(label)
 
@@ -119,11 +125,28 @@ def _failed(
     done: Sequence[str],
     left: Sequence[str],
 ) -> str:
-    return (
-        f"app {label}: database {alias}: the migrate step failed: {_cause(error)}\n"
-        f"migrated: {', '.join(done) or 'none'}\n"
-        f"not migrated: {', '.join(left)}"
-    )
+    lines = [
+        f"app {label}: database {alias}: the migrate step failed: {_cause(error)}",
+        f"migrated: {', '.join(done) or 'none'}",
+        f"failed: {label}, {_applied(label, alias)}",
+    ]
+    if left:
+        lines.append(f"not migrated: {', '.join(left)}")
+    return "\n".join(lines)
+
+
+def _applied(label: str, alias: str) -> str:
+    """What the alias records as applied for ``label``, read after a
+    failure.
+    """
+    try:
+        rows = MigrationRecorder(connections[alias]).applied_migrations()
+    except Exception as error:
+        return f"whose applied migrations cannot be read: {_cause(error)}"
+    names = sorted(name for owner, name in rows if owner == label)
+    if not names:
+        return "with none of its migrations applied"
+    return f"with {', '.join(names)} applied"
 
 
 def _say(out: TextIOBase, verbosity: int) -> Callable[[str], None]:

@@ -37,6 +37,7 @@ server ``neolith run`` starts.
 """
 
 import contextlib
+import os
 import select
 import signal
 import socket
@@ -51,7 +52,7 @@ from django.core.servers.basehttp import ThreadedWSGIServer, WSGIRequestHandler
 
 from neolith import _checks
 
-__all__ = ["Connections", "drain_bound", "listen", "serve"]
+__all__ = ["Connections", "drain_bound", "listen", "say", "serve"]
 
 _SHOWN: Final = 200
 
@@ -265,8 +266,11 @@ class _Wake:
         self._write.close()
 
 
-def serve(server: _Server, bound: float, out: TextIO, err: TextIO) -> int:
+def serve(server: _Server, bound: float, out: TextIO, err: TextIO, serving: str) -> int:
     """Serve until a signal, then drain; return the exit status.
+
+    ``serving`` is printed once the signal handlers are in place, so a
+    signal sent by whoever reads it always drains.
 
     Runs in the main thread, where Python runs signal handlers; the accept
     loop and each connection run on threads of their own. A signal may be
@@ -293,6 +297,7 @@ def serve(server: _Server, bound: float, out: TextIO, err: TextIO) -> int:
         threading.Thread(
             target=server.serve_forever, name="neolith-serve", daemon=True
         ).start()
+        _say(out, serving)
         while not received:
             wake.wait(None)
         began = time.monotonic()
@@ -342,5 +347,22 @@ def _seconds(value: float) -> str:
 
 
 def _say(stream: TextIO, line: str) -> None:
-    stream.write(f"neolith: {line}\n")
-    stream.flush()
+    """Print a line of the host's, if the stream can still take it: a reader
+    that has gone changes nothing about how the host drains.
+    """
+    say(stream, f"neolith: {line}")
+
+
+def say(stream: TextIO, line: str) -> None:
+    """Write ``line`` to ``stream``. When the stream cannot take it, such as
+    a pipe whose reader has gone, it is pointed at the null device, so that
+    neither this write nor Python's flush at exit raises.
+    """
+    try:
+        stream.write(f"{line}\n")
+        stream.flush()
+    except (OSError, ValueError):
+        with contextlib.suppress(Exception):
+            null = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(null, stream.fileno())
+            os.close(null)

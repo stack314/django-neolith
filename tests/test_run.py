@@ -393,6 +393,13 @@ def test_bind_admits_an_address_and_a_port(
         "[127.0.0.1]:80",
         "[]:80",
         "[::1]:65536",
+        "0x7f000001:0",
+        "0x7f.0x0.0x0.0x1:0",
+        "127.0.0.0x1:0",
+        "0x0:0",
+        "1.2.3.0x:80",
+        "0177.0.0.1:80",
+        "a.0X1f:80",
     ],
 )
 def test_bind_refuses_anything_else(text: str) -> None:
@@ -423,8 +430,8 @@ def test_the_package_installs_one_console_script() -> None:
         ),
         (
             "from django.conf import settings\nsettings.DEBUG\n",
-            "neolith: settings: deployer cannot be imported: ImproperlyConfigured: "
-            "Requested setting DEBUG, but settings are not configured.",
+            "neolith: settings: deployer reads Django settings at import; it holds "
+            "the deployer's names, which are read before settings exist",
         ),
         (
             "from django.conf import settings\nsettings.configure()\n",
@@ -493,8 +500,9 @@ def test_the_environment_s_settings_module_is_ignored(site: Site) -> None:
     env = {**site.env(), "DJANGO_SETTINGS_MODULE": "whole"}
     ran = site.neolith("migrate", DESK, "--settings", "deployer", env=env)
     assert ran.returncode == 1
-    assert "Requested setting DEBUG, but settings are not configured" in ran.stderr
+    assert "neolith: settings: deployer reads Django settings at import" in ran.stderr
     assert "was read" not in ran.stderr
+    assert "DJANGO_SETTINGS_MODULE" not in ran.stderr
 
 
 # The phases, in order.
@@ -535,6 +543,9 @@ def test_a_phase_that_refuses_stops_the_host_before_the_next(
     printed = ran.stdout + ran.stderr
     assert f"neolith: {refusal.format(desk=site.database('desk'))}" in printed
     assert later not in printed
+    # Each refusal is printed once, as the command line prints it.
+    assert [line for line in ran.stderr.splitlines() if line], ran.stderr
+    assert all(line.startswith("neolith: ") for line in ran.stderr.splitlines())
     assert "neolith: serving" not in printed
 
 
@@ -626,15 +637,17 @@ def test_a_request_in_flight_finishes_and_nothing_new_is_served(
 ) -> None:
     site.deployer({"DATABASES": site.databases("desk"), "REQUEST_DEADLINE": LONG})
     assert site.migrate().returncode == 0
-    held = site.hold("a")
+    held, later = site.hold("a"), site.hold("z")
     host = served()
     port = host.serving()
     idle = connect(port)
     send(idle, "/ping/")
     assert response(idle) == (200, b"pong", None)
-    busy = connect(port)
+    busy, other = connect(port), connect(port)
     send(busy, "/hold/a/")
     held.wait_started()
+    send(other, "/hold/z/")
+    later.wait_started()
     host.stop(number)
     host.wait_for("neolith: draining: ")
     # No new connection, and the idle one is closed, so a request sent on
@@ -645,14 +658,84 @@ def test_a_request_in_flight_finishes_and_nothing_new_is_served(
     with contextlib.suppress(OSError):
         send(idle, "/ping/")
     assert closed_by_server(idle)
-    # The request in flight makes its contract call and finishes, and its
-    # connection closes after the response.
+    # A request in flight makes its contract call and finishes, and its
+    # connection closes after the response, while the host still waits for
+    # the other.
     held.let_go()
     assert response(busy)[:2] == (200, b"a 0")
     assert closed_by_server(busy)
+    assert host.process.poll() is None
+    later.let_go()
+    assert response(other)[:2] == (200, b"z 0")
     status, seen = host.ended()
     assert status == 0, seen
     assert "neolith: stopped; every request in flight finished" in lines(seen, "out")
+
+
+@pytest.mark.spec("APP-39", "APP-43")
+@pytest.mark.parametrize("attempt", range(3))
+def test_a_signal_sent_as_soon_as_the_host_says_it_serves_drains(
+    site: Site, served: Callable[..., Served], attempt: int
+) -> None:
+    site.deployer()
+    assert site.migrate().returncode == 0
+    host = served()
+    host.serving()
+    host.stop()
+    host.wait_for("neolith: draining: ")
+    status, seen = host.ended()
+    assert status == 0, seen
+
+
+@pytest.mark.spec("APP-41", "APP-43")
+def test_a_reader_that_has_gone_changes_nothing_about_drain(site: Site) -> None:
+    """A supervisor that stops reading the host's output, so that a line
+    the host prints meets a closed pipe."""
+    site.deployer({"DATABASES": site.databases("desk"), "REQUEST_DEADLINE": LONG})
+    assert site.migrate().returncode == 0
+    held = site.hold("p")
+    process = subprocess.Popen(  # noqa: S603
+        [
+            sys.executable,
+            "-W",
+            "error",
+            "-m",
+            "neolith",
+            "run",
+            DESK,
+            "--settings",
+            "deployer",
+            "--bind",
+            "127.0.0.1:0",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=site.root,
+        env=site.env(),
+    )
+    try:
+        assert process.stdout is not None
+        assert process.stderr is not None
+        line = process.stdout.readline()
+        port = int(line.split(" at http://", 1)[1].split("/", 1)[0].rsplit(":", 1)[1])
+        process.stdout.close()
+        client = connect(port)
+        send(client, "/hold/p/")
+        held.wait_started()
+        process.send_signal(signal.SIGTERM)
+        held.let_go()
+        assert response(client)[:2] == (200, b"p 0")
+        assert process.wait(timeout=_WAIT) == 0
+        errors = process.stderr.read()
+        assert "Traceback" not in errors, errors
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=_WAIT)
+        for stream in (process.stdout, process.stderr):
+            if stream is not None:
+                stream.close()
 
 
 @pytest.mark.spec("APP-41", "APP-43")
@@ -967,10 +1050,54 @@ def test_the_migrate_step_stops_at_the_first_failure_and_says_what_it_did(
         "neolith: app failing: database failing: the migrate step failed: "
         "RuntimeError: this migration fails on purpose",
         "neolith: migrated: desk",
-        "neolith: not migrated: failing, fresh",
+        "neolith: failed: failing, with none of its migrations applied",
+        "neolith: not migrated: fresh",
     ]
     assert "Migrating app fresh" not in ran.stdout
     assert not site.database("fresh").exists()
+
+
+@pytest.mark.spec("APP-49")
+def test_an_app_that_fails_partway_is_named_with_what_was_applied(
+    site: Site,
+) -> None:
+    site.deployer({"DATABASES": site.databases("half")})
+    ran = site.migrate("tests.run_apps.half")
+    assert ran.returncode == 1, ran.stderr
+    printed = [line for line in ran.stderr.splitlines() if line.startswith("neolith:")]
+    assert printed == [
+        "neolith: app half: database half: the migrate step failed: RuntimeError: "
+        "the second migration fails on purpose",
+        "neolith: migrated: none",
+        "neolith: failed: half, with 0001_initial applied",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("app", "refusal"),
+    [
+        (
+            "tests.run_apps.nodb",
+            "neolith: (neolith.E011) app nodb: conflicting migrations 0002_a, 0002_b",
+        ),
+        (
+            "tests.run_apps.dangles",
+            "neolith: (neolith.E010) app dangles: its migrations cannot be loaded: "
+            "NodeNotFoundError: ",
+        ),
+    ],
+    ids=["conflict", "missing dependency"],
+)
+def test_the_migrate_step_judges_every_app_s_migrations_as_django_does(
+    site: Site, app: str, refusal: str
+) -> None:
+    """Django's ``migrate`` loads the whole graph and judges conflicts over
+    it, so an app the step does not migrate would stop every app it does."""
+    site.deployer()
+    ran = site.migrate(DESK, app)
+    assert ran.returncode == 1, ran.stderr
+    assert any(line.startswith(refusal) for line in ran.stderr.splitlines()), ran.stderr
+    assert not site.database("desk").exists()
 
 
 # The migrate step in a host built by a settings module.
@@ -1102,7 +1229,7 @@ def test_every_ip_address_and_port_is_admitted_as_written(
 
 
 @pytest.mark.spec("APP-16")
-@given(text=st.text(alphabet="0123456789abfx:.[]%-_ \n", max_size=24))
+@given(text=st.text(alphabet="0123456789abfxX:.[]%-_ \n", max_size=24))
 def test_what_bind_admits_reads_back_as_written(text: str) -> None:
     """An admitted address is an IP address or a host name, and the port a
     number in range, written back exactly as given: nothing is trimmed,
@@ -1122,3 +1249,6 @@ def test_what_bind_admits_reads_back_as_written(text: str) -> None:
         labels = host.split(".")
         assert all(label and label[0] != "-" and label[-1] != "-" for label in labels)
         assert not labels[-1].isdigit()
+        # The resolver does not read it as an address in another spelling.
+        with pytest.raises(OSError, match="illegal IP address"):
+            socket.inet_aton(host)
