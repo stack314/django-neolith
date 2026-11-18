@@ -1,6 +1,7 @@
 # 0022. The app host builds settings from declarations, checks at app loading, and boots when a handler is built
 
 - **Status:** Accepted
+- Narrowed by [0025](0025-drain-counts-a-request-from-its-request-line.md) (Decision 1)
 - **Accepted:** 2026-11-12
 - **Date:** 2026-11-12
 

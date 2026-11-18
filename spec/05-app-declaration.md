@@ -1,6 +1,6 @@
 # 05. App declaration and lifecycle
 
-**Status:** outline, except the form of a declaration, Resolve and Validate, the checks before Serve, Configure, Boot and an app's database, which are specified. Serve and Drain become requirements with the host (#11).
+**Status:** outline, except the form of a declaration, Resolve and Validate, the checks before Serve, Configure, Boot, Serve and Drain, the schema step and an app's database, which are specified.
 
 ## Declaration
 
@@ -111,6 +111,42 @@ Boot reads the state of each database the host was configured with, and of each 
 **APP-36.** A host MUST NOT write to a database while it checks the database and its schemas, beyond what the deployer's own connection settings run on each new connection.
 
 **APP-37.** A database that is ahead of an app's schema changes, holding changes the app does not ship, MAY be admitted, so that a host of the previous release can start during a rolling deployment.
+
+### Serve and Drain
+
+A host serves once every phase before Serve has ended. Drain begins when the host is asked to shut down, and ends when it stops.
+
+**APP-38.** A host MUST NOT begin a phase before every phase above it in the lifecycle has ended without a refusal.
+
+**APP-39.** When Drain begins, a host MUST stop accepting connections.
+
+**APP-40.** A host MUST NOT serve a request that begins after Drain has begun, whether it arrives on a new connection or on one that was open before.
+
+**APP-41.** A host MUST let each request that is in flight when Drain begins run until it ends, or until the host's request deadline ([02](02-transports.md), TRN-59) has passed since Drain began, whichever comes first.
+
+**APP-42.** When the host has no request deadline, Drain MUST still end, after a bound the host documents.
+
+**APP-43.** A host MUST stop once no request is in flight, or once the bound has passed.
+
+**APP-44.** A host that stops while a request is still in flight MUST name each such request in its diagnostic, and end with an outcome that differs from a stop with none in flight.
+
+**APP-45.** A host that is asked to shut down a second time MAY stop at once.
+
+Every request in flight began before Drain did, so a call made while serving it, under the request root's deadline, ends before the bound. Work under a root that app code opens itself, with a deadline of its own or none, is not bounded by the request it runs in, and Drain can cut it. A call that arrives over a transport carries its caller's deadline, or none; what Drain gives it is open ([ADR 0022](../docs/adr/0022-the-app-host-builds-settings-and-checks-before-it-serves.md), open question 13).
+
+### The schema step
+
+Schema changes are applied by a step of their own, which the deployer runs before hosts that serve the apps start.
+
+**APP-46.** A host MUST NOT apply schema changes while it starts, serves or drains.
+
+**APP-47.** The schema step MUST refuse, before it changes any database, an app that declares a database resource and has no schema changes.
+
+**APP-48.** The schema step MUST refuse, before it changes any database, an app with a schema change that depends on a schema change of an app whose records live in another database.
+
+**APP-49.** When applying one app's schema changes fails, the schema step MUST stop before the next app, with a diagnostic that names the apps whose changes it applied and those whose changes it did not.
+
+**APP-50.** The schema step MUST offer a check that reports what Boot would refuse in each database and schema, and what the schema step would refuse before it changes a database, and writes to no database beyond what the deployer's own connection settings run on each new connection.
 
 ### An app's database
 
