@@ -1,6 +1,7 @@
 # 0021. An app declares itself in class attributes of its `NeolithAppConfig`, with contracts named by their declaration classes
 
 - **Status:** Accepted
+- Narrowed by [0026](0026-set-up-keeps-an-unknown-recorded-identity.md) (Decision 1)
 - **Accepted:** 2026-11-12
 - **Date:** 2026-11-12
 
