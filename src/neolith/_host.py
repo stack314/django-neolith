@@ -214,6 +214,7 @@ def _restored_elsewhere() -> Host | None:
     config = global_apps.app_configs.get(_LABEL)
     if type(config) is not HostConfig:
         return None
+    # safe read: a HostConfig of neolith's
     if vars(config).get(_LOADER_ATTR) == threading.get_ident():
         return None
     for stored in reversed(global_apps.stored_app_configs):
@@ -262,7 +263,7 @@ def set_up(config: AppConfig) -> None:
         _name_pending(list(configs))
         _ONCE_INSTALLED.update(c.name for c in configs)
         installed = frozenset(c.name for c in configs) | {
-            f"{type(c).__module__}.{type(c).__qualname__}" for c in configs
+            _naming.full_name(type(c), None) for c in configs
         }
         checked = _checked_by(installed)
         for identity, places in sorted(checked.items()):
@@ -437,7 +438,7 @@ def _config_key(config: AppConfig) -> str:
     kind = type(config)
     if kind is AppConfig:
         return config.name
-    return f"{kind.__module__}.{kind.__qualname__}"
+    return _naming.full_name(kind, None)
 
 
 def _name_pending(configs: Sequence[AppConfig]) -> None:
