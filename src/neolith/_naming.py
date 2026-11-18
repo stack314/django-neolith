@@ -239,18 +239,28 @@ def instance_dict(item: object) -> dict[Any, object] | None:
             return None
         if found is None:
             found = slot
-    own = None if found is None else found.__get__(item)
+    if found is None:
+        return None
+    try:
+        own = found.__get__(item)
+    except AttributeError:  # as getattr_static: no dict of its own
+        return None
     return own if type(own) is dict else None
 
 
 def module_dict(module: object) -> dict[str, Any] | None:
-    """A module's own dict, read through ``ModuleType``'s slot rather than
-    looked up on the module's class, or None for anything that is not a
-    module.
+    """A module's own dict, or None for anything that is not a module.
+
+    A plain module is read through ``ModuleType``'s slot. A module of a
+    subclass is read through its class, which is the module's own code,
+    already run by importing it: importlib's lazy module loads only when
+    read that way. What that read raises reaches the caller.
     """
     if not issubclass(type(module), types.ModuleType):
         return None
-    own = _MODULE_DICT.__get__(module)
+    own = _MODULE_DICT.__get__(module) if type(module) is types.ModuleType else None
+    if own is None:
+        own = vars(module)
     return own if type(own) is dict else None
 
 

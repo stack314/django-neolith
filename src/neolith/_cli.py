@@ -305,7 +305,12 @@ def _built(name: str, apps: list[str]) -> dict[str, Any]:
             "imported; it holds the deployer's names, which are read before "
             "settings exist"
         )
-    names = _naming.module_dict(module)
+    try:
+        names = _naming.module_dict(module)
+    except Exception as error:  # a lazy module loads as it is read
+        raise ImproperlyConfigured(
+            f"settings: {_shown(name)} cannot be read: {_cause(error)}"
+        ) from error
     if names is None:
         raise ImproperlyConfigured(
             f"settings: {_shown(name)} is a {_naming.type_name(module)}, not a module"

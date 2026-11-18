@@ -12,6 +12,8 @@ keep every name read in ``src/neolith`` going through ``neolith._naming``.
 """
 
 import ast
+import contextlib
+import importlib.util
 import inspect
 import re
 import sys
@@ -887,6 +889,10 @@ _SHADOWS: dict[str, dict[str, object]] = {
     "a property": {"__dict__": property(_raising_dict)},
     "another slot": {"__dict__": type.__dict__["__name__"]},
     "another class's slot": {"__dict__": vars(_Plain)["__dict__"]},
+    "a slot it has no dict for": {
+        "__slots__": (),
+        "__dict__": vars(_Plain)["__dict__"],
+    },
 }
 
 
@@ -898,7 +904,8 @@ def test_instance_dict_reads_an_instance_as_getattr_static_does() -> None:
     # Read exactly where getattr_static reads it, on each Python version.
     for body in _SHADOWS.values():
         shadowed = type("Shadow", (), body)()
-        object.__setattr__(shadowed, "x", 1)
+        with contextlib.suppress(AttributeError):  # a class with no dict
+            object.__setattr__(shadowed, "x", 1)
         read = inspect.getattr_static(shadowed, "x", None) == 1
         assert (_naming.instance_dict(shadowed) is not None) is read
 
@@ -927,6 +934,23 @@ def test_a_config_whose_class_shadows_its_dict_is_checked_as_it_is_loaded() -> N
     loaded = config("shop.other", package)
     with pytest.raises(DeclarationError, match="holds __dict__; remove it"):
         loaded.import_models()
+
+
+def test_a_lazily_loaded_module_is_read_with_its_names(tmp_path: Path) -> None:
+    source = tmp_path / "lazily.py"
+    source.write_text("NAME = 1\n")
+    spec = importlib.util.spec_from_file_location("lazily", source)
+    assert spec is not None
+    assert spec.loader is not None
+    loader = importlib.util.LazyLoader(spec.loader)
+    spec.loader = loader
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    names = _naming.module_dict(module)
+    assert names is not None
+    assert names["NAME"] == 1
+    assert _naming.module_dict(types.ModuleType("plain")) is not None
+    assert _naming.module_dict(Hostile()) is None
 
 
 # Every name read goes through neolith._naming.
