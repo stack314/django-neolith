@@ -15,7 +15,10 @@ it is raised. It builds the principal backends of
 build for ``neolith.E019``. Then it runs the host's system checks, those tagged
 ``neolith`` (``neolith._checks``): every error among them is raised in one
 ``ImproperlyConfigured``, whatever ``SILENCED_SYSTEM_CHECKS`` says, and each
-warning is logged. A set-up that passes publishes its table, with the
+warning is logged. It then builds the paths the host answers itself and
+the OpenAPI document of the provided contracts (``neolith._endpoint``); a
+document that cannot be built is a fault of neolith, which stops set-up. A
+set-up that passes publishes its table, with the
 request deadline read from ``NEOLITH``, on the ``neolith`` app config that
 ran it, so the table and the implementation instances belong to
 that set-up: a later set-up in the same process builds its own, and when an
@@ -66,7 +69,15 @@ from django.core.exceptions import ImproperlyConfigured
 from django.core.signals import setting_changed
 from pydantic import BaseModel
 
-from neolith import _caller, _checks, _configure, _context, _naming, _principal
+from neolith import (
+    _caller,
+    _checks,
+    _configure,
+    _context,
+    _endpoint,
+    _naming,
+    _principal,
+)
 from neolith._connector import Connector as Bound
 from neolith._connector import InProcess
 from neolith._context import Principal, UsageError
@@ -113,6 +124,9 @@ class Host:
     vary: tuple[str, ...] = ()
     # The caller backends and signing keys set-up built (ADR 0027).
     callers: _caller.Callers = _caller.NO_CALLERS
+    # The paths the host answers itself, and the OpenAPI document's bytes,
+    # built from the provided contracts (ADR 0011 Decisions 2 and 7).
+    endpoints: _endpoint.Endpoints = _endpoint.NO_ENDPOINTS
 
 
 _LOCK: Final = threading.Lock()
@@ -291,6 +305,10 @@ def set_up(config: AppConfig) -> None:
         warned = frozenset(
             m.msg for m in found if m.level == checks.WARNING and not m.is_silenced()
         )
+        try:
+            endpoints = _endpoint.table(host.connectors)
+        except ImproperlyConfigured as error:
+            _refuse(error)
         published = dataclasses.replace(
             host,
             request_deadline=deadline,
@@ -298,6 +316,7 @@ def set_up(config: AppConfig) -> None:
             principals=principals,
             vary=_principal.vary_of(principals),
             callers=callers,
+            endpoints=endpoints,
         )
         # Only a set-up that passes is done with the places it checked, all
         # of which its table knows. A refused one drops none, whatever its
