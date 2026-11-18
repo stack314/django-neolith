@@ -294,7 +294,9 @@ def settings_problems(configs: Iterable[AppConfig]) -> list[str]:
     sides, as ``ConnectionHandler.configure_settings`` fills them, by every
     key at every depth: the keys Django fills in are equal on both sides
     (ADR 0022 fact 11), and any other key added after the builder is
-    refused. A ``NEOLITH`` that its own check refuses is reported there and
+    refused. A difference inside it is named by its path, and neither value
+    is shown: an alias holds connection settings, a password among them
+    (K9). A ``NEOLITH`` that its own check refuses is reported there and
     not here.
     """
     hosted = _checks.hosted_declarations(list(configs))
@@ -341,6 +343,10 @@ def _filled(databases: dict[str, Any]) -> dict[str, Any]:
 def databases_difference(found: object, built: dict[str, Any]) -> str | None:
     """The first difference between ``DATABASES`` and what the host builds,
     with Django's defaults filled into both, or ``None``.
+
+    No value under an alias is shown, on either side (K9). An error raised
+    while the defaults are filled in is named by its class alone, since its
+    message may quote a value.
     """
     if found is _checks.MISSING:
         return "it is absent"
@@ -360,7 +366,7 @@ def databases_difference(found: object, built: dict[str, Any]) -> str | None:
     try:
         have = _filled(found)
     except Exception as error:
-        return f"it cannot be read as Django reads it: {_cause(error)}"
+        return f"it cannot be read as Django reads it: {_type(error)}"
     return _difference(have, _filled(built), whole=True)
 
 
@@ -374,6 +380,11 @@ def _difference(
     """The first difference between a setting and what the host builds, or
     ``None``. A mapping the host built is compared by its own keys only,
     unless ``whole``, when a key on either side alone is a difference.
+
+    A value inside a mapping is named by its path, ``where``, and is never
+    shown, on either side: the mapping the host builds is ``DATABASES``,
+    whose values are connection settings (K9). An entry of a list that is
+    the setting itself, an app or a router, is shown.
     """
     if found is _checks.MISSING:
         return "it is absent"
@@ -411,14 +422,19 @@ def _difference(
         items: list[object] = found
         for index, (have, want) in enumerate(zip(items, expected, strict=False)):
             if type(have) is not type(want) or have != want:
+                if where:
+                    return f"{where}[{index}] is not the value the host builds"
                 return f"entry {index} is {_repr(have)}, the host builds {want!r}"
         if len(items) != len(expected):
-            return f"it has {len(items)} entries, the host builds {len(expected)}"
+            return (
+                f"{where or 'it'} has {len(items)} entries, the host builds "
+                f"{len(expected)}"
+            )
         return None
     try:
         same = type(found) is type(expected) and found == expected
     except Exception:
         same = False
     if not same:
-        return f"{where} is {_repr(found)}, the host builds {_repr(expected)}"
+        return f"{where or 'it'} is not the value the host builds"
     return None
