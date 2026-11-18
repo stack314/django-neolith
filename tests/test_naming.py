@@ -21,7 +21,7 @@ from typing import Annotated, Any, NoReturn, Protocol, cast
 import pytest
 from django.core.management.base import CommandError
 from django.utils.functional import SimpleLazyObject
-from pydantic import Field, create_model
+from pydantic import Field, PrivateAttr, create_model
 
 import neolith
 from neolith import (
@@ -606,11 +606,49 @@ def test_a_default_holding_a_hostile_value_is_refused(key: str) -> None:
             declare_with_field(record)
 
 
+_PRIVATE = type(PrivateAttr())
+
+
+class _OwnPrivate(_PRIVATE):  # type: ignore[misc,valid-type]
+    pass
+
+
+_OwnPrivate.__qualname__ = Trap("_OwnPrivate")
+
+
+class _Unsigned:
+    """A factory whose signature raises an error that cannot be read."""
+
+    @property
+    def __signature__(self) -> NoReturn:
+        raise HostileError
+
+    def __call__(self) -> int:
+        return 0
+
+
+def test_a_private_attribute_with_hostile_parts_is_named() -> None:
+    renamed = create_model(
+        "Renamed", n=(int, 0), _p=(int, _OwnPrivate(default_factory=lambda: 0))
+    )
+    with pytest.raises(ContractDefinitionError, match="which is a _OwnPrivate, not"):
+        declare_with_field(renamed)
+    unsigned = create_model(
+        "Unsigned", n=(int, 0), _p=(int, PrivateAttr(default_factory=_Unsigned()))
+    )
+    with pytest.raises(
+        ContractDefinitionError,
+        match=re.escape("cannot be read (HostileError: <the message cannot be read>)"),
+    ):
+        declare_with_field(unsigned)
+
+
 # Every name read goes through neolith._naming.
 
 # Name reads on neolith's own objects, which no author can replace.
 _OWN_NAMES = {
     ("_checker.py", "kind.__module__"),
+    ("_frozen.py", "cls.__name__"),
     ("_contracts.py", "type(self).__name__"),
     ("_forms.py", "self.python_type.__name__"),
     ("_portable.py", "named.python_type.__name__"),

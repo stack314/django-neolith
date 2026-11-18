@@ -1495,7 +1495,7 @@ def _private_attribute_problem(cls: type[Any]) -> str | None:
         if type(attribute) is not _PRIVATE_ATTRIBUTE:
             return (
                 f"has the private attribute {name}, which is a "
-                f"{type(attribute).__qualname__}, not what Pydantic's "
+                f"{_naming.type_name(attribute)}, not what Pydantic's "
                 "PrivateAttr builds"
             )
         factory = attribute.default_factory
@@ -1514,7 +1514,7 @@ def _private_attribute_problem(cls: type[Any]) -> str | None:
         except Exception as error:  # an author's callable may raise anything
             return (
                 f"has the private attribute {name}, whose default factory's "
-                f"signature cannot be read ({type(error).__name__}: {error})"
+                f"signature cannot be read ({_naming.cause(error, None)})"
             )
         if takes_data or any(
             parameter.default is inspect.Parameter.empty
