@@ -14,7 +14,10 @@ principal already read, and a receiver kind that turns the network check on.
 
 import json
 import logging
+import os
+import subprocess
 import sys
+import time
 from collections.abc import Callable
 from datetime import date
 from typing import Annotated, Any, Protocol, cast
@@ -22,7 +25,13 @@ from typing import Annotated, Any, Protocol, cast
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
-from pydantic import AwareDatetime, BaseModel, Field, StringConstraints
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    BeforeValidator,
+    Field,
+    StringConstraints,
+)
 
 from neolith import CallContext, Contract, ContractDefinitionError, action, contract
 from neolith._connector import Failure, Provider
@@ -266,6 +275,10 @@ def test_the_network_receiver_refuses_text_that_is_not_i_json_at_any_depth(
             b"[" * 100_000 + b"]" * 100_000,
             "is nested too deeply to be read as JSON text",
         ),
+        (
+            b'{"later":' + b"1" * 4301 + b"}",
+            "holds a number outside the range of a double, at Order",
+        ),
     ],
     ids=[
         "duplicate-in-a-map",
@@ -276,6 +289,7 @@ def test_the_network_receiver_refuses_text_that_is_not_i_json_at_any_depth(
         "trailing-text",
         "encoded-surrogate",
         "deep",
+        "past-the-digits-int-reads",
     ],
 )
 def test_each_text_rule_names_itself(text: bytes, said: str) -> None:
@@ -483,6 +497,12 @@ def _agrees(
     """For a value drawn from the description, and each value made from it by
     replacing one part, at any depth, with a value next to that part or with
     any JSON value, the receiver admits what the reference validator admits.
+
+    The numbers drawn here are ones a double holds, and their bounds are far
+    below 2**53. Integer text that a double does not hold, which no sender
+    writes (TRN-11), is also held to each bound as its double, so there the
+    receiver can refuse what the reference admits
+    (test_integer_text_that_rounds_past_an_exclusive_bound_is_refused).
     """
     reference = _Reference(schema, format_checker=_FORMATS)
     valid = data.draw(admitted_by(_every_field(schema)))
@@ -778,3 +798,149 @@ def test_an_entry_named_like_a_key_error_is_an_entry() -> None:
     with pytest.raises(Refusal) as refused:
         codec(found, Nested).receive(b'{"nested":{"k1":{"[key]":"x"}}}', "x")
     assert ", at Nested.nested[entry 0][entry 0]: " in str(refused.value)
+
+
+# Review of #122: a deep text, the order of the walk, the double reading, and
+# what a validator's message may hold.
+
+_SMALL_STACK = """
+import sys, threading
+from typing import Protocol
+from pydantic import BaseModel
+from neolith import Contract, action, contract
+from neolith._crossing import Refusal, codec
+
+class Deep(BaseModel):
+    n: int = 0
+
+@contract("deep.v1")
+class Deeply(Protocol):
+    @action
+    def go(self, request: Deep) -> None: ...
+
+texts = [
+    b"[" * 5000 + b"]" * 5000,
+    b'{"a":' * 5000 + b"1" + b"}" * 5000,
+    b'["\\\\ud800",' + b"[" * 5000 + b"]" * 5000 + b"]",
+    b"[" + b"1" * 5000 + b"," + b"[" * 5000 + b"]" * 5000 + b"]",
+    b'["\\\\"[",' + b"[" * 5000,
+]
+said = []
+
+def run():
+    for text in texts:
+        try:
+            codec(Contract.of(Deeply), Deep).receive(text, "the request")
+        except Refusal as refusal:
+            said.append(str(refusal))
+
+threading.stack_size(128 * 1024)
+thread = threading.Thread(target=run)
+thread.start()
+thread.join()
+print("\\n".join(said))
+"""
+
+
+@pytest.mark.spec("CON-42")
+def test_a_deep_text_is_refused_on_a_small_thread_stack() -> None:
+    # musl's default thread stack is 128 KB, where the json module's reader
+    # ends the process on Python 3.12 and 3.13 before RecursionError, so the
+    # depth is bounded before it reads. A process of its own, since a crash
+    # would end the test run.
+    ran = subprocess.run(  # noqa: S603
+        [sys.executable, "-c", _SMALL_STACK],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={"PYTHONPATH": os.pathsep.join(sys.path)},
+    )
+    assert (ran.returncode, ran.stderr[-600:]) == (0, "")
+    assert (
+        ran.stdout.splitlines()
+        == ["the request is nested too deeply to be read as JSON text"] * 5
+    )
+
+
+@pytest.mark.spec("CON-42")
+@pytest.mark.parametrize("depth", [201, 256])
+def test_a_text_as_deep_as_a_reader_admits_is_read(depth: int) -> None:
+    # 201 levels is the deepest pydantic-core's reader admits; up to the
+    # bound, the json module reads the text and the description check, not
+    # the depth bound, decides.
+    text = b'{"later":' + b"[" * (depth - 1) + b"]" * (depth - 1) + b"}"
+    said = _receive(text)
+    if depth <= 201:
+        assert said is None
+    else:
+        assert said == "the request is nested too deeply to be read as JSON text"
+
+
+@pytest.mark.spec("CON-42")
+def test_brackets_in_strings_do_not_count_and_quotes_stay_cheap() -> None:
+    inside = '{"lines":[{"sku":"' + "[{" * 1000 + '\\"]\\\\"}]}'
+    assert _receive(inside.encode()) is None
+    # Many escaped quotes in a text whose string never ends: refused, fast.
+    started = time.monotonic()
+    said = _receive(b'{"lines":"' + b'\\"' * 500_000)
+    assert said == "the request is not JSON text"
+    assert time.monotonic() - started < 5
+
+
+@pytest.mark.spec("CON-42")
+@pytest.mark.parametrize(
+    ("text", "place"),
+    [
+        (b'{"lines":[{"sku":"\\ud800"}],"count":1,"count":2}', "Order"),
+        (b'{"lines":[{"qty":NaN},{"sku":"\\ud800"}]}', "Order.lines[0].qty"),
+        (b'{"lines":[{"sku":"\\ud800"}],"ratio":NaN}', "Order.lines[0].sku"),
+        (b'{"ratio":NaN,"lines":[{"sku":"\\ud800"}]}', "Order.ratio"),
+    ],
+)
+def test_the_first_problem_in_the_text_is_named(text: bytes, place: str) -> None:
+    # Members and items are walked in the order of the text; an object's own
+    # names are checked before its members, as the first test's text shows.
+    said = _receive(text)
+    assert said is not None
+    assert said.endswith(f", at {place}")
+
+
+class Below(BaseModel):
+    under: Annotated[float, Field(lt=2**60)] = 0.0
+
+
+@pytest.mark.spec("CON-39")
+def test_integer_text_that_rounds_past_an_exclusive_bound_is_refused() -> None:
+    # 2**60 - 1 is below the bound, but the double it reads as is not, so the
+    # validator would refuse it: the description check does, and says so.
+    found, schema = _contract_for(Below)
+    text = b'{"under":1152921504606846975}'
+    assert _Reference(schema, format_checker=_FORMATS).is_valid(json.loads(text))
+    with pytest.raises(Refusal) as refused:
+        codec(found, Below).receive(text, "the request")
+    assert str(refused.value) == (
+        "the request does not fit the contract's description of Below, at "
+        "Below.under: Input should be less than 1152921504606846976"
+    )
+    codec(found, Below).receive(b'{"under":1152921504606846720}', "the request")
+
+
+def _odd(value: object) -> object:
+    if type(value) is int and value % 2:
+        raise ValueError(f"the value {value} is odd")
+    return value
+
+
+class Even(BaseModel):
+    n: Annotated[int, BeforeValidator(_odd)] = 0
+
+
+@pytest.mark.spec("CON-39")
+def test_a_validators_own_message_is_never_shown() -> None:
+    found, _ = _contract_for(Even)
+    with pytest.raises(Refusal) as refused:
+        codec(found, Even).receive(b'{"n":77777}', "the request")
+    assert str(refused.value) == (
+        "the request does not read as a Even, at Even.n (value_error)"
+    )
+    assert codec(found, Even).receive(b'{"n":77776}', "the request").n == 77776

@@ -25,10 +25,10 @@ double it was written from. A ``-0`` is admitted: only a sender is bound to writ
 ``0`` (CON-35), and it converts the value before it writes the text.
 """
 
-import contextlib
 import json
 import math
 import operator
+import sys
 import typing
 from collections.abc import Callable, Mapping
 from datetime import UTC, date, datetime
@@ -206,10 +206,14 @@ def _typed(rest: dict[str, Any], refs: list[str]) -> CoreSchema:
         )
     if kind == "number":
         bounds = _Bounds(rest)
-        return core_schema.no_info_before_validator_function(
-            bounds.check,
-            core_schema.float_schema(strict=True, allow_inf_nan=False),
-        )
+        number = core_schema.float_schema(strict=True, allow_inf_nan=False)
+        if bounds.within_the_form:
+            # A finite double is within the form's range, and so is the
+            # double integer text reads as; integer text past the largest
+            # double is refused before this check (CON-42), and no sender
+            # writes it (TRN-11). So such a number needs no check of its own.
+            return number
+        return core_schema.no_info_before_validator_function(bounds.check, number)
     if kind == "boolean":
         return core_schema.bool_schema(strict=True)
     raise TypeError(f"type {kind!r} is not read")
@@ -315,6 +319,10 @@ _BOUNDS: tuple[tuple[str, str, str, Callable[[float, float], bool]], ...] = (
 )
 
 
+# The bounds every number's description states: the range of its form.
+_FORM_BOUNDS = {"minimum": -sys.float_info.max, "maximum": sys.float_info.max}
+
+
 class _Bounds:
     """The bounds of a number, which check each value the reader hands on.
 
@@ -326,34 +334,41 @@ class _Bounds:
     holds. A refusal shows the bound as the description writes it.
     """
 
-    __slots__ = ("_bounds",)
+    __slots__ = ("_bounds", "within_the_form")
 
     def __init__(self, rest: dict[str, Any]) -> None:
         """Take each bound keyword from ``rest``."""
         self._bounds: list[tuple[str, str, Callable[[float, float], bool], float]] = []
+        self.within_the_form = True
         for keyword, error, words, meets in _BOUNDS:
             written = rest.get(keyword)
             bound = _double(rest, keyword)
-            if bound is not None:
-                message = f"Input should be {words} {json.dumps(written)}"
-                self._bounds.append((error, message, meets, bound))
+            if bound is None:
+                continue
+            message = f"Input should be {words} {json.dumps(written)}"
+            self._bounds.append((error, message, meets, bound))
+            if _FORM_BOUNDS.get(keyword) != bound:
+                self.within_the_form = False
 
     def check(self, value: object) -> object:
         """Refuse a number outside a bound, and pass anything else on
         unchanged, for the number's own check to read.
         """
         kind = type(value)
+        exact: float | int
+        double: float | int
         if kind is int:
-            readings: tuple[float | int, ...] = (typing.cast(int, value),)
-            # Past every double, only its exact value is compared.
-            with contextlib.suppress(OverflowError):
-                readings += (float(typing.cast(int, value)),)
+            exact = typing.cast(int, value)
+            try:
+                double = float(exact)
+            except OverflowError:  # past every double: its exact value is
+                double = exact
         elif kind is float and math.isfinite(typing.cast(float, value)):
-            readings = (typing.cast(float, value),)
+            exact = double = typing.cast(float, value)
         else:
             return value
         for error, message, meets, bound in self._bounds:
-            if not all(meets(reading, bound) for reading in readings):
+            if not (meets(exact, bound) and meets(double, bound)):
                 raise PydanticCustomError(error, message)
         return value
 
