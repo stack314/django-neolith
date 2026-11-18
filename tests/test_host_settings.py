@@ -38,7 +38,7 @@ from neolith import DeclarationError, _checks, _host
 from neolith._configure import configure
 from neolith._declaration import declaration_of
 from tests import host_apps
-from tests.hosting import in_built_host, in_fresh_process
+from tests.hosting import NEOLITH_KEYS, in_built_host, in_fresh_process
 from tests.test_host import WriteApp
 from tests.test_host import write_app as write_app
 
@@ -50,7 +50,7 @@ SQLITE = "django.db.backends.sqlite3"
 HOSTED = list(host_apps.HOSTED)
 LEDGER = "tests.app_db.ledger"
 BILLING = "tests.app_db.billing"
-KEYS = "the keys are DATABASES, PRINCIPAL_BACKENDS, REQUEST_DEADLINE, UNDECLARED_APPS"
+KEYS = NEOLITH_KEYS
 UNDECLARED = 'NEOLITH["UNDECLARED_APPS"]'
 DBS = 'NEOLITH["DATABASES"]'
 

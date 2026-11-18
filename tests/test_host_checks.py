@@ -26,13 +26,14 @@ from hypothesis import strategies as st
 from neolith import _checks
 from neolith._checks import middleware_problems, neolith_problems, request_deadline
 from tests import host_apps
+from tests.hosting import NEOLITH_KEYS
 
 ROOT = "neolith.middleware.RootMiddleware"
 PRINCIPAL = "neolith.middleware.PrincipalMiddleware"
 OTHER = "django.middleware.common.CommonMiddleware"
 DEADLINE = 'NEOLITH["REQUEST_DEADLINE"]'
 RANGE = "is outside 0.001 to 9999999.999 seconds"
-KEYS = "the keys are DATABASES, PRINCIPAL_BACKENDS, REQUEST_DEADLINE, UNDECLARED_APPS"
+KEYS = NEOLITH_KEYS
 
 
 class MyStr(str):

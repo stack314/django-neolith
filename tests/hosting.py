@@ -11,6 +11,12 @@ import sys
 import textwrap
 from collections.abc import Mapping, Sequence
 
+# The tail of every unknown-key refusal of NEOLITH: one copy, so a new key in
+# the host's table changes one line of the tests (ADR 0022 Decision 3).
+NEOLITH_KEYS = (
+    "the keys are DATABASES, PRINCIPAL_BACKENDS, REQUEST_DEADLINE, UNDECLARED_APPS"
+)
+
 _PREAMBLE = """\
 import json
 import sys
