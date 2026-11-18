@@ -7,6 +7,11 @@ the request's JSON text and the context to a transport, which returns the
 reply's JSON text or raises a ``Failure``: the error's kind, message and
 detail as JSON text. With the ``single`` routing policy a connector has one
 provider and never sends a call twice: it never retries and never falls back.
+With ``local-first`` it holds two or more transports in order, and moves a
+call to the next only when an attempt ends with ``unavailable``, the action
+is idempotent and at least 1 ms of the call's budget is left (ADR 0031). Every
+attempt carries the same context; a call that ends with ``timeout`` after a
+move says that the action might have run.
 
 The in-process transport runs the provider's action in the caller's thread, in
 a copy of the caller's context, so that what it sets in a context variable
@@ -51,7 +56,7 @@ import json
 import logging
 import types
 import typing
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, NoReturn, Protocol, final
 
 from pydantic import BaseModel
@@ -79,6 +84,9 @@ _NOT_RUN = "the deadline passed before the action was run"
 _LATE = "the deadline passed before the call ended; the action might have run"
 # Kinds that only hosts and transports produce, never an action.
 _TRANSPORT_KINDS = frozenset({"unavailable", "timeout"})
+# The least share of the time left that an attempt which can still move gets
+# to connect, in seconds (ADR 0031 Decision 5, after ADR 0028's per address).
+SHARE_FLOOR = 2.0
 
 
 @final
@@ -127,6 +135,13 @@ class Transport(Protocol):
     an action of another contract is a ``TypeError``, a mistake in the code
     that called it. ``receiver`` says where the text it returns comes from,
     which decides how the connector reads it.
+
+    A transport that a connector routes among others (``local-first``) also
+    takes ``connect_by=``: a time on this host's clock by which it must have
+    a connection ready, or end the attempt with ``unavailable`` (ADR 0031
+    Decision 5). The connector passes it only when the attempt's share of
+    the connect phase applies, so a transport used alone need not take it;
+    one that carries no connection, as the in-process one, ignores it.
     """
 
     @property
@@ -141,6 +156,20 @@ class Transport(Protocol):
 
     def call(self, action: Action, request: bytes, context: Sent) -> bytes | None:
         """Carry the call and return the reply's text."""
+        ...
+
+
+class _Bounded(Transport, Protocol):
+    """A transport that takes ``connect_by=``, as one routed among others."""
+
+    def call(
+        self,
+        action: Action,
+        request: bytes,
+        context: Sent,
+        connect_by: float | None = None,
+    ) -> bytes | None:
+        """Carry the call, with a connection ready by ``connect_by``."""
         ...
 
 
@@ -492,11 +521,18 @@ class InProcess(Provider):
     #: The reply's text was written by a sender's check in this process.
     receiver = Receiver.IN_PROCESS
 
-    def call(self, action: Action, request: bytes, context: Sent) -> bytes | None:
+    def call(
+        self,
+        action: Action,
+        request: bytes,
+        context: Sent,
+        connect_by: float | None = None,
+    ) -> bytes | None:
         """Run the action in the caller's thread and return the reply's text.
 
         An action of another contract is a ``TypeError``: a connector never
         passes one, since it is built for this transport's contract.
+        ``connect_by`` is ignored: an in-process call opens no connection.
         """
         arrived = _context.now()
         if self._contract.actions.get(action.name) is not action:
@@ -548,8 +584,57 @@ class InProcess(Provider):
 
 
 @final
+class _Route:
+    """One entry of a connector's order: its transport, whether its text
+    comes from a network, and where it is, for the log.
+    """
+
+    __slots__ = ("network", "transport", "where")
+
+    def __init__(self, transport: Transport, network: bool, where: str) -> None:
+        self.transport = transport
+        self.network = network
+        self.where = where
+
+
+def _takes_connect_by(transport: Transport) -> bool:
+    """Whether the transport's ``call`` takes ``connect_by=`` by keyword."""
+    try:
+        parameters = inspect.signature(transport.call).parameters
+    except (TypeError, ValueError):
+        return False
+    found = parameters.get("connect_by")
+    if found is not None:
+        return found.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        )
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values())
+
+
+def _where(transport: Transport, receiver: Receiver) -> str:
+    """Where a provider is, as the routing log names it: in this host, or
+    at its origin, a remote provider's admitted url.
+    """
+    if receiver is Receiver.IN_PROCESS:
+        return "in this host"
+    origin: object = None
+    with contextlib.suppress(Exception):
+        origin = getattr(transport, "origin", None)
+    return f"at {origin}" if type(origin) is str else "at an origin it does not name"
+
+
+@final
 class Connector:
-    """Calls the actions of one contract version through one transport.
+    """Calls the actions of one contract version through its transports.
+
+    One transport is the ``single`` policy: one attempt per call. Two or
+    more are the ``local-first`` policy's order, the provider in the host
+    first when there is one (ADR 0031): each call starts at the first and
+    moves to the next only when an attempt ends with ``unavailable``, the
+    action is idempotent and at least 1 ms of the call's budget is left, and
+    it tries each at most once. Each transport of an order takes
+    ``connect_by=`` (``Transport``).
 
     Each action of the contract is an attribute taking one request, by
     position or by the name the declaration gives it, and returning the
@@ -569,23 +654,40 @@ class Connector:
     connector, so nothing else of the transport's crosses.
     """
 
-    __slots__ = ("_contract", "_network", "_parameters", "_transport")
+    __slots__ = ("_contract", "_parameters", "_routes")
 
-    def __init__(self, declaration: type[Any], transport: Transport) -> None:
+    def __init__(
+        self, declaration: type[Any], transport: Transport, *more: Transport
+    ) -> None:
         contract = Contract.of(declaration)
-        if transport.contract is not contract:
-            raise TypeError(
-                f"the transport carries calls of {transport.contract.identity}, "
-                f"not of {contract.identity}"
+        transports = (transport, *more)
+        routes: list[_Route] = []
+        for index, each in enumerate(transports):
+            which = "the transport" if not more else f"transport {index}"
+            if each.contract is not contract:
+                raise TypeError(
+                    f"{which} carries calls of {each.contract.identity}, "
+                    f"not of {contract.identity}"
+                )
+            receiver = each.receiver
+            if type(receiver) is not Receiver:
+                kind = _naming.type_name(receiver)
+                raise TypeError(f"a transport's receiver is a Receiver, not {kind}")
+            if any(each is earlier for earlier in transports[:index]):
+                raise ValueError(
+                    f"{which} is listed before; a call tries each provider once"
+                )
+            if more and not _takes_connect_by(each):
+                raise TypeError(
+                    f"{which} takes no connect_by=, which a transport routed "
+                    "among others takes"
+                )
+            # Text from a network gets the network receive check (ADR 0007).
+            routes.append(
+                _Route(each, receiver is Receiver.NETWORK, _where(each, receiver))
             )
-        receiver = transport.receiver
-        if type(receiver) is not Receiver:
-            kind = _naming.type_name(receiver)
-            raise TypeError(f"a transport's receiver is a Receiver, not {kind}")
         self._contract = contract
-        self._transport = transport
-        # Text from a network gets the network receive check (ADR 0007).
-        self._network = receiver is Receiver.NETWORK
+        self._routes: Sequence[_Route] = tuple(routes)
         # The name each action's declaration gives its request, which a call
         # may pass it by, as it could to the declared method.
         self._parameters = types.MappingProxyType(
@@ -601,6 +703,11 @@ class Connector:
                 for name in contract.actions
             }
         )
+
+    @property
+    def _transport(self) -> Transport:
+        """The first transport of the order: under ``single``, the one."""
+        return self._routes[0].transport
 
     def __getattr__(self, name: str) -> Callable[..., BaseModel | None]:
         # Only reached for a name the instance does not have; a private name
@@ -717,12 +824,17 @@ class Connector:
             idempotency_key=key,
             caller=caller,
         )
-        outcome = self._carry(action, text, sent)
+        outcome, moved = self._route(action, text, sent)
         # The caller's own deadline, on its own clock: over a network it
         # stops waiting then, so whatever comes back later is discarded here
-        # too. A timeout the transport gave says where the deadline passed.
+        # too. A timeout the transport gave says where the deadline passed,
+        # unless the call has moved: an earlier attempt may have run the
+        # action, so the call cannot say it was not sent.
         late = deadline is not None and _context.now() >= deadline
         if isinstance(outcome, ContractError):
+            if outcome.kind == "timeout" and moved:
+                del outcome
+                raise _received("timeout", _LATE)
             if not late or outcome.kind == "timeout":
                 raise outcome
             with contextlib.suppress(Exception):
@@ -739,21 +851,132 @@ class Connector:
         del outcome
         raise _received("timeout", _LATE)
 
-    def _carry(
+    def _route(
         self, action: Action, text: bytes, sent: Sent
+    ) -> tuple[BaseModel | ContractError | None, bool]:
+        """Make the call's attempts in the policy's order, and return the
+        outcome of the last and whether the call moved.
+
+        A call moves to the next entry only when its attempt ended with
+        ``unavailable``, the action is idempotent and the budget, read now,
+        is at least 1 ms (TRN-8). Otherwise it ends with that attempt's
+        outcome. Every attempt carries the same ``Sent``.
+        """
+        routes = self._routes
+        count = len(routes)
+        deadline = sent.deadline
+        index = 0
+        while True:
+            route = routes[index]
+            outcome = self._carry(
+                route, action, text, sent, self._connect_by(action, index, deadline)
+            )
+            if (
+                index + 1 == count
+                or not isinstance(outcome, ContractError)
+                or outcome.kind != "unavailable"
+            ):
+                return outcome, index > 0
+            following = routes[index + 1]
+            if not action.idempotent:
+                self._log(
+                    "%s, action %r: provider %d of %d %s was unavailable, and %s "
+                    "is not idempotent, so the call is not moved to provider %d "
+                    "(trace %s)",
+                    self._contract.identity,
+                    action.name,
+                    index + 1,
+                    count,
+                    route.where,
+                    action.name,
+                    index + 2,
+                    sent.trace_id,
+                )
+                return outcome, index > 0
+            budget = _context.budget(deadline, _context.now())
+            if budget is not None and budget < 1:
+                self._log(
+                    "%s, action %r: provider %d of %d %s was unavailable, and the "
+                    "call's deadline left under 1 ms to try provider %d %s "
+                    "(trace %s)",
+                    self._contract.identity,
+                    action.name,
+                    index + 1,
+                    count,
+                    route.where,
+                    index + 2,
+                    following.where,
+                    sent.trace_id,
+                )
+                return outcome, index > 0
+            self._log(
+                "%s, action %r: provider %d of %d %s was unavailable, and %s is "
+                "idempotent; trying provider %d %s with %s (trace %s)",
+                self._contract.identity,
+                action.name,
+                index + 1,
+                count,
+                route.where,
+                action.name,
+                index + 2,
+                following.where,
+                "no deadline" if budget is None else f"{budget} ms left",
+                sent.trace_id,
+            )
+            del outcome
+            index += 1
+
+    def _connect_by(
+        self, action: Action, index: int, deadline: float | None
+    ) -> float | None:
+        """The time by which the attempt to entry ``index`` must have a
+        connection ready, or ``None`` when no share applies.
+
+        An attempt that can still move (the action is idempotent and an entry
+        is left after this one) gets its share of the time left: that time
+        divided by the entries left, this one included, at least
+        ``SHARE_FLOOR`` seconds. When that is all the time left, the deadline
+        bounds the phase alone. A call with no deadline gets no share.
+        """
+        left_entries = len(self._routes) - index
+        if deadline is None or left_entries == 1 or not action.idempotent:
+            return None
+        current = _context.now()
+        left = deadline - current
+        share = max(left / left_entries, SHARE_FLOOR)
+        return current + share if share < left else None
+
+    def _log(self, message: str, *args: object) -> None:
+        """Log a routing decision at ``INFO``, never raising."""
+        with contextlib.suppress(Exception):
+            _log.info(message, *args)
+
+    def _carry(
+        self,
+        route: _Route,
+        action: Action,
+        text: bytes,
+        sent: Sent,
+        connect_by: float | None,
     ) -> BaseModel | ContractError | None:
-        """Send the call and return its reply, or the error the caller gets.
+        """Send one attempt and return its reply, or the error the caller gets.
 
         Never raises an ``Exception``, so the error the caller gets is built
         here, from the kind, message and detail text alone.
         """
         what = "the transport failed"
         try:
-            reply = self._transport.call(action, text, sent)
+            if connect_by is None:
+                reply = route.transport.call(action, text, sent)
+            else:
+                bounded = typing.cast("_Bounded", route.transport)
+                reply = bounded.call(action, text, sent, connect_by=connect_by)
         except Failure as failed:
             try:
                 return mark(
-                    self._error(action, failed.kind, failed.message, failed.detail)
+                    self._error(
+                        route, action, failed.kind, failed.message, failed.detail
+                    )
                 )
             except Exception as error:
                 failure: BaseException = error
@@ -762,7 +985,7 @@ class Connector:
             failure = error
         else:
             try:
-                return self._read(action, reply)
+                return self._read(route, action, reply)
             except Exception as error:
                 failure = error
                 what = "the reply could not be read"
@@ -775,7 +998,12 @@ class Connector:
         return _received("internal", internal_message(sent.trace_id))
 
     def _error(
-        self, action: Action, kind: object, message: object, detail: object
+        self,
+        route: _Route,
+        action: Action,
+        kind: object,
+        message: object,
+        detail: object,
     ) -> ContractError:
         """The error a caller gets for one that arrived; raises when it cannot
         be read against the contract.
@@ -793,7 +1021,9 @@ class Connector:
             if detail is None:
                 raise ValueError(f"a {kind!r} error arrived without its detail")
             return ContractError(
-                kind, message, self._received(record, detail, "the error's detail")
+                kind,
+                message,
+                self._received(route, record, detail, "the error's detail"),
             )
         # A kind this version of the contract does not declare for the action
         # (CON-28): a later version may have added it, even if another action
@@ -802,21 +1032,23 @@ class Connector:
             kind, message, None if detail is None else _untyped(detail)
         )
 
-    def _read(self, action: Action, reply: object) -> BaseModel | None:
+    def _read(self, route: _Route, action: Action, reply: object) -> BaseModel | None:
         if action.reply is None:
             if reply is not None:
                 raise TypeError("a reply arrived for an action whose reply is empty")
             return None
         if type(reply) is not bytes:
             raise TypeError(f"the reply is {_naming.type_name(reply)}, not text")
-        return self._received(action.reply, reply, "the reply")
+        return self._received(route, action.reply, reply, "the reply")
 
-    def _received[R: BaseModel](self, record: type[R], text: bytes, subject: str) -> R:
+    def _received[R: BaseModel](
+        self, route: _Route, record: type[R], text: bytes, subject: str
+    ) -> R:
         """Read text that arrived with ``record``: from a network, after the
         network receive check, whose ``Refusal`` the caller gets as
         ``internal``; in-process, with the validator alone.
         """
         reading = codec(self._contract, record)
-        if self._network:
+        if route.network:
             return reading.receive(text, subject)
         return reading.read(text)

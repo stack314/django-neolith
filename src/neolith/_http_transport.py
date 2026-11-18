@@ -103,9 +103,20 @@ class HTTPTransport:
     def __repr__(self) -> str:
         return f"<HTTP transport of {self._contract.identity} to {self.origin}>"
 
-    def call(self, action: Action, request: bytes, context: Sent) -> bytes | None:
+    def call(
+        self,
+        action: Action,
+        request: bytes,
+        context: Sent,
+        connect_by: float | None = None,
+    ) -> bytes | None:
         """Send the call once and return the reply's text, or ``None`` for an
         empty reply.
+
+        ``connect_by`` is a time on this host's clock by which the client
+        must have a connection ready, the attempt's share of the connect
+        phase when the connector routes the call among providers (ADR 0031
+        Decision 5), or ``None``.
 
         Every outcome that is not a reply is a ``Failure``, raised outside
         any exception handler, so it carries nothing of the client. A
@@ -125,6 +136,10 @@ class HTTPTransport:
             )
         if type(request) is not bytes:
             raise TypeError(f"the request is {_naming.type_name(request)}, not text")
+        if connect_by is not None and type(connect_by) is not float:
+            raise TypeError(
+                f"connect_by is a time as float, not {_naming.type_name(connect_by)}"
+            )
         caller = context.caller
         # Refused before anything is sent: a call with no app has nothing to
         # sign for, and one from an app with no key would be refused.
@@ -140,6 +155,7 @@ class HTTPTransport:
                 lambda: self._fields(caller, context),
                 request,
                 context.deadline,
+                connect_by,
             )
         except _http.ClientError as failed:
             error = failed

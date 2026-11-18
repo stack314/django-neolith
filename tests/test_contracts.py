@@ -318,6 +318,31 @@ def test_action_name_may_hold_digits_and_underscores() -> None:
     assert list(Contract.of(Echo).actions) == ["ping_2"]
 
 
+@pytest.mark.spec("CON-12")
+def test_a_contract_that_redefines_an_action_is_described_with_it_once() -> None:
+    # A contract's actions are the methods of one class, whose namespace
+    # holds a name once: the later definition replaces the earlier one.
+    @contract("echo.v1")
+    class Echo(Protocol):
+        @action
+        def ping(self, request: Ping) -> Pong: ...
+
+        @action
+        def other(self, request: Ping) -> None: ...
+
+        # mypy reports the redefinition on the decorator's line or the def's,
+        # depending on the version that runs it.
+        @action(idempotent=True)  # type: ignore[no-redef,unused-ignore]
+        def ping(self, request: Pong) -> Ping: ...  # type: ignore[no-redef,unused-ignore]  # noqa: F811
+
+    found = Contract.of(Echo)
+    assert list(found.actions) == ["ping", "other"]
+    assert found.actions["ping"] == Action("ping", True, Pong, Ping, {})
+    described = found.describe()["actions"]
+    assert list(described) == ["ping", "other"]
+    assert described["ping"]["idempotent"] is True
+
+
 @pytest.mark.parametrize(
     "member",
     [

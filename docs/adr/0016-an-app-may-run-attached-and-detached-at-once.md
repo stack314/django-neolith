@@ -1,6 +1,6 @@
 # 0016. An app may run attached and detached at the same time
 
-- **Status:** Proposed
+- **Status:** Superseded by [0031](0031-a-contract-version-is-routed-by-single-unless-local-first-is-named.md)
 - **Date:** 2026-11-09
 
 ## Context

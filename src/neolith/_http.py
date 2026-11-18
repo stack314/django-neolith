@@ -585,6 +585,7 @@ def exchange(
     fields: Callable[[], Sequence[tuple[str, str]] | None],
     body: bytes,
     deadline: float | None,
+    connect_by: float | None = None,
 ) -> Response:
     """Send one call and read its final response, by ``deadline`` at the latest.
 
@@ -597,6 +598,10 @@ def exchange(
             1 ms, and the call is not sent.
         body: The request's JSON text.
         deadline: The call's deadline on this host's clock, or ``None``.
+        connect_by: A time on this host's clock by which a connection must be
+            ready, besides the connect cap and the deadline, or ``None``: an
+            attempt's share of the connect phase (ADR 0031 Decision 5). The
+            replacement connection is held to the same time.
 
     Returns:
         The final status and the body's bytes.
@@ -608,7 +613,7 @@ def exchange(
     """
     handled = sys.exception()
     try:
-        return _exchange(pool, target, fields, body, deadline)
+        return _exchange(pool, target, fields, body, deadline, connect_by)
     except _Stop as stop:
         error: Exception = stop.error
     except _Refused as refused:
@@ -645,6 +650,7 @@ def _exchange(
     fields: Callable[[], Sequence[tuple[str, str]] | None],
     body: bytes,
     deadline: float | None,
+    connect_by: float | None,
 ) -> Response:
     if not _TARGET.fullmatch(target):
         raise _Refused("the target is not a contract action's path")
@@ -653,7 +659,7 @@ def _exchange(
     first = connection is not None
     while True:
         if connection is None:
-            connection = _open(pool, deadline)
+            connection = _open(pool, deadline, connect_by)
         try:
             given = fields()
             if given is None:
@@ -685,18 +691,27 @@ def _exchange(
     return response
 
 
-def _open(pool: Pool, deadline: float | None) -> _Connection:
-    """Open a connection, within the connect cap and the deadline."""
+def _open(
+    pool: Pool, deadline: float | None, connect_by: float | None = None
+) -> _Connection:
+    """Open a connection, within the connect cap, ``connect_by`` and the
+    deadline, whichever comes first.
+
+    When the deadline ends the phase, the call fails with ``timeout``;
+    otherwise with ``unavailable``, naming the bound that ended it.
+    """
     origin = pool.origin
-    cap = _now() + CONNECT_CAP
-    until = cap if deadline is None else min(cap, deadline)
+    started = _now()
+    bound = started + CONNECT_CAP
+    if connect_by is not None and connect_by < bound:
+        bound = connect_by
+    until = bound if deadline is None else min(bound, deadline)
 
     def out_of_time(error: BaseException | None) -> _Stop:
-        if deadline is not None and deadline <= cap:
+        if deadline is not None and deadline <= bound:
             return _stop("timeout", _NOT_SENT, "before writing", _cause(error))
-        return _unreachable(
-            origin, f"no connection within {CONNECT_CAP:g} seconds", error
-        )
+        seconds = round(max(bound - started, 0), 3)
+        return _unreachable(origin, f"no connection within {seconds:g} seconds", error)
 
     if until - _now() <= 0:
         raise out_of_time(None)
