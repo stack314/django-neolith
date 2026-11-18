@@ -33,7 +33,10 @@ it, and inside the repository must sit under ``build/``.
 
 A staged page that holds an email address is a problem, and is left out.
 
-**Build** runs Sphinx with ``-W -n --keep-going`` and reports each warning.
+**Build** runs Sphinx with ``-W -n --keep-going`` and reports each warning,
+then copies each file of ``mirror_files``, the reference document and the
+case files of ``spec/conformance/``, to the same path in the HTML, byte for
+byte.
 The extension ``docs/site/_ext/neolith_docs.py`` anchors requirements, links
 and checks citations, refuses raw HTML in pages the site writes, and records
 each ``{planned}`` block in ``planned.json``.
@@ -68,6 +71,7 @@ import inspect
 import io
 import json
 import math
+import os
 import posixpath
 import re
 import shutil
@@ -229,6 +233,59 @@ def mirror_table(root: Path) -> dict[str, str]:
     for path in sorted((root / "docs" / "adr").glob("[0-9][0-9][0-9][0-9]-*.md")):
         table[f"docs/adr/{path.name}"] = f"adr/{path.name}"
     return table
+
+
+def mirror_files(root: Path) -> dict[str, str]:
+    """Map each file the site serves as it is to its path in the HTML.
+
+    These are the files under ``spec/conformance/``, the reference document
+    and the case files (ADR 0032 Decisions 3 and 7), each at the same path,
+    beside the specification's pages. Every entry is listed, a symbolic link
+    or a file that is not JSON among them, so ``copy_files`` can refuse it.
+
+    Args:
+        root: The repository root.
+
+    Returns:
+        Repository paths (POSIX, relative to ``root``) to paths in the HTML.
+    """
+    table: dict[str, str] = {}
+    base = root / "spec" / "conformance"
+    for directory, folders, files in os.walk(base, followlinks=False):
+        for name in sorted(folders + files):
+            path = Path(directory) / name
+            if name in files or path.is_symlink():
+                rel = path.relative_to(root).as_posix()
+                table[rel] = rel
+    return dict(sorted(table.items()))
+
+
+def copy_files(root: Path, html: Path) -> list[str]:
+    """Copy each file of ``mirror_files`` into ``html``, byte for byte.
+
+    A symbolic link, and a file whose name does not end in ``.json``, is a
+    problem and is not copied, so the site never serves a file from outside
+    the repository or one the specification does not define.
+
+    Returns:
+        One line per file that is not copied.
+    """
+    problems: list[str] = []
+    for repo_path, site_path in mirror_files(root).items():
+        source = root / repo_path
+        if source.is_symlink():
+            problems.append(f"{repo_path}: a symbolic link; it is not copied")
+            continue
+        if source.suffix != ".json":
+            problems.append(f"{repo_path}: not a JSON file; it is not copied")
+            continue
+        try:
+            target = html / site_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(source.read_bytes())
+        except Exception as error:  # reported, and the rest copied
+            problems.append(f"{repo_path}: cannot be copied: {error!r}")
+    return problems
 
 
 @dataclass
@@ -869,6 +926,10 @@ def build(
     problems.extend(said)
     if status and not said:
         problems.append(f"Sphinx failed with status {status}:\n{output.getvalue()}")
+    try:
+        problems.extend(copy_files(root, html))
+    except Exception as error:  # reported with what came before
+        problems.append(f"the files of spec/conformance/ cannot be copied: {error!r}")
     return Result(html, problems)
 
 

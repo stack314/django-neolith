@@ -127,6 +127,60 @@ def test_the_mirror_table_holds_every_spec_document_and_record() -> None:
     assert "CODE_OF_CONDUCT.md" not in table
 
 
+def test_every_file_of_spec_conformance_is_mirrored_at_its_own_path() -> None:
+    files = docs.mirror_files(ROOT)
+    on_disk = sorted(
+        path.relative_to(ROOT).as_posix()
+        for path in (ROOT / "spec" / "conformance").rglob("*")
+        if path.is_file()
+    )
+    assert "spec/conformance/reference.v1.openapi.json" in on_disk
+    assert list(files) == on_disk
+    assert all(site == repo for repo, site in files.items())
+
+
+def test_the_files_are_copied_byte_for_byte_and_only_json(tmp_path: Path) -> None:
+    root, html = tmp_path / "root", tmp_path / "html"
+    base = root / "spec" / "conformance"
+    (base / "cases").mkdir(parents=True)
+    (base / "reference.v1.openapi.json").write_bytes(b'{"a": "\\u00e9\xc3\xa9"}\n')
+    (base / "cases" / "contract.json").write_bytes(b"[]")
+    (base / "notes.md").write_text("# Notes\n", "utf-8")
+    outside = tmp_path / "secret.json"
+    outside.write_text("{}", "utf-8")
+    (base / "linked.json").symlink_to(outside)
+    (base / "folder").symlink_to(tmp_path)
+    problems = docs.copy_files(root, html)
+    assert problems == [
+        "spec/conformance/folder: a symbolic link; it is not copied",
+        "spec/conformance/linked.json: a symbolic link; it is not copied",
+        "spec/conformance/notes.md: not a JSON file; it is not copied",
+    ]
+    copied = sorted(
+        path.relative_to(html).as_posix() for path in html.rglob("*") if path.is_file()
+    )
+    assert copied == [
+        "spec/conformance/cases/contract.json",
+        "spec/conformance/reference.v1.openapi.json",
+    ]
+    for name in copied:
+        assert (html / name).read_bytes() == (root / name).read_bytes()
+
+
+def test_a_build_copies_the_files_of_spec_conformance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def run(argv: list[str]) -> int:
+        Path(argv[-1]).mkdir(parents=True)
+        return 0
+
+    _fake_sphinx(monkeypatch, run)
+    result = docs.build(ROOT, tmp_path)
+    assert result.problems == ["inventory problem"]
+    for repo_path, site_path in docs.mirror_files(ROOT).items():
+        assert (result.path / site_path).read_bytes() == (ROOT / repo_path).read_bytes()
+
+
 @pytest.mark.parametrize(
     ("source", "written", "staged"),
     [
@@ -1584,6 +1638,8 @@ def test_the_site_builds_and_passes_every_check(tmp_path: Path) -> None:
     (ident,) = record["concepts/index.html"]
     assert f'class="admonition planned" id="{ident}"' in read("concepts")
     assert 'href="../spec/00-overview/#ovr-5"' in read("concepts")
+    for repo_path, site_path in docs.mirror_files(docs.ROOT).items():
+        assert (built / site_path).read_bytes() == (ROOT / repo_path).read_bytes()
 
 
 # Each entry: a page, or a patch run before the build, and what must be said.
