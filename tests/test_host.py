@@ -1531,7 +1531,7 @@ def test_a_refused_set_up_that_knows_an_identity_keeps_its_record(
 
 @pytest.mark.spec("APP-14")
 @pytest.mark.parametrize("asks", ["through a helper", "by a lazy import"])
-def test_a_record_belongs_to_the_set_up_whose_loading_asked_for_it(
+def test_a_record_belongs_to_the_app_whose_loading_asked_for_it(
     write_app: WriteApp, asks: str
 ) -> None:
     # The connect() line is in a module of an app an earlier set-up installed,
@@ -1632,7 +1632,7 @@ def test_each_set_up_after_any_override_decides_as_in_a_fresh_process(
 
 
 @pytest.mark.spec("APP-14")
-def test_a_place_two_set_ups_ask_from_belongs_to_both(write_app: WriteApp) -> None:
+def test_a_place_two_apps_ask_from_belongs_to_both(write_app: WriteApp) -> None:
     # One helper line asks for nope.v1 on behalf of two apps, each added by
     # its own override: each override is refused every time it is entered.
     helper = write_app(
