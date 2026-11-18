@@ -37,10 +37,13 @@ from neolith._frozen import once
 
 # Each pattern is ASCII-only and anchored with ^...$, and matches the same
 # strings under ECMA-262, Rust regex and Python's re.fullmatch (spec 01).
-BYTES_PATTERN = (
-    r"^([A-Za-z0-9_\-]{4})*"
-    r"([A-Za-z0-9_\-][AQgw]==|[A-Za-z0-9_\-]{2}[AEIMQUYcgkosw048]=)?$"
+# Bytes are built from two parts, which the reader also checks one by one: a
+# base64url character, and the last 4 characters when they hold padding.
+_BASE64URL_CHAR = r"[A-Za-z0-9_\-]"
+_BASE64URL_PADDED = (
+    rf"{_BASE64URL_CHAR}[AQgw]==|{_BASE64URL_CHAR}{{2}}[AEIMQUYcgkosw048]="
 )
+BYTES_PATTERN = rf"^({_BASE64URL_CHAR}{{4}})*({_BASE64URL_PADDED})?$"
 DECIMAL_PATTERN = r"^(0(\.[0-9]+)?|-?[1-9][0-9]*(\.[0-9]+)?|-?0\.0*[1-9][0-9]*)$"
 DECIMAL_DIGITS_PATTERN = r"^-?[0-9](\.?[0-9]){0,33}$"
 DURATION_PATTERN = (
@@ -63,10 +66,8 @@ _DECIMAL_ROUNDING = Context(
 # 60 times the decoded size (#45). So bytes are checked against the same rules
 # in two parts, neither holding any: every character but the last four is in
 # the alphabet, and the last four end the text as the pattern's tail allows.
-_BASE64URL = re.compile(r"[A-Za-z0-9_\-]*")
-_BASE64URL_END = re.compile(
-    r"[A-Za-z0-9_\-]{4}|[A-Za-z0-9_\-][AQgw]==|[A-Za-z0-9_\-]{2}[AEIMQUYcgkosw048]="
-)
+_BASE64URL = re.compile(f"{_BASE64URL_CHAR}*")
+_BASE64URL_END = re.compile(f"{_BASE64URL_CHAR}{{4}}|{_BASE64URL_PADDED}")
 _FROM_BASE64URL = str.maketrans("-_", "+/")
 
 

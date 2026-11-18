@@ -1076,6 +1076,19 @@ def test_binary_reads_exactly_the_text_its_pattern_matches(text: str) -> None:
         assert read == base64.urlsafe_b64decode(text)
 
 
+def test_binary_reads_every_character_at_every_position_as_its_pattern_does() -> None:
+    # The sampled test above rarely puts the one character that matters at
+    # the one position that matters; each class of the pattern is one such
+    # character. So short strings with each kind of padding are checked with
+    # every nearby character in turn at every position.
+    for text in ["AAAA", "AAAAAAAA", "AAAAAA==", "AAAAAAA=", "AA==", "AAA="]:
+        for at in range(len(text)):
+            for char in _BASE64URL + _NEAR_BASE64URL:
+                changed = text[:at] + char + text[at + 1 :]
+                matched = re.fullmatch(BYTES_PATTERN, changed) is not None
+                assert fullmatch(BYTES_PATTERN, changed) is matched, changed
+
+
 _SIZE = 1 << 20
 
 
