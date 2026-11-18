@@ -25,8 +25,8 @@ from hypothesis import strategies as st
 from pydantic import AwareDatetime, BaseModel, Field, StringConstraints
 
 from neolith import CallContext, Contract, ContractDefinitionError, action, contract
-from neolith._connector import Failure, InProcess, Provider
-from neolith._context import Arrived, Principal, Sent
+from neolith._connector import Failure, Provider
+from neolith._context import Arrived, Principal
 from neolith._crossing import Receiver, Refusal, codec
 from tests.strategies import admitted_by
 from tests.test_call_context import Clock
@@ -597,15 +597,6 @@ def test_the_action_runs_in_the_context_as_it_arrived(
     # A call that arrived without a key has none.
     assert ctx.idempotency_key is None
     assert ctx.caller == "shop"
-
-
-@pytest.mark.spec("TRN-36")
-def test_an_in_process_call_sent_without_a_key_arrives_without_one() -> None:
-    placing = Placing()
-    transport = InProcess(Orders, placing, app="orders", principal_from=("shop",))
-    sent = Sent(None, "0af7651916cd43dd8448eb211c80319c", "", None, None, "shop")
-    assert transport.call(PLACE, b"{}", sent) == b'{"lines":0}'
-    assert placing.contexts[0].idempotency_key is None
 
 
 @pytest.mark.spec("TRN-35")

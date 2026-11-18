@@ -392,17 +392,15 @@ class Sent:
 
     These are the fields spec 03 puts in headers. ``principal`` is the sent
     form, ``budget`` the remaining whole milliseconds, at least 1, or ``None``
-    for a call with no deadline, ``idempotency_key`` the call's key, or
-    ``None`` for a call that arrived without one, and ``caller`` the calling
-    app, which a network transport authenticates and the in-process one is
-    told. A connector always sends a key (ADR 0017 Decision 3).
+    for a call with no deadline, and ``caller`` the calling app, which a
+    network transport authenticates and the in-process one is told.
     """
 
     principal: bytes | None
     trace_id: str
     tracestate: str
     budget: int | None
-    idempotency_key: str | None
+    idempotency_key: str
     caller: str | None
 
 
