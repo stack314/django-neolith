@@ -25,10 +25,10 @@ Questions not yet decided are in [open-questions.md](../open-questions.md).
 | [0008](0008-typed-contract-errors-in-both-modes.md) | Contract errors are typed and identical in both modes | Accepted |
 | [0009](0009-one-database-alias-per-app.md) | One database alias per app | Accepted |
 | [0010](0010-pluggable-principal-resolution.md) | Pluggable principal resolution in core | Accepted |
-| [0011](0011-django-ninja-for-contract-endpoints.md) | django-ninja for contract endpoints | Proposed |
+| [0011](0011-django-ninja-for-contract-endpoints.md) | The host serves contract endpoints itself, from its root middleware, with no web framework | Proposed |
 | [0012](0012-supported-python-and-django-versions.md) | Supported Python and Django versions | Accepted |
 | [0013](0013-license.md) | License: BSD-3-Clause | Accepted |
-| [0014](0014-pluggable-connector-transports.md) | Connector transports are pluggable | Proposed |
+| [0014](0014-pluggable-connector-transports.md) | Connector transports are pluggable, and a host names each remote provider by contract in `NEOLITH["REMOTE_PROVIDERS"]` | Proposed |
 | [0015](0015-specification-first-django-reference-implementation.md) | Specification first; django-neolith is the reference implementation | Accepted |
 | [0016](0016-an-app-may-run-attached-and-detached-at-once.md) | An app may run attached and detached at the same time | Proposed |
 | [0017](0017-call-context-explicit-at-the-action-ambient-for-propagation.md) | The call context is explicit at the action and ambient for propagation | Accepted |
@@ -41,4 +41,5 @@ Questions not yet decided are in [open-questions.md](../open-questions.md).
 | [0024](0024-user-documentation-is-built-with-sphinx-from-this-repository.md) | User documentation is built with Sphinx from this repository | Proposed |
 | [0025](0025-drain-counts-a-request-from-its-request-line.md) | Drain counts a request from its request line | Accepted |
 | [0026](0026-set-up-keeps-an-unknown-recorded-identity.md) | Set-up keeps a recorded identity it does not know, so the next set-up reports it again | Accepted |
+| [0027](0027-a-caller-backend-names-the-calling-app-over-http.md) | On an HTTP call, a caller backend names the calling app from a shared-secret token, and the principal header is read only after the allow-list admits that app | Proposed |
 | [0029](0029-a-record-belongs-to-the-app-whose-loading-asked-for-it.md) | A record belongs to the app whose loading step asked for it, and only a set-up that passes drops it | Accepted |
