@@ -571,7 +571,7 @@ class Connector:
             # the cause is logged and nothing of it is chained.
             _report(
                 f"{self._contract.identity}, action {action.name!r}: the call's "
-                f"principal is not valid (trace {trace_id})",
+                f"principal is not valid, or could not be resolved (trace {trace_id})",
                 problem,
             )
             del problem

@@ -26,12 +26,14 @@ from hypothesis import strategies as st
 from neolith import _checks
 from neolith._checks import middleware_problems, neolith_problems, request_deadline
 from tests import host_apps
+from tests.hosting import NEOLITH_KEYS
 
 ROOT = "neolith.middleware.RootMiddleware"
+PRINCIPAL = "neolith.middleware.PrincipalMiddleware"
 OTHER = "django.middleware.common.CommonMiddleware"
 DEADLINE = 'NEOLITH["REQUEST_DEADLINE"]'
 RANGE = "is outside 0.001 to 9999999.999 seconds"
-KEYS = "the keys are DATABASES, REQUEST_DEADLINE, UNDECLARED_APPS"
+KEYS = NEOLITH_KEYS
 
 
 class MyStr(str):
@@ -60,7 +62,10 @@ class MyList(list[str]):
         ({"DATABASES": {}}, ['NEOLITH["DATABASES"]: is empty; leave the key out']),
         (
             {"PRINCIPAL_BACKENDS": []},
-            [f"NEOLITH: unknown key 'PRINCIPAL_BACKENDS'; {KEYS}"],
+            [
+                'NEOLITH["PRINCIPAL_BACKENDS"]: is empty; leave the key out for no '
+                "backend"
+            ],
         ),
         ({1: 30}, [f"NEOLITH: unknown key of type int; {KEYS}"]),
         (
@@ -197,6 +202,10 @@ def test_the_deadline_read_from_neolith() -> None:
     ],
 )
 def test_middleware_has_the_root_first_once(value: object, problems: list[str]) -> None:
+    """The root middleware's rules, with the principal middleware listed
+    once in every list (its own rules are in ``test_principal_backends``)."""
+    if type(value) is list:
+        value = [*value, PRINCIPAL]
     assert middleware_problems(value) == problems
 
 
@@ -221,7 +230,7 @@ def test_set_up_raises_every_error_at_once(registered: None) -> None:
     """Django loads an override's apps before it applies the override's
     settings, so the settings to judge are changed first."""
     with (
-        _in_place(NEOLITH={"OTHER": 1}, MIDDLEWARE=[OTHER, ROOT]),
+        _in_place(NEOLITH={"OTHER": 1}, MIDDLEWARE=[OTHER, ROOT, PRINCIPAL]),
         pytest.raises(ImproperlyConfigured) as raised,
         override_settings(INSTALLED_APPS=host_apps.INSTALLED),
     ):
@@ -238,7 +247,9 @@ def test_set_up_judges_middleware_by_class(registered: None) -> None:
     """Set-up runs the constructor's one rule: an alias of the root
     middleware stops it."""
     with (
-        override_settings(MIDDLEWARE=[ROOT, "tests.request_site.Alias"]),
+        override_settings(
+            MIDDLEWARE=[*host_apps.MIDDLEWARE, "tests.request_site.Alias"]
+        ),
         pytest.raises(ImproperlyConfigured, match="is listed 2 times"),
         override_settings(INSTALLED_APPS=host_apps.INSTALLED),
     ):

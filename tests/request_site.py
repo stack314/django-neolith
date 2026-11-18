@@ -9,10 +9,15 @@ import copy
 import functools
 from collections.abc import Callable
 
-from django.http import HttpRequest, HttpResponse, HttpResponseBase
+from django.http import (
+    HttpRequest,
+    HttpResponse,
+    HttpResponseBase,
+    StreamingHttpResponse,
+)
 from django.utils.deprecation import MiddlewareMixin
 
-from neolith import ContractError, UsageError, connect
+from neolith import CallContext, ContractError, UsageError, _context, connect
 from tests.declaration_contracts import Sku
 from tests.host_apps.couriers import services as courier_services
 
@@ -22,6 +27,15 @@ SEEN: list[str] = []
 HELD: list[contextvars.Context] = []
 
 couriers = connect("couriers.v3")
+
+
+def _seen() -> CallContext:
+    """The context the couriers action last saw for a call made from the
+    scope in force here, matched by its trace, since requests served at
+    once append to the same list."""
+    scope = _context._CURRENT.get()
+    trace = None if scope is None else scope.held.trace_id
+    return [c for c in courier_services.CONTEXTS if c.trace_id == trace][-1]
 
 
 def ask() -> str:
@@ -36,7 +50,7 @@ def ask() -> str:
     except UsageError:
         outcome = "usage error"
     else:
-        outcome = f"as {courier_services.CONTEXTS[-1].caller}"
+        outcome = f"as {_seen().caller}"
     SEEN.append(outcome)
     return outcome
 
@@ -114,6 +128,24 @@ def project_page(request: HttpRequest) -> HttpResponse:
     return HttpResponse(ask())
 
 
+def unnamed_stream(request: HttpRequest) -> StreamingHttpResponse:
+    """A streamed body that makes no call, with an authenticated user the
+    Django-user backend fails on: a search for the root would log a
+    failure and add Vary."""
+
+    class Unnamed:
+        is_authenticated = True
+        pk = 7
+
+    request.user = Unnamed()  # type: ignore[assignment]
+    return StreamingHttpResponse(iter([b"ok"]))
+
+
+def project_stream(request: HttpRequest) -> StreamingHttpResponse:
+    """``unnamed_stream`` from a view in no app."""
+    return unnamed_stream(request)
+
+
 def copies_request(
     get_response: Callable[[HttpRequest], HttpResponseBase],
 ) -> Callable[[HttpRequest], HttpResponseBase]:
@@ -179,3 +211,80 @@ def copies_attributes(view: _View) -> _View:
         return view(request)
 
     return wrapper
+
+
+# What each call made through whom() came to, in order.
+WHOM: list[str] = []
+
+
+def whom() -> str:
+    """Call the stock contract once from where it runs; return, and record,
+    ``user <subject>`` for the principal couriers saw, ``nobody``,
+    ``refused <kind>`` or ``usage error``. The web app may assert a
+    principal on stock, which asks couriers on the same principal; the
+    connector is asked for here, since a process that imports this module
+    may host no app that requires stock."""
+    try:
+        connect("stock.v1").level(Sku(sku="ab"))
+    except ContractError as error:
+        outcome = f"refused {error.kind}"
+    except UsageError:
+        outcome = "usage error"
+    else:
+        principal = _seen().principal
+        outcome = "nobody" if principal is None else f"user {principal.subject}"
+    WHOM.append(outcome)
+    return outcome
+
+
+class LateCaller(MiddlewareMixin):
+    """Calls in its response phase, which runs after the principal
+    middleware's when it is listed before it."""
+
+    def process_response(
+        self, request: HttpRequest, response: HttpResponseBase
+    ) -> HttpResponseBase:
+        whom()
+        return response
+
+
+class CallsInView(MiddlewareMixin):
+    """Calls from its ``process_view``, wherever it is listed after the root
+    middleware, and lets the request go on."""
+
+    def process_view(
+        self,
+        request: HttpRequest,
+        view: object,
+        args: tuple[object, ...],
+        kwargs: dict[str, object],
+    ) -> None:
+        whom()
+
+
+class AnswersInView(MiddlewareMixin):
+    """Calls from its ``process_view`` and answers there, so no later
+    ``process_view`` and no view runs."""
+
+    def process_view(
+        self,
+        request: HttpRequest,
+        view: object,
+        args: tuple[object, ...],
+        kwargs: dict[str, object],
+    ) -> HttpResponse:
+        return HttpResponse(whom())
+
+
+def csrf_failure(request: HttpRequest, reason: str = "") -> HttpResponse:
+    """A ``CSRF_FAILURE_VIEW`` that calls, which Django runs from
+    ``CsrfViewMiddleware.process_view``."""
+    return HttpResponse(whom(), status=403)
+
+
+class Streams(MiddlewareMixin):
+    """Answers every request from its request phase with a streamed body,
+    before any view is resolved, so the root is never bound."""
+
+    def process_request(self, request: HttpRequest) -> StreamingHttpResponse:
+        return StreamingHttpResponse(iter([b"ok"]))

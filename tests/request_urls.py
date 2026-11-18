@@ -7,6 +7,7 @@ from django.urls import path
 
 from tests import request_site as site
 from tests.host_apps.stock import views as stock_views
+from tests.host_apps.web import principals
 from tests.host_apps.web import views as web
 from tests.plain_app import views as plain
 
@@ -61,6 +62,21 @@ urlpatterns = [
     path("hang/", web.hang),
     path("ahang/", web.ahang),
     path("fail/", web.fail),
+    path("principal/quiet/", principals.quiet),
+    path("principal/aquiet/", principals.aquiet),
+    path("principal/who/", principals.who),
+    path("principal/awho/", principals.awho),
+    path("principal/stream/", principals.stream),
+    path("principal/astream/", principals.astream),
+    path("principal/bearer/", principals.bearer),
+    path("principal/stranger/", principals.stranger),
+    path("principal/cached/", principals.cached),
+    path("principal/page-cached/", principals.page_cached),
+    path("principal/pair/", principals.pair),
+    path("principal/apair/", principals.apair),
+    path("principal/alogout-stream/", principals.alogout_stream),
+    path("principal/project-stream/", site.project_stream),
+    path("principal/plain-stream/", plain.stream),
 ]
 
 handler404 = "tests.host_apps.web.views.not_found"

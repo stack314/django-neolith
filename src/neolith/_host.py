@@ -10,7 +10,9 @@ every app's models, in Django's global registry only, and sets the host up:
 
 Set-up reports every refusal of both, and every unknown identity a
 ``connect()`` recorded before it, in one ``DeclarationError``, logged before
-it is raised. Then it runs the host's system checks, those tagged
+it is raised. It builds the principal backends of
+``NEOLITH["PRINCIPAL_BACKENDS"]`` once (ADR 0023), recording what it cannot
+build for ``neolith.E019``. Then it runs the host's system checks, those tagged
 ``neolith`` (``neolith._checks``): every error among them is raised in one
 ``ImproperlyConfigured``, whatever ``SILENCED_SYSTEM_CHECKS`` says, and each
 warning is logged. A set-up that passes publishes its table, with the
@@ -61,7 +63,7 @@ from django.core.exceptions import ImproperlyConfigured
 from django.core.signals import setting_changed
 from pydantic import BaseModel
 
-from neolith import _checks, _configure, _context
+from neolith import _checks, _configure, _context, _principal
 from neolith._connector import Connector as Bound
 from neolith._connector import InProcess
 from neolith._context import Principal, UsageError
@@ -99,6 +101,10 @@ class Host:
     request_deadline: float | None = _checks.DEFAULT_REQUEST_DEADLINE
     # The warnings set-up logged, which Boot does not log again.
     warned: frozenset[str] = frozenset()
+    # The principal backends set-up built, in order (ADR 0023), and the
+    # union of their request inputs, which a response varies on.
+    principals: tuple[_principal.Built, ...] = ()
+    vary: tuple[str, ...] = ()
 
 
 _LOCK: Final = threading.Lock()
@@ -187,6 +193,9 @@ def set_up(config: AppConfig) -> None:
     configs = registry.get_app_configs()
     hosted = {c.label: type(c) for c in configs if declaration_of(type(c)) is not None}
     host, refusals = build(registry)
+    # Built once per set-up, after app loading; what is refused is recorded
+    # for neolith.E019, which the checks below report (ADR 0023 Decision 10).
+    principals = _principals(config)
     # Run outside the lock, which a check must never need; judged inside it,
     # after Resolve and Validate, so their refusals come first.
     found = checks.run_checks(tags=[_checks.TAG])
@@ -227,8 +236,29 @@ def set_up(config: AppConfig) -> None:
         warned = frozenset(
             m.msg for m in found if m.level == checks.WARNING and not m.is_silenced()
         )
-        published = dataclasses.replace(host, request_deadline=deadline, warned=warned)
+        published = dataclasses.replace(
+            host,
+            request_deadline=deadline,
+            warned=warned,
+            principals=principals,
+            vary=_principal.vary_of(principals),
+        )
         setattr(config, _HOST_ATTR, published)
+
+
+def _principals(config: AppConfig) -> tuple[_principal.Built, ...]:
+    """Build the backends of ``NEOLITH["PRINCIPAL_BACKENDS"]`` when its form
+    is one ``neolith.E001`` admits, and record on ``config`` what was refused.
+    """
+    refusals: list[str] = []
+    built: tuple[_principal.Built, ...] = ()
+    neolith = getattr(settings, "NEOLITH", None)
+    if type(neolith) is dict:
+        value = neolith.get(_principal.KEY)
+        if value is not None and not _principal.shape_problems(value):
+            built, refusals = _principal.build(value)
+    setattr(config, _checks.PRINCIPAL_REFUSALS, tuple(refusals))
+    return built
 
 
 def _setting_changed(
