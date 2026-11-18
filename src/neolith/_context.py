@@ -456,8 +456,8 @@ class Scope:
         self._counts: dict[tuple[str, str, str], int] = {}
         # Unset until the first call; then the form, or why there is none.
         self._form: tuple[bytes | None, str | None] | None = None
-        # A request root's principal, which the principal middleware hands
-        # it once the root is bound; it then answers for the root.
+        # A request root's principal, which the root middleware hands it as
+        # it binds the root; it then answers for the root.
         self.resolution: Resolver | None = None
 
     @property

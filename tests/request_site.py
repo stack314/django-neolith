@@ -9,7 +9,12 @@ import copy
 import functools
 from collections.abc import Callable
 
-from django.http import HttpRequest, HttpResponse, HttpResponseBase
+from django.http import (
+    HttpRequest,
+    HttpResponse,
+    HttpResponseBase,
+    StreamingHttpResponse,
+)
 from django.utils.deprecation import MiddlewareMixin
 
 from neolith import CallContext, ContractError, UsageError, _context, connect
@@ -223,3 +228,45 @@ class LateCaller(MiddlewareMixin):
     ) -> HttpResponseBase:
         whom()
         return response
+
+
+class CallsInView(MiddlewareMixin):
+    """Calls from its ``process_view``, wherever it is listed after the root
+    middleware, and lets the request go on."""
+
+    def process_view(
+        self,
+        request: HttpRequest,
+        view: object,
+        args: tuple[object, ...],
+        kwargs: dict[str, object],
+    ) -> None:
+        whom()
+
+
+class AnswersInView(MiddlewareMixin):
+    """Calls from its ``process_view`` and answers there, so no later
+    ``process_view`` and no view runs."""
+
+    def process_view(
+        self,
+        request: HttpRequest,
+        view: object,
+        args: tuple[object, ...],
+        kwargs: dict[str, object],
+    ) -> HttpResponse:
+        return HttpResponse(whom())
+
+
+def csrf_failure(request: HttpRequest, reason: str = "") -> HttpResponse:
+    """A ``CSRF_FAILURE_VIEW`` that calls, which Django runs from
+    ``CsrfViewMiddleware.process_view``."""
+    return HttpResponse(whom(), status=403)
+
+
+class Streams(MiddlewareMixin):
+    """Answers every request from its request phase with a streamed body,
+    before any view is resolved, so the root is never bound."""
+
+    def process_request(self, request: HttpRequest) -> StreamingHttpResponse:
+        return StreamingHttpResponse(iter([b"ok"]))

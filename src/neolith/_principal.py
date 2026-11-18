@@ -543,6 +543,16 @@ class Resolution:
         with self._lock:
             return self._outcome is not None
 
+    @property
+    def open(self) -> bool:
+        """Whether a search could start now: no outcome is written, the
+        root is not marked, and there is a request to give the backends.
+        """
+        with self._lock:
+            return (
+                self._outcome is None and not self._marked and self.request is not None
+            )
+
     def finish(self) -> bool:
         """Mark the root, so no search starts for it afterwards; return
         whether a search had started.

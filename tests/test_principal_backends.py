@@ -550,7 +550,7 @@ def test_a_host_with_no_backend_gives_a_root_no_resolution(
         token = middleware._REQUEST.set(scope)
         try:
             if bound:
-                middleware._attach(RequestFactory().get("/"))
+                middleware._bind(RequestFactory().get("/"), HttpResponse)
             assert middleware._resolution(scope) is None
             assert scope.principal() is None
         finally:

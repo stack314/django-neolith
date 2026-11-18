@@ -140,10 +140,14 @@ class RootMiddleware:
         view_args: tuple[Any, ...],
         view_kwargs: dict[str, Any],
     ) -> None:
-        """Bind the request's root to the app whose code serves the view.
+        """Bind the request's root to the app whose code serves the view,
+        and, in a host with a principal backend, give the root the request
+        and the backends in the same step.
 
         Django calls it once the URL is resolved, before any other
         middleware's ``process_view``, since this middleware comes first.
+        So no code runs in a bound root before its principal can be
+        resolved.
 
         Args:
             request: The request.
@@ -151,7 +155,7 @@ class RootMiddleware:
             view_args: Its positional arguments.
             view_kwargs: Its keyword arguments.
         """
-        _bind(view_func)
+        _bind(request, view_func)
 
     async def _aprocess_view(
         self,
@@ -160,7 +164,7 @@ class RootMiddleware:
         view_args: tuple[Any, ...],
         view_kwargs: dict[str, Any],
     ) -> None:
-        _bind(view_func)
+        _bind(request, view_func)
 
 
 def _open() -> tuple[_context.Scope, _Tokens]:
@@ -191,7 +195,11 @@ def _leave(scope: _context.Scope, tokens: _Tokens, handed: bool) -> None:
         _context._CURRENT.reset(current)
 
 
-def _bind(view: object) -> None:
+def _bind(request: HttpRequest, view: object) -> None:
+    """Bind the request's root to the view's app. In a host with a backend
+    the root gets its resolution first, so a call that sees the root bound,
+    in any thread, sees its resolution too.
+    """
     scope = _REQUEST.get()
     if scope is None:
         return
@@ -200,6 +208,10 @@ def _bind(view: object) -> None:
     host = _host._current()
     if label is not None and host is not None and label in host.apps:
         requires = frozenset(host.apps[label])
+    if host is not None and host.principals and scope.resolution is None:
+        scope.resolution = _principal.Resolution(
+            host.principals, host.vary, request, scope.held.trace_id
+        )
     scope.bind(label, requires)
 
 
@@ -361,16 +373,15 @@ class _AsyncBody(_Closing):
 
 @final
 class PrincipalMiddleware:
-    """Hand each request's root its principal backends, and vary the
-    response on their request inputs (ADR 0023 Decision 6).
+    """Bound the resolution of each request's principal, and vary the
+    response on the backends' request inputs (ADR 0023 Decision 6).
 
     Listed once in every host, with or without backends; with none it does
     nothing per request. Django runs it in the mode of the handler inside
-    it, sync or async. Its ``process_view``, which Django calls after the
-    root middleware's has bound the root, gives the root the request and
-    the host's backends, so a call made before then has no principal and
-    asks no backend. A call from the root then resolves the principal
-    (``neolith._principal.Resolution``).
+    it, sync or async. The root middleware gives a root its request and the
+    host's backends when it binds the root, so a call from a bound root
+    resolves the principal (``neolith._principal.Resolution``) wherever it
+    is made, before this middleware's place in the list too.
 
     Its response phase, for a root that has its backends:
 
@@ -412,7 +423,6 @@ class PrincipalMiddleware:
         self._async = inspect.iscoroutinefunction(get_response)
         if self._async:
             inspect.markcoroutinefunction(self)
-            self.process_view = self._aprocess_view  # type: ignore[method-assign,assignment]
 
     def __call__(
         self, request: HttpRequest
@@ -437,32 +447,6 @@ class PrincipalMiddleware:
             await afinish(resolution, response)
         return response
 
-    def process_view(
-        self,
-        request: HttpRequest,
-        view_func: object,
-        view_args: tuple[Any, ...],
-        view_kwargs: dict[str, Any],
-    ) -> None:
-        """Give the request's root the request and the host's backends.
-
-        Args:
-            request: The request, which the backends are given.
-            view_func: The resolved view.
-            view_args: Its positional arguments.
-            view_kwargs: Its keyword arguments.
-        """
-        _attach(request)
-
-    async def _aprocess_view(
-        self,
-        request: HttpRequest,
-        view_func: object,
-        view_args: tuple[Any, ...],
-        view_kwargs: dict[str, Any],
-    ) -> None:
-        _attach(request)
-
 
 def _resolution(scope: _context.Scope | None) -> _principal.Resolution | None:
     """The root's resolution for the response phase. A root that was never
@@ -482,24 +466,15 @@ def _resolution(scope: _context.Scope | None) -> _principal.Resolution | None:
     return resolution if isinstance(resolution, _principal.Resolution) else None
 
 
-def _attach(request: HttpRequest) -> None:
-    scope = _REQUEST.get()
-    host = _host._current()
-    if scope is None or host is None or not host.principals:
-        return
-    if scope.resolution is None:
-        scope.resolution = _principal.Resolution(
-            host.principals, host.vary, request, scope.held.trace_id
-        )
-
-
 def finish(resolution: _principal.Resolution, response: HttpResponseBase) -> None:
     """The principal middleware's response phase, in sync mode, for a root
     and its response (ADR 0023 Decision 6): search now for a streamed body
-    the root keeps, unless an outcome is fixed; mark the root; and patch
-    ``Vary`` with the resolution's union when a search has started.
+    the root keeps, when a search could start (``Resolution.open``); mark
+    the root; and patch ``Vary`` with the resolution's union when a search
+    has started. A root never bound has no request, so nothing is searched
+    or recorded for it here: a failure is recorded only for a caller.
     """
-    if _kept(response) and not resolution.fixed:
+    if _kept(response) and resolution.open:
         with contextlib.suppress(ValueError):  # only recorded
             resolution.form()
     _vary(response, resolution)
@@ -509,7 +484,7 @@ async def afinish(
     resolution: _principal.Resolution, response: HttpResponseBase
 ) -> None:
     """``finish`` in async mode: the search, if any, awaits ``aresolve``."""
-    if _kept(response) and not resolution.fixed:
+    if _kept(response) and resolution.open:
         with contextlib.suppress(ValueError):  # only recorded
             await resolution.aform()
     _vary(response, resolution)

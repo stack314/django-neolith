@@ -62,10 +62,10 @@ class Served:
         return [] if found is None else [n.strip() for n in found.split(",")]
 
 
-def _environ(path: str, headers: dict[str, str]) -> dict[str, Any]:
+def _environ(path: str, headers: dict[str, str], method: str) -> dict[str, Any]:
     route, _, query = path.partition("?")
     environ: dict[str, Any] = {
-        "REQUEST_METHOD": "GET",
+        "REQUEST_METHOD": method,
         "PATH_INFO": route,
         "QUERY_STRING": query,
         "HTTP_HOST": "testserver",
@@ -76,7 +76,13 @@ def _environ(path: str, headers: dict[str, str]) -> dict[str, Any]:
     return environ
 
 
-def wsgi(path: str, headers: dict[str, str], *, before: Callable[[], None]) -> Served:
+def wsgi(
+    path: str,
+    headers: dict[str, str],
+    *,
+    before: Callable[[], None],
+    method: str = "GET",
+) -> Served:
     """Serve ``path`` as a WSGI server does; ``before`` runs once the
     response is returned and before its body is iterated."""
     started: dict[str, Any] = {}
@@ -86,7 +92,7 @@ def wsgi(path: str, headers: dict[str, str], *, before: Callable[[], None]) -> S
         started["headers"] = {k.lower(): v for k, v in sent}
         return lambda data: None
 
-    result = WSGIHandler()(_environ(path, headers), start)
+    result = WSGIHandler()(_environ(path, headers, method), start)
     before()
     try:
         body = b"".join(result)
@@ -96,14 +102,14 @@ def wsgi(path: str, headers: dict[str, str], *, before: Callable[[], None]) -> S
 
 
 async def _asgi(
-    path: str, headers: dict[str, str], before: Callable[[], None]
+    path: str, headers: dict[str, str], before: Callable[[], None], method: str
 ) -> Served:
     route, _, query = path.partition("?")
     scope = {
         "type": "http",
         "asgi": {"version": "3.0"},
         "http_version": "1.1",
-        "method": "GET",
+        "method": method,
         "scheme": "http",
         "path": route,
         "raw_path": route.encode(),
@@ -148,11 +154,12 @@ def serve(
     headers: dict[str, str] | None = None,
     *,
     before: Callable[[], None] = lambda: None,
+    method: str = "GET",
 ) -> Served:
     given = headers or {}
     if mode == "wsgi":
-        return wsgi(path, given, before=before)
-    return asyncio.run(_asgi(path, given, before))
+        return wsgi(path, given, before=before, method=method)
+    return asyncio.run(_asgi(path, given, before, method))
 
 
 def _middleware(mode: str, *outside: str, after: tuple[str, ...] = ()) -> list[str]:
@@ -405,6 +412,109 @@ def test_two_concurrent_first_calls_share_a_principal_and_a_trace(
     first, second = courier_services.CONTEXTS[before:]
     assert first.principal == second.principal
     assert first.trace_id == second.trace_id
+
+
+# One principal per root, from the moment it is bound
+
+CALLS_IN_VIEW = "tests.request_site.CallsInView"
+ANSWERS_IN_VIEW = "tests.request_site.AnswersInView"
+CSRF = "django.middleware.csrf.CsrfViewMiddleware"
+
+
+def _around(mode: str, probe: str, place: str) -> list[str]:
+    """The test host's middleware with ``probe`` listed at ``place``:
+    outside the two the backend reads, between them and the principal
+    middleware, or after it."""
+    inside = [SYNC_ONLY] if mode.endswith("sync mode") else []
+    listed = {
+        "outside": [ROOT, probe, SESSION, AUTH, PRINCIPAL],
+        "before the principal middleware": [ROOT, SESSION, AUTH, probe, PRINCIPAL],
+        "after the principal middleware": [ROOT, SESSION, AUTH, PRINCIPAL, probe],
+    }[place]
+    return [*listed, *inside]
+
+
+PLACES = (
+    "outside",
+    "before the principal middleware",
+    "after the principal middleware",
+)
+
+
+@pytest.mark.spec("APP-51", "APP-56")
+@pytest.mark.parametrize("place", PLACES)
+@pytest.mark.parametrize("view", ["who", "awho"])
+@pytest.mark.parametrize("mode", MODES)
+def test_a_call_from_any_process_view_of_a_bound_root_has_its_principal(
+    users: dict[str, str], mode: str, view: str, place: str
+) -> None:
+    """A middleware's ``process_view`` runs in the bound root wherever it is
+    listed, so its call and the view's carry the one principal."""
+    with override_settings(MIDDLEWARE=_around(mode, CALLS_IN_VIEW, place)):
+        served = serve(mode, f"/principal/{view}/", {"Cookie": users["first"]})
+    me = f"user {_subject('first')}"
+    assert served.body == me.encode()
+    assert [me, me] == request_site.WHOM
+    assert sorted(n.lower() for n in served.vary) == ["authorization", "cookie"]
+
+
+@pytest.mark.spec("APP-51", "APP-60")
+@pytest.mark.parametrize("place", PLACES)
+@pytest.mark.parametrize("mode", MODES)
+def test_a_process_view_that_answers_calls_with_the_principal(
+    users: dict[str, str], mode: str, place: str
+) -> None:
+    """A middleware that answers from ``process_view``, before the principal
+    middleware's place or after it, calls as the user."""
+    with override_settings(MIDDLEWARE=_around(mode, ANSWERS_IN_VIEW, place)):
+        served = serve(mode, "/principal/quiet/", {"Cookie": users["first"]})
+    me = f"user {_subject('first')}"
+    assert served.body == me.encode()
+    assert [me] == request_site.WHOM
+    assert "authorization" in [n.lower() for n in served.vary]
+
+
+@pytest.mark.spec("APP-51", "APP-60")
+@pytest.mark.parametrize("place", PLACES)
+@pytest.mark.parametrize("mode", MODES)
+def test_a_csrf_failure_view_calls_with_the_principal(
+    users: dict[str, str], mode: str, place: str
+) -> None:
+    """Django runs ``CSRF_FAILURE_VIEW`` from the CSRF middleware's
+    ``process_view``, in the bound root, wherever that middleware is
+    listed."""
+    with override_settings(
+        MIDDLEWARE=_around(mode, CSRF, place),
+        CSRF_FAILURE_VIEW="tests.request_site.csrf_failure",
+    ):
+        served = serve(
+            mode, "/principal/quiet/", {"Cookie": users["first"]}, method="POST"
+        )
+    me = f"user {_subject('first')}"
+    assert served.status == 403
+    assert served.body == me.encode()
+    assert [me] == request_site.WHOM
+
+
+@pytest.mark.spec("APP-57", "APP-61")
+@pytest.mark.filterwarnings("ignore:StreamingHttpResponse must consume")
+@pytest.mark.parametrize("mode", MODES)
+def test_a_stream_from_a_root_never_bound_records_nothing(
+    users: dict[str, str], mode: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A streamed answer from a request phase leaves the root unbound: the
+    response phase searches for nobody, records nothing and logs nothing,
+    and the response gains no Vary."""
+    middleware = _middleware(mode, after=("tests.request_site.Streams",))
+    with (
+        caplog.at_level("DEBUG", logger="neolith"),
+        override_settings(MIDDLEWARE=middleware),
+    ):
+        served = serve(mode, "/principal/who/", {"Cookie": users["first"]})
+    assert (served.status, served.body) == (200, b"ok")
+    assert request_site.WHOM == []
+    assert "authorization" not in [n.lower() for n in served.vary]
+    assert [r.getMessage() for r in caplog.records if r.levelname == "ERROR"] == []
 
 
 # The latest point
