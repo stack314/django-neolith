@@ -83,7 +83,7 @@ import urllib.request
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from markdown_it import MarkdownIt
 from markdown_it.common.utils import unescapeAll
@@ -241,7 +241,9 @@ def mirror_files(root: Path) -> dict[str, str]:
     These are the files under ``spec/conformance/``, the reference document
     and the case files (ADR 0032 Decisions 3 and 7), each at the same path,
     beside the specification's pages. Every entry is listed, a symbolic link
-    or a file that is not JSON among them, so ``copy_files`` can refuse it.
+    or a file that is not JSON among them, so ``copy_files`` can refuse it; a
+    symbolic link is listed and never followed, and when ``spec`` or
+    ``spec/conformance`` is one, it is the only entry.
 
     Args:
         root: The repository root.
@@ -249,10 +251,14 @@ def mirror_files(root: Path) -> dict[str, str]:
     Returns:
         Repository paths (POSIX, relative to ``root``) to paths in the HTML.
     """
-    table: dict[str, str] = {}
     base = root / "spec" / "conformance"
+    for above in (base.parent, base):
+        if above.is_symlink():
+            rel = above.relative_to(root).as_posix()
+            return {rel: rel}
+    table: dict[str, str] = {}
     for directory, folders, files in os.walk(base, followlinks=False):
-        for name in sorted(folders + files):
+        for name in folders + files:
             path = Path(directory) / name
             if name in files or path.is_symlink():
                 rel = path.relative_to(root).as_posix()
@@ -260,29 +266,67 @@ def mirror_files(root: Path) -> dict[str, str]:
     return dict(sorted(table.items()))
 
 
+def _json_strings(value: object) -> Iterator[str]:
+    """Every string a JSON value holds, its object keys among them."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield key
+            yield from _json_strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _json_strings(item)
+
+
+def _copy_problem(root: Path, repo_path: str) -> tuple[str | None, bytes]:
+    """Why a file of ``mirror_files`` is not copied, or ``None``, and its bytes."""
+    path = root
+    for part in PurePosixPath(repo_path).parts:
+        path = path / part
+        if path.is_symlink():
+            return "a symbolic link", b""
+    source = root / repo_path
+    if not source.is_file():
+        return "not a file", b""
+    if source.suffix != ".json":
+        return "not a JSON file", b""
+    raw = source.read_bytes()
+    try:
+        text = raw.decode("utf-8")
+        strings = [text, *_json_strings(json.loads(text))]
+    except ValueError:
+        return "not JSON text in UTF-8", b""
+    if any(_EMAIL.search(string) for string in strings):
+        return "holds an email address", b""
+    if _secrets(strings, seen=False):
+        return "holds something shaped like a secret", b""
+    return None, raw
+
+
 def copy_files(root: Path, html: Path) -> list[str]:
     """Copy each file of ``mirror_files`` into ``html``, byte for byte.
 
-    A symbolic link, and a file whose name does not end in ``.json``, is a
-    problem and is not copied, so the site never serves a file from outside
-    the repository or one the specification does not define.
+    A file is not copied, and is a problem, when it or a folder above it in
+    the repository is a symbolic link, when it is not a file whose name ends
+    in ``.json`` and that holds JSON text in UTF-8, or when its text or a
+    string it holds, as a JSON reader decodes it, holds an email address or
+    a known token form. So the site serves no file from outside the
+    repository, and none that staging or the HTML check would refuse.
 
     Returns:
         One line per file that is not copied.
     """
     problems: list[str] = []
     for repo_path, site_path in mirror_files(root).items():
-        source = root / repo_path
-        if source.is_symlink():
-            problems.append(f"{repo_path}: a symbolic link; it is not copied")
-            continue
-        if source.suffix != ".json":
-            problems.append(f"{repo_path}: not a JSON file; it is not copied")
-            continue
         try:
+            problem, raw = _copy_problem(root, repo_path)
+            if problem is not None:
+                problems.append(f"{repo_path}: {problem}; it is not copied")
+                continue
             target = html / site_path
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(source.read_bytes())
+            target.write_bytes(raw)
         except Exception as error:  # reported, and the rest copied
             problems.append(f"{repo_path}: cannot be copied: {error!r}")
     return problems

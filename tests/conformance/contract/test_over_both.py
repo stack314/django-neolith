@@ -102,6 +102,12 @@ def test_a_reply_is_the_same_over_both(over_both: OverBoth, values: Values) -> N
     reply = over_both(call).reply
     assert type(reply) is Values
     assert reply == values
+    # Equality alone misses data a form keeps that == ignores, such as a
+    # decimal's trailing zeros or an enum member read as its text.
+    assert reply.model_dump_json() == values.model_dump_json()
+    assert {name: type(value) for name, value in reply} == {
+        name: type(value) for name, value in values
+    }
 
 
 @PARITY

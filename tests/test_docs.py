@@ -143,28 +143,73 @@ def test_the_files_are_copied_byte_for_byte_and_only_json(tmp_path: Path) -> Non
     root, html = tmp_path / "root", tmp_path / "html"
     base = root / "spec" / "conformance"
     (base / "cases").mkdir(parents=True)
-    (base / "reference.v1.openapi.json").write_bytes(b'{"a": "\\u00e9\xc3\xa9"}\n')
-    (base / "cases" / "contract.json").write_bytes(b"[]")
-    (base / "notes.md").write_text("# Notes\n", "utf-8")
-    outside = tmp_path / "secret.json"
-    outside.write_text("{}", "utf-8")
-    (base / "linked.json").symlink_to(outside)
-    (base / "folder").symlink_to(tmp_path)
+    # The nearest admitted files: escapes, non-ASCII text, an "@" that is no
+    # address, and a nested folder.
+    admitted = {
+        "spec/conformance/reference.v1.openapi.json": (
+            b'{"a": "\\u00e9\xc3\xa9", "pattern": "^[^@]+$"}\n'
+        ),
+        "spec/conformance/cases/contract.json": b"[]",
+    }
+    for name, raw in admitted.items():
+        (root / name).write_bytes(raw)
+    refused = {
+        "notes.md": (b"# Notes\n", "not a JSON file"),
+        "broken.json": (b"{", "not JSON text in UTF-8"),
+        "latin.json": (b'"\xe9"', "not JSON text in UTF-8"),
+        "mail.json": (b'{"by": "a@example.org"}', "holds an email address"),
+        "escaped.json": (
+            b'{"by": "a\\u0040example.org"}',
+            "holds an email address",
+        ),
+        "key.json": (
+            b'{"a\\u0040example.org": 1}',
+            "holds an email address",
+        ),
+        "token.json": (
+            b'["ghp_' + b"a" * 36 + b'"]',
+            "holds something shaped like a secret",
+        ),
+    }
+    for name, (raw, _) in refused.items():
+        (base / name).write_bytes(raw)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.json").write_text("{}", "utf-8")
+    (base / "linked.json").symlink_to(outside / "secret.json")
+    (base / "folder").symlink_to(outside)
+    (base / "dangling.json").symlink_to(tmp_path / "missing.json")
     problems = docs.copy_files(root, html)
-    assert problems == [
-        "spec/conformance/folder: a symbolic link; it is not copied",
-        "spec/conformance/linked.json: a symbolic link; it is not copied",
-        "spec/conformance/notes.md: not a JSON file; it is not copied",
-    ]
+    expected = {
+        f"spec/conformance/{name}: {why}; it is not copied"
+        for name, (_, why) in refused.items()
+    } | {
+        f"spec/conformance/{name}: a symbolic link; it is not copied"
+        for name in ("linked.json", "folder", "dangling.json")
+    }
+    assert sorted(problems) == sorted(expected)
     copied = sorted(
         path.relative_to(html).as_posix() for path in html.rglob("*") if path.is_file()
     )
-    assert copied == [
-        "spec/conformance/cases/contract.json",
-        "spec/conformance/reference.v1.openapi.json",
+    assert copied == sorted(admitted)
+    for name, raw in admitted.items():
+        assert (html / name).read_bytes() == raw
+
+
+@pytest.mark.parametrize("linked", ["spec", "spec/conformance"])
+def test_a_linked_folder_above_the_files_is_never_followed(
+    tmp_path: Path, linked: str
+) -> None:
+    root, html, outside = tmp_path / "root", tmp_path / "html", tmp_path / "outside"
+    (outside / "conformance").mkdir(parents=True)
+    (outside / "conformance" / "secret.json").write_text("{}", "utf-8")
+    (root / linked).parent.mkdir(parents=True, exist_ok=True)
+    (root / linked).symlink_to(outside if linked == "spec" else outside / "conformance")
+    assert docs.mirror_files(root) == {linked: linked}
+    assert docs.copy_files(root, html) == [
+        f"{linked}: a symbolic link; it is not copied"
     ]
-    for name in copied:
-        assert (html / name).read_bytes() == (root / name).read_bytes()
+    assert not html.exists()
 
 
 def test_a_build_copies_the_files_of_spec_conformance(
