@@ -33,6 +33,7 @@ from neolith._caller import Callers, Findings
 from neolith._context import Arrived, Sent
 from neolith._contracts import _FrozenList, _FrozenMap
 from neolith._declaration import Declaration, Provision
+from neolith._endpoint import Endpoints, Route
 from neolith._forms import _Form
 from neolith._frozen import once
 from neolith._host import Connector, Host
@@ -77,6 +78,7 @@ class _Caller(CallerBackend):
 
 _EVIL = Built(9, "evil.Evil", _Backend(), ("x",))
 _EVIL_CALLERS = Callers((CallerBuilt(9, "evil.Evil", _Caller()),))
+_EVIL_ENDPOINTS = Endpoints(("/evil/v1/",), {}, b"evil")
 _ALICE = Principal("https://id.example", "alice", {"role": "admin"})
 _CASES: dict[type, Case] = {
     Principal: Case(
@@ -139,6 +141,7 @@ _CASES: dict[type, Case] = {
                 (_EVIL,),
                 ("x",),
                 _EVIL_CALLERS,
+                _EVIL_ENDPOINTS,
             ),
             {},
         ),
@@ -151,7 +154,18 @@ _CASES: dict[type, Case] = {
             (_EVIL,),
             ("x",),
             _EVIL_CALLERS,
+            _EVIL_ENDPOINTS,
         ],
+    ),
+    Endpoints: Case(
+        lambda: Endpoints(("/shop/v1/",), {}, b"{}"),
+        ((("/evil/v1/",), {"/evil/v1/x": None}, b"evil"), {}),
+        state=[("/evil/v1/",), {"/evil/v1/x": None}, b"evil"],
+    ),
+    Route: Case(
+        lambda: Route("shop.v1", Action("ask", True, Ask, Told), None),  # type: ignore[arg-type]
+        (("evil.v1", Action("tell", False, Told, None), None), {}),
+        state=["evil.v1", Action("tell", False, Told, None), None],
     ),
     CallerBuilt: Case(
         lambda: CallerBuilt(0, "shop.Backend", _Caller()),

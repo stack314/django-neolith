@@ -42,8 +42,8 @@ What this version does. The [changelog](https://github.com/stack314/django-neoli
 - **App declaration.** An app declares what it provides, requires and owns on its `NeolithAppConfig`, and the declaration is checked when the class is defined.
 - **Checks before serving.** At start-up the host resolves every required contract to a provider and validates each implementation, listing every refusal in one error; once those pass, it runs its system checks on the settings and reports all their errors together.
 - **One database per app.** `neolith.routers.AppRouter` keeps each app's data on a database alias of its own.
-- **Call context.** A principal, a trace, a deadline and the calling app travel with each call. A root is opened for each request by `RootMiddleware`, and for a command or background work by `command_scope`. A request's principal comes from the backends listed in `NEOLITH["PRINCIPAL_BACKENDS"]`, such as `neolith.principals.DjangoUserBackend` for the logged-in Django user.
-- **Request principal.** Ordered principal backends, such as `neolith.principals.DjangoUserBackend`, name who a request is for, and `PrincipalMiddleware` fixes that principal for the request's calls.
+- **Call context.** A principal, a trace, a deadline and the calling app travel with each call. A root is opened for each request by `RootMiddleware`, and for a command or background work by `command_scope`.
+- **Request principal.** `NEOLITH["PRINCIPAL_BACKENDS"]` lists ordered principal backends, such as `neolith.principals.DjangoUserBackend` for the logged-in Django user. They name who a request is for, and `PrincipalMiddleware` fixes that principal for the request's calls.
 - **One app alone.** `neolith run <app>` boots apps from their declarations and serves them, and `neolith migrate <app>` applies each app's migrations to its own database.
 
 Not yet in this version: the HTTP transport, the conformance suite and events. See the roadmap below.

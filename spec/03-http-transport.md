@@ -25,13 +25,29 @@ The context travels in headers. The calling app's credential travels in `Authori
 | `traceparent` | The trace identifier, per W3C Trace Context |
 | `Neolith-Timeout` | The remaining time budget, in whole milliseconds, rounded down |
 
-The deadline is sent as a relative budget, not an absolute time, so that the deadline does not depend on synchronised clocks. The receiving host computes its own local deadline from the budget when the request arrives. In outline, following [ADR 0017](../docs/adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md):
+The deadline is sent as a relative budget, not an absolute time, so that the deadline does not depend on synchronised clocks. The receiving host computes its own local deadline from the budget when the request arrives. Each header follows [ADR 0017](../docs/adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md), and a provider's host reads them once the calling app is authenticated and admitted ([below](#calling-app-and-principal)). Header names are compared ignoring ASCII case, as HTTP compares them.
 
-- `Neolith-Timeout` is 1 to 10 ASCII digits, the first not `0` (`%x31-39 0*9DIGIT`). That is stricter than Connect's `Connect-Timeout-Ms`, a positive integer of at most 10 digits, which does not rule out a leading zero. An absent header means the call has no deadline. A caller never sends 0: a call whose budget rounds down to 0 ms fails with `timeout` before it is sent. A provider's host fails a call whose header is present but does not match, such as `0050`, with `invalid_argument`. In every mode, a budget above 9999999999 ms counts as 9999999999, and a provider's host can cap it lower, at a maximum of its own.
-- `traceparent` follows W3C Trace Context, including its rules for versions above `00`. One that is absent or invalid starts a fresh trace, and `tracestate` is then dropped; otherwise `tracestate` is passed on.
-- `Idempotency-Key` carries the call's key: one derived from its parent's key as in [02](02-transports.md), or a random one at a root. The IETF Idempotency-Key draft makes it a structured-field String (RFC 9651); neolith narrows that to a String of 1 to 255 characters, counted after unescaping, with no parameters. One that does not match fails the call with `invalid_argument`. A call that arrives without one has no key, so the calls it makes get random keys, and a retry of it does not reproduce them.
+**HTTP-21.** A provider's host MUST read a call-context header's value with the OWS at either end removed (RFC 9110, section 5.5), and nothing inside it changed. A value that holds a character outside ASCII has none of the forms below.
 
-These become requirements, with their tests, with the HTTP transport in roadmap step 5 (#12).
+`Neolith-Timeout` is 1 to 10 ASCII digits, the first not `0` (`%x31-39 0*9DIGIT`). That is stricter than Connect's `Connect-Timeout-Ms`, a positive integer of at most 10 digits, which does not rule out a leading zero. An absent header means the call has no deadline. A caller never sends 0: a call whose budget rounds down to 0 ms fails with `timeout` before it is sent. In every mode, a budget above 9999999999 ms counts as 9999999999, and a provider's host can cap it lower, at a maximum of its own.
+
+**HTTP-22.** A provider's host MUST fail a call whose `Neolith-Timeout` is present but does not have that form, such as `0050`, with `invalid_argument`.
+
+`Idempotency-Key` carries the call's key: one derived from its parent's key as in [02](02-transports.md), or a random one at a root. The IETF Idempotency-Key draft makes it a structured-field String (RFC 9651); neolith narrows that to a String of 1 to 255 characters, counted after unescaping, with no parameters. A call that arrives without one has no key, so the calls it makes get random keys, and a retry of it does not reproduce them.
+
+**HTTP-23.** A provider's host MUST fail a call whose `Idempotency-Key` is present but does not have that form with `invalid_argument`.
+
+`traceparent` follows W3C Trace Context, including its rules for versions above `00`, and `tracestate` goes with it.
+
+**HTTP-24.** A provider's host MUST start a fresh trace for a call whose `traceparent` is absent or invalid, and drop its `tracestate`; neither fails the call.
+
+**HTTP-25.** With a valid `traceparent`, a provider's host MUST pass on the list-members of a `tracestate` whose value is a W3C Trace Context list of 1 to 32 list-members (section 3.3.1.1), in their order, leaving out the empty ones.
+
+**HTTP-26.** A provider's host MUST shorten such a list that is longer than 512 characters by whole list-members, those longer than 128 characters first, then from the end, until it is at most 512 characters, as W3C Trace Context section 3.3.1.5 asks.
+
+**HTTP-27.** A provider's host MUST drop a `tracestate` that is not such a list, and never fail the call for it.
+
+**HTTP-28.** A provider's host MUST ignore every request header this document does not name, one whose name starts with `Neolith-` included (RFC 9110, section 5.1). Header names that start with `Neolith-` are reserved to this document.
 
 ## Errors
 
@@ -71,6 +87,37 @@ A caller writes HTTP/1.1. These rules keep every response the caller accepts to 
 
 **HTTP-17.** A caller MUST read the budget it sends in `Neolith-Timeout` once it has a connection ready to write the request on, so that the time it took to reach the provider is not counted again by the provider's host. A budget under 1 ms then fails the call with `timeout`, unsent (TRN-28).
 
+## Receiving a call
+
+A provider's host *owns* every path that starts with `/<name>/v<N>/`, for a contract version it provides, or with `/.well-known/neolith/`. It compares paths after their percent-encoding is decoded, code point by code point. The *well-known paths* are `/.well-known/neolith/openapi.json` ([Projection](#projection)) and `/.well-known/neolith/health` ([Health](#health)).
+
+**HTTP-29.** A provider's host MUST answer a request on a path it owns whose `Host` names no host it serves without a neolith error body, since such a request is on none of its contract paths.
+
+**HTTP-30.** A provider's host MUST answer a request on a path it owns that is neither a contract path nor a well-known path with status 404 and an empty body, whatever its method. A connector maps it to `unavailable` ([Errors](#errors)).
+
+**HTTP-31.** A provider's host MUST answer `GET` and `HEAD` on a well-known path, and `HEAD` with the status and header fields that `GET` gets and no body, except that a `HEAD` answer can leave out `Content-Length`, as RFC 9110, section 9.3.2, allows a server to.
+
+**HTTP-32.** A provider's host MUST answer any other method on a well-known path with status 405, `Allow: GET, HEAD` and an empty body.
+
+**HTTP-33.** A provider's host MUST answer a request on a well-known path that has a query with status 400 and an empty body.
+
+On a contract path, a provider's host checks a call in the order of [ADR 0017](../docs/adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md) Decision 9 and stops at the first check that fails (TRN-35). It checks the method and the query within that order's step 3, before the call-context headers, and the body's own header fields within step 5, before the body. A provider's host MUST fail a call on a contract path with `invalid_argument`:
+
+- **HTTP-34.** when its method is not `POST`, with `Allow: POST`;
+- **HTTP-35.** when its request target has a query;
+- **HTTP-36.** when the value of `Content-Type` it receives is not `application/json`, optionally followed by OWS `;` OWS `charset=` and either the token `utf-8` or the quoted-string `"utf-8"`, with the type, the subtype, the parameter's name and its value compared ignoring ASCII case, with `Accept-Post: application/json`;
+- **HTTP-37.** when it has a `Content-Encoding` field, with `Accept-Encoding: identity`;
+- **HTTP-38.** when it has no `Content-Length` field, or one whose value, as the host receives it, is not 1 to 19 ASCII digits, which several fields joined with `,` are not;
+- **HTTP-39.** when its body, as received, is not as long as its `Content-Length` says.
+
+**HTTP-40.** A provider's host MAY fail a call whose `Content-Length` is above a limit of its own with `invalid_argument`, before it reads the body.
+
+A repeated `Content-Type` or `Content-Length` reaches the host joined with `,` under ASGI, and so fails HTTP-36 or HTTP-38; under WSGI the server decides first ([ADR 0011](../docs/adr/0011-django-ninja-for-contract-endpoints.md), a repeated body header): gunicorn and `neolith run` answer it with a 400 of their own, and `runserver` keeps the first field.
+
+The body itself then gets the receive check of [01](01-contracts.md).
+
+**HTTP-41.** A provider's host MUST answer a reply with status 200, `Content-Type: application/json` and the reply's JSON text as the body, and an empty reply with status 204 and no body.
+
 ## Projection
 
 **HTTP-2.** A provider MUST serve an OpenAPI 3.1 document describing every contract version it provides, derived from the contracts. The document is the HTTP transport's publication of the contract ([01](01-contracts.md)). Its location is `GET /.well-known/neolith/openapi.json`.
@@ -96,7 +143,15 @@ A host with several backends tries them in a configured order. The first that re
 
 Base64url-encoded values here use the base64url alphabet only (RFC 4648, section 5), with no padding, no whitespace and zero unused bits. JSON objects here meet the I-JSON rule of [ADR 0019](../docs/adr/0019-wire-encodings-of-the-portable-forms.md), so a duplicate member name or a lone surrogate makes one invalid while a noncharacter such as U+FFFF does not, and integers are JSON numbers with no fraction or exponent, within ±(2^53 − 1).
 
-On a contract path, the provider's host authenticates the calling app before it reads the request body or any call-context header. A call on a contract path whose credential is missing, is recognized by no backend or does not resolve, or that reaches a host with no backend, fails with `unauthenticated`. It runs its other checks, the request body last, in the order of [ADR 0017](../docs/adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md) Decision 9. A request on any other path is answered as the Errors section says. In-process there are no credentials: the calling app is the app the call is made from. A call made from no app fails with `unauthenticated` on every transport.
+**HTTP-42.** On a contract path, a provider's host MUST authenticate the calling app before it reads the request body or any call-context header.
+
+**HTTP-43.** A provider's host MUST take the time a call arrives, from which it counts the call's budget, before it authenticates the calling app, so that the time authentication takes comes off the budget.
+
+**HTTP-44.** A call on a contract path whose credential is missing, is recognized by no backend or does not resolve, or that reaches a host with no backend, MUST fail with `unauthenticated`.
+
+**HTTP-45.** A provider's host MUST send every response with status 401 with exactly one `WWW-Authenticate` field, whose value is `Bearer realm="neolith"`.
+
+The host runs its other checks, the request body last, in the order of [ADR 0017](../docs/adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md) Decision 9 ([Receiving a call](#receiving-a-call)). A request on any other path is answered as the Errors section says. In-process there are no credentials: the calling app is the app the call is made from. A call made from no app fails with `unauthenticated` on every transport.
 
 **HTTP-18.** A caller MUST fail a call with `unauthenticated`, without sending it, when the call has no calling app or its calling app holds no key to sign a shared-secret token with. A call with no calling app so gets the outcome it gets in-process (TRN-42), and no call reaches a provider without a credential.
 
@@ -106,7 +161,11 @@ A *principal object* is a JSON object with exactly the members `issuer` and `sub
 
 With the shared-secret backend, `Neolith-Principal` is present exactly when the call has a principal, and carries it as a bare assertion: a principal object, base64url-encoded, with the encoding at most 4096 bytes. A caller sends the object's *sent form*: its JCS serialization (RFC 8785) in UTF-8, with `claims` left out when empty. A provider accepts any serialization that meets these rules. No valid serialization of a principal object is shorter than its sent form, so a principal that arrived in a valid header still fits when the provider passes it on in calls of its own. A header with an empty value counts as present. A bare assertion that is not a principal object, encoded as above, fails the call with `invalid_argument`, once the calling app has been authenticated and found on the allow-list below. A neolith caller never sends one, because it checks the principal's sent form against these rules first, in every mode, in the order of [ADR 0017](../docs/adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md) Decision 9. A provider receives the principal decoded from that form.
 
-The principal is not signed: the authenticated calling app asserts it, and it never goes inside the shared-secret token. A provider accepts `Neolith-Principal` only from a calling app on its allow-list of apps that may assert a principal. A call from any other calling app that carries the header fails with `permission_denied`, whatever the header holds. A later backend can carry a signed delegation token in this header instead of the bare assertion, under its own format.
+The principal is not signed: the authenticated calling app asserts it, and it never goes inside the shared-secret token. A provider accepts `Neolith-Principal` only from a calling app on its allow-list of apps that may assert a principal. A call from any other calling app that carries the header fails with `permission_denied`, whatever the header holds.
+
+**HTTP-46.** A provider's host MUST read `Neolith-Principal` only once the calling app is authenticated and found on the allow-list, so a call from any other calling app that carries the header fails with `permission_denied` (TRN-43) however the header is malformed.
+
+A later backend can carry a signed delegation token in this header instead of the bare assertion, under its own format.
 
 For example, the principal with issuer `https://id.example.com`, subject `u-81f3` and the claim `roles` holding `["clerk"]` has the sent form `{"claims":{"roles":["clerk"]},"issuer":"https://id.example.com","subject":"u-81f3"}` and is sent as:
 
@@ -161,4 +220,4 @@ The rest of this section becomes requirements, with IDs and tests, with the HTTP
 
 ## Health
 
-`GET /.well-known/neolith/health` returns 200 when the host can serve its contracts.
+**HTTP-47.** A provider's host MUST answer `GET /.well-known/neolith/health` with status 200 and an empty body only once it can serve its contracts: the path means ready, not merely running.

@@ -897,23 +897,26 @@ def test_a_host_whose_remote_provider_is_down_sets_up_boots_serves_and_fails_the
             identity: type(found._transport).__name__
             for identity, found in host.connectors.items()
         }
+        served = list(host.endpoints.prefixes)
         with neolith.command_scope("web", timeout=10):
             try:
                 neolith.connect("stock.v1").level(Sku(sku="abc"))
             except neolith.ContractError as error:
                 kind = error.kind
-        print(json.dumps([status, before, transports, kind, len(reached) > 0]))
+        print(json.dumps([status, before, transports, served, kind, len(reached) > 0]))
         """,
         [COURIERS, WEB, "neolith"],
         {"NEOLITH": neolith, "ROOT_URLCONF": "tests.empty_urls"},
         timeout=120,
     )
-    status, before, transports, kind, called = json.loads(out.splitlines()[-1])
+    status, before, transports, served, kind, called = json.loads(out.splitlines()[-1])
     # Set-up, Boot and a request served, and nothing reached for the network.
     assert status == 404
     assert before == []
     # Under single: the app of the host where one provides, else the remote one.
     assert transports == {"couriers.v3": "InProcess", "stock.v1": "HTTPTransport"}
+    # The host serves only what its apps provide, never a remote contract.
+    assert served == ["/couriers/v3/"]
     assert kind == "unavailable"
     assert called
 
