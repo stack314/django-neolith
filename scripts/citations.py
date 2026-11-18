@@ -47,9 +47,10 @@ BARE_RECORD = r"0\d{3}(?!\d)"
 # the numbers joined to it, as in "CON-30 and 31", "CON-30-33" or
 # "CON-30 through CON-33". A number of another area starts a word of its own.
 # A number followed by a point and a digit is a decimal or a version, such as
-# "1.5 seconds", and is not joined.
+# "1.5 seconds", and is not joined; a word whose own number is followed by one,
+# such as the licence "MPL-2.0", is a version and no citation.
 ID_SHAPED = re.compile(
-    r"(?<![\w-])(?P<area>[A-Z]+)-(?P<number>\d+)"
+    r"(?<![\w-])(?P<area>[A-Z]+)-(?P<number>\d+)(?!\d|\.\d)"
     rf"(?P<ends>(?:{JOIN}(?!{DATE}|{BARE_RECORD})(?:(?P=area)-)?\d+(?!\w|\.\d))*)"
     r"(?!\w)"
 )
