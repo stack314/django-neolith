@@ -77,8 +77,14 @@ def _refuse(problems: list[str]) -> None:
         raise ImproperlyConfigured("\n".join(sorted(problems)))
 
 
-def configure(apps: object, deployer: object) -> dict[str, Any]:
+def configure(
+    apps: object, deployer: object, *, closed: bool = False
+) -> dict[str, Any]:
     """Run Declare, Resolve and Configure; return the whole settings mapping.
+
+    ``closed`` is for a host named on the command line, which hosts declared
+    apps only in 0.1 (ADR 0022 Decision 4): Configure then also refuses a
+    ``default`` in ``NEOLITH["DATABASES"]``.
 
     Raises:
         DeclarationError: A hosted app's declaration is refused when its
@@ -98,7 +104,10 @@ def configure(apps: object, deployer: object) -> dict[str, Any]:
     if refusals:
         raise DeclarationError("\n".join(sorted(refusals)))
     names, problems = _names(deployer)
-    _refuse(problems + _deployer_problems(names, declarations))
+    problems += _deployer_problems(names, declarations)
+    if closed:
+        problems += _open_problems(names.get("NEOLITH"))
+    _refuse(problems)
     return {**names, **built_settings(declarations, names["NEOLITH"])}
 
 
@@ -227,6 +236,17 @@ def _deployer_problems(
         names.get("SILENCED_SYSTEM_CHECKS", _checks.MISSING)
     )
     return problems
+
+
+def _open_problems(neolith: object) -> list[str]:
+    """The refusal of a ``default`` database in a host that must be closed."""
+    databases = neolith.get("DATABASES") if type(neolith) is dict else None
+    if type(databases) is dict and _databases.DEFAULT in databases:
+        return [
+            f"database {_databases.DEFAULT}: neolith run hosts declared apps only "
+            "in 0.1"
+        ]
+    return []
 
 
 def built_settings(

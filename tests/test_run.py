@@ -11,6 +11,7 @@ and waits on lines the host prints, never on time (T3).
 import contextlib
 import http.client
 import importlib.metadata
+import ipaddress
 import os
 import queue
 import signal
@@ -25,6 +26,8 @@ from pathlib import Path
 from typing import IO, Any
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from neolith import _checks, _cli, _server
 
@@ -165,13 +168,15 @@ class Served:
         self.seen: list[tuple[str, str]] = []
         assert self.process.stdout is not None
         assert self.process.stderr is not None
-        for name, stream in (
-            ("out", self.process.stdout),
-            ("err", self.process.stderr),
-        ):
-            threading.Thread(
-                target=self._read, args=(name, stream), daemon=True
-            ).start()
+        self.readers = [
+            threading.Thread(target=self._read, args=(name, stream), daemon=True)
+            for name, stream in (
+                ("out", self.process.stdout),
+                ("err", self.process.stderr),
+            )
+        ]
+        for reader in self.readers:
+            reader.start()
         self.port = 0
         self.ends = 0
 
@@ -215,10 +220,16 @@ class Served:
                 self.seen.append((name, line))
         return status, self.seen
 
-    def kill(self) -> None:
+    def close(self) -> None:
+        """Kill the process if it still runs, and close its pipes."""
         if self.process.poll() is None:
             self.process.kill()
-            self.process.wait(timeout=_WAIT)
+        self.process.wait(timeout=_WAIT)
+        for reader in self.readers:
+            reader.join(timeout=_WAIT)
+        for stream in (self.process.stdout, self.process.stderr):
+            if stream is not None:
+                stream.close()
 
 
 @pytest.fixture
@@ -237,11 +248,24 @@ def served(site: Site) -> Iterator[Callable[..., Served]]:
 
     yield start
     for process in started:
-        process.kill()
+        process.close()
+
+
+# Every socket a test opens, closed after the test.
+_OPENED: list[socket.socket] = []
+
+
+@pytest.fixture(autouse=True)
+def _sockets_closed() -> Iterator[None]:
+    yield
+    while _OPENED:
+        _OPENED.pop().close()
 
 
 def connect(port: int, host: str = "127.0.0.1") -> socket.socket:
-    return socket.create_connection((host, port), timeout=_WAIT)
+    connection = socket.create_connection((host, port), timeout=_WAIT)
+    _OPENED.append(connection)
+    return connection
 
 
 def send(connection: socket.socket, path: str) -> None:
@@ -453,9 +477,9 @@ def test_a_default_database_is_refused_with_the_other_settings_refusals(
     assert ran.returncode == 1, ran.stderr
     refusals = [line for line in ran.stderr.splitlines() if line.startswith("neolith:")]
     assert refusals == [
-        "neolith: database default: neolith run hosts declared apps only in 0.1",
         "neolith: NEOLITH: unknown key 'OTHER'; the keys are DATABASES, "
         "REQUEST_DEADLINE, UNDECLARED_APPS",
+        "neolith: database default: neolith run hosts declared apps only in 0.1",
     ]
 
 
@@ -481,8 +505,9 @@ def test_the_environment_s_settings_module_is_ignored(site: Site) -> None:
     ("apps", "refusal", "later"),
     [
         (
-            ["tests.settings_apps.broken", DESK],
-            "app tests.settings_apps.broken.apps.BrokenConfig: resources",
+            ["tests.run_apps.refused", DESK],
+            "app tests.run_apps.refused.apps.RefusedConfig: resources: 'database' "
+            "is listed twice; a kind is listed once",
             "neolith.E",
         ),
         (
@@ -580,13 +605,13 @@ def test_one_app_boots_alone_on_sqlite_and_stops(
         "with Django's development server, which is not for production"
     )
     assert f"neolith: serving {DESK} at http://{bind.rsplit(':', 1)[0]}:{port}/" in line
-    client = connect(port, "::1" if bind.startswith("[") else "127.0.0.1")
-    send(client, "/count/")
-    assert response(client)[:2] == (200, b"2")
+    with connect(port, "::1" if bind.startswith("[") else "127.0.0.1") as client:
+        send(client, "/count/")
+        assert response(client)[:2] == (200, b"2")
     host.stop()
     status, seen = host.ended()
     assert status == 0, seen
-    assert "neolith: stopped; no request was in flight" in lines(seen, "out")
+    assert lines(seen, "out")[-1].startswith("neolith: stopped; ")
 
 
 # Drain.
@@ -695,6 +720,49 @@ def test_a_second_signal_stops_at_once(
     )
 
 
+@pytest.mark.spec("APP-39", "APP-43")
+def test_a_signal_delivered_to_a_request_s_thread_starts_drain(
+    site: Site, served: Callable[..., Served]
+) -> None:
+    """The kernel may deliver a signal meant for the process to any thread;
+    here it reaches the thread serving the request, which finishes."""
+    site.deployer({"DATABASES": site.databases("desk"), "REQUEST_DEADLINE": LONG})
+    assert site.migrate().returncode == 0
+    host = served()
+    port = host.serving()
+    client = connect(port)
+    send(client, "/signal/")
+    assert response(client)[:2] == (200, b"sent")
+    host.wait_for("neolith: draining: ")
+    status, seen = host.ended()
+    assert status == 0, seen
+
+
+@pytest.mark.spec("APP-44", "APP-45")
+def test_a_second_signal_delivered_to_a_request_s_thread_stops_at_once(
+    site: Site, served: Callable[..., Served]
+) -> None:
+    site.deployer({"DATABASES": site.databases("desk"), "REQUEST_DEADLINE": LONG})
+    assert site.migrate().returncode == 0
+    stuck, signalling = site.hold("stuck"), site.hold("sig")
+    host = served()
+    port = host.serving()
+    first, second = connect(port), connect(port)
+    send(first, "/hold/stuck/")
+    stuck.wait_started()
+    send(second, "/signal/sig/")
+    signalling.wait_started()
+    host.stop()
+    host.wait_for("neolith: draining: ")
+    signalling.let_go()
+    status, seen = host.ended()
+    assert status == 1, seen
+    assert (
+        "neolith: drain: stopped at once with a request in flight: GET /hold/stuck/ "
+        "HTTP/1.1" in lines(seen, "err")
+    )
+
+
 @pytest.mark.spec("APP-43")
 def test_a_request_that_a_signal_receiver_ended_is_not_counted_as_in_flight(
     site: Site, served: Callable[..., Served]
@@ -731,6 +799,7 @@ class _Handler:
 
     def __init__(self) -> None:
         self.connection, self.peer = socket.socketpair()
+        _OPENED.extend((self.connection, self.peer))
         self.peer.settimeout(_WAIT)
 
     def shut(self) -> bool:
@@ -771,9 +840,9 @@ def test_one_lock_decides_whether_a_request_began_before_drain() -> None:
     newer = _Handler()
     assert not table.opened(newer)
     # The request in flight ends, and its connection closes.
-    assert table.wait(0) == ["GET /a/ HTTP/1.1"]
+    assert table.in_flight() == ["GET /a/ HTTP/1.1"]
     assert table.ended(early) is True
-    assert table.wait(0) == []
+    assert table.in_flight() == []
     for handler in (early, late, idle):
         table.closed(handler)
 
@@ -798,7 +867,7 @@ def test_cutting_names_each_request_and_shuts_its_connection() -> None:
     assert table.begin(handler, b"GET /\xff\x00" + b"x" * 300 + b" HTTP/1.1\r\n")
     assert table.drain() == 1
     (cut,) = table.cut()
-    assert cut.startswith("GET /\xff? ")
+    assert cut.startswith("GET /\xff?xxx")
     assert len(cut) <= 203
     assert cut.endswith("...")
     assert handler.shut()
@@ -967,6 +1036,33 @@ def test_the_check_reports_what_boot_would_refuse_and_writes_nothing(
     assert site.database("desk").read_bytes() == after
 
 
+@pytest.mark.spec("APP-48")
+def test_an_undeclared_app_that_depends_on_a_hosted_app_is_refused(
+    site: Site,
+) -> None:
+    """On a real ``default``, an app without a declaration whose migration
+    depends on a hosted app's would record that app's migrations on
+    ``default``."""
+    manage = _project(
+        site,
+        {
+            "DATABASES": site.databases("desk", "default"),
+            "UNDECLARED_APPS": [
+                "django.contrib.contenttypes",
+                "tests.run_apps.borrower",
+            ],
+        },
+    )
+    ran = manage("migrateapps")
+    assert ran.returncode == 1
+    assert (
+        "(neolith.E013) app borrower: migration 0001_initial depends on desk"
+        in ran.stderr
+    )
+    assert not site.database("desk").exists()
+    assert not site.database("default").exists()
+
+
 def test_on_a_real_default_the_step_migrates_undeclared_apps_there(
     site: Site,
 ) -> None:
@@ -990,3 +1086,39 @@ def test_on_a_real_default_the_step_migrates_undeclared_apps_there(
     connection.close()
     assert apps == {"contenttypes"}
     assert manage("migrateapps", "--check").returncode == 0
+
+
+@pytest.mark.spec("APP-16")
+@given(
+    address=st.ip_addresses(),
+    port=st.integers(min_value=0, max_value=65535),
+)
+def test_every_ip_address_and_port_is_admitted_as_written(
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address, port: int
+) -> None:
+    ipv6 = address.version == 6
+    text = f"[{address}]:{port}" if ipv6 else f"{address}:{port}"
+    assert _cli.parse_bind(text) == (str(address), port, ipv6)
+
+
+@pytest.mark.spec("APP-16")
+@given(text=st.text(alphabet="0123456789abfx:.[]%-_ \n", max_size=24))
+def test_what_bind_admits_reads_back_as_written(text: str) -> None:
+    """An admitted address is an IP address or a host name, and the port a
+    number in range, written back exactly as given: nothing is trimmed,
+    normalised or guessed."""
+    try:
+        host, port, ipv6 = _cli.parse_bind(text)
+    except ValueError:
+        return
+    assert (f"[{host}]:{port}" if ipv6 else f"{host}:{port}") == text
+    assert 0 <= port <= 65535
+    if ipv6:
+        assert ipaddress.ip_address(host).version == 6
+    else:
+        with contextlib.suppress(ValueError):
+            assert ipaddress.ip_address(host).version == 4
+            return
+        labels = host.split(".")
+        assert all(label and label[0] != "-" and label[-1] != "-" for label in labels)
+        assert not labels[-1].isdigit()

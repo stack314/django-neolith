@@ -142,7 +142,7 @@ Schema changes are applied by a step of their own, which the deployer runs befor
 
 **APP-47.** The schema step MUST refuse, before it changes any database, an app that declares a database resource and has no schema changes.
 
-**APP-48.** The schema step MUST refuse, before it changes any database, an app with a schema change that depends on a schema change of another app.
+**APP-48.** The schema step MUST refuse, before it changes any database, an app with a schema change that depends on a schema change of an app whose records live in another database.
 
 **APP-49.** When applying one app's schema changes fails, the schema step MUST stop before the next app, with a diagnostic that names the apps whose changes it applied and those whose changes it did not.
 

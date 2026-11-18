@@ -7,4 +7,4 @@ from tests.run_apps.desk.models import Note
 
 class DeskService:
     def count(self, request: Tally, ctx: CallContext) -> Tally:
-        return Tally(notes=request.notes + Note.objects.count())
+        return Tally(notes=request.notes + Note._default_manager.count())

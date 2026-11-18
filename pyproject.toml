@@ -32,6 +32,10 @@ classifiers = [
     "Typing :: Typed",
 ]
 
+# ADR 0022 Decision 12: one console script, also reachable as python -m neolith.
+[project.scripts]
+neolith = "neolith._cli:main"
+
 [project.urls]
 Repository = "https://github.com/stack314/django-neolith"
 Issues = "https://github.com/stack314/django-neolith/issues"

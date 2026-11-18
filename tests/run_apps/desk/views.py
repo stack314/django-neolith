@@ -1,5 +1,8 @@
 """The desk app's views.
 
+Two views send a signal to the thread that serves them, as the kernel may
+deliver a signal meant for the process to any of its threads.
+
 A test holds a request in flight through two named pipes in the directory
 that ``NEOLITH_RUN_PIPES`` names: the view writes a line to
 ``<name>.started`` once it runs, then reads one from ``<name>.release``
@@ -8,6 +11,8 @@ the server can keep its connection alive.
 """
 
 import os
+import signal
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -34,7 +39,9 @@ def _held(name: str) -> None:
 
 
 def _notes() -> str:
-    return str(_DESK.count(Tally(notes=0)).notes)
+    tally = _DESK.count(Tally(notes=0))
+    assert isinstance(tally, Tally)
+    return str(tally.notes)
 
 
 def ping(request: HttpRequest) -> HttpResponse:
@@ -57,3 +64,14 @@ def stream(request: HttpRequest, name: str) -> StreamingHttpResponse:
         yield _notes()
 
     return StreamingHttpResponse(body())
+
+
+def signal_here(request: HttpRequest) -> HttpResponse:
+    signal.pthread_kill(threading.get_ident(), signal.SIGTERM)
+    return _sized("sent")
+
+
+def signal_after(request: HttpRequest, name: str) -> HttpResponse:
+    _held(name)
+    signal.pthread_kill(threading.get_ident(), signal.SIGINT)
+    return _sized(name)

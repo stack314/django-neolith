@@ -22,4 +22,6 @@ urlpatterns = [
     path("count/", views.count),
     path("hold/<str:name>/", views.hold),
     path("stream/<str:name>/", views.stream),
+    path("signal/", views.signal_here),
+    path("signal/<str:name>/", views.signal_after),
 ]

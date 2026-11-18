@@ -6,7 +6,12 @@ class DeskConfig(NeolithAppConfig):
     name = "tests.run_apps.desk"
     label = "desk"
     provides = (
-        Provided(Desk, implementation="tests.run_apps.desk.services.DeskService"),
+        Provided(
+            Desk,
+            implementation="tests.run_apps.desk.services.DeskService",
+            principal_from=(),
+        ),
     )
     requires = (Desk,)
     resources = ("database",)
+    default_auto_field = "django.db.models.AutoField"

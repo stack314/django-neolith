@@ -68,7 +68,13 @@ from neolith import _checks, _compat, _databases
 from neolith._context import UsageError
 from neolith._declaration import declaration_of
 
-__all__ = ["boot", "boot_for_tests", "schema_messages", "state_messages"]
+__all__ = [
+    "boot",
+    "boot_for_tests",
+    "code_messages",
+    "schema_messages",
+    "state_messages",
+]
 
 _log = logging.getLogger("neolith.host")
 _LOCK: Final = threading.Lock()
@@ -348,6 +354,44 @@ def _read(
     return messages
 
 
+def code_messages(
+    hosted: Sequence[str], undeclared: Sequence[str]
+) -> tuple[list[checks.CheckMessage], list[str]]:
+    """The checks of the code that need no database, as Boot runs them: for
+    each label of ``hosted``, a hosted app with a database, ``neolith.E008``,
+    ``E010``, ``E011`` and ``E013``; for each label of ``undeclared``, apps
+    without a declaration on a real ``default``, ``E010``, ``E011``, and
+    ``E013`` for a migration that depends on one of ``hosted``, whose records
+    live in another database. Also returns the labels of ``undeclared`` that
+    have migrations, in order.
+    """
+    messages: list[checks.CheckMessage] = []
+    code, broken, failure = _code_graph()
+    if failure is not None:
+        messages.append(
+            checks.Error(
+                f"host: the migrations cannot be loaded: {failure}", id="neolith.E010"
+            )
+        )
+    for label in hosted:
+        if label in broken:
+            messages.append(_unloadable(label, broken[label]))
+        elif code is not None:
+            messages.extend(_code_messages(code, label))
+    migrated: list[str] = []
+    for label in undeclared:
+        if label in broken:
+            messages.append(_unloadable(label, broken[label]))
+        elif code is not None and _has_nodes(code, label):
+            messages.extend(
+                checks.Error(f"app {label}: {edge}", id="neolith.E013")
+                for edge in sorted(_edges_into(code, label, frozenset(hosted)))
+            )
+            messages.extend(_conflicts(code, label))
+            migrated.append(label)
+    return messages, migrated
+
+
 class _Loader(MigrationLoader):
     """Django's migration loader, leaving out the migrations of the labels
     in ``excluded``, so that one app whose migrations break the graph hides
@@ -502,6 +546,20 @@ def _cross_label(code: _Loader, label: str) -> set[str]:
             if other[0] != label
         )
     return edges
+
+
+def _edges_into(code: _Loader, label: str, others: frozenset[str]) -> set[str]:
+    """Every edge in Django's graph from a migration of ``label`` to one of
+    a label in ``others``.
+    """
+    graph = code.graph
+    return {
+        f"migration {key[1]} depends on {parent.key[0]}"
+        for key in graph.nodes
+        if key[0] == label
+        for parent in graph.node_map[key].parents
+        if parent.key[0] in others
+    }
 
 
 def _conflicts(code: MigrationLoader, label: str) -> list[checks.CheckMessage]:
