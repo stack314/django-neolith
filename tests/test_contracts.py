@@ -49,6 +49,7 @@ from pydantic import (
     SerializeAsAny,
     Strict,
     StringConstraints,
+    ValidationInfo,
     WithJsonSchema,
     WrapSerializer,
     WrapValidator,
@@ -719,6 +720,94 @@ def test_before_validators_are_accepted() -> None:
             return abs(value)
 
     declare_with_field(Checked)
+
+
+# A validator that takes ValidationInfo can read info.data, the fields of its
+# record validated before it, as the very values the record keeps. Each
+# callable below notes whether pydantic-core handed it that info.
+_VALIDATOR_INFO: list[bool] = []
+
+
+def _value_only(value: object) -> object:
+    _VALIDATOR_INFO.append(False)
+    return value
+
+
+def _value_and_info(value: object, info: ValidationInfo) -> object:
+    _VALIDATOR_INFO.append(True)
+    return value
+
+
+def _info_optional(value: object, info: object = None) -> object:
+    _VALIDATOR_INFO.append(info is not None)
+    return value
+
+
+class _CallTakesInfo:
+    def __call__(self, value: object, info: ValidationInfo) -> object:
+        _VALIDATOR_INFO.append(True)
+        return value
+
+
+_BEFORE_VALIDATORS: list[Callable[..., object]] = [
+    _value_only,
+    _value_and_info,
+    _info_optional,
+    lambda value: _value_only(value),
+    lambda value, info: _value_and_info(value, info),
+    functools.partial(_info_optional, info=None),
+    _CallTakesInfo(),
+]
+
+
+@pytest.mark.spec("CON-13", "CON-16", "CON-17")
+@pytest.mark.parametrize("validator", _BEFORE_VALIDATORS)
+@pytest.mark.parametrize("place", ["field", "list item"])
+def test_before_validator_is_refused_when_pydantic_hands_it_validation_info(
+    validator: Callable[..., object], place: str
+) -> None:
+    checked: Any = Annotated[int, BeforeValidator(validator)]
+    annotation: Any = checked if place == "field" else cast("Any", list)[checked]
+    record = create_model("Later", items=(list[int], ...), y=(annotation, ...))
+    # What the installed Pydantic hands the validator when it reads a value.
+    _VALIDATOR_INFO.clear()
+    record.model_validate({"items": [1], "y": 2 if place == "field" else [2]})
+    assert len(_VALIDATOR_INFO) == 1
+    if _VALIDATOR_INFO[0]:
+        with pytest.raises(
+            ContractDefinitionError,
+            match=r"field Shape\.value\.y(\[\*\])? has a validator that takes "
+            r"ValidationInfo",
+        ):
+            declare_with_field(record)
+    else:
+        declare_with_field(record)
+
+
+class ChangesAnEarlierField(BaseModel):
+    items: list[int]
+    y: int
+
+    @field_validator("y", mode="before")
+    @classmethod
+    def tamper(cls, value: object, info: ValidationInfo) -> object:
+        info.data["items"].append("not an int")
+        return value
+
+
+@pytest.mark.spec("CON-13", "CON-16", "CON-17")
+def test_before_validator_that_changes_an_earlier_field_is_refused() -> None:
+    # The change travels: info.data holds the values the record keeps.
+    made = ChangesAnEarlierField.model_validate_json('{"items": [1], "y": 2}')
+    assert made.items == [1, "not an int"]
+    with pytest.raises(
+        ContractDefinitionError,
+        match=re.escape(
+            "field Shape.value.y has a validator that takes ValidationInfo, "
+            "whose data holds the fields validated before it"
+        ),
+    ):
+        declare_with_field(ChangesAnEarlierField)
 
 
 class AfterModel(BaseModel):
@@ -2061,6 +2150,171 @@ def test_post_init_under_another_name_is_refused() -> None:
         ContractDefinitionError, match="runs a post-init other than model_post_init"
     ):
         declare_with_field(RenamedPostInit)
+
+
+# Pydantic builds a record's private attributes after validation, in the
+# model_post_init it generates. Each factory below notes whether Pydantic
+# called it with arguments: from 2.13, unlike 2.12, a factory that takes one
+# positional argument is handed the validated data, which it can change.
+_FACTORY_ARGUMENTS: list[bool] = []
+_NOTHING = object()
+
+
+def _takes_data(data: dict[str, Any]) -> int:
+    _FACTORY_ARGUMENTS.append(True)
+    data["x"] = "not an int"
+    return 0
+
+
+def _takes_data_positionally(data: dict[str, Any], /) -> int:
+    _FACTORY_ARGUMENTS.append(True)
+    return 0
+
+
+def _takes_two(data: dict[str, Any], other: object) -> int:
+    _FACTORY_ARGUMENTS.append(True)
+    return 0
+
+
+def _takes_keyword(*, data: dict[str, Any]) -> int:
+    _FACTORY_ARGUMENTS.append(True)
+    return 0
+
+
+def _takes_nothing() -> int:
+    _FACTORY_ARGUMENTS.append(False)
+    return 0
+
+
+def _data_optional(data: object = _NOTHING) -> int:
+    _FACTORY_ARGUMENTS.append(data is not _NOTHING)
+    return 0
+
+
+def _any_arguments(*args: object, **kwargs: object) -> int:
+    _FACTORY_ARGUMENTS.append(bool(args or kwargs))
+    return 0
+
+
+def _both_given(first: object, second: object) -> int:
+    # Called with arguments Pydantic adds, it would raise TypeError.
+    _FACTORY_ARGUMENTS.append(False)
+    return 0
+
+
+class _CallTakesData:
+    def __call__(self, data: dict[str, Any]) -> int:
+        _FACTORY_ARGUMENTS.append(True)
+        return 0
+
+
+class _CallTakesNothing:
+    def __call__(self) -> int:
+        _FACTORY_ARGUMENTS.append(False)
+        return 0
+
+
+_PRIVATE_FACTORIES: list[Callable[..., int]] = [
+    _takes_data,
+    _takes_data_positionally,
+    _takes_two,
+    _takes_keyword,
+    lambda data: _takes_data(data),
+    functools.partial(_takes_two, other=None),
+    functools.partial(_takes_two, {}),
+    _CallTakesData(),
+    _takes_nothing,
+    _data_optional,
+    _any_arguments,
+    lambda: _takes_nothing(),
+    _CallTakesNothing(),
+    functools.partial(_both_given, 1, 2),
+]
+
+
+def _with_private_factory(factory: Callable[..., int]) -> type[BaseModel]:
+    class Cached(BaseModel):
+        x: int
+        _made: int = PrivateAttr(default_factory=factory)
+
+    return Cached
+
+
+@pytest.mark.spec("CON-13", "CON-16", "CON-17")
+@pytest.mark.parametrize("factory", _PRIVATE_FACTORIES)
+def test_private_default_factory_is_refused_when_pydantic_would_pass_it_arguments(
+    factory: Callable[..., int],
+) -> None:
+    record = _with_private_factory(factory)
+    # What the installed Pydantic does with the factory when it builds a value.
+    _FACTORY_ARGUMENTS.clear()
+    try:
+        record.model_validate({"x": 1})
+    except TypeError:
+        # It needs arguments Pydantic does not pass (always so before 2.13).
+        takes_arguments = True
+    else:
+        assert len(_FACTORY_ARGUMENTS) == 1
+        takes_arguments = _FACTORY_ARGUMENTS[0]
+    if takes_arguments:
+        with pytest.raises(
+            ContractDefinitionError,
+            match=r"record Shape\.value has the private attribute _made, whose "
+            r"default factory takes arguments",
+        ):
+            declare_with_field(record)
+    else:
+        declare_with_field(record)
+
+
+class TakesDataPrivate(BaseModel):
+    items: list[int]
+    _p: int = PrivateAttr(default_factory=_takes_data)
+
+
+class InheritsTakesDataPrivate(TakesDataPrivate):
+    y: int = 0
+
+
+class _OwnPrivateAttr(type(PrivateAttr())):  # type: ignore[misc]
+    """A private attribute that says how Pydantic must call its factory."""
+
+    @property
+    def default_factory_takes_validated_data(self) -> bool:
+        return True
+
+
+class OwnPrivateAttr(BaseModel):
+    x: int
+    _p: int = _OwnPrivateAttr(default_factory=lambda: 0)
+
+
+@pytest.mark.spec("CON-13", "CON-17")
+@pytest.mark.parametrize(
+    ("record", "refusal"),
+    [
+        (
+            TakesDataPrivate,
+            "record Shape.value has the private attribute _p, "
+            "whose default factory takes arguments",
+        ),
+        (
+            InheritsTakesDataPrivate,
+            "record Shape.value has the private attribute _p, "
+            "whose default factory takes arguments",
+        ),
+        (
+            OwnPrivateAttr,
+            "record Shape.value has the private attribute _p, "
+            "which is a _OwnPrivateAttr, not what Pydantic's PrivateAttr builds",
+        ),
+    ],
+)
+def test_private_attribute_pydantic_would_hand_the_data_is_refused(
+    record: type[BaseModel], refusal: str
+) -> None:
+    with pytest.raises(ContractDefinitionError, match=re.escape(refusal)):
+        declare_with_field(record)
 
 
 # Unknown fields

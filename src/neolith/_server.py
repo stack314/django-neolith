@@ -53,6 +53,7 @@ from typing import Any, Final, NoReturn, Protocol, TextIO
 from django.core.servers.basehttp import ThreadedWSGIServer, WSGIRequestHandler
 
 from neolith import _checks
+from neolith._frozen import once
 
 __all__ = ["Connections", "drain_bound", "listen", "say", "serve"]
 
@@ -73,6 +74,7 @@ class _Connection(Protocol):
     connection: Any
 
 
+@once
 @dataclass(frozen=True, slots=True)
 class _Request:
     line: str
