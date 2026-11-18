@@ -25,7 +25,7 @@ State the host owns (CONTRIBUTING K6), all of it guarded by one lock:
   with the file and line of each ``connect()``, each tied to the installed
   apps of the set-up that first saw it; a set-up checks those tied to apps it
   all installs, and only a set-up that passes drops them, so an unknown one
-  stays and the next set-up of those apps reports it again (ADR 0029);
+  stays and the next set-up of those apps reports it again (ADR 0026);
 - the hosted apps of the first set-up that passed, since a process hosts one
   set of apps (ADR 0022 Decision 5);
 - the ``NEOLITH`` that first set-up checked, without ``REQUEST_DEADLINE``,
@@ -230,7 +230,7 @@ def set_up(config: AppConfig) -> None:
         # Only a set-up that passes is done with the places it checked, all
         # of which its table knows. A refused one drops none, whatever its
         # table knew, so the next set-up of the same apps reports an unknown
-        # identity again (ADR 0029).
+        # identity again (ADR 0026).
         for identity, places in checked.items():
             for place in places:
                 del _RECORDED[identity][place]
@@ -249,7 +249,7 @@ def _checked_by(installed: frozenset[str]) -> dict[str, list[str]]:
     later set-up checks the place if it installs every app that set-up did.
     One that installs fewer, such as the first apps restored after an
     override that added an app, leaves it for a set-up that installs them
-    all again (ADR 0029).
+    all again (ADR 0026).
     """
     checked: dict[str, list[str]] = {}
     for identity, places in _RECORDED.items():

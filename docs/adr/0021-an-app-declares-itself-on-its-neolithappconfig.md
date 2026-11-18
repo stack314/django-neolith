@@ -2,7 +2,6 @@
 
 - **Status:** Accepted
 - Narrowed by [0026](0026-set-up-keeps-an-unknown-recorded-identity.md) (Decision 1)
-- Narrowed by [0029](0029-a-record-belongs-to-the-set-up-that-asked-for-it.md) (Decision 1)
 - **Accepted:** 2026-11-12
 - **Date:** 2026-11-12
 
