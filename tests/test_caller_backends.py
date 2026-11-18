@@ -336,15 +336,56 @@ def test_the_size_bound_counts_the_token_after_the_scheme(
     assert check("Bearer    " + _sized(size), IDENTITY, KEYS, NOW) == expected
 
 
-@pytest.mark.spec("HTTP-7", "HTTP-8")
-def test_a_header_nested_as_deep_as_the_size_bound_allows_is_read() -> None:
-    """The json module reads any nesting a token of 4096 bytes can hold, so
-    the reader's own depth limit decides no token that could be valid."""
-    depth = 3000
-    head = text(header())[:-1] + ',"x":' + "[" * depth + "]" * depth + "}"
+def _nested(depth: int, inside: str = "") -> str:
+    """A header with ``typ`` and a member nested ``depth`` levels deep."""
+    member = "[" * (depth - 1) + inside + "]" * (depth - 1)
+    return text(header())[:-1] + ',"x":' + member + "}"
+
+
+@pytest.mark.spec("HTTP-7", "HTTP-9")
+@pytest.mark.parametrize(
+    ("depth", "inside", "expected"),
+    [
+        (64, "", (None, _token.MEMBERS)),
+        (64, '"[[[[{{{{\\\\"', (None, _token.MEMBERS)),
+        (64, '"\\"]]]]]"', (None, _token.MEMBERS)),
+        (65, "", (None, None)),
+        (65, '"]]]]"', (None, None)),
+        (8000, "", (None, None)),
+    ],
+)
+def test_a_first_part_nested_more_than_64_levels_abstains(
+    depth: int, inside: str, expected: object
+) -> None:
+    """The header counts its own object as a level, so its member adds
+    ``depth - 1``; brackets and escapes inside strings are not nesting."""
+    token = signed(raw_head=_nested(depth, inside))
+    assert check(bearer(token), IDENTITY, KEYS, NOW) == expected
+
+
+def test_many_sibling_arrays_are_not_nesting() -> None:
+    head = text(header())[:-1] + ',"x":[' + ",".join(["[]"] * 5000) + "]}"
     token = signed(raw_head=head)
-    assert len(token) > _token.LIMIT
     assert check(bearer(token), IDENTITY, KEYS, NOW) == (None, _token.PARTS)
+
+
+@pytest.mark.spec("HTTP-7")
+def test_a_deep_first_part_abstains_on_a_thread_with_a_small_stack() -> None:
+    """The depth is judged before the json module reads the text, whose
+    recursive scanner could otherwise exhaust a 1 MB thread stack, as the
+    official Alpine images give every thread."""
+    value = bearer(signed(raw_head=_nested(9000)))
+    found: list[object] = []
+    previous = threading.stack_size(1024 * 1024)
+    try:
+        worker = threading.Thread(
+            target=lambda: found.append(check(value, IDENTITY, KEYS, NOW))
+        )
+        worker.start()
+        worker.join()
+    finally:
+        threading.stack_size(previous)
+    assert found == [(None, None)]
 
 
 # Recognition: the backend abstains on anything else (HTTP-7, HTTP-11)
@@ -1521,6 +1562,18 @@ def test_a_refusal_hides_the_backend_s_exception_from_the_chain() -> None:
     assert type(error) is Refused
     assert error.__suppress_context__ is True
     assert error.__cause__ is None
+    awaited = _caught(
+        lambda: asyncio.run(
+            aidentify(
+                built(Counting(answer=CredentialRefused("revoked"))),
+                request(),
+                IDENTITY,
+            )
+        )
+    )
+    assert type(awaited) is Refused
+    assert awaited.__suppress_context__ is True
+    assert awaited.__cause__ is None
 
 
 @pytest.mark.parametrize("stop", [KeyboardInterrupt, asyncio.CancelledError])

@@ -65,6 +65,9 @@ _EXAMPLE_HEX: Final = EXAMPLE_SECRET.hex()
 _EXAMPLE_B64: Final = base64.urlsafe_b64encode(EXAMPLE_SECRET).rstrip(b"=").decode()
 _GENERATE: Final = "generate one with secrets.token_urlsafe(32)"
 _SHOWN_KEY_ID: Final = 32
+# The deepest nesting of arrays and objects the reader admits, judged before
+# the json module reads a text, so no thread's stack decides the outcome.
+_DEPTH: Final = 64
 
 # The refusals of a recognized token, in the order they are checked
 # (Decision 2).
@@ -227,10 +230,11 @@ def _strict(data: bytes) -> dict[str, object] | None:
     no fraction or exponent within ±(2^53 - 1); a number with a fraction or
     an exponent is read as a double, and must be finite.
 
-    A text nested deeper than the json module reads (``RecursionError``) is
-    ``None`` too, as ``read_principal`` treats it. Within the 4096-byte
-    bound of a valid token no first part can be nested that deep, so this
-    changes the outcome of no token that could be valid.
+    A text that nests more than 64 arrays and objects is ``None`` too,
+    judged by ``_shallow`` before the json module reads it, since its
+    recursive scanner can exhaust a thread's stack before it raises
+    ``RecursionError``, which stays caught as a backstop. Spec 03 (HTTP-7)
+    lets a reader limit nesting; a valid header has one level.
     """
 
     class _Refused(Exception):
@@ -262,6 +266,8 @@ def _strict(data: bytes) -> dict[str, object] | None:
 
     try:
         text = data.decode("utf-8")
+        if not _shallow(text):
+            return None
         value = json.loads(
             text,
             object_pairs_hook=pairs,
@@ -275,6 +281,30 @@ def _strict(data: bytes) -> dict[str, object] | None:
         return None
     found: dict[str, object] = value
     return found
+
+
+def _shallow(text: str) -> bool:
+    """True when ``text`` nests at most ``_DEPTH`` arrays and objects."""
+    if text.count("[") + text.count("{") <= _DEPTH:
+        return True
+    depth, quoted, escaped = 0, False, False
+    for char in text:
+        if escaped:
+            escaped = False
+        elif quoted:
+            if char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+        elif char == '"':
+            quoted = True
+        elif char in "[{":
+            depth += 1
+            if depth > _DEPTH:
+                return False
+        elif char in "]}":
+            depth -= 1
+    return True
 
 
 def _texts_encode(value: object) -> bool:
