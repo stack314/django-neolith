@@ -34,7 +34,6 @@ import json
 import logging
 import re
 import sys
-import types
 import typing
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -57,7 +56,7 @@ from neolith._connector import (
     internal_message,
 )
 from neolith._context import Arrived, Principal
-from neolith._contracts import Action
+from neolith._contracts import Action, _FrozenMap
 from neolith._frozen import once
 
 __all__ = [
@@ -186,9 +185,8 @@ class Endpoints:
     """
 
     prefixes: tuple[str, ...] = ()
-    routes: Mapping[str, Route] = field(
-        default_factory=lambda: types.MappingProxyType({})
-    )
+    # Read-only, and copied and pickled as the table it sits on is.
+    routes: Mapping[str, Route] = field(default_factory=_FrozenMap)
     document: bytes = b""
 
     def owns(self, path: str) -> bool:
@@ -239,7 +237,7 @@ def table(connectors: Mapping[str, object]) -> Endpoints:
             f"built: {error}; this is a fault of neolith, not of an app, so "
             "please report it"
         ) from None
-    return Endpoints(tuple(prefixes), types.MappingProxyType(routes), document)
+    return Endpoints(tuple(prefixes), _FrozenMap(routes), document)
 
 
 # A set-up with nothing provided: the well-known paths only.
@@ -267,7 +265,8 @@ def _protect(request: HttpRequest) -> None:
     path can report it, ``DisallowedHost`` included, so whatever reports
     the request hides the neolith headers (ADR 0027 Decision 3).
     """
-    request.exception_reporter_filter = _Filter()  # type: ignore[attr-defined]  # Django reads it by getattr
+    # Django reads it with getattr (views/debug.py, 5.2 and 6.1).
+    request.exception_reporter_filter = _Filter()
 
 
 def _method(request: HttpRequest) -> str:

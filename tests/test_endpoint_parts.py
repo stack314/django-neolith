@@ -268,7 +268,7 @@ def test_an_internal_mails_the_cause_and_never_the_principal_or_token(
     assert served.status == 500
     assert served.error()["kind"] == "internal"
     (message,) = mailoutbox
-    text = message.subject + message.body
+    text = f"{message.subject}{message.body}"
     assert "the books are closed" in text  # the cause is mailed
     for secret in (PRINCIPAL, sent, sent.split(" ")[1], "u-81f3"):
         assert secret not in text
@@ -290,7 +290,7 @@ def test_a_host_this_host_does_not_serve_mails_no_principal(
         )
     assert served.status == 400
     (message,) = mailoutbox
-    assert "DisallowedHost" in message.subject + message.body
+    assert "DisallowedHost" in f"{message.subject}{message.body}"
     assert PRINCIPAL not in message.body
 
 
@@ -332,7 +332,7 @@ def test_the_reporter_filter_hides_every_neolith_header_whatever_debug_says(
             meta = hidden.get_safe_request_meta(request)
             assert meta["HTTP_NEOLITH_PRINCIPAL"] != PRINCIPAL
             assert meta["HTTP_NEOLITH_FOO"] != "x"
-            request.exception_reporter_filter = hidden  # type: ignore[attr-defined]
+            request.exception_reporter_filter = hidden
             try:
                 raise RuntimeError("probe")
             except RuntimeError:
