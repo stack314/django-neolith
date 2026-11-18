@@ -266,6 +266,27 @@ def mirror_files(root: Path) -> dict[str, str]:
     return dict(sorted(table.items()))
 
 
+def _strict_json(text: str) -> object:
+    """Read JSON text as I-JSON (RFC 7493) does: an object with a repeated
+    member name, or ``NaN`` or ``Infinity``, is refused, so no member's value
+    is dropped before it is checked.
+
+    Raises:
+        ValueError: The text is not such JSON.
+    """
+
+    def pairs(found: list[tuple[str, object]]) -> dict[str, object]:
+        names = [name for name, _ in found]
+        if len(set(names)) != len(names):
+            raise ValueError("a member name is repeated")
+        return dict(found)
+
+    def constant(name: str) -> object:
+        raise ValueError(f"{name} is not JSON")
+
+    return json.loads(text, object_pairs_hook=pairs, parse_constant=constant)
+
+
 def _json_strings(value: object) -> Iterator[str]:
     """Every string a JSON value holds, its object keys among them."""
     if isinstance(value, str):
@@ -294,9 +315,9 @@ def _copy_problem(root: Path, repo_path: str) -> tuple[str | None, bytes]:
     raw = source.read_bytes()
     try:
         text = raw.decode("utf-8")
-        strings = [text, *_json_strings(json.loads(text))]
+        strings = [text, *_json_strings(_strict_json(text))]
     except ValueError:
-        return "not JSON text in UTF-8", b""
+        return "not I-JSON text in UTF-8", b""
     if any(_EMAIL.search(string) for string in strings):
         return "holds an email address", b""
     if _secrets(strings, seen=False):
@@ -309,7 +330,8 @@ def copy_files(root: Path, html: Path) -> list[str]:
 
     A file is not copied, and is a problem, when it or a folder above it in
     the repository is a symbolic link, when it is not a file whose name ends
-    in ``.json`` and that holds JSON text in UTF-8, or when its text or a
+    in ``.json`` and that holds I-JSON text in UTF-8 (no repeated member name,
+    no ``NaN`` or ``Infinity``), or when its text or a
     string it holds, as a JSON reader decodes it, holds an email address or
     a known token form. So the site serves no file from outside the
     repository, and none that staging or the HTML check would refuse.

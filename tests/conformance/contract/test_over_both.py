@@ -95,19 +95,18 @@ def _reference() -> neolith.Connector:
 @pytest.mark.spec("TRN-1", "TRN-16", "HTTP-41")
 @pytest.mark.parametrize("values", [EVERY, FEWEST], ids=["every", "fewest"])
 def test_a_reply_is_the_same_over_both(over_both: OverBoth, values: Values) -> None:
+    replies: list[object] = []
+
     def call() -> object:
         with neolith.command_scope(CALLER):
-            return _reference().echo(values)
+            replies.append(_reference().echo(values))
+        return replies[-1]
 
-    reply = over_both(call).reply
-    assert type(reply) is Values
-    assert reply == values
-    # Equality alone misses data a form keeps that == ignores, such as a
-    # decimal's trailing zeros or an enum member read as its text.
-    assert reply.model_dump_json() == values.model_dump_json()
-    assert {name: type(value) for name, value in reply} == {
-        name: type(value) for name, value in values
-    }
+    over_both(call)
+    # Each transport's own reply, judged by the data each form keeps, which
+    # == ignores in part: a decimal's trailing zeros, an enum member read as
+    # its text.
+    assert [_data(reply) for reply in replies] == [_data(values)] * 2
 
 
 @PARITY
@@ -350,6 +349,18 @@ def test_over_both_refuses_what_it_cannot_run(over_both: OverBoth) -> None:
     with pytest.raises(UsageError, match=r"does not know desk\.v1"):
         over_both(lambda: None, identity="desk.v1")
     assert over_both.runs == 0
+
+
+def _data(reply: object) -> tuple[type, dict[str, type], dict[str, object]]:
+    """A reply's type, each field's type, and each field as it travels, with a
+    timestamp as its instant in UTC, since its offset is not data (spec 01).
+    """
+    assert isinstance(reply, Values)
+    travels = reply.model_dump(mode="json")
+    for name in ("timestamp", "optional_timestamp"):
+        instant = getattr(reply, name)
+        travels[name] = None if instant is None else instant.astimezone(UTC)
+    return type(reply), {name: type(value) for name, value in reply}, travels
 
 
 def _balances(accounts: list[str]) -> list[int]:

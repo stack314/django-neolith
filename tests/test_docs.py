@@ -144,19 +144,30 @@ def test_the_files_are_copied_byte_for_byte_and_only_json(tmp_path: Path) -> Non
     base = root / "spec" / "conformance"
     (base / "cases").mkdir(parents=True)
     # The nearest admitted files: escapes, non-ASCII text, an "@" that is no
-    # address, and a nested folder.
+    # address, a nested folder, and one name in several objects.
     admitted = {
         "spec/conformance/reference.v1.openapi.json": (
             b'{"a": "\\u00e9\xc3\xa9", "pattern": "^[^@]+$"}\n'
         ),
-        "spec/conformance/cases/contract.json": b"[]",
+        # One member name in two objects is no repetition.
+        "spec/conformance/cases/contract.json": b'[{"a": 1}, {"a": {"a": 2}}]',
     }
     for name, raw in admitted.items():
         (root / name).write_bytes(raw)
     refused = {
         "notes.md": (b"# Notes\n", "not a JSON file"),
-        "broken.json": (b"{", "not JSON text in UTF-8"),
-        "latin.json": (b'"\xe9"', "not JSON text in UTF-8"),
+        "broken.json": (b"{", "not I-JSON text in UTF-8"),
+        "latin.json": (b'"\xe9"', "not I-JSON text in UTF-8"),
+        "repeated.json": (
+            b'{"by": "a\\u0040example.org", "by": "x"}',
+            "not I-JSON text in UTF-8",
+        ),
+        "nested.json": (
+            b'[{"a": 1, "b": {"c": 1, "c": 2}}]',
+            "not I-JSON text in UTF-8",
+        ),
+        "nan.json": (b'{"n": NaN}', "not I-JSON text in UTF-8"),
+        "infinity.json": (b"[-Infinity]", "not I-JSON text in UTF-8"),
         "mail.json": (b'{"by": "a@example.org"}', "holds an email address"),
         "escaped.json": (
             b'{"by": "a\\u0040example.org"}',
@@ -168,6 +179,10 @@ def test_the_files_are_copied_byte_for_byte_and_only_json(tmp_path: Path) -> Non
         ),
         "token.json": (
             b'["ghp_' + b"a" * 36 + b'"]',
+            "holds something shaped like a secret",
+        ),
+        "escaped-token.json": (
+            b'{"t": "gh\\u0070_' + b"a" * 36 + b'"}',
             "holds something shaped like a secret",
         ),
     }

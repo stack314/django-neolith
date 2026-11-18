@@ -68,6 +68,10 @@ def reference_part(tree: dict[str, Any], prefix: str) -> dict[str, Any]:
     return part
 
 
+def _text(tree: object) -> str:
+    return json.dumps(tree, sort_keys=True, ensure_ascii=False)
+
+
 def test_the_committed_document_is_the_projection_of_the_reference_contract() -> None:
     assert document.PATH.read_text(encoding="utf-8") == document.text(), (
         "spec/conformance/reference.v1.openapi.json is out of date; write it "
@@ -80,7 +84,8 @@ def test_the_served_document_holds_the_committed_one() -> None:
     assert served.status_code == 200
     tree = cast("dict[str, Any]", json.loads(served.content))
     committed = json.loads(document.PATH.read_text(encoding="utf-8"))
-    assert reference_part(tree, "/reference/v1/") == committed
+    # Compared as JSON text with sorted members, so true is never 1.
+    assert _text(reference_part(tree, "/reference/v1/")) == _text(committed)
     # The served document describes the host's other contracts too.
     assert set(tree["paths"]) > set(committed["paths"])
 
@@ -93,7 +98,7 @@ def test_the_reference_part_leaves_out_every_other_contract() -> None:
         for name in tree["components"]["schemas"]
         if name.startswith("reference.v1.")
     }
-    assert part == reference_part(part, "/reference/v1/")
+    assert _text(part) == _text(reference_part(part, "/reference/v1/"))
 
 
 def _context(key: str | None, deadline: float | None = None) -> CallContext:
