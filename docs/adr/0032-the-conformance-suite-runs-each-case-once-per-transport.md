@@ -1,6 +1,7 @@
 # 0032. The conformance suite runs each contract case once per transport and compares the outcomes, lists its cases by name, and reports a run per requirement ID against the specification's own exemptions
 
-- **Status:** Proposed
+- **Status:** Accepted
+- **Accepted:** 2026-11-19
 - **Date:** 2026-11-18; reconciled with the routing record 2026-11-19
 - **Narrows, once accepted:** [0028](0028-the-http-transport-uses-the-standard-library-only.md) (Decision 9's live server, Decision 5 here). 0028 gains `Narrowed by 0032 (Decision 5)` under its status (D2).
 - **Accepted by:** the pull request that carries the first code built on it. In #13's plan that is step 5's task 8 (#12), which builds Decisions 4 and 5 in their final files. #12's task 8 line lists `src/neolith/_server.py` and `tests/conformance/`, and ends "Accepts the conformance record". It also covers TLS and an IPv6 origin, outside `tests/conformance/` (Decision 4).
