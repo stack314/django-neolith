@@ -12,6 +12,7 @@ keep every name read in ``src/neolith`` going through ``neolith._naming``.
 """
 
 import ast
+import inspect
 import re
 import sys
 import types
@@ -781,6 +782,92 @@ def test_a_config_module_given_as_a_str_subclass_is_read_as_its_text() -> None:
     refusals: list[str] = []
     assert _host._declared_with(cast(Any, Config()), "shopz.apps", "here", refusals)
     assert refusals[0].startswith("here: the class is in shopz.apps, which is")
+
+
+class _Base:
+    x: int | None = 1
+
+
+class _Inherits(_Base):
+    pass
+
+
+class _Removes(_Base):
+    x = None
+
+
+class _Shadows(_Base):
+    x = 2
+
+
+class _Holds:
+    pass
+
+
+class _OnMetaclass(type):
+    x = 3
+
+
+class _Absent(metaclass=_OnMetaclass):
+    pass
+
+
+@pytest.mark.parametrize(
+    "cls",
+    [_Base, _Inherits, _Removes, _Shadows, _Holds],
+    ids=["own", "inherited", "removed with None", "shadowed", "absent"],
+)
+def test_find_answers_as_getattr_static_does_on_a_class(cls: type) -> None:
+    assert _naming.find(cls, "x") is inspect.getattr_static(cls, "x", None)
+    assert _naming.find(cls, "x", Ellipsis) is inspect.getattr_static(
+        cls, "x", Ellipsis
+    )
+
+
+def test_find_reads_neither_the_metaclass_nor_through_it() -> None:
+    # Only a name the class's own order holds is an attribute of its
+    # instances; getattr_static would also give the metaclass's.
+    assert inspect.getattr_static(_Absent, "x") == 3
+    assert _naming.find(_Absent, "x") is None
+    hostile = DictRaises("Hostile", (_Shadows,), {})
+    with pytest.raises(RuntimeError):
+        inspect.getattr_static(hostile, "x")
+    assert _naming.find(hostile, "x") == 2
+
+
+def test_an_action_removed_with_none_is_missing() -> None:
+    def reserve(self: object, request: Reserve) -> Reserved:
+        raise NotImplementedError
+
+    base = type("Base", (), {"reserve": reserve})
+    removed = type("Removed", (base,), {"reserve": None})
+    assert INVENTORY._implementation_problems(base) == []
+    assert INVENTORY._implementation_problems(removed) == [
+        "crossing.v1, implementation Removed: action 'reserve' is missing"
+    ]
+
+
+@pytest.mark.parametrize("position", ["_helper", "helper", "reserve"])
+def test_a_wrapper_of_a_marked_stub_is_found_whatever_its_metaclass(
+    position: str,
+) -> None:
+    def stub(self: object, request: Reserve) -> Reserved:
+        raise NotImplementedError
+
+    def reserve(self: object, request: Reserve) -> Reserved:
+        raise NotImplementedError
+
+    def init(self: object, wrapped: object) -> None:
+        self.__wrapped__ = wrapped  # type: ignore[attr-defined]
+
+    marked = action(stub)
+    said = []
+    for metaclass in (type, DictRaises):
+        wrapper = metaclass("Wrapper", (), {"__init__": init})
+        body = {"reserve": reserve, position: wrapper(marked)}
+        said.append(INVENTORY._implementation_problems(type("Impl", (), body)))
+    assert said[0] == said[1]
+    assert any("is marked with @action" in problem for problem in said[0])
 
 
 # Every name read goes through neolith._naming.

@@ -35,6 +35,7 @@ __all__ = [
     "entry",
     "find",
     "full_name",
+    "holds",
     "is_a",
     "module",
     "mro",
@@ -172,28 +173,42 @@ def namespace(cls: object) -> Mapping[Any, Any]:
     return _NAMESPACE.__get__(cls)  # type: ignore[no-any-return]
 
 
-def entry(held: Mapping[Any, object], name: str) -> object:
-    """The entry ``name`` of a namespace or dict, or None, compared only with
-    keys that are exactly ``str``, so that no key's own ``__eq__`` runs.
+_ABSENT: Final = object()
+
+
+def entry(held: Mapping[Any, object], name: str, default: object = None) -> object:
+    """The entry ``name`` of a namespace or dict, or ``default`` if it holds
+    none, compared only with keys that are exactly ``str``, so that no key's
+    own ``__eq__`` runs.
     """
     for key, value in held.items():
         if type(key) is str and key == name:
             return value
-    return None
+    return default
 
 
-def find(cls: object, name: str) -> object:
-    """``name`` as the class ``cls`` holds it, its own or inherited, or None.
+def holds(held: Mapping[Any, object], name: str) -> bool:
+    """Whether a namespace or dict holds ``name``, whatever its value, as
+    ``entry`` compares it.
+    """
+    return entry(held, name, _ABSENT) is not _ABSENT
 
-    Like ``inspect.getattr_static`` on a class, but each class is read
-    through ``type``'s own descriptors: ``getattr_static`` reads each
-    class's ``__dict__`` through its metaclass.
+
+def find(cls: object, name: str, default: object = None) -> object:
+    """``name`` as the class ``cls`` holds it, its own or inherited, or
+    ``default``.
+
+    As ``inspect.getattr_static`` finds it on a class: the nearest class in
+    the method resolution order that holds the name decides, even with
+    ``None``, as ``reserve = None`` removes an inherited method. But each
+    class is read through ``type``'s own descriptors, where
+    ``getattr_static`` reads each class's ``__dict__`` through its metaclass.
     """
     for klass in mro(typing.cast(type, cls)):
-        found = entry(namespace(klass), name)
-        if found is not None:
+        found = entry(namespace(klass), name, _ABSENT)
+        if found is not _ABSENT:
             return found
-    return None
+    return default
 
 
 def derives(kind: type, base: type) -> bool:

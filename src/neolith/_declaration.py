@@ -319,7 +319,11 @@ class NeolithAppConfig(AppConfig):
         held += [_naming.namespace(klass) for klass in _naming.mro(config)]
         for attribute, declared in (("name", snapshot.name), ("label", snapshot.label)):
             found = next(
-                (v for h in held if (v := _naming.entry(h, attribute)) is not None),
+                (
+                    v
+                    for h in held
+                    if (v := _naming.entry(h, attribute, _MISSING)) is not _MISSING
+                ),
                 _MISSING,
             )
             if type(found) is not str or found != declared:
@@ -349,7 +353,7 @@ def _check(cls: type[NeolithAppConfig]) -> tuple[list[str], Declaration | None]:
     refusals: list[str] = []
     checked: set[int] = set()
     for parent in extras[1:]:
-        if _naming.entry(_naming.namespace(parent), _SNAPSHOT_ATTR) is not None:
+        if _naming.holds(_naming.namespace(parent), _SNAPSHOT_ATTR):
             refusals.append(
                 f"it extends {_class_name(parent)}, which holds a declaration; "
                 "a declaration cannot be extended or relabelled"

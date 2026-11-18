@@ -574,7 +574,7 @@ class Contract:
                 klass
                 for klass in _naming.mro(impl)
                 if klass is not object
-                and _naming.entry(_naming.namespace(klass), _CONTRACT_ATTR) is None
+                and not _naming.holds(_naming.namespace(klass), _CONTRACT_ATTR)
             ]
         except Exception as error:  # an __mro__ it cannot read
             problems.append(
@@ -998,7 +998,7 @@ def _carries_mark(value: object) -> bool:
         kind = type(item)
         if kind is types.FunctionType:
             # safe read: a function's own dict, through FunctionType's slot.
-            if _naming.entry(vars(item), _ACTION_ATTR) is not None:
+            if _naming.holds(vars(item), _ACTION_ATTR):
                 return True
         elif issubclass(kind, staticmethod | classmethod):
             pending.append(typing.cast(Any, item).__func__)
@@ -1012,12 +1012,15 @@ def _carries_mark(value: object) -> bool:
             | functools.cached_property,
         ):
             pending.append(typing.cast(Any, item).func)
-        try:
-            # safe read: an object in a class body, not a class; what its
-            # class's metaclass raises only ends the walk.
-            wrapped = inspect.getattr_static(item, "__wrapped__", None)
-        except Exception:
-            wrapped = None
+        # As getattr_static finds it, the instance's own dict first, read only
+        # through the __dict__ slot its class has from type, then its class,
+        # each class read through type's own descriptors.
+        holder = item if issubclass(kind, type) else kind
+        slot = None if holder is item else _naming.find(kind, "__dict__")
+        own = slot.__get__(item) if type(slot) is types.GetSetDescriptorType else None
+        wrapped = _naming.entry(own, "__wrapped__") if type(own) is dict else None
+        if wrapped is None:
+            wrapped = _naming.find(holder, "__wrapped__")
         if wrapped is not None:
             pending.append(wrapped)
     return False
