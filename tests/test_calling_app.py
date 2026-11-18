@@ -34,6 +34,7 @@ from neolith import (
 from neolith._connector import Connector, Failure, InProcess
 from neolith._context import Sent
 from neolith._contracts import Action
+from neolith._crossing import Receiver
 from neolith._declaration import declaration_of
 from neolith._host import _current
 from tests import host_apps
@@ -294,7 +295,7 @@ def _sent(**changes: Any) -> Sent:  # noqa: ANN401
         "principal": None,
         "trace_id": "0af7651916cd43dd8448eb211c80319c",
         "tracestate": "",
-        "budget": None,
+        "deadline": None,
         "idempotency_key": "parent-key",
         "caller": "shop",
     }
@@ -307,7 +308,7 @@ def _sent(**changes: Any) -> Sent:  # noqa: ANN401
 # does not read. Each arrives alone and with the others.
 _LATER: dict[str, dict[str, Any]] = {
     "principal": {"principal": b"\xff not a principal"},
-    "deadline": {"budget": 0},
+    "deadline": {"deadline": 1000.0},
     "request": {},
 }
 
@@ -435,6 +436,7 @@ class _LateRefusal:
 
     def __init__(self, inner: InProcess, clock: Clock) -> None:
         self.contract = inner.contract
+        self.receiver = Receiver.IN_PROCESS
         self._inner = inner
         self._clock = clock
 

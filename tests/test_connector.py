@@ -37,6 +37,7 @@ from neolith import (
 from neolith._connector import Connector, Failure, InProcess, internal_message
 from neolith._context import Scope, Sent
 from neolith._contracts import Action
+from neolith._crossing import Receiver
 from tests.strategies import admitted_by
 from tests.test_contract_round_trip import _HYPOTHESIS, _TYPES, _name, _records
 from tests.test_crossing import _shared
@@ -298,6 +299,7 @@ class Counting:
         self.calls: list[tuple[str, bytes]] = []
         self._outcome = outcome
         self.contract = Contract.of(Inventory)
+        self.receiver = Receiver.IN_PROCESS
 
     def call(self, action: Action, request: bytes, context: Sent) -> bytes | None:
         self.calls.append((action.name, request))
