@@ -37,6 +37,7 @@ from django.core.exceptions import ImproperlyConfigured
 from django.http import HttpRequest
 from django.utils.module_loading import import_string
 
+from neolith import _naming
 from neolith._context import Principal, principal_form
 from neolith._frozen import once
 from neolith.principals import PrincipalBackend
@@ -70,7 +71,7 @@ _CACHE: Final = "django.middleware.cache.UpdateCacheMiddleware"
 
 
 def _type(value: object) -> str:
-    return type(value).__qualname__
+    return _naming.type_name(value)
 
 
 def _shown(value: object) -> str:

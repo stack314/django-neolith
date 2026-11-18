@@ -356,6 +356,7 @@ def principal_check(**kwargs: object) -> list[checks.CheckMessage]:
     config = global_apps.get_app_config(TAG)
     found: list[checks.CheckMessage] = [
         checks.Error(problem, id="neolith.E019")
+        # safe read: neolith's own app config.
         for problem in vars(config).get(PRINCIPAL_REFUSALS, ())
     ]
     neolith = _checked_neolith()
