@@ -77,6 +77,12 @@ A **routing policy** chooses the provider for each call. Defined policies:
 - `weighted`: distribute by configured weights;
 - `explicit`: chosen by a function of the call context.
 
+A host learns of a provider in two ways: from its own apps, one of which may provide the contract version, and from its configuration, which may name a *remote provider* for it, reached over a network transport.
+
+**TRN-66.** Under the `single` policy, a host MUST choose each contract version's one provider before it serves: the app of the host that provides it, when there is one, and otherwise the remote provider its configuration names for it.
+
+**TRN-67.** A host MUST stop before it serves when its configuration names a remote provider for a contract version that none of its apps requires, or, under the `single` policy, for one that one of its apps provides.
+
 ~~**TRN-7.** Fallback after a failed call MUST happen only for idempotent actions and only on `unavailable` or `timeout`.~~ Withdrawn in spec 0.1: `timeout` leaves the outcome unknown, so it is no longer grounds for fallback (ADR 0017).
 
 **TRN-8.** A retry or a fallback after a failed call MUST happen only for an idempotent action, only on `unavailable`, and only within the call's deadline.

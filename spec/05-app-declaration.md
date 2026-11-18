@@ -176,6 +176,8 @@ An app's table names are the same in every host, so that the app finds its table
 
 **APP-8.** A host MUST find a provider for every contract version that one of its apps requires, before it serves.
 
+**APP-62.** A host MUST NOT refuse to serve because a remote provider cannot be reached. Resolve finds a remote provider in the host's configuration, and the host does not contact it before it serves, so a provider that is down is found by the first call to it, which fails at the caller with `unavailable`, or with `timeout` when its deadline passes first ([02](02-transports.md), TRN-3 and TRN-4).
+
 **APP-9.** A host MUST NOT hold two apps that provide one contract version.
 
 **APP-10.** All apps of a host that name one contract version, as provided or as required, MUST name the same contract declaration of it.
