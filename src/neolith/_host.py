@@ -22,9 +22,10 @@ that set-up: a later set-up in the same process builds its own, and when an
 State the host owns (CONTRIBUTING K6), all of it guarded by one lock:
 
 - the identities that ``connect()`` was asked for before a table existed,
-  with the file and line of each ``connect()``, which set-up checks,
-  dropping those its table knows; an unknown one stays, so the next set-up
-  reports it again;
+  with the file and line of each ``connect()``, each tied to the installed
+  apps of the set-up that first saw it; a set-up checks those tied to apps it
+  all installs, and only a set-up that passes drops them, so an unknown one
+  stays and the next set-up of those apps reports it again (ADR 0029);
 - the hosted apps of the first set-up that passed, since a process hosts one
   set of apps (ADR 0022 Decision 5);
 - the ``NEOLITH`` that first set-up checked, without ``REQUEST_DEADLINE``,
@@ -103,11 +104,10 @@ class Host:
 
 _LOCK: Final = threading.Lock()
 # The identities connect() was asked for before a table existed: each with
-# the places it was asked from, which only the message reads, and the module
-# that asked from each, which decides which set-up checks it.
-_RECORDED: dict[str, dict[str, str]] = {}
-# The names of the apps installed at any set-up in this process.
-_ONCE_INSTALLED: set[str] = set()
+# the places it was asked from, which only the message reads, and for each
+# place the names of the apps installed at the set-up that first saw it, or
+# None until a set-up has.
+_RECORDED: dict[str, dict[str, frozenset[str] | None]] = {}
 # The hosted apps of the first set-up that passed: label to config class.
 _first: Mapping[str, type[AppConfig]] | None = None
 # The NEOLITH the first set-up checked, without REQUEST_DEADLINE.
@@ -203,8 +203,7 @@ def set_up(config: AppConfig) -> None:
             for problem in _configure.settings_problems(configs)
         ]
     with _LOCK:
-        _ONCE_INSTALLED.update(c.name for c in configs)
-        checked = _checked_by(registry)
+        checked = _checked_by(frozenset(c.name for c in configs))
         for identity, places in sorted(checked.items()):
             if identity not in host.known:
                 refusals.extend(_unknown_at(identity, place, host) for place in places)
@@ -228,10 +227,10 @@ def set_up(config: AppConfig) -> None:
             m.msg for m in found if m.level == checks.WARNING and not m.is_silenced()
         )
         published = dataclasses.replace(host, request_deadline=deadline, warned=warned)
-        # Only a set-up that passes is done with the records it checked, all
-        # of which its table knows. A refused one leaves every record, so the
-        # next set-up of the same apps reports an unknown identity again,
-        # whatever a refused set-up with other apps knew (ADR 0029).
+        # Only a set-up that passes is done with the places it checked, all
+        # of which its table knows. A refused one drops none, whatever its
+        # table knew, so the next set-up of the same apps reports an unknown
+        # identity again (ADR 0029).
         for identity, places in checked.items():
             for place in places:
                 del _RECORDED[identity][place]
@@ -240,24 +239,25 @@ def set_up(config: AppConfig) -> None:
         setattr(config, _HOST_ATTR, published)
 
 
-def _checked_by(registry: Apps) -> dict[str, list[str]]:
-    """The places of each record that a set-up of ``registry`` checks.
+def _checked_by(installed: frozenset[str]) -> dict[str, list[str]]:
+    """The places of each record that a set-up installing ``installed``
+    checks, after tying each place no set-up has seen to ``installed``.
 
-    A record asked for from a module of an installed app, or from a module of
-    no app ever installed in this process, is checked. One asked for from an
-    app that an earlier set-up installed and this one does not is left for a
-    set-up that installs that app again: its module stays imported, but its
-    app is not part of this host (ADR 0029).
+    A record is made only while a set-up loads, or before the first one, and
+    a place asked again is untied, so the first set-up to see a place is the
+    one whose loading asked for it. A
+    later set-up checks the place if it installs every app that set-up did.
+    One that installs fewer, such as the first apps restored after an
+    override that added an app, leaves it for a set-up that installs them
+    all again (ADR 0029).
     """
     checked: dict[str, list[str]] = {}
     for identity, places in _RECORDED.items():
-        for place, module in places.items():
-            if registry.get_containing_app_config(module) is None and any(
-                module == name or module.startswith(f"{name}.")
-                for name in _ONCE_INSTALLED
-            ):
-                continue
-            checked.setdefault(identity, []).append(place)
+        for place, apps in places.items():
+            if apps is None:
+                places[place] = apps = installed
+            if apps <= installed:
+                checked.setdefault(identity, []).append(place)
     return checked
 
 
@@ -686,8 +686,8 @@ def connect(identity: str, /) -> "Connector":
     with _LOCK:
         host, _ = _table()
         if host is None:
-            place, module = _place()
-            _RECORDED.setdefault(identity, {})[place] = module
+            # A place asked again belongs to the set-up loading now.
+            _RECORDED.setdefault(identity, {})[_place()] = None
         elif identity not in host.known:
             raise UsageError(
                 f"connect({_quoted(identity)}): no app of this host provides or "
@@ -696,20 +696,14 @@ def connect(identity: str, /) -> "Connector":
     return Connector._made(identity)
 
 
-def _place() -> tuple[str, str]:
-    """The file and line of the ``connect()`` call, for the message only, and
-    the name of the module it is in, or ``""`` if that is not known.
-    """
+def _place() -> str:
+    """The file and line of the ``connect()`` call, for the message only."""
     frame = inspect.currentframe()
     try:
         caller = None if frame is None or frame.f_back is None else frame.f_back.f_back
         if caller is None:
-            return "an unknown place", ""
-        module = caller.f_globals.get("__name__")
-        return (
-            f"{caller.f_code.co_filename}:{caller.f_lineno}",
-            module if type(module) is str else "",
-        )
+            return "an unknown place"
+        return f"{caller.f_code.co_filename}:{caller.f_lineno}"
     finally:
         del frame
 

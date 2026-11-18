@@ -1529,6 +1529,82 @@ def test_a_refused_set_up_that_knows_an_identity_keeps_its_record(
     ]
 
 
+@pytest.mark.spec("APP-14")
+@pytest.mark.parametrize("asks", ["through a helper", "by a lazy import"])
+def test_a_record_belongs_to_the_set_up_whose_loading_asked_for_it(
+    write_app: WriteApp, asks: str
+) -> None:
+    # The connect() line is in a module of an app an earlier set-up installed,
+    # but it runs only because another app's models are loaded: the set-ups
+    # that install that other app report it, with or without the first.
+    helper = write_app(
+        "",
+        helpers="from neolith import connect\n\n\ndef ask(identity):\n"
+        "    return connect(identity)\n",
+        lazy='from neolith import connect\n\nconnect("nope.v1")\n',
+    )
+    models = (
+        f'from {helper}.helpers import ask\n\nask("nope.v1")\n'
+        if asks == "through a helper"
+        else f"import {helper}.lazy\n"
+    )
+    asker = write_app("", models=models)
+    printed = in_built_host(
+        f"""
+        import django
+        from django.test.utils import override_settings
+
+        django.setup()
+        installed = list(settings.INSTALLED_APPS)
+        for added in ([{helper!r}], [{asker!r}], [{asker!r}], [{helper!r}]):
+            try:
+                with override_settings(INSTALLED_APPS=[*added, *installed]):
+                    print("admitted")
+            except Exception as error:
+                print(type(error).__name__)
+        """,
+        host_apps.HOSTED,
+        {"NEOLITH": host_apps.NEOLITH},
+    )
+    assert printed.splitlines() == [
+        "admitted",
+        "DeclarationError",
+        "DeclarationError",
+        "admitted",
+    ]
+
+
+@pytest.mark.spec("APP-14")
+def test_a_nested_app_added_and_refused_leaves_its_outer_app_admitted(
+    write_app: WriteApp, tmp_path: Path
+) -> None:
+    # Django finds the outer app as the one containing the nested app's
+    # modules; the record still belongs to the set-up that installed both.
+    outer = write_app("")
+    inner = tmp_path / outer / "inner"
+    inner.mkdir()
+    (inner / "__init__.py").write_text("", encoding="utf-8")
+    (inner / "models.py").write_text(_UNDECLARED_CONNECTS, encoding="utf-8")
+    printed = in_built_host(
+        f"""
+        import django
+        from django.test.utils import override_settings
+
+        django.setup()
+        installed = list(settings.INSTALLED_APPS)
+        for added in ([{outer!r}], [{outer!r}, "{outer}.inner"], [{outer!r}]):
+            try:
+                with override_settings(INSTALLED_APPS=[*added, *installed]):
+                    print("admitted")
+            except Exception as error:
+                print(type(error).__name__)
+        """,
+        host_apps.HOSTED,
+        {"NEOLITH": host_apps.NEOLITH},
+    )
+    assert printed.splitlines() == ["admitted", "DeclarationError", "admitted"]
+
+
 @pytest.mark.spec("APP-15")
 @pytest.mark.parametrize("place", ["__init__", "models"])
 def test_connect_while_an_override_without_neolith_loads_is_refused_at_once(

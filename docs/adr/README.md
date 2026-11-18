@@ -41,4 +41,4 @@ Questions not yet decided are in [open-questions.md](../open-questions.md).
 | [0024](0024-user-documentation-is-built-with-sphinx-from-this-repository.md) | User documentation is built with Sphinx from this repository | Proposed |
 | [0025](0025-drain-counts-a-request-from-its-request-line.md) | Drain counts a request from its request line | Accepted |
 | [0026](0026-set-up-keeps-an-unknown-recorded-identity.md) | Set-up keeps a recorded identity it does not know, so the next set-up reports it again | Accepted |
-| [0029](0029-only-a-set-up-that-passes-drops-a-record.md) | Only a set-up that passes drops a record, and a set-up checks the records of the apps it installs | Accepted |
+| [0029](0029-a-record-belongs-to-the-set-up-that-asked-for-it.md) | A record belongs to the set-up whose loading asked for it, and only a set-up that passes drops it | Accepted |
