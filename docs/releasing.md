@@ -287,7 +287,7 @@ Run every check on the tip of the release branch after the version pull request 
   ```
   git ls-remote origin "refs/heads/${BRANCH}"
   ```
-  Expected: no output. If the branch is still there, check the merge settings (section 10); the maintainer can delete it with `gh api -X DELETE "repos/${REPO}/git/refs/heads/${BRANCH}"`. Open pull requests that targeted it now target `main`; section 8 moves them to the next release branch.
+  Expected: no output. If the branch is still there, a ruleset or the merge settings keep GitHub from deleting it (section 10): fix them, then delete it with *Delete branch* on the merged pull request. GitHub moves the open pull requests that targeted it to `main`, after the automatic deletion or that button; section 8 moves them to the next release branch.
 
 ## 5. Tag and publish
 
@@ -535,7 +535,23 @@ Then repeat section 5. Do not open the `.dev` pull request until the release is 
 
 **A fix must ship while the open release branch holds work that is not ready.** Make a hotfix: a release of its own, on a second release branch made from `main` ([G8](../CONTRIBUTING.md#commits-and-pull-requests)). *Recommendation:* if the open release branch can be released as it stands, release it instead, since each pull request leaves it working.
 
-1. Set the variables. `VERSION` is the hotfix's version: it sorts after the last release and before the open release's version, for example `0.1.1` while `release/0.2.0` is open. `BRANCH="release/${VERSION}"`, `PREVIOUS` is the last release, and `OPEN_BRANCH` is the open release branch. Make a milestone titled with the hotfix's version.
+1. Set the variables, and check that the hotfix's version sorts after the last release and before the open release's version. In the alpha series, only a post-release sorts in between, such as `0.1.0a2.post1` while `release/0.1.0a3` is open; after a final release, it is the next patch version, such as `0.1.1` while `release/0.2.0` is open. Make a milestone titled with the hotfix's version.
+   ```
+   VERSION=0.1.0a2.post1                  # the hotfix's version
+   BRANCH="release/${VERSION}"            # the hotfix's branch
+   PREVIOUS=0.1.0a2                       # the last published version
+   OPEN_VERSION=0.1.0a3                   # the version of the open release branch
+   OPEN_BRANCH="release/${OPEN_VERSION}"
+   python - "${PREVIOUS}" "${VERSION}" "${OPEN_VERSION}" <<'PY'
+   import sys
+   from packaging.version import Version
+
+   previous, version, open_version = (Version(v) for v in sys.argv[1:])
+   assert previous < version < open_version, f"{version} does not sort between {previous} and {open_version}"
+   print(version, "sorts between", previous, "and", open_version)
+   PY
+   ```
+   Expected: `0.1.0a2.post1 sorts between 0.1.0a2 and 0.1.0a3`. Section 2 checks the rest of the version's form.
 2. Make the hotfix branch from `main`, as section 8 makes a release branch:
    ```
    gh api "repos/${REPO}/git/refs" -f ref="refs/heads/${BRANCH}" -f sha="$(git rev-parse origin/main)" -q .ref
@@ -569,7 +585,7 @@ For reference, and for checking when something in section 5 fails.
 - **PyPI trusted publisher** for the project `django-neolith`: owner `stack314`, repository `django-neolith`, workflow `release.yml`, environment `release`. No API token is stored anywhere.
 - **The `release` environment** (Settings, Environments): the maintainer is a required reviewer, and only tags matching `v*` may deploy to it.
 - **Branch rulesets** (Settings, Rules):
-  - `release/*`, which covers each release branch from the moment it is made: no force push; changes by pull request only, one approving review, stale approvals dismissed on push; the lint job and the four test jobs required. Squash merges and merge commits are allowed: every pull request is squash-merged except the one that brings `main` in after a hotfix (section 9). Deletion is not restricted, so that GitHub can delete a release branch when its release pull request merges.
+  - `release/*`, which covers each release branch from the moment it is made: no force push; changes by pull request only, one approving review, stale approvals dismissed on push; the lint job and the four test jobs required. Squash merges and merge commits are allowed: every pull request is squash-merged except the one that brings `main` in after a hotfix (section 9). Deletion is not restricted, so that GitHub can delete a release branch when its release pull request merges; a rule or ruleset that restricts it keeps GitHub from doing so. The cost: anyone with write access can delete the open release branch, and GitHub then closes every open pull request into it instead of moving them.
   - `main` (the default branch): no deletion or force push; changes by pull request only, merge commits only, one approving review, stale approvals dismissed on push; the same five jobs required. A second ruleset for `main`, which would let only admins update it, exists and is disabled.
 - **Merge settings** (Settings, General): squash merging and merge commits allowed, rebase merging off. Both take the pull request's title and description as the commit's message. Head branches are deleted after merge: a release branch goes when its release pull request merges, and GitHub moves the open pull requests that targeted it to `main`.
 - **Release branches**: nothing is set per branch. Section 8 makes each release's branch from `main` once the previous release is published, and section 9 makes a hotfix's.
