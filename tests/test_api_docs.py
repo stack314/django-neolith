@@ -35,6 +35,8 @@ an annotation that the check does not know is a problem, not a pass.
 
 import ast
 import builtins
+import enum
+import functools
 import importlib
 import inspect
 import logging
@@ -219,8 +221,50 @@ def _defaults(found: griffe.Object) -> Iterator[str | griffe.Expr | None]:
 
 # A marker shown in place of a value, as dataclasses shows "<factory>".
 _MARKER = re.compile(r"<[a-z]+>")
-# The address Sphinx strips from a repr, as it does.
-_ADDRESS = re.compile(r" at 0x[0-9a-f]+(?=>)")
+# The address Sphinx strips from a repr.
+_ADDRESS = re.compile(r" at 0x[0-9a-f]{8,16}(?=>)")
+
+
+def _shown(value: object, seen: frozenset[int] = frozenset()) -> str:
+    """A default as the reference shows it.
+
+    This is ``sphinx.util.inspect.object_description`` of Sphinx 9.2, in its
+    order: a dict, set, frozenset, tuple or list, subclasses too, is shown by
+    its items, and an enum member by its class and name unless its enum has
+    its own ``__repr__``. ``test_shown_is_what_sphinx_shows`` holds the two
+    equal.
+    """
+    for kind in (dict, set, frozenset):
+        if isinstance(value, kind):
+            if id(value) in seen:
+                return f"{kind.__name__}(...)"
+            seen |= {id(value)}
+            try:
+                keys = sorted(value)
+            except TypeError:
+                keys = sorted(value, key=lambda key: _shown(key, seen))
+            if isinstance(value, dict):
+                shown = (
+                    f"{_shown(key, seen)}: {_shown(value[key], seen)}" for key in keys
+                )
+            else:
+                shown = (_shown(key, seen) for key in keys)
+            inner = "{" + ", ".join(shown) + "}"
+            return f"frozenset({inner})" if kind is frozenset else inner
+    if isinstance(value, enum.Enum):
+        if type(value).__repr__ is not enum.Enum.__repr__:
+            return repr(value)
+        return f"{type(value).__name__}.{value.name}"
+    for sequence in (tuple, list):
+        if isinstance(value, sequence):
+            if id(value) in seen:
+                return f"{sequence.__name__}(...)"
+            seen |= {id(value)}
+            items = [_shown(item, seen) for item in value]
+            if isinstance(value, list):
+                return f"[{', '.join(items)}]"
+            return f"({', '.join(items)}{',' * (len(items) == 1)})"
+    return _ADDRESS.sub("", repr(value)).replace("\n", " ")
 
 
 def _live(found: griffe.Object) -> object:
@@ -232,34 +276,53 @@ def _live(found: griffe.Object) -> object:
     return live
 
 
-def _shown_defaults(found: griffe.Object) -> Iterator[tuple[str, str]]:
-    """Each default of an object that is not an overload, as the reference shows it.
+def _signed(found: griffe.Object) -> list[object]:
+    """The callables whose signatures the reference shows for an object.
 
-    The reference shows such a default by its ``repr`` (docs/site/conf.py
-    leaves ``autodoc_preserve_defaults`` off), as ``help()`` does. A class
-    shows its own ``__init__``.
+    Not an overloaded function, whose overloads are shown as written. A
+    class shows its own ``__new__`` and ``__init__``; a single-dispatch
+    function also shows each function registered on it.
     """
+    if isinstance(found, griffe.Function) and found.overloads:
+        return []
     if not isinstance(found, griffe.Class | griffe.Function):
-        return
+        return []
     live = _live(found)
     if isinstance(found, griffe.Class):
-        live = vars(live).get("__init__")
-        if live is None:
-            return
-    assert callable(live)
-    for parameter in inspect.signature(live).parameters.values():
-        if parameter.default is not parameter.empty:
-            yield parameter.name, _ADDRESS.sub("", repr(parameter.default))
+        assert isinstance(live, type)
+        return [
+            getattr(live, name)
+            for name in ("__new__", "__init__")
+            if name in vars(live)
+        ]
+    if isinstance(found.parent, griffe.Class):
+        raw = inspect.getattr_static(_live(found.parent), found.name)
+        if isinstance(raw, functools.singledispatchmethod):
+            return [live, *raw.dispatcher.registry.values()]
+    registry = getattr(live, "registry", None)
+    if callable(getattr(live, "dispatch", None)) and registry is not None:
+        return [
+            live,
+            *(function for kind, function in registry.items() if kind is not object),
+        ]
+    return [live]
 
 
 def _shown_default_problems(found: griffe.Object) -> Iterator[tuple[str, str, str]]:
     """Each default the reference shows that is neither a literal nor a marker.
 
-    A literal names no object, and a marker such as ``<missing>`` names none
-    either; any other text may name one the package does not export.
+    The reference shows a default by its value (docs/site/conf.py leaves
+    ``autodoc_preserve_defaults`` off), as ``help()`` does. A literal names
+    no object, and a marker such as ``<missing>`` names none either; any
+    other text may name one the package does not export.
     """
     try:
-        shown = list(_shown_defaults(found))
+        shown = [
+            (parameter.name, _shown(parameter.default))
+            for live in _signed(found)
+            for parameter in inspect.signature(live).parameters.values()  # type: ignore[arg-type]
+            if parameter.default is not parameter.empty
+        ]
     except Exception as error:  # an import that fails is reported, not raised
         yield "defaults", "", f"its defaults cannot be read: {error!r}"
         return
@@ -587,6 +650,7 @@ def test_the_records_are_read(records: Records) -> None:
 _GOOD = '''
 """A sample."""
 import enum
+import functools
 import json
 from collections.abc import Mapping
 from typing import Annotated, overload
@@ -620,6 +684,11 @@ class _Marker(enum.Enum):
 class _Named:
     def __repr__(self) -> str:
         return "_MISSING"
+
+
+class _Names(tuple):
+    def __repr__(self) -> str:
+        return "<none>"
 
 
 #: The limit (spec 01): at most 32 levels, as CON-30 says, in UTF-8.
@@ -917,7 +986,7 @@ def test_a_sample_in_every_admitted_shape_passes(
         pytest.param(
             "parts: Mapping[str, object] | None = None",
             "parts: Mapping[str, object] | None = _Kind.ONE",
-            "sample.Thing: its default for parts shows as <_Kind.ONE: 1>",
+            "sample.Thing: its default for parts shows as _Kind.ONE,",
             id="private-enum-default",
         ),
         pytest.param(
@@ -926,6 +995,22 @@ def test_a_sample_in_every_admitted_shape_passes(
             "_Hidden.__doc__) -> T: ...\n\n\ndef make[T](kind",
             "sample.make: its defaults name _Hidden, which sample does not export",
             id="private-name-in-an-overload-default",
+        ),
+        pytest.param(
+            "    name: str\n",
+            "    name: str\n\n    def __new__(cls, *args: object, hidden: object = "
+            "_Hidden()) -> 'Thing':\n        return super().__new__(cls)\n",
+            "sample.Thing: its default for hidden shows as <sample._Hidden object>",
+            id="private-default-of-own-new",
+        ),
+        pytest.param(
+            "    return kind()\n",
+            "    return kind()\n\n\n@functools.singledispatch\ndef convert(value: "
+            'object) -> object:\n    """Convert it."""\n    return value\n\n\n'
+            "@convert.register\ndef _(value: int, strict: object = _Hidden()) -> "
+            'object:\n    return value\n\n\n__all__ += ["convert"]\n',
+            "sample.convert: its default for strict shows as <sample._Hidden object>",
+            id="private-default-of-a-registered-function",
         ),
         pytest.param(
             '    """Not exported."""\n\n\nclass Problem(ValueError):',
@@ -1127,10 +1212,16 @@ def test_each_rule_refuses_its_nearest_wrong_shape(
     [
         pytest.param("_Hidden", "<class 'sample._Hidden'>", id="class"),
         pytest.param("_Hidden()", "<sample._Hidden object>", id="instance"),
-        pytest.param("_Kind.ONE", "<_Kind.ONE: 1>", id="enum-member"),
+        pytest.param("_Kind.ONE", "_Kind.ONE", id="enum-member"),
         pytest.param("_Named()", "_MISSING", id="repr-a-name"),
         pytest.param("object()", "<object object>", id="object"),
-        pytest.param("(1, _Kind.ONE)", "(1, <_Kind.ONE: 1>)", id="in-a-tuple"),
+        pytest.param("(1, _Kind.ONE)", "(1, _Kind.ONE)", id="in-a-tuple"),
+        pytest.param(
+            "_Names((_Kind.ONE,))", "(_Kind.ONE,)", id="tuple-with-a-marker-repr"
+        ),
+        pytest.param(
+            "{'a': _Hidden}", "{'a': <class 'sample._Hidden'>}", id="in-a-dict"
+        ),
         pytest.param("len", "<built-in function len>", id="function"),
     ],
 )
@@ -1153,6 +1244,43 @@ def test_a_default_shown_as_a_literal_or_a_marker_passes(
 ) -> None:
     source = _GOOD.replace("strict: bool = False", f"strict: bool = {default}")
     assert _sample(tmp_path, source, records) == []
+
+
+class _Names(tuple[object, ...]):
+    def __repr__(self) -> str:
+        return "<none>"
+
+
+class _Plain(enum.Enum):
+    ONE = 1
+
+
+class _Marked(enum.Enum):
+    ONE = 1
+
+    def __repr__(self) -> str:
+        return "<one>"
+
+
+_SHOWN_SAMPLES: list[object] = [
+    _Names((_Marked.ONE, _Plain.ONE)),
+    _Marked.ONE,
+    None,
+    ("a", 1),
+    [1, (2,)],
+    {"b": 1, "a": (None,)},
+    {2, 1},
+    frozenset({"x"}),
+    _Plain.ONE,
+    object(),
+    "a\nb",
+]
+
+
+def test_shown_is_what_sphinx_shows() -> None:
+    sphinx = pytest.importorskip("sphinx.util.inspect")
+    for value in _SHOWN_SAMPLES:
+        assert _shown(value) == sphinx.object_description(value)
 
 
 def test_the_reference_shows_a_default_by_its_repr() -> None:
