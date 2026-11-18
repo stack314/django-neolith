@@ -576,7 +576,7 @@ def test_each_hosted_transport_holds_exactly_its_apps_declaration() -> None:
                     contract.identity for contract in declaration.requires
                 )
                 checked.append(identity)
-    assert sorted(checked) == ["couriers.v3", "stock.v1"]
+    assert sorted(checked) == ["couriers.v3", "reference.v1", "stock.v1"]
 
 
 @pytest.mark.spec("TRN-43")

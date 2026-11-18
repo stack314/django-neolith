@@ -330,8 +330,10 @@ def test_a_contract_that_redefines_an_action_is_described_with_it_once() -> None
         @action
         def other(self, request: Ping) -> None: ...
 
-        @action(idempotent=True)
-        def ping(self, request: Pong) -> Ping: ...  # type: ignore[no-redef]  # noqa: F811
+        # mypy reports the redefinition on the decorator's line or the def's,
+        # depending on the version that runs it.
+        @action(idempotent=True)  # type: ignore[no-redef,unused-ignore]
+        def ping(self, request: Pong) -> Ping: ...  # type: ignore[no-redef,unused-ignore]  # noqa: F811
 
     found = Contract.of(Echo)
     assert list(found.actions) == ["ping", "other"]
