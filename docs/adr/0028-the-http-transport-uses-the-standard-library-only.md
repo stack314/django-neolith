@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - Narrowed by [0032](0032-the-conformance-suite-runs-each-case-once-per-transport.md) (Decision 5)
+- Narrowed by [0031](0031-a-contract-version-is-routed-by-single-unless-local-first-is-named.md) (Decision 5)
 - **Date:** 2026-11-18
 
 ## Context
