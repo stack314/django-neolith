@@ -139,7 +139,13 @@ jobs:
           sys.path.insert(0, str(root))
           settings.configure(**build_settings(
               ["smoke"],
-              {"MIDDLEWARE": ["neolith.middleware.RootMiddleware"], "NEOLITH": {}},
+              {
+                  "MIDDLEWARE": [
+                      "neolith.middleware.RootMiddleware",
+                      "neolith.middleware.PrincipalMiddleware",
+                  ],
+                  "NEOLITH": {},
+              },
           ))
           django.setup()
           print(f"neolith {neolith.__version__} on Django {django.get_version()}")
