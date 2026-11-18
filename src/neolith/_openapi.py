@@ -2,7 +2,9 @@
 
 ADR 0011 Decision 7: set-up builds one OpenAPI 3.1.2 document for every
 contract version the host provides, from ``Contract.describe()`` only, and
-keeps its text as fixed bytes, so equal hosts serve equal bytes.
+keeps its text as fixed bytes. The bytes depend on the descriptions alone, in
+the order each one lists its actions, kinds and records, so hosts with equal
+descriptions serve equal bytes.
 
 Every schema of a description is copied unchanged, apart from its references,
 which move from ``#/$defs/<Record>`` to ``#/components/schemas/<key>``. The
@@ -236,16 +238,24 @@ def _project(
 
 
 def _error_body(kind: str, data: object = None) -> dict[str, Any]:
-    """Spec 03's error body for one kind, with ``data`` for a declared kind."""
+    """Spec 03's error body for one kind: ``data`` only for a declared kind."""
     properties: dict[str, Any] = {
         "kind": {"const": kind},
         "message": {"type": "string"},
     }
-    required = ["kind", "message"]
-    if data is not None:
-        properties["data"] = data
-        required.append("data")
-    return {"type": "object", "properties": properties, "required": required}
+    if data is None:
+        return {
+            "type": "object",
+            "properties": properties,
+            "required": ["kind", "message"],
+            "not": {"required": ["data"]},
+        }
+    properties["data"] = data
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": ["kind", "message", "data"],
+    }
 
 
 def _copy(identity: str, defs: Mapping[str, Any], schema: object) -> object:

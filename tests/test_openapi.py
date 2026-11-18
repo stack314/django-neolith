@@ -192,6 +192,7 @@ def _error(kind: str, data: object = None) -> dict[str, Any]:
             "type": "object",
             "properties": properties,
             "required": ["kind", "message"],
+            "not": {"required": ["data"]},
         }
     return {
         "type": "object",
@@ -432,8 +433,10 @@ _IN_A_FRESH_PROCESS = textwrap.dedent(
 
 @pytest.mark.spec("HTTP-20")
 def test_equal_hosts_give_equal_bytes_across_processes() -> None:
-    # String hashing differs between processes, so any order taken from a set
-    # would show here.
+    # String hashing differs between processes, so any order the projection
+    # took from a set would show here. A declaration built from a set has its
+    # own order in each process, and so another description: that is not an
+    # equal host.
     root = Path(__file__).parent.parent
     outputs = []
     for seed in ("1", "2"):
@@ -509,6 +512,38 @@ def test_a_description_inside_the_admitted_set_is_projected(
     assert _copy("x.v1", {"Order": {}}, schema) == (
         schema if expected is None else expected
     )
+
+
+@pytest.mark.spec("HTTP-20")
+@pytest.mark.parametrize(
+    ("status", "body", "admitted"),
+    [
+        ("500", {"kind": "internal", "message": "x"}, True),
+        ("500", {"kind": "internal", "message": "x", "data": {"sku": "a"}}, False),
+        ("500", {"kind": "internal", "message": "x", "data": None}, False),
+        ("500", {"kind": "timeout", "message": "x"}, False),
+        ("500", {"kind": "internal"}, False),
+        ("422", {"kind": "out_of_stock", "message": "x", "data": {"sku": "a"}}, True),
+        ("422", {"kind": "held", "message": "x", "data": {"order": "o"}}, True),
+        ("422", {"kind": "held", "message": "x", "data": {"sku": "a"}}, False),
+        ("422", {"kind": "out_of_stock", "message": "x"}, False),
+        ("422", {"kind": "internal", "message": "x", "data": {"sku": "a"}}, False),
+    ],
+)
+def test_error_bodies_admit_spec_03s_forms(
+    status: str, body: dict[str, Any], admitted: bool
+) -> None:
+    # A standard kind's body never has data; a declared kind's always does,
+    # holding that kind's detail record.
+    tree = _check(document(_ALL))
+    response = tree["paths"]["/shop.orders/v1/cancel"]["post"]["responses"][status]
+    if "$ref" in response:
+        response = tree["components"]["responses"][response["$ref"].rpartition("/")[2]]
+    schema = {
+        **response["content"]["application/json"]["schema"],
+        "components": tree["components"],
+    }
+    assert Draft202012Validator(schema).is_valid(body) is admitted
 
 
 def test_kind_status_covers_every_standard_kind() -> None:
