@@ -20,12 +20,13 @@ written out where they are used.
 
 import copy
 import enum
+import inspect
 import json
 import math
 import re
 import sys
 import types
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any, Literal, cast
@@ -394,6 +395,9 @@ class Portable:
             # initialise them when the record has any.
             admitted.add("post_init")
         self.keys(node, frozenset(admitted), subject)
+        private = _private_attribute_problem(cls)
+        if private is not None:
+            raise self.fail(f"{subject} {private}")
         if node.get("root_model"):
             raise self.fail(f"{subject} is a root model; a record has named fields")
         if node.get("custom_init"):
@@ -938,6 +942,17 @@ class Portable:
                 "travels unchecked against the description; check the input in a "
                 "before validator (mode='before') instead"
             )
+        # pydantic-core hands ValidationInfo to a "with-info" function, and its
+        # data holds the record's fields validated so far: the very values the
+        # record keeps, which the validator could change after they were
+        # checked. Anything but "no-info" is refused.
+        function = node.get("function")
+        if not isinstance(function, Mapping) or function.get("type") != "no-info":
+            raise self.fail(
+                f"{subject} has a validator that takes ValidationInfo, whose "
+                "data holds the fields validated before it, which it could "
+                "change; take the value only"
+            )
         self.keys(node, _VALIDATOR_KEYS, subject)
 
     def bounds(
@@ -1429,6 +1444,81 @@ def _only_initialises_private_attributes(cls: type[Any]) -> bool:
             return False
         function = held[_WRAPPED_CELL]
     return False
+
+
+# What Pydantic's PrivateAttr builds, taken from it rather than imported.
+_PRIVATE_ATTRIBUTE = type(PrivateAttr())
+
+if sys.version_info >= (3, 14):
+    from annotationlib import Format
+
+    def _signature(function: Callable[..., object]) -> inspect.Signature:
+        """A callable's signature, its annotations left unevaluated."""
+        return inspect.signature(function, annotation_format=Format.FORWARDREF)
+
+else:
+
+    def _signature(function: Callable[..., object]) -> inspect.Signature:
+        """A callable's signature, its annotations left unevaluated."""
+        return inspect.signature(function)
+
+
+def _private_attribute_problem(cls: type[Any]) -> str | None:
+    """Say which private attribute could be handed the validated data, or None.
+
+    Pydantic builds a record's private attributes after validation, in the
+    model_post_init it generates (``init_private_attributes`` in
+    pydantic/_internal/_model_construction.py). From 2.13 it hands the
+    record's validated data, the very field values, to a default factory that
+    Pydantic's ``default_factory_takes_validated_data`` says takes it (one
+    positional parameter without a default), and that factory can change them
+    after they were checked. At 2.12 it calls every factory with no
+    arguments, so such a factory raises each time a value is read. So a
+    private attribute is what ``PrivateAttr`` builds, which no record can
+    override, and its default factory, if any, takes no arguments, whatever
+    Pydantic would say of it.
+    """
+    attributes = _from_classes(cls, "__private_attributes__")
+    if type(attributes) is not dict:
+        return "has private attributes that neolith cannot read"
+    for name, attribute in attributes.items():
+        if type(attribute) is not _PRIVATE_ATTRIBUTE:
+            return (
+                f"has the private attribute {name}, which is a "
+                f"{type(attribute).__qualname__}, not what Pydantic's "
+                "PrivateAttr builds"
+            )
+        factory = attribute.default_factory
+        if factory is None:
+            continue
+        try:
+            takes_data = (
+                getattr(attribute, "default_factory_takes_validated_data", False)
+                is not False
+            )
+            try:
+                parameters = list(_signature(factory).parameters.values())
+            except (ValueError, TypeError):
+                # Pydantic cannot read it either, so calls it with none.
+                parameters = []
+        except Exception as error:  # an author's callable may raise anything
+            return (
+                f"has the private attribute {name}, whose default factory's "
+                f"signature cannot be read ({type(error).__name__}: {error})"
+            )
+        if takes_data or any(
+            parameter.default is inspect.Parameter.empty
+            and parameter.kind
+            not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+            for parameter in parameters
+        ):
+            return (
+                f"has the private attribute {name}, whose default factory takes "
+                "arguments; Pydantic calls it after validation and may hand it "
+                "the validated data, which it could change. Give it a factory "
+                "that takes none"
+            )
+    return None
 
 
 def _narrowed(base: Mapping[str, Any], bounds: Mapping[str, Any]) -> dict[str, Any]:
