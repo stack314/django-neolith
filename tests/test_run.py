@@ -12,6 +12,7 @@ import contextlib
 import http.client
 import importlib.metadata
 import ipaddress
+import logging
 import os
 import queue
 import signal
@@ -26,6 +27,7 @@ from pathlib import Path
 from typing import IO, Any
 
 import pytest
+from django.core.exceptions import ImproperlyConfigured
 from hypothesis import given
 from hypothesis import strategies as st
 
@@ -407,6 +409,95 @@ def test_bind_refuses_anything_else(text: str) -> None:
         _cli.parse_bind(text)
 
 
+def test_the_console_script_finds_modules_from_the_working_directory(
+    site: Site,
+) -> None:
+    """``python -m`` puts the working directory on the path, and the script
+    does the same, so the deployer's module is found either way."""
+    site.deployer()
+    script = Path(sys.executable).parent / "neolith"
+    ran = subprocess.run(  # noqa: S603
+        [str(script), "migrate", DESK, "--settings", "deployer"],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=site.root,
+        timeout=_WAIT,
+        env={**site.env(), "PYTHONPATH": os.pathsep.join(sys.path)},
+    )
+    assert ran.returncode == 0, ran.stderr
+    assert site.database("desk").exists()
+
+
+@pytest.mark.spec("APP-1")
+@pytest.mark.parametrize(
+    ("closed", "command", "status"),
+    [("1", "migrate", 0), ("2", "run", 1), ("1", "run", 1)],
+)
+def test_a_closed_standard_stream_changes_no_outcome(
+    site: Site, closed: str, command: str, status: int
+) -> None:
+    site.deployer()
+    ran = subprocess.run(  # noqa: S603
+        [
+            "/bin/sh",
+            "-c",
+            f'exec "$0" "$@" {closed}>&-',
+            sys.executable,
+            "-W",
+            "error",
+            "-m",
+            "neolith",
+            command,
+            DESK,
+            "--settings",
+            "deployer",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=site.root,
+        timeout=_WAIT,
+        env=site.env(),
+    )
+    assert ran.returncode == status, ran.stderr
+    assert "Traceback" not in ran.stderr
+    assert site.database("desk").exists() is (command == "migrate")
+
+
+def test_the_host_s_log_is_printed_once_beside_the_refusals(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    log = _cli._HostLog()
+    record = logging.LogRecord(
+        "neolith.host", logging.WARNING, __file__, 1, "(id) warned\nagain", (), None
+    )
+    log.emit(record)
+    record = logging.LogRecord(
+        "neolith.host", logging.ERROR, __file__, 1, "refused:\nline", (), None
+    )
+    log.emit(record)
+    try:
+        raise RuntimeError("the cause")
+    except RuntimeError:
+        failure = sys.exc_info()
+    log.emit(
+        logging.LogRecord(
+            "neolith.host", logging.ERROR, __file__, 1, "logged only", (), failure
+        )
+    )
+    _cli._report(ImproperlyConfigured("refused:\nline\nmore"), log.printed)
+    printed = capsys.readouterr().err.splitlines()
+    assert printed[:5] == [
+        "neolith: warning: (id) warned",
+        "neolith: warning: again",
+        "neolith: refused:",
+        "neolith: line",
+        "neolith: logged only",
+    ]
+    assert printed[-2:] == ["RuntimeError: the cause", "neolith: more"]
+
+
 def test_the_package_installs_one_console_script() -> None:
     scripts = importlib.metadata.entry_points(group="console_scripts")
     found = [s for s in scripts if s.value.startswith("neolith")]
@@ -455,6 +546,20 @@ def test_a_settings_module_of_the_wrong_kind_is_refused(
     assert ran.returncode == 1, ran.stderr
     assert message in ran.stderr.splitlines()[0] + ran.stderr, ran.stderr
     assert not site.database("desk").exists()
+
+
+@pytest.mark.spec("APP-16")
+@pytest.mark.parametrize("command", ["run", "migrate"])
+def test_an_app_that_reads_a_setting_at_import_is_refused_by_name(
+    site: Site, command: str
+) -> None:
+    site.deployer()
+    ran = site.neolith(command, "tests.settings_apps.reader", "--settings", "deployer")
+    assert ran.returncode == 1
+    assert (
+        "neolith: app tests.settings_apps.reader: reads Django settings at import; "
+        "a declaration is read before settings exist" in ran.stderr.splitlines()
+    ), ran.stderr
 
 
 @pytest.mark.spec("APP-16")
@@ -1188,6 +1293,28 @@ def test_an_undeclared_app_that_depends_on_a_hosted_app_is_refused(
     )
     assert not site.database("desk").exists()
     assert not site.database("default").exists()
+
+
+@pytest.mark.spec("APP-49")
+def test_a_failure_names_what_django_applied_as_a_dependency(site: Site) -> None:
+    """Django's ``migrate <label>`` applies the migrations a label's depend
+    on, so an app after the one that failed can be migrated already."""
+    manage = _project(
+        site,
+        {
+            "DATABASES": site.databases("desk", "default"),
+            "UNDECLARED_APPS": [
+                "tests.run_apps.dependent",
+                "django.contrib.contenttypes",
+            ],
+        },
+    )
+    ran = manage("migrateapps")
+    assert ran.returncode == 1
+    assert ran.stderr.splitlines()[-2:] == [
+        "migrated: desk, contenttypes",
+        "failed: dependent, with none of its migrations applied",
+    ], ran.stderr
 
 
 def test_on_a_real_default_the_step_migrates_undeclared_apps_there(

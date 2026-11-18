@@ -37,7 +37,7 @@ from django.core import checks
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db import connections
-from django.db.migrations.recorder import MigrationRecorder
+from django.db.migrations.executor import MigrationExecutor
 
 from neolith import _boot, _databases
 from neolith._declaration import declaration_of
@@ -112,41 +112,71 @@ def migrate(out: TextIOBase, *, verbosity: int) -> None:
                 stdout=out,
             )
         except Exception as error:
-            raise CommandError(
-                _failed(label, alias, error, done, [s[0] for s in steps[index + 1 :]])
-            ) from error
+            raise CommandError(_failed(steps, index, error, done)) from error
         done.append(label)
 
 
 def _failed(
-    label: str,
-    alias: str,
+    steps: Sequence[tuple[str, str]],
+    index: int,
     error: Exception,
     done: Sequence[str],
-    left: Sequence[str],
 ) -> str:
+    """The diagnostic of a step that failed at ``steps[index]``, read from
+    the state of the databases it touched: Django's ``migrate`` also applies
+    the migrations of other labels that a label's depend on, so a label
+    after the one that failed may be migrated, in part or whole, on a
+    database the step touched. A database it never touched is not opened,
+    since opening a SQLite path creates its file.
+    """
+    label, alias = steps[index]
+    touched = {where for _, where in steps[: index + 1]}
     lines = [
         f"app {label}: database {alias}: the migrate step failed: {_cause(error)}",
-        f"migrated: {', '.join(done) or 'none'}",
-        f"failed: {label}, {_applied(label, alias)}",
     ]
-    if left:
-        lines.append(f"not migrated: {', '.join(left)}")
+    migrated = list(done)
+    partly: list[str] = []
+    untouched: list[str] = []
+    for other, where in steps[index + 1 :]:
+        if where not in touched:
+            untouched.append(other)
+            continue
+        state = _state(other, where)
+        if type(state) is str:
+            partly.append(f"{other}, {state}")
+        elif not state[0]:
+            migrated.append(other)
+        elif state[1]:
+            partly.append(f"{other}, with {', '.join(state[1])} applied")
+        else:
+            untouched.append(other)
+    lines.append(f"migrated: {', '.join(migrated) or 'none'}")
+    failed = _state(label, alias)
+    if type(failed) is str:
+        lines.append(f"failed: {label}, {failed}")
+    elif failed[1]:
+        lines.append(f"failed: {label}, with {', '.join(failed[1])} applied")
+    else:
+        lines.append(f"failed: {label}, with none of its migrations applied")
+    lines += [f"partly migrated: {entry}" for entry in partly]
+    if untouched:
+        lines.append(f"not migrated: {', '.join(untouched)}")
     return "\n".join(lines)
 
 
-def _applied(label: str, alias: str) -> str:
-    """What the alias records as applied for ``label``, read after a
-    failure.
+def _state(label: str, alias: str) -> tuple[list[str], list[str]] | str:
+    """The migrations of ``label`` still to apply on ``alias``, and those
+    applied, as Django's planner reads them; or why they cannot be read.
     """
     try:
-        rows = MigrationRecorder(connections[alias]).applied_migrations()
+        executor = MigrationExecutor(connections[alias])
+        plan = executor.migration_plan(executor.loader.graph.leaf_nodes(label))
+        rows = executor.loader.applied_migrations or {}
     except Exception as error:
-        return f"whose applied migrations cannot be read: {_cause(error)}"
-    names = sorted(name for owner, name in rows if owner == label)
-    if not names:
-        return "with none of its migrations applied"
-    return f"with {', '.join(names)} applied"
+        return f"whose migrations cannot be read: {_cause(error)}"
+    pending = [m.name for m, back in plan if m.app_label == label and not back]
+    applied = sorted(name for owner, name in rows if owner == label)
+    return pending, applied
 
 
 def _say(out: TextIOBase, verbosity: int) -> Callable[[str], None]:

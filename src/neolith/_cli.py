@@ -183,33 +183,29 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-class _SettingRead(ImproperlyConfigured):
-    """A setting was read while the command line read the deployer's module
-    or the apps' declarations, before settings exist.
+class _HostLog(logging.Handler):
+    """The host's log under the command line: each line printed as
+    ``neolith: <line>``, a warning's as ``neolith: warning: <line>``, with a
+    record's traceback after it. ``printed`` holds the lines of the errors
+    printed, so a refusal the host logged before raising it is printed once.
     """
 
     def __init__(self) -> None:
-        super().__init__(
-            "a setting was read before settings exist; neolith run and neolith "
-            "migrate read the deployer's module and each app's declaration "
-            "first, so neither may read a setting at import"
-        )
-
-
-class _HostLog(logging.Handler):
-    """The host's log under the command line. A refusal is printed once,
-    from the error raised, so an error the host logs is printed only for
-    the traceback it carries; a warning is printed as a line of its own.
-    """
+        super().__init__()
+        self.printed: set[str] = set()
 
     def emit(self, record: logging.LogRecord) -> None:
         from neolith import _server
 
         try:
-            if record.levelno < logging.ERROR:
-                for line in record.getMessage().splitlines():
+            warning = record.levelno < logging.ERROR
+            for line in record.getMessage().splitlines():
+                if warning:
                     _server.say(sys.stderr, f"neolith: warning: {line}")
-            elif record.exc_info:
+                else:
+                    self.printed.add(line)
+                    _server.say(sys.stderr, f"neolith: {line}")
+            if record.exc_info:
                 _server.say(
                     sys.stderr,
                     "".join(traceback.format_exception(*record.exc_info)).rstrip(),
@@ -221,22 +217,33 @@ class _HostLog(logging.Handler):
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the ``neolith`` command line; return the exit status."""
     arguments = _parser().parse_args(argv)
+    # A standard stream that is closed is None in Python; nothing the host
+    # prints may stop it.
+    for stream in ("stdout", "stderr"):
+        if getattr(sys, stream) is None:
+            setattr(sys, stream, open(os.devnull, "w", encoding="utf-8"))  # noqa: SIM115
     os.environ.pop(_SETTINGS, None)
-    logging.getLogger("neolith.host").addHandler(_HostLog())
+    # The modules named on the command line are found from the working
+    # directory, as python -m finds them, whichever way the script started.
+    here = os.getcwd()
+    if "" not in sys.path and here not in sys.path:
+        sys.path.insert(0, here)
+    log = _HostLog()
+    logging.getLogger("neolith.host").addHandler(log)
     try:
         if arguments.command == "run":
             return _run(arguments)
         return _migrate(arguments)
     except (ImproperlyConfigured, CommandError) as refusal:
-        _report(refusal)
+        _report(refusal, log.printed)
         return 1
 
 
-def _report(refusal: BaseException) -> None:
+def _report(refusal: BaseException, printed: set[str]) -> None:
     from neolith import _server
 
     for line in str(refusal).splitlines() or [type(refusal).__qualname__]:
-        if line:
+        if line and line not in printed:
             _server.say(sys.stderr, f"neolith: {line}")
 
 
@@ -272,12 +279,12 @@ def _built(name: str, apps: list[str]) -> dict[str, Any]:
     """Import the deployer's module ``name`` and build the settings."""
     from django.conf import settings
 
-    from neolith import host
+    from neolith import _configure, host
 
     with host._deployer_import(name):
         try:
             module = importlib.import_module(name)
-        except _SettingRead as error:
+        except _configure.EarlyRead as error:
             raise ImproperlyConfigured(
                 f"settings: {_shown(name)} reads Django settings at import; it "
                 "holds the deployer's names, which are read before settings exist"

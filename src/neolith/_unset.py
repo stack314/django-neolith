@@ -5,6 +5,6 @@ refused by name, instead of with Django's advice to set
 ``DJANGO_SETTINGS_MODULE``, which the command line does not read.
 """
 
-from neolith._cli import _SettingRead
+from neolith._configure import EarlyRead
 
-raise _SettingRead
+raise EarlyRead

@@ -346,18 +346,21 @@ def _seconds(value: float) -> str:
     return f"{shown} second" if shown == "1" else f"{shown} seconds"
 
 
-def _say(stream: TextIO, line: str) -> None:
+def _say(stream: TextIO | None, line: str) -> None:
     """Print a line of the host's, if the stream can still take it: a reader
     that has gone changes nothing about how the host drains.
     """
     say(stream, f"neolith: {line}")
 
 
-def say(stream: TextIO, line: str) -> None:
+def say(stream: TextIO | None, line: str) -> None:
     """Write ``line`` to ``stream``. When the stream cannot take it, such as
     a pipe whose reader has gone, it is pointed at the null device, so that
-    neither this write nor Python's flush at exit raises.
+    neither this write nor Python's flush at exit raises. ``None``, which
+    Python gives for a standard stream that was closed, takes nothing.
     """
+    if stream is None:
+        return
     try:
         stream.write(f"{line}\n")
         stream.flush()

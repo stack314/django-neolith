@@ -38,6 +38,7 @@ from neolith._declaration import Declaration, DeclarationError, declaration_of
 __all__ = [
     "HOST_NAMES",
     "ROUTER",
+    "EarlyRead",
     "built_settings",
     "configure",
     "databases_difference",
@@ -54,6 +55,16 @@ HOST_NAMES: Final = {
 # Labels the host reserves (ADR 0009, the admitted set).
 _RESERVED: Final = ("default", "django_cache")
 _SHOWN: Final = 160
+
+
+class EarlyRead(ImproperlyConfigured):
+    """A setting was read while the command line read the deployer's module
+    or an app's declaration, before settings exist: ``neolith._unset``, the
+    settings module Django is pointed at meanwhile, raises it.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("a setting was read before settings exist")
 
 
 def _type(value: object) -> str:
@@ -148,15 +159,14 @@ def _read(path: str) -> Declaration | str:
         config = AppConfig.create(path)
     except DeclarationError:
         raise
+    except EarlyRead as error:
+        raise ImproperlyConfigured(_reads(where)) from error
     except Exception as error:
         raise ImproperlyConfigured(
             f"{where}: cannot be read: {_cause(error)}"
         ) from error
     if not was and settings.configured:
-        raise ImproperlyConfigured(
-            f"{where}: reads Django settings at import; a declaration is read "
-            "before settings exist"
-        )
+        raise ImproperlyConfigured(_reads(where))
     cls = type(config)
     declaration = declaration_of(cls)
     if declaration is None:
@@ -169,6 +179,13 @@ def _read(path: str) -> Declaration | str:
             "package the declaration names"
         )
     return declaration
+
+
+def _reads(where: str) -> str:
+    return (
+        f"{where}: reads Django settings at import; a declaration is read before "
+        "settings exist"
+    )
 
 
 def _compared(pairs: Sequence[tuple[str, Declaration]]) -> list[str]:
