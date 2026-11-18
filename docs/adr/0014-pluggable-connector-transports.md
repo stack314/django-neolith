@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Accepted:** 2026-11-18
+- Narrowed by [0031](0031-a-contract-version-is-routed-by-single-unless-local-first-is-named.md) (Decision 2)
 - **Date:** 2026-11-07; amended 2026-11-18 for roadmap step 5 (#12)
 
 ## Context
