@@ -47,6 +47,7 @@ from pydantic import (
     SerializeAsAny,
     Strict,
     StringConstraints,
+    ValidationInfo,
     WithJsonSchema,
     WrapSerializer,
     WrapValidator,
@@ -717,6 +718,97 @@ def test_before_validators_are_accepted() -> None:
             return abs(value)
 
     declare_with_field(Checked)
+
+
+# A validator that takes ValidationInfo can read info.data, the fields of its
+# record validated before it, as the very values the record keeps. Each
+# callable below notes whether pydantic-core handed it that info.
+_VALIDATOR_INFO: list[bool] = []
+
+
+def _value_only(value: object) -> object:
+    _VALIDATOR_INFO.append(False)
+    return value
+
+
+def _value_and_info(value: object, info: ValidationInfo) -> object:
+    _VALIDATOR_INFO.append(True)
+    return value
+
+
+def _info_optional(value: object, info: object = None) -> object:
+    _VALIDATOR_INFO.append(info is not None)
+    return value
+
+
+class _CallTakesInfo:
+    def __call__(self, value: object, info: ValidationInfo) -> object:
+        _VALIDATOR_INFO.append(True)
+        return value
+
+
+_BEFORE_VALIDATORS: list[Callable[..., object]] = [
+    _value_only,
+    _value_and_info,
+    _info_optional,
+    lambda value: _value_only(value),
+    lambda value, info: _value_and_info(value, info),
+    functools.partial(_info_optional, info=None),
+    _CallTakesInfo(),
+]
+
+
+@pytest.mark.spec("CON-13", "CON-16", "CON-17")
+@pytest.mark.parametrize("validator", _BEFORE_VALIDATORS)
+@pytest.mark.parametrize("place", ["field", "list item"])
+def test_before_validator_is_refused_when_pydantic_hands_it_validation_info(
+    validator: Callable[..., object], place: str
+) -> None:
+    checked: object = Annotated[int, BeforeValidator(validator)]
+    record = create_model(
+        "Later",
+        items=(list[int], ...),
+        y=(checked if place == "field" else list[checked], ...),  # type: ignore[valid-type]
+    )
+    # What the installed Pydantic hands the validator when it reads a value.
+    _VALIDATOR_INFO.clear()
+    record.model_validate({"items": [1], "y": 2 if place == "field" else [2]})
+    assert len(_VALIDATOR_INFO) == 1
+    if _VALIDATOR_INFO[0]:
+        with pytest.raises(
+            ContractDefinitionError,
+            match=r"field Shape\.value\.y(\[\*\])? has a validator that takes "
+            r"ValidationInfo",
+        ):
+            declare_with_field(record)
+    else:
+        declare_with_field(record)
+
+
+class ChangesAnEarlierField(BaseModel):
+    items: list[int]
+    y: int
+
+    @field_validator("y", mode="before")
+    @classmethod
+    def tamper(cls, value: object, info: ValidationInfo) -> object:
+        info.data["items"].append("not an int")
+        return value
+
+
+@pytest.mark.spec("CON-13", "CON-16", "CON-17")
+def test_before_validator_that_changes_an_earlier_field_is_refused() -> None:
+    # The change travels: info.data holds the values the record keeps.
+    made = ChangesAnEarlierField.model_validate_json('{"items": [1], "y": 2}')
+    assert made.items == [1, "not an int"]
+    with pytest.raises(
+        ContractDefinitionError,
+        match=re.escape(
+            "field Shape.value.y has a validator that takes ValidationInfo, "
+            "whose data holds the fields validated before it"
+        ),
+    ):
+        declare_with_field(ChangesAnEarlierField)
 
 
 class AfterModel(BaseModel):

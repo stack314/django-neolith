@@ -942,6 +942,17 @@ class Portable:
                 "travels unchecked against the description; check the input in a "
                 "before validator (mode='before') instead"
             )
+        # pydantic-core hands ValidationInfo to a "with-info" function, and its
+        # data holds the record's fields validated so far: the very values the
+        # record keeps, which the validator could change after they were
+        # checked. Anything but "no-info" is refused.
+        function = node.get("function")
+        if not isinstance(function, Mapping) or function.get("type") != "no-info":
+            raise self.fail(
+                f"{subject} has a validator that takes ValidationInfo, whose "
+                "data holds the fields validated before it, which it could "
+                "change; take the value only"
+            )
         self.keys(node, _VALIDATOR_KEYS, subject)
 
     def bounds(
