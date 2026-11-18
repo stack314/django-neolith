@@ -22,7 +22,7 @@
 
 </div>
 
-**Status: alpha (0.1.0a1). The API may change before 0.1.**
+**Status: alpha (0.1.0a2). The API may change before 0.1.**
 
 ```
 pip install --pre django-neolith
