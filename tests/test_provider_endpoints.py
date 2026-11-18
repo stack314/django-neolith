@@ -269,7 +269,7 @@ def test_row_2_an_unlisted_app_with_no_principal_is_served(
 
 @pytest.mark.spec("HTTP-34")
 @pytest.mark.parametrize("mode", MODES)
-@pytest.mark.parametrize("method", ["GET", "PUT", "PATCH", "DELETE", "HEAD"])
+@pytest.mark.parametrize("method", ["GET", "PUT", "PATCH", "DELETE", "HEAD", "post"])
 def test_row_3_a_method_other_than_post_is_refused_with_allow(
     site: Site, mode: str, method: str
 ) -> None:
@@ -814,7 +814,7 @@ def test_health_is_an_empty_200(site: Site, mode: str, method: str) -> None:
 @pytest.mark.spec("HTTP-32")
 @pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("path", [_endpoint.OPENAPI, _endpoint.HEALTH])
-@pytest.mark.parametrize("method", ["POST", "PUT", "DELETE", "OPTIONS"])
+@pytest.mark.parametrize("method", ["POST", "PUT", "DELETE", "OPTIONS", "get", "head"])
 def test_another_method_on_a_well_known_path_is_405(
     site: Site, mode: str, path: str, method: str
 ) -> None:

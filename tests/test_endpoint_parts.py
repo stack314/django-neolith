@@ -42,6 +42,8 @@ from tests.endpoint_site import (
     publish,
     token,
 )
+from tests.endpoint_site import asgi as endpoints_asgi
+from tests.endpoint_site import wsgi as endpoints_wsgi
 from tests.hosting import in_fresh_process
 
 
@@ -270,6 +272,51 @@ def test_an_internal_mails_the_cause_and_never_the_principal_or_token(
     assert "the books are closed" in text  # the cause is mailed
     for secret in (PRINCIPAL, sent, sent.split(" ")[1], "u-81f3"):
         assert secret not in text
+
+
+@pytest.mark.filterwarnings("ignore:Django 2028 will not have a default mailer")
+@pytest.mark.parametrize("mode", MODES)
+def test_a_host_this_host_does_not_serve_mails_no_principal(
+    site: Site, mode: str, mailoutbox: list[mail.EmailMessage]
+) -> None:
+    serve = endpoints_wsgi if mode == "wsgi" else endpoints_asgi
+    with override_settings(ADMINS=_admins(), DEBUG=False):
+        served = serve(
+            "POST",
+            POST,
+            "",
+            [("Host", "evil.example"), ("Neolith-Principal", PRINCIPAL)],
+            ENTRY,
+        )
+    assert served.status == 400
+    (message,) = mailoutbox
+    assert "DisallowedHost" in message.subject + message.body
+    assert PRINCIPAL not in message.body
+
+
+@pytest.mark.parametrize("version", [django.VERSION[:2]])
+def test_an_html_report_of_an_endpoint_failure_shows_no_header_or_principal(
+    site: Site, monkeypatch: pytest.MonkeyPatch, version: tuple[int, int]
+) -> None:
+    caught: list[BaseException] = []
+
+    def failing(request: object) -> bytes:
+        raise RuntimeError("the body cannot be read")
+
+    monkeypatch.setattr(_endpoint, "_body", failing)
+    monkeypatch.setattr(
+        _endpoint, "_cause", lambda message, error: caught.append(error)
+    )
+    served = call("wsgi", fields=[("Neolith-Principal", PRINCIPAL)])
+    assert served.status == 500
+    (error,) = caught
+    with override_settings(DEBUG=False):
+        html = ExceptionReporter(
+            None, type(error), error, error.__traceback__, is_email=True
+        ).get_traceback_html()
+    assert "_admitted" in html
+    assert PRINCIPAL not in html
+    assert "u-81f3" not in html
 
 
 def test_the_reporter_filter_hides_every_neolith_header_whatever_debug_says(

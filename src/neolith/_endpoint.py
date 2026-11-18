@@ -13,8 +13,10 @@ the rest of the middleware chain. On an owned path:
   set-up built, as fixed bytes, and an empty 200 for health;
 - any other path that is not a contract path gets an empty 404.
 
-On a contract path the host takes the call's arrival, sets a reporter filter
-on the request that hides every ``HTTP_NEOLITH_`` key, and then runs ADR
+On every owned path the host first sets a reporter filter on the request
+that hides every ``HTTP_NEOLITH_`` key, so no report made with the request,
+``DisallowedHost``'s included, shows the end user's principal. On a contract
+path it takes the call's arrival and then runs ADR
 0011's table in the order of ADR 0017 Decision 9: the caller backends
 (step 1), the allow-list (step 2), the method, the query, the scheme and the
 call-context headers (step 3), the deadline (step 4), and the body's header
@@ -41,8 +43,10 @@ from typing import Final, final
 from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured, RequestDataTooBig
+from django.core.handlers.asgi import ASGIRequest
 from django.http import HttpRequest, HttpResponse, UnreadablePostError
 from django.views.debug import SafeExceptionReporterFilter
+from django.views.decorators.debug import sensitive_variables
 
 from neolith import _caller, _context, _crossing, _http, _openapi, _token
 from neolith._connector import (
@@ -258,6 +262,23 @@ class _Filter(SafeExceptionReporterFilter):
         return True
 
 
+def _protect(request: HttpRequest) -> None:
+    """Give the request the reporter filter, before anything on an owned
+    path can report it, ``DisallowedHost`` included, so whatever reports
+    the request hides the neolith headers (ADR 0027 Decision 3).
+    """
+    request.exception_reporter_filter = _Filter()  # type: ignore[attr-defined]  # Django reads it by getattr
+
+
+def _method(request: HttpRequest) -> str:
+    """The request's method as it arrived: methods are case-sensitive (RFC
+    9110, section 9.1), and Django upper-cases ``request.method``.
+    """
+    if isinstance(request, ASGIRequest):
+        return str(request.scope["method"])
+    return str(request.META["REQUEST_METHOD"])
+
+
 def _cause(message: str, error: BaseException) -> None:
     """Log an internal's cause on ``django.neolith``, never raising, with no
     request attached.
@@ -277,7 +298,8 @@ def _other(request: HttpRequest, path: str, endpoints: Endpoints) -> HttpRespons
     """The answer on an owned path that is not a contract path."""
     if path not in (OPENAPI, HEALTH):
         return _empty(404)
-    if request.method not in ("GET", "HEAD"):
+    method = _method(request)
+    if method not in ("GET", "HEAD"):
         response = _empty(405)
         response["Allow"] = "GET, HEAD"
         return response
@@ -286,9 +308,7 @@ def _other(request: HttpRequest, path: str, endpoints: Endpoints) -> HttpRespons
     if path == HEALTH:
         return _empty(200)
     document = endpoints.document
-    response = HttpResponse(
-        b"" if request.method == "HEAD" else document, content_type=_JSON
-    )
+    response = HttpResponse(b"" if method == "HEAD" else document, content_type=_JSON)
     response["Content-Length"] = str(len(document))
     return response
 
@@ -303,6 +323,7 @@ def answer(
             for Django to answer.
     """
     arrived = _context.now()
+    _protect(request)
     request.get_host()
     route = endpoints.routes.get(request.path)
     if route is None:
@@ -323,6 +344,7 @@ async def aanswer(
     as Django runs a sync view (ADR 0011 Decision 6).
     """
     arrived = _context.now()
+    _protect(request)
     request.get_host()
     route = endpoints.routes.get(request.path)
     if route is None:
@@ -360,9 +382,6 @@ class _Call:
         # Until traceparent is read, a fresh identifier, made when needed.
         self._trace: str | None = None
         self._step = 1
-        # Before the first backend runs, so whatever reports the request
-        # from here on hides the neolith headers (ADR 0027 Decision 3).
-        request.exception_reporter_filter = _Filter()  # type: ignore[attr-defined]  # Django reads it by getattr
 
     @property
     def trace_id(self) -> str:
@@ -400,6 +419,9 @@ class _Call:
             )
             return self._internal()
 
+    # Its locals hold the request's headers and the principal: hidden from
+    # a report of a failure's frames, such as an HTML error mail.
+    @sensitive_variables()
     def _admitted(self, caller: str) -> HttpResponse:
         request, route = self._request, self._route
         meta = request.META
@@ -410,7 +432,7 @@ class _Call:
             raise _Refused(refusal.kind, refusal.message)
         # Step 3: the request line and the scheme, then the neolith headers.
         self._step = 3
-        if request.method != "POST":
+        if _method(request) != "POST":
             raise _Refused("invalid_argument", _METHOD, ("Allow", "POST"))
         if meta.get("QUERY_STRING"):
             raise _Refused("invalid_argument", _QUERY)
@@ -575,6 +597,7 @@ def _value(raw: object) -> str | None:
     return text if text.isascii() else None
 
 
+@sensitive_variables()
 def _principal(raw: object) -> Principal | None:
     """The principal ``Neolith-Principal`` carries, or ``None`` when it is
     absent; a header that is present, empty included, is read (spec 03).
