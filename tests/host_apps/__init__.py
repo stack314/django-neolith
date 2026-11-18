@@ -1,7 +1,7 @@
-"""The test host: three declared apps that one process hosts (ADR 0022 Decision 5).
+"""The test host: six declared apps that one process hosts (ADR 0022 Decision 5).
 
 A process hosts one set of apps, so every test that sets the host up in
-Django's global registry installs exactly these three apps and ``neolith``,
+Django's global registry installs exactly these six apps and ``neolith``,
 in the order ``tests/settings.py`` builds, with Django's ``contenttypes``,
 ``auth`` and ``sessions`` on the real ``default``.
 """
@@ -10,6 +10,11 @@ HOSTED = [
     "tests.host_apps.stock",
     "tests.host_apps.couriers",
     "tests.host_apps.web",
+    # The conformance suite's reference contract, its provider and two
+    # callers, one on its allow-list and one not (ADR 0032 Decision 3).
+    "tests.host_apps.reference",
+    "tests.host_apps.reference_caller",
+    "tests.host_apps.reference_stranger",
 ]
 UNDECLARED = [
     "django.contrib.contenttypes",

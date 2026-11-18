@@ -45,7 +45,9 @@ from tests.test_host import WriteApp, _apps_module
 from tests.test_host import write_app as write_app
 
 ALICE = Principal("https://id.example", "alice")
-HOSTED = "couriers, stock, web"
+# The labels of the test host's apps, as a refusal lists them: each app's
+# label is the last part of its name, and the list is sorted.
+HOSTED = ", ".join(sorted(name.rpartition(".")[2] for name in host_apps.HOSTED))
 
 couriers = connect("couriers.v3")
 stock = connect("stock.v1")
