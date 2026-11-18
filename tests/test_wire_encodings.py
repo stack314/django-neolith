@@ -1141,22 +1141,24 @@ def test_checking_written_bytes_copies_nothing() -> None:
 
 
 @pytest.mark.parametrize(
-    "digits",
-    ["1" * _SIZE, "0." + "1" * _SIZE, "NaN" + "1" * _SIZE],
-    ids=["integer", "fraction", "NaN payload"],
+    "written", ["1{}", "0.{}", "NaN{}"], ids=["integer", "fraction", "NaN payload"]
 )
 def test_a_decimal_of_many_digits_is_refused_without_copying_them(
-    digits: str,
+    written: str,
 ) -> None:
-    # Its digits as a tuple took about 24 times the value's own size; it is
-    # now refused first, by being a NaN or by its digit count, which copies
-    # the value once.
-    value = Decimal(digits)
+    # Its digits as a tuple took about 10 bytes per digit; it is now refused
+    # first, by being a NaN or by its digit count, which copies at most the
+    # value itself (under half a byte per digit in C, none in pure Python).
+    limit = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(0)  # pure-Python decimal builds an int of them
+    try:
+        value = Decimal(written.format("1" * _SIZE))
+    finally:
+        sys.set_int_max_str_digits(limit)
     record = _record(Decimal128)
     record.model_validate({"v": Decimal(1)})
     held = record.model_construct(v=value)
-    size = sys.getsizeof(value)
     read = _peak(lambda: record.model_validate({"v": value}))
-    written = _peak(held.model_dump_json)
-    assert read < 3 * size, f"read: {read / size:.1f} times the size"
-    assert written < 3 * size, f"written: {written / size:.1f} times the size"
+    dumped = _peak(held.model_dump_json)
+    assert read < 2 * _SIZE, f"read: {read / _SIZE:.2f} bytes per digit"
+    assert dumped < 2 * _SIZE, f"written: {dumped / _SIZE:.2f} bytes per digit"
