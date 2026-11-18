@@ -39,7 +39,7 @@ from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from enum import Enum
-from typing import Any, NoReturn, final
+from typing import Any, final
 
 from pydantic import BaseModel
 from pydantic_core import SchemaSerializer, SchemaValidator, ValidationError
@@ -250,7 +250,10 @@ class Codec[R: BaseModel]:
         if type(text) is not bytes:
             raise TypeError(f"{subject} arrives as bytes, not {_kind(text)}")
         name = _naming.name(self.record)
-        parsed = _interchange(text, subject)
+        parsed, broken, path = _interchange(text)
+        if broken is not None:
+            place = f", at {self._place(parsed, path)}" if parsed is not None else ""
+            raise Refusal(f"{subject} {broken}{place}")
         failed: ValidationError | None = None
         try:
             self._checker.validate_json(text)
@@ -289,7 +292,7 @@ class Codec[R: BaseModel]:
         name = _naming.name(self.record)
         steps = [name]
         schema: object = {"$ref": f"#/$defs/{name}"}
-        for step in loc:
+        for at, step in enumerate(loc):
             schema = self._resolved(schema)
             if type(schema) is not dict:
                 break
@@ -301,12 +304,13 @@ class Codec[R: BaseModel]:
                 value = typing.cast(dict[str, object], value).get(str(step))
             elif type(value) is dict and "additionalProperties" in described:
                 entries = typing.cast(dict[str, object], value)
-                if step == "[key]":
-                    steps.append(" (its key)")
-                    break
                 if type(step) is not str or step not in entries:
                     break
                 steps.append(f"[entry {list(entries).index(step)}]")
+                if loc[at + 1 : at + 2] == ("[key]",):
+                    # The error is in the entry's key, not its value.
+                    steps.append(" (its key)")
+                    break
                 schema, value = described["additionalProperties"], entries[step]
             elif type(value) is list and type(step) is int:
                 items = typing.cast(list[object], value)
@@ -437,44 +441,54 @@ _DOUBLE_MAX = int(sys.float_info.max)
 _DOUBLE_DIGITS = len(str(_DOUBLE_MAX))
 
 
-def _interchange(text: bytes, subject: str) -> object:
-    """Check that a text is I-JSON as spec 01 asks of a receiver (CON-42),
-    and return the value it holds, or raise ``Refusal``.
+class _Twice(dict[str, object]):
+    """An object in which a member name occurs twice, as the reader made it."""
 
-    It is UTF-8 JSON text (RFC 8259), with no member name twice in one
-    object, no lone surrogate in any string or member name, and no number
-    outside the range of a double. ``NaN`` and ``Infinity`` are not JSON
-    numbers, and a number written with a fraction or an exponent is outside
-    the range when the double it reads as is not finite, as ``1e400``. A
-    number written as an integer is compared with the largest double exactly.
+    __slots__ = ()
+
+
+@final
+class _Unheld:
+    """A number the reader cannot hold, in place of its value."""
+
+    __slots__ = ("rule",)
+
+    def __init__(self, rule: str) -> None:
+        self.rule = rule
+
+
+_NOT_A_NUMBER = _Unheld("holds NaN or Infinity, which are not JSON numbers")
+_PAST_A_DOUBLE = _Unheld("holds a number outside the range of a double")
+
+
+def _interchange(text: bytes) -> tuple[object, str | None, tuple[int | str, ...]]:
+    """Read a text as I-JSON, as spec 01 asks of a receiver (CON-42).
+
+    Returns the value it holds, and, when it breaks a rule, the rule and the
+    path of the first place in the text that breaks it. The text is UTF-8
+    JSON text (RFC 8259), with no member name twice in one object, no lone
+    surrogate in a string or a member name, and no number outside the range
+    of a double. ``NaN`` and ``Infinity`` are not JSON numbers. A number is
+    read as Python's JSON reader reads it: written as an integer, exactly,
+    so it is outside the range when it is past the largest double; written
+    with a fraction or an exponent, as a double, so it is outside the range
+    when that double is not finite, as for ``1e400``.
     """
 
     def pairs(items: list[tuple[str, object]]) -> dict[str, object]:
         found = dict(items)
-        if len(found) != len(items):
-            raise Refusal(f"{subject} holds a member name twice in one object")
-        return found
+        return found if len(found) == len(items) else _Twice(found)
 
-    def constant(literal: str) -> NoReturn:
-        raise Refusal(f"{subject} holds NaN or Infinity, which are not JSON numbers")
-
-    def outside() -> NoReturn:
-        raise Refusal(f"{subject} holds a number outside the range of a double")
-
-    def fraction(written: str) -> float:
+    def fraction(written: str) -> float | _Unheld:
         number = float(written)
-        if not math.isfinite(number):
-            outside()
-        return number
+        return number if math.isfinite(number) else _PAST_A_DOUBLE
 
-    def integer(written: str) -> int:
+    def integer(written: str) -> int | _Unheld:
         # Counted before it is read, so a long one costs nothing to refuse.
         if len(written.lstrip("-")) > _DOUBLE_DIGITS:
-            outside()
+            return _PAST_A_DOUBLE
         number = int(written)
-        if abs(number) > _DOUBLE_MAX:
-            outside()
-        return number
+        return number if abs(number) <= _DOUBLE_MAX else _PAST_A_DOUBLE
 
     problem: str | None = None
     value: object = None
@@ -487,7 +501,7 @@ def _interchange(text: bytes, subject: str) -> object:
             value = json.loads(
                 decoded,
                 object_pairs_hook=pairs,
-                parse_constant=constant,
+                parse_constant=lambda written: _NOT_A_NUMBER,
                 parse_float=fraction,
                 parse_int=integer,
             )
@@ -496,23 +510,33 @@ def _interchange(text: bytes, subject: str) -> object:
         except json.JSONDecodeError:
             problem = "is not JSON text"
     if problem is not None:
-        # Raised outside the handlers, so nothing of the reader's error, which
-        # can quote the text, is chained to it.
-        raise Refusal(f"{subject} {problem}")
-    # Without recursion, so a deep value cannot exhaust the stack.
-    pending: list[object] = [value]
+        return None, problem, ()
+    # In the order of the text, without recursion, so a deep value cannot
+    # exhaust the stack.
+    pending: list[tuple[object, tuple[int | str, ...]]] = [(value, ())]
     while pending:
-        item = pending.pop()
-        if type(item) is dict:
-            for key, part in item.items():
-                if text_problem(key) is not None:
-                    raise Refusal(f"{subject} holds a lone surrogate in a member name")
-                pending.append(part)
-        elif type(item) is list:
-            pending.extend(item)
-        elif type(item) is str and text_problem(item) is not None:
-            raise Refusal(f"{subject} holds a lone surrogate in a string")
-    return value
+        item, path = pending.pop()
+        kind = type(item)
+        if kind is _Unheld:
+            return value, typing.cast(_Unheld, item).rule, path
+        if kind is str and text_problem(typing.cast(str, item)) is not None:
+            return value, "holds a lone surrogate in a string", path
+        if kind is list:
+            items = typing.cast(list[object], item)
+            pending.extend(
+                (part, (*path, index))
+                for index, part in reversed(list(enumerate(items)))
+            )
+        elif kind is dict or kind is _Twice:
+            members = typing.cast(dict[str, object], item)
+            if kind is _Twice:
+                return value, "holds a member name twice in one object", path
+            if any(text_problem(key) is not None for key in members):
+                return value, "holds a lone surrogate in a member name", path
+            pending.extend(
+                (part, (*path, key)) for key, part in reversed(members.items())
+            )
+    return value, None, ()
 
 
 def _reader_limit(error: Exception) -> str | None:

@@ -191,7 +191,7 @@ class Provider:
     call it makes is refused from, and an empty list.
 
     Each transport runs the provider's first three steps (ADR 0017 Decision
-    9) itself, with ``refusal`` for the first two, and hands the rest to
+    9) itself, with ``_refusal`` for the first two, and hands the rest to
     ``serve``: the deadline, the request's receive check, the action in a
     scope of its own, the rules on what an action may deliver (ADR 0008),
     and the deadline again once the action has ended.
@@ -253,7 +253,7 @@ class Provider:
         """The contract version the implementation provides."""
         return self._contract
 
-    def refusal(self, caller: str | None, asserts: bool) -> Failure | None:
+    def _refusal(self, caller: str | None, asserts: bool) -> Failure | None:
         """The provider's checks of the calling app, steps 1 and 2, or
         ``None`` when the call passes them.
 
@@ -497,7 +497,7 @@ class InProcess(Provider):
             )
         # The calling app comes first: a call it refuses is refused before
         # anything else is read, and its action never runs.
-        refusal = self.refusal(context.caller, context.principal is not None)
+        refusal = self._refusal(context.caller, context.principal is not None)
         if refusal is not None:
             raise refusal
         caller = typing.cast(str, context.caller)

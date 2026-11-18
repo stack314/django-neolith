@@ -22,7 +22,7 @@ from typing import Annotated, Any, Protocol, cast
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
-from pydantic import AwareDatetime, BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, Field, StringConstraints
 
 from neolith import CallContext, Contract, ContractDefinitionError, action, contract
 from neolith._connector import Failure, InProcess, Provider
@@ -202,6 +202,15 @@ def _records_in(order: dict[str, Any]) -> list[tuple[Any, ...]]:
     return paths
 
 
+def _place_of(order: dict[str, Any], at: tuple[Any, ...]) -> str:
+    """The place a refusal names for the record object at path ``at``."""
+    if not at:
+        return "Order"
+    if at[0] == "lines":
+        return f"Order.lines[{at[1]}]"
+    return f"Order.notes[entry {list(order['notes']).index(at[1])}]"
+
+
 @pytest.mark.spec("CON-42")
 @_SETTINGS
 @given(data=st.data())
@@ -215,13 +224,16 @@ def test_the_network_receiver_refuses_text_that_is_not_i_json_at_any_depth(
     first, part = next(iter(cast("dict[str, Any]", _part(order, at)).items()))
     twice = f"{json.dumps(first)}:{json.dumps(part)}"
     said = _receive(_write(order, at, twice).encode())
-    assert said == "the request holds a member name twice in one object"
-    # A member no field names, holding what the text rules refuse.
+    place = _place_of(order, at)
+    assert said == f"the request holds a member name twice in one object, at {place}"
+    # A member no field names, holding what the text rules refuse: the place
+    # named is the record, since the member's own name is not shown.
     name = data.draw(st.sampled_from(sorted(_REFUSED_MEMBERS)))
     member, rule = _REFUSED_MEMBERS[name]
     said = _receive(_write(order, at, member).encode())
     assert said is not None
     assert rule in said
+    assert said.endswith(f", at {place}")
     # And the nearest member they admit.
     near = _ADMITTED_MEMBERS[data.draw(st.sampled_from(sorted(_ADMITTED_MEMBERS)))]
     assert _receive(_write(order, at, near).encode()) is None
@@ -231,10 +243,22 @@ def test_the_network_receiver_refuses_text_that_is_not_i_json_at_any_depth(
 @pytest.mark.parametrize(
     ("text", "said"),
     [
-        (b'{"notes":{"a":{},"a":{}}}', "holds a member name twice in one object"),
-        (b'{"lines":[{"sku":"\\ud800"}]}', "holds a lone surrogate in a string"),
-        (b'{"ratio":NaN}', "holds NaN or Infinity, which are not JSON numbers"),
-        (b'{"ratio":-1e999}', "holds a number outside the range of a double"),
+        (
+            b'{"notes":{"a":{},"a":{}}}',
+            "holds a member name twice in one object, at Order.notes",
+        ),
+        (
+            b'{"lines":[{},{"sku":"\\ud800"}]}',
+            "holds a lone surrogate in a string, at Order.lines[1].sku",
+        ),
+        (
+            b'{"ratio":NaN}',
+            "holds NaN or Infinity, which are not JSON numbers, at Order.ratio",
+        ),
+        (
+            b'{"notes":{"s3cr3t":{"qty":-1e999}}}',
+            "holds a number outside the range of a double, at Order.notes[entry 0].qty",
+        ),
         (b"\xef\xbb\xbf{}", "is not JSON text"),
         (b'{"lines":[]} []', "is not JSON text"),
         (b'{"sku":"\xed\xa0\x80"}', "is not UTF-8 text"),
@@ -641,12 +665,12 @@ def test_both_receivers_give_the_same_reply_to_text_a_sender_wrote(
 
 def test_the_steps_before_the_deadline_are_the_transports() -> None:
     provider = _provider(Placing())
-    assert provider.refusal("shop", True) is None
-    assert provider.refusal("till", False) is None
-    unlisted = provider.refusal("till", True)
+    assert provider._refusal("shop", True) is None
+    assert provider._refusal("till", False) is None
+    unlisted = provider._refusal("till", True)
     assert unlisted is not None
     assert unlisted.kind == "permission_denied"
-    nobody = provider.refusal(None, False)
+    nobody = provider._refusal(None, False)
     assert nobody is not None
     assert nobody.kind == "unauthenticated"
     # The shared side takes only a context as it arrived, and a receiver.
@@ -668,3 +692,65 @@ def test_a_bound_that_is_not_whole_is_compared_as_written() -> None:
     with pytest.raises(Refusal, match=r"less than or equal to 0\.5$"):
         codec(found, Part).receive(b'{"share":1}', "the request")
     assert codec(found, Part).receive(b'{"share":0}', "the request").share == 0
+
+
+class Wide(BaseModel):
+    whole: Annotated[float, Field(le=2**60)] = 0.0
+    double: Annotated[float, Field(le=2.0**70)] = 0.0
+
+
+@pytest.mark.spec("CON-39")
+@pytest.mark.parametrize(
+    ("field", "texts", "shown"),
+    [
+        (
+            "whole",
+            ["1152921504606846977", "2e18", "1152921504606847232.0"],
+            "1152921504606846976",
+        ),
+        (
+            "double",
+            ["1180591620717411303425", "2e21", "1180591620717411303424.5e1"],
+            "1.1805916207174113e+21",
+        ),
+    ],
+)
+def test_a_refusal_shows_the_bound_as_the_description_writes_it(
+    field: str, texts: list[str], shown: str
+) -> None:
+    found, schema = _contract_for(Wide)
+    assert json.dumps(schema["$defs"]["Wide"]["properties"][field]["maximum"]) == shown
+    for written in texts:
+        with pytest.raises(Refusal) as refused:
+            codec(found, Wide).receive(f'{{"{field}":{written}}}'.encode(), "x")
+        assert str(refused.value).endswith(
+            f"at Wide.{field}: Input should be less than or equal to {shown}"
+        ), written
+    # The bound itself, as the description writes it, is admitted.
+    codec(found, Wide).receive(f'{{"{field}":{shown}}}'.encode(), "x")
+
+
+class Keyed(BaseModel):
+    short: dict[Annotated[str, StringConstraints(max_length=3)], int] = {}
+    nested: dict[str, dict[Annotated[str, StringConstraints(max_length=3)], int]] = {}
+
+
+@pytest.mark.spec("CON-39")
+@pytest.mark.parametrize(
+    ("text", "place"),
+    [
+        (b'{"short":{"ok":1,"s3cr3t":1}}', "Keyed.short[entry 1] (its key)"),
+        (b'{"short":{"ok":"s3cr3t"}}', "Keyed.short[entry 0]"),
+        (b'{"nested":{"k1":{"s3cr3t":1}}}', "Keyed.nested[entry 0][entry 0] (its key)"),
+        (b'{"nested":{"k1":{"ok":"s3cr3t"}}}', "Keyed.nested[entry 0][entry 0]"),
+    ],
+)
+def test_a_refusal_in_a_maps_key_says_so_without_showing_it(
+    text: bytes, place: str
+) -> None:
+    found, _ = _contract_for(Keyed)
+    with pytest.raises(Refusal) as refused:
+        codec(found, Keyed).receive(text, "the request")
+    said = str(refused.value)
+    assert f", at {place}: " in said
+    assert "s3cr3t" not in said
