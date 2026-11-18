@@ -1687,27 +1687,57 @@ def test_an_app_named_in_any_form_asks_at_import_and_is_refused(
         host_apps.HOSTED,
         {"NEOLITH": neolith},
     )
-    overridden = in_built_host(
-        f"""
-        import django
-        from django.test.utils import override_settings
-
-        django.setup()
-        installed = list(settings.INSTALLED_APPS)
-        for added in ([{entry!r}], [], [{entry!r}]):
-            try:
-                with override_settings(INSTALLED_APPS=[*added, *installed]):
-                    print("admitted")
-            except Exception as error:
-                print(type(error).__name__)
-        """,
-        host_apps.HOSTED,
-        {"NEOLITH": host_apps.NEOLITH},
-    )
     assert fresh.splitlines() == ["DeclarationError"]
-    # In an override, Django imports the entry before neolith's app is made,
-    # so connect() is refused at once against the restored table (APP-15).
-    assert overridden.splitlines() == ["UsageError", "admitted", "UsageError"]
+    # Another spelling of the same app, which imports the same package.
+    # (A module entry for the alias's package would find two default configs,
+    # which Django refuses.)
+    respelt = {
+        "module": f"{package}.apps.Config",
+        "alias": f"{package}.apps.Config",
+        "other name": entry,
+    }.get(form, package)
+    # Each walk runs in a process of its own: (before, after) the first apps.
+    walks = {
+        # Django imports the entry before neolith's app is made, so connect()
+        # is refused at once against the restored table (APP-15).
+        "prepended": (
+            [([entry], []), ([], []), ([entry], [])],
+            ["UsageError", "admitted", "UsageError"],
+        ),
+        "appended": (
+            [([], [entry]), ([], []), ([], [entry])],
+            ["DeclarationError", "admitted", "DeclarationError"],
+        ),
+        "refused, then spelt another way": (
+            [([], [entry]), ([], [respelt])],
+            ["DeclarationError", "DeclarationError"],
+        ),
+        "stopped before set-up, then spelt another way": (
+            [([], [entry, "no_such_app"]), ([], [respelt])],
+            ["ModuleNotFoundError", "DeclarationError"],
+        ),
+    }
+    for walk, (overrides, decided) in walks.items():
+        printed = in_built_host(
+            f"""
+            import django
+            from django.test.utils import override_settings
+
+            django.setup()
+            installed = list(settings.INSTALLED_APPS)
+            for before, after in {overrides!r}:
+                try:
+                    with override_settings(
+                        INSTALLED_APPS=[*before, *installed, *after]
+                    ):
+                        print("admitted")
+                except Exception as error:
+                    print(type(error).__name__)
+            """,
+            host_apps.HOSTED,
+            {"NEOLITH": host_apps.NEOLITH},
+        )
+        assert printed.splitlines() == decided, walk
 
 
 @pytest.mark.spec("APP-14")

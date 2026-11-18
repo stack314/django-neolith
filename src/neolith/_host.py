@@ -112,6 +112,11 @@ _LOCK: Final = threading.Lock()
 # entry of INSTALLED_APPS being imported, with None for a request made
 # outside any app's loading step.
 _RECORDED: dict[str, dict[str, dict[str | None, None]]] = {}
+# The loads of Django's global registry that recorded a place while
+# importing an entry of INSTALLED_APPS: each load's entries and the dict of
+# app configs it fills, one per entry in order, which outlives the load even
+# when it stops before its set-up.
+_LOADS: list[tuple[Sequence[object], dict[str, AppConfig]]] = []
 # The app whose implementation Validate imports and builds now, if any.
 _VALIDATING: Final = contextvars.ContextVar[str | None]("_VALIDATING", default=None)
 # The hosted apps of the first set-up that passed: label to config class.
@@ -318,26 +323,33 @@ def _loading_app() -> str | None:
     found = loading.get("app_config" if global_apps.apps_ready else "entry")
     if isinstance(found, AppConfig):
         return found.name
-    return found if type(found) is str else None
+    if type(found) is not str:
+        return None
+    entries = loading.get("installed_apps")
+    if isinstance(entries, (list, tuple)) and not any(
+        kept is entries for kept, _ in _LOADS
+    ):
+        _LOADS.append((entries, global_apps.app_configs))
+    return found
 
 
 def _name_entries() -> None:
-    """Tie to its app's name each call site tied to an entry of the
-    ``INSTALLED_APPS`` this set-up's load imported, so that a later set-up
-    of the app matches it however the entry spelt the app: a module, a
-    config class, a class re-exported or aliased, or a config whose ``name``
-    differs from its package.
+    """Tie to its app's name each call site tied to an entry of
+    ``INSTALLED_APPS``, so that a set-up of the app matches it however the
+    entry spelt the app: a module, a config class, a class re-exported or
+    aliased, or a config whose ``name`` differs from its package.
 
-    Phase 1 of ``Apps.populate`` adds one config per entry, in order.
+    Phase 1 of ``Apps.populate`` adds one config per entry, in order, to the
+    dict of its load, which ``_LOADS`` keeps; a load that stopped before its
+    set-up keeps the configs it made, and an entry whose config was never
+    made stays as it is.
     """
-    loading = _populating()
-    entries = None if loading is None else loading.get("installed_apps")
-    if not isinstance(entries, (list, tuple)):
-        return
     names: dict[str, str] = {}
-    for entry, made in zip(entries, global_apps.app_configs.values(), strict=False):
-        if type(entry) is str:
-            names[entry] = made.name
+    for entries, made in _LOADS:
+        for entry, config in zip(entries, list(made.values()), strict=False):
+            if type(entry) is str:
+                names[entry] = config.name
+    _LOADS.clear()
     for places in _RECORDED.values():
         for place, loads in places.items():
             if any(app in names for app in loads):
