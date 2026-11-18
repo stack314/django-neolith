@@ -205,6 +205,26 @@ def test_each_row_of_the_builder_admits_its_form_and_refuses_the_rest(
 
 
 @pytest.mark.spec("APP-16")
+@pytest.mark.parametrize(
+    "backend",
+    [
+        "neolith.transports.HttpTransport",
+        "neolith._http_transport.HTTPTransport",
+        "transports.HTTPTransport",
+        "neolith.transports.HTTPTransport ",
+        "neolith.transports.HTTPTransportX",
+        "neolith.transports",
+    ],
+)
+def test_backend_is_compared_as_written_and_never_imported(backend: str) -> None:
+    value = {"stock.v1": [{**entry(), "BACKEND": backend}]}
+    assert _checks.remote_problems(value) == [
+        f'{REMOTE}["stock.v1"][0]["BACKEND"]: {backend!r} is not a transport of '
+        f"this host; the one remote transport in 0.1 is {TRANSPORT}"
+    ]
+
+
+@pytest.mark.spec("APP-16")
 def test_every_refusal_reaches_the_diagnostic_whatever_was_refused_first() -> None:
     value = {
         "Stock": [entry("http://Localhost"), {"BACKEND": 1}],
@@ -935,7 +955,8 @@ def test_remote_identities_on_one_origin_share_its_connections() -> None:
         host, _ = _table()
         stock = host.connectors["stock.v1"]._transport
         couriers = host.connectors["couriers.v3"]._transport
-        print(json.dumps([stock.origin, stock._pool is couriers._pool]))
+        kind = type(host.connectors).__name__
+        print(json.dumps([stock.origin, stock._pool is couriers._pool, kind]))
         """,
         [WEB, "neolith"],
         {
@@ -946,7 +967,8 @@ def test_remote_identities_on_one_origin_share_its_connections() -> None:
         },
         timeout=120,
     )
-    assert json.loads(out.splitlines()[-1]) == [url, True]
+    # The table holds them read-only, as it holds the in-process ones.
+    assert json.loads(out.splitlines()[-1]) == [url, True, "mappingproxy"]
 
 
 @pytest.mark.spec("APP-1", "TRN-67")
@@ -1258,3 +1280,74 @@ def test_a_set_up_that_django_drops_closes_its_connections() -> None:
 def test_an_a_label_is_an_ordinary_label_taken_as_written(url: str) -> None:
     assert _expected(url)
     assert built(remote(stock_v1=url, couriers_v3="http://localhost")) is None
+
+
+# A key that is not a contract identity is named only by its own refusal,
+# bounded: Resolve and W002 never read it.
+
+_LONG_KEY = "x" * 300
+
+
+def test_a_key_that_is_no_identity_is_read_by_nothing_but_its_refusal() -> None:
+    neolith = {"REMOTE_PROVIDERS": {_LONG_KEY: [entry("http://inventory.internal")]}}
+    assert _checks.remote_identities(neolith) == frozenset()
+    assert _checks.remote_urls(neolith) == {}
+    assert _checks.remote_warnings(neolith) == []
+    (problem,) = _checks.remote_problems(neolith["REMOTE_PROVIDERS"])
+    assert _LONG_KEY not in problem
+    assert problem.startswith(f"{REMOTE}: key 'xxx")
+
+
+@pytest.mark.spec("APP-1")
+def test_set_up_names_a_long_key_that_is_no_identity_once_and_bounded() -> None:
+    out = in_fresh_process(
+        """
+        import logging
+
+        import django
+        from django.core.exceptions import ImproperlyConfigured
+
+        class Keep(logging.Handler):
+            lines = []
+
+            def emit(self, record):
+                Keep.lines.append(record.getMessage())
+
+        logging.getLogger("neolith").addHandler(Keep())
+        try:
+            django.setup()
+        except ImproperlyConfigured as error:
+            print(json.dumps([str(error), Keep.lines]))
+        """,
+        [COURIERS, "neolith"],
+        {
+            "NEOLITH": {
+                "REMOTE_PROVIDERS": {_LONG_KEY: [entry("http://inventory.internal")]}
+            }
+        },
+        timeout=120,
+    )
+    refusal, logged = json.loads(out.splitlines()[-1])
+    assert refusal.splitlines() == [
+        "host: the settings are refused before the host serves:",
+        f"(neolith.E001) {REMOTE}: key {'x' * 80!r}...: expected a contract "
+        "identity, such as <contract>.v1",
+    ]
+    assert _LONG_KEY not in out
+    assert not any("W002" in line or "required by no" in line for line in logged)
+
+
+def test_the_check_reports_e021_and_w002_together(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Read as manage.py check reads it, on the suite's host, whose web and
+    # stock apps require stock.v1 and hold no signing key.
+    remote_only = {"REMOTE_PROVIDERS": remote(stock_v1="http://inventory.internal")}
+    monkeypatch.setattr(settings, "NEOLITH", remote_only)
+    found = sorted((m.id, m.msg) for m in _checks.remote_check())
+    unsigned = 'has no signing key in NEOLITH["SIGNING_SECRETS"], so it cannot call'
+    assert found == [
+        ("neolith.E021", f"app stock {unsigned} stock.v1 over HTTP"),
+        ("neolith.E021", f"app web {unsigned} stock.v1 over HTTP"),
+        ("neolith.W002", _warned("http://inventory.internal")[0]),
+    ]
