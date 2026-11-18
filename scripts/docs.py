@@ -84,6 +84,7 @@ from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, S
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path, PurePosixPath
+from typing import Final
 
 from markdown_it import MarkdownIt
 from markdown_it.common.utils import unescapeAll
@@ -266,10 +267,18 @@ def mirror_files(root: Path) -> dict[str, str]:
     return dict(sorted(table.items()))
 
 
+# The integers every JSON reader holds exactly (RFC 7493, section 2.2).
+_EXACT_INTEGER: Final = 2**53 - 1
+
+
 def _strict_json(text: str) -> object:
-    """Read JSON text as I-JSON (RFC 7493) does: an object with a repeated
-    member name, or ``NaN`` or ``Infinity``, is refused, so no member's value
-    is dropped before it is checked.
+    """Read I-JSON text (RFC 7493), refusing anything else.
+
+    Refused: a repeated member name (section 2.3), so no member's value is
+    dropped before it is checked; a string or member name holding a
+    surrogate or a noncharacter (section 2.1); and a number no double holds:
+    ``NaN``, ``Infinity``, a number that reads as infinite, such as
+    ``1e400``, and an integer outside +/-(2**53 - 1) (section 2.2).
 
     Raises:
         ValueError: The text is not such JSON.
@@ -284,7 +293,35 @@ def _strict_json(text: str) -> object:
     def constant(name: str) -> object:
         raise ValueError(f"{name} is not JSON")
 
-    return json.loads(text, object_pairs_hook=pairs, parse_constant=constant)
+    def number(written: str) -> float:
+        value = float(written)
+        if not math.isfinite(value):
+            raise ValueError(f"{written} is outside the range of a double")
+        return value
+
+    def integer(written: str) -> int:
+        value = int(written)
+        if abs(value) > _EXACT_INTEGER:
+            raise ValueError("an integer is outside +/-(2**53 - 1)")
+        return value
+
+    value = json.loads(
+        text,
+        object_pairs_hook=pairs,
+        parse_constant=constant,
+        parse_float=number,
+        parse_int=integer,
+    )
+    for string in _json_strings(value):
+        for character in string:
+            point = ord(character)
+            if (
+                0xD800 <= point <= 0xDFFF
+                or 0xFDD0 <= point <= 0xFDEF
+                or point & 0xFFFE == 0xFFFE
+            ):
+                raise ValueError(f"U+{point:04X} is a surrogate or a noncharacter")
+    return value
 
 
 def _json_strings(value: object) -> Iterator[str]:
@@ -330,8 +367,8 @@ def copy_files(root: Path, html: Path) -> list[str]:
 
     A file is not copied, and is a problem, when it or a folder above it in
     the repository is a symbolic link, when it is not a file whose name ends
-    in ``.json`` and that holds I-JSON text in UTF-8 (no repeated member name,
-    no ``NaN`` or ``Infinity``), or when its text or a
+    in ``.json`` and that holds I-JSON text in UTF-8, as ``_strict_json``
+    reads it, or when its text or a
     string it holds, as a JSON reader decodes it, holds an email address or
     a known token form. So the site serves no file from outside the
     repository, and none that staging or the HTML check would refuse.

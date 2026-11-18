@@ -149,8 +149,12 @@ def test_the_files_are_copied_byte_for_byte_and_only_json(tmp_path: Path) -> Non
         "spec/conformance/reference.v1.openapi.json": (
             b'{"a": "\\u00e9\xc3\xa9", "pattern": "^[^@]+$"}\n'
         ),
-        # One member name in two objects is no repetition.
-        "spec/conformance/cases/contract.json": b'[{"a": 1}, {"a": {"a": 2}}]',
+        # One member name in two objects is no repetition; the largest double
+        # and exact integer, a surrogate pair and U+FFFD are I-JSON.
+        "spec/conformance/cases/contract.json": (
+            b'[{"a": 1}, {"a": {"a": 2}}, 1.7976931348623157e+308, -9007199254740991,'
+            b' "\\ud83d\\ude00", "\xef\xbf\xbd"]'
+        ),
     }
     for name, raw in admitted.items():
         (root / name).write_bytes(raw)
@@ -168,6 +172,15 @@ def test_the_files_are_copied_byte_for_byte_and_only_json(tmp_path: Path) -> Non
         ),
         "nan.json": (b'{"n": NaN}', "not I-JSON text in UTF-8"),
         "infinity.json": (b"[-Infinity]", "not I-JSON text in UTF-8"),
+        "huge.json": (b"[1e400]", "not I-JSON text in UTF-8"),
+        "tiny.json": (b"[-1e400]", "not I-JSON text in UTF-8"),
+        "inexact.json": (b"[9007199254740992]", "not I-JSON text in UTF-8"),
+        "surrogate.json": (b'["\\ud800"]', "not I-JSON text in UTF-8"),
+        "surrogate-key.json": (b'{"\\udfff": 1}', "not I-JSON text in UTF-8"),
+        "noncharacter.json": ('["\uffff"]'.encode(), "not I-JSON text in UTF-8"),
+        "noncharacter-escaped.json": (b'["\\ufdd0"]', "not I-JSON text in UTF-8"),
+        "plane.json": ('{"k": "\U0010fffe"}'.encode(), "not I-JSON text in UTF-8"),
+        "bom.json": (b"\xef\xbb\xbf[]", "not I-JSON text in UTF-8"),
         "mail.json": (b'{"by": "a@example.org"}', "holds an email address"),
         "escaped.json": (
             b'{"by": "a\\u0040example.org"}',

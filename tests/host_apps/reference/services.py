@@ -3,6 +3,10 @@
 A pure function of its request, apart from ``deposit``'s totals, which are
 keyed by account and kept in memory under a lock. A case keeps itself
 repeatable by drawing a fresh account per run.
+
+``deposit`` adds once per idempotency key and account: a key counts per
+account, and a repeated key returns the total as it stood after the call
+that first used it, not the current one. A call with no key always adds.
 """
 
 import json
