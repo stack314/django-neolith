@@ -26,7 +26,7 @@ The [vision](VISION.md), the [guiding principles](docs/principles.md) and the Ac
 
 Neolith is defined by a specification under `spec/`, written independently of Django and Python. django-neolith is its reference implementation ([ADR 0015](docs/adr/0015-specification-first-django-reference-implementation.md)).
 
-- **P1.** A change to behaviour the specification defines updates the specification in the same pull request. On `main`, the code and the specification never disagree.
+- **P1.** A change to behaviour the specification defines updates the specification in the same pull request. On `main` and on every release branch, the code and the specification never disagree.
 - **P2.** Specification text names no Django or Python construct. Framework-specific detail belongs in the implementation's documentation.
 - **P3.** The normative words MUST, MUST NOT, REQUIRED, SHOULD and MAY are used in capitals, with their RFC 2119 meaning, only in `spec/`.
 - **P4.** A change to the specification changes the conformance tests to match, in the same pull request.
@@ -99,13 +99,16 @@ These rules apply to documentation, docstrings, error messages, commit messages 
 
 ## Commits and pull requests
 
-- **G1.** Work on a branch named `<type>/<short-name>`, for example `fix/connector-timeout`. Never push to `main`.
+- **G1.** Work on a branch named `<type>/<short-name>`, for example `fix/connector-timeout`, and open the pull request against the open release branch. That branch is named `release/<version>`, where `<version>` is the title of the open milestone, for example `release/0.1.0a2`. Never push to `main` or to a release branch. GitHub proposes `main` as the base; change it to the release branch. A `Closes #N` line does not close the issue when the pull request merges into a release branch.
 - **G2.** Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/). Types: `feat`, `fix`, `docs`, `spec`, `test`, `refactor`, `perf`, `build`, `ci`, `chore`. The subject is imperative, starts in lower case after the type, and is at most 72 characters. The body says why.
 - **G3.** One logical change per pull request. Unrelated clean-up goes in its own pull request.
 - **G4.** The pull request description opens with a summary of three or four bullets. It then says what changed and why, links the issue or decision record, names every specification document and decision record it touches, and says how the change was verified.
-- **G5.** Pull requests are squash-merged. The pull request title becomes the commit subject, so it follows **G2**.
+- **G5.** Pull requests into a release branch are squash-merged. The pull request title becomes the commit subject, so it follows **G2**. A release pull request from `release/<version>` into `main` is merged with a merge commit, so `main` keeps one commit per change. One pull request into a release branch is merged with a merge commit too: the one that brings `main` into the open release branch after a hotfix, so that branch keeps `main`'s history ([runbook, section 9](docs/releasing.md#9-when-something-goes-wrong)).
 - **G6.** A breaking change uses `!` after the type, for example `feat!:`, and has a *Breaking changes* section in the description. Before 1.0, breaking changes are allowed but never silent.
-- **G7.** Merging needs the maintainer's approval, and every review comment answered or resolved.
+- **G7.** A pull request merges into a release branch once it has an approving review, passing checks, and every review comment answered or resolved. `main` changes only through a release pull request, which the maintainer merges.
+- **G8.** Each release is built on its own branch, `release/<version>`, made from `main`, and has a milestone with the same version as its title. One release branch is open at a time: the one for the release being built. A release starts with a pull request into its branch that sets the version and dates the changelog section. The release pull request from that branch into `main` then lists the changes it carries and every decision record whose status it changes; GitHub deletes the branch when it merges, and the tag marks the release. Once the release is published, the next release's branch is made from `main`, and its first pull request starts the next `.dev` version. A hotfix takes the same path on a second release branch, made from `main`, while the open release branch stays as it is.
+
+The [release runbook](docs/releasing.md) walks through a release step by step.
 
 ## How review works
 

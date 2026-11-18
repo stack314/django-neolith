@@ -68,7 +68,13 @@ from neolith import _checks, _compat, _databases
 from neolith._context import UsageError
 from neolith._declaration import declaration_of
 
-__all__ = ["boot", "boot_for_tests", "schema_messages", "state_messages"]
+__all__ = [
+    "boot",
+    "boot_for_tests",
+    "code_messages",
+    "schema_messages",
+    "state_messages",
+]
 
 _log = logging.getLogger("neolith.host")
 _LOCK: Final = threading.Lock()
@@ -348,6 +354,62 @@ def _read(
     return messages
 
 
+def code_messages(
+    hosted: Sequence[str], undeclared: Sequence[str]
+) -> tuple[list[checks.CheckMessage], list[str]]:
+    """The checks of the code that need no database, which the migrate step
+    runs before it touches one.
+
+    ``hosted`` are the hosted apps with a database, each on its own;
+    ``undeclared`` are the apps without a declaration that live on a real
+    ``default``. The rules, each over every installed app it applies to:
+
+    - every installed app: its migrations load (``neolith.E010``) and none
+      conflict (``E011``), since Django's ``migrate`` loads the whole graph
+      and judges conflicts over it;
+    - a hosted app: it has migrations (``E008``, Boot's predicate);
+    - every edge between a migration of a hosted app and one of another
+      label, in either direction, is refused (``E013``): no migration
+      depends on one whose records live in another database. A hosted app's
+      own edges are read as Boot reads them; an edge from any other label,
+      a declared app without a database, an app without a declaration, a
+      battery or ``neolith`` itself, is read from Django's graph. A chain
+      into a hosted app always ends in one such edge, so one hop per label
+      covers it.
+
+    Also returns the labels of ``undeclared`` that have migrations, in order.
+    """
+    messages: list[checks.CheckMessage] = []
+    code, broken, failure = _code_graph()
+    if failure is not None:
+        messages.append(
+            checks.Error(
+                f"host: the migrations cannot be loaded: {failure}", id="neolith.E010"
+            )
+        )
+    into = frozenset(hosted)
+    for config in global_apps.get_app_configs():
+        label = config.label
+        if label in broken:
+            messages.append(_unloadable(label, broken[label]))
+        elif code is None:
+            continue
+        elif label in into:
+            messages.extend(_code_messages(code, label))
+        else:
+            messages.extend(
+                checks.Error(f"app {label}: {edge}", id="neolith.E013")
+                for edge in sorted(_edges_into(code, label, into))
+            )
+            messages.extend(_conflicts(code, label))
+    migrated = [
+        label
+        for label in undeclared
+        if code is not None and label not in broken and _has_nodes(code, label)
+    ]
+    return messages, migrated
+
+
 class _Loader(MigrationLoader):
     """Django's migration loader, leaving out the migrations of the labels
     in ``excluded``, so that one app whose migrations break the graph hides
@@ -502,6 +564,20 @@ def _cross_label(code: _Loader, label: str) -> set[str]:
             if other[0] != label
         )
     return edges
+
+
+def _edges_into(code: _Loader, label: str, others: frozenset[str]) -> set[str]:
+    """Every edge in Django's graph from a migration of ``label`` to one of
+    a label in ``others``.
+    """
+    graph = code.graph
+    return {
+        f"migration {key[1]} depends on {parent.key[0]}"
+        for key in graph.nodes
+        if key[0] == label
+        for parent in graph.node_map[key].parents
+        if parent.key[0] in others
+    }
 
 
 def _conflicts(code: MigrationLoader, label: str) -> list[checks.CheckMessage]:

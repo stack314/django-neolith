@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, "release/**"]
   pull_request:
 
 # Least privilege: nothing by default, read-only checkout per job.
@@ -37,6 +37,17 @@ jobs:
       - run: ruff check .
       - run: ruff format --check .
       - run: mypy
+      # The tests and the docs checks read files from across the repository,
+      # so the sdist carries every tracked file: built with the tools the
+      # release pins, in a venv of their own.
+      - name: The sdist carries every tracked file
+        env:
+          PIP_CONSTRAINT: ${{ github.workspace }}/.github/release-constraints.txt
+        run: |
+          python -m venv "$RUNNER_TEMP/build"
+          "$RUNNER_TEMP/build/bin/python" -m pip install pip build
+          "$RUNNER_TEMP/build/bin/python" -m build --sdist --outdir "$RUNNER_TEMP/dist"
+          python scripts/sdist_check.py "$RUNNER_TEMP"/dist/*.tar.gz
 
   test:
     # ADR 0012: the floor and the newest supported pair, on x86-64 and arm64.

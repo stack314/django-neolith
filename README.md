@@ -34,7 +34,7 @@ Neolith makes the Django app, not the Django project, the unit of deployment. An
 
 ## Features
 
-What works on `main` today. The [changelog](https://github.com/stack314/django-neolith/blob/main/CHANGELOG.md) has the details.
+What this version does. The [changelog](https://github.com/stack314/django-neolith/blob/main/CHANGELOG.md) has the details.
 
 - **Typed contracts.** A contract is a `Protocol` class with `@contract` and `@action`, and an implementation is marked with `@implements`. Request and reply types are Pydantic models in a portable type system, and every check runs when the module is imported.
 - **Typed errors.** `ContractError` carries a `kind`, a message and a detail. An action can declare its own error kinds with their detail records.
@@ -43,8 +43,9 @@ What works on `main` today. The [changelog](https://github.com/stack314/django-n
 - **Checks before serving.** At start-up the host resolves every required contract to a provider and validates each implementation, listing every refusal in one error; once those pass, it runs its system checks on the settings and reports all their errors together.
 - **One database per app.** `neolith.routers.AppRouter` keeps each app's data on a database alias of its own.
 - **Call context.** A principal, a trace, a deadline and the calling app travel with each call. A root is opened for each request by `RootMiddleware`, and for a command or background work by `command_scope`. A request's principal comes from the backends listed in `NEOLITH["PRINCIPAL_BACKENDS"]`, such as `neolith.principals.DjangoUserBackend` for the logged-in Django user.
+- **One app alone.** `neolith run <app>` boots apps from their declarations and serves them, and `neolith migrate <app>` applies each app's migrations to its own database.
 
-Not yet on `main`: `neolith run <app>`, the HTTP transport, the conformance suite and events. See the roadmap below.
+Not yet in this version: the HTTP transport, the conformance suite and events. See the roadmap below.
 
 ## A short example
 
@@ -158,6 +159,15 @@ globals().update(build_settings(["inventory", "shop"], globals()))
 ```
 
 With these, a view in the shop app can call `place_order` directly; a command opens its root first, with `neolith.command_scope("shop")`. A test runs every Python block on this page under these settings.
+
+To run apps without a project, put the deployer's names (`SECRET_KEY`, `MIDDLEWARE`, `ROOT_URLCONF`, `NEOLITH` and the rest) in a module that does not call the builder, then apply the migrations and serve:
+
+```console
+$ neolith migrate inventory shop --settings deploy
+$ neolith run inventory shop --settings deploy --bind 127.0.0.1:8000
+```
+
+`neolith run` uses Django's development server, which is not for production; in production, serve a settings module like the one above with any WSGI or ASGI server. On `SIGINT` or `SIGTERM` it stops taking requests and gives each request in flight until `NEOLITH["REQUEST_DEADLINE"]`, or 30 seconds when that is `None`. Under another server, give its graceful shutdown a timeout no shorter than the request deadline. In a host built by a settings module, `manage.py migrateapps` is the migrate step, and `manage.py migrateapps --check` reports what the host would refuse at start-up.
 
 ## Roadmap
 

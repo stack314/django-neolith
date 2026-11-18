@@ -36,6 +36,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, NoReturn, final
 
+from neolith._frozen import once
 from neolith._jcs import canonical, canonical_text
 from neolith._portable import SAFE_INTEGER_MAX, text_problem
 
@@ -86,6 +87,7 @@ def b64url(data: bytes) -> str:
 
 
 @final
+@once
 class Principal:
     """On whose behalf a call is made: an issuer, a subject and claims.
 
@@ -112,7 +114,8 @@ class Principal:
         TypeError: If ``issuer`` or ``subject`` is not a ``str``, if
             ``claims`` is not a mapping, if a claim's name is not a ``str``,
             or if a claim's value is of another type than those. Defining a
-            subclass raises it too.
+            subclass raises it too, and so does calling ``__init__`` on a
+            principal already built.
     """
 
     __slots__ = ("_claims", "_issuer", "_subject")
@@ -314,12 +317,16 @@ def principal_form(principal: Principal) -> bytes:
 
 
 @final
+@once
 @dataclass(frozen=True, slots=True, eq=False)
 class CallContext:
     """The context of one call (ADR 0017 Decision 1).
 
     An action that reads it takes it as a second parameter annotated
     ``CallContext``.
+
+    A value is built once: calling ``__init__`` or ``__setstate__`` on one
+    already built raises ``TypeError``.
 
     Passed as ``context=`` to a connector call, a value only names its scope:
     the call's context is derived from what that scope holds, so a changed
@@ -377,6 +384,7 @@ class CallContext:
 
 
 @final
+@once
 @dataclass(frozen=True, slots=True)
 class Sent:
     """A call's context as a transport carries it.

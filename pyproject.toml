@@ -32,6 +32,10 @@ classifiers = [
     "Typing :: Typed",
 ]
 
+# ADR 0022 Decision 12: one console script, also reachable as python -m neolith.
+[project.scripts]
+neolith = "neolith._cli:main"
+
 [project.urls]
 Repository = "https://github.com/stack314/django-neolith"
 Issues = "https://github.com/stack314/django-neolith/issues"
@@ -78,20 +82,26 @@ path = "src/neolith/__init__.py"
 packages = ["src/neolith"]
 
 [tool.hatch.build.targets.sdist]
-# docs/, VISION.md, CONTRIBUTING.md and CODE_OF_CONDUCT.md: the tests read the
-# records and the site's sources, and the site links them (ADR 0024).
+# Every file git tracks, and nothing else: the tests and the docs checks read
+# files from across the repository, so they run from the sdist as from a
+# checkout. scripts/sdist_check.py holds a built sdist to this list. Each
+# entry starts with "/", so it names a path at the root only: unanchored, it
+# would also match a directory of that name anywhere, such as in a venv or a
+# worktree that git ignores.
 include = [
-    "src/neolith",
-    "tests",
-    "scripts",
-    "spec",
-    "docs",
-    "LICENSE",
-    "README.md",
-    "CHANGELOG.md",
-    "VISION.md",
-    "CONTRIBUTING.md",
-    "CODE_OF_CONDUCT.md",
+    "/.github",
+    "/src/neolith",
+    "/tests",
+    "/scripts",
+    "/spec",
+    "/docs",
+    "/LICENSE",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/VISION.md",
+    "/CONTRIBUTING.md",
+    "/CODE_OF_CONDUCT.md",
+    "/SECURITY.md",
 ]
 
 [tool.pytest.ini_options]

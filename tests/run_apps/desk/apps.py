@@ -1,0 +1,17 @@
+from neolith import NeolithAppConfig, Provided
+from tests.run_apps.contracts import Desk
+
+
+class DeskConfig(NeolithAppConfig):
+    name = "tests.run_apps.desk"
+    label = "desk"
+    provides = (
+        Provided(
+            Desk,
+            implementation="tests.run_apps.desk.services.DeskService",
+            principal_from=(),
+        ),
+    )
+    requires = (Desk,)
+    resources = ("database",)
+    default_auto_field = "django.db.models.AutoField"

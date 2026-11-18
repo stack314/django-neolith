@@ -28,7 +28,7 @@ Questions not yet decided are in [open-questions.md](../open-questions.md).
 | [0011](0011-django-ninja-for-contract-endpoints.md) | django-ninja for contract endpoints | Proposed |
 | [0012](0012-supported-python-and-django-versions.md) | Supported Python and Django versions | Accepted |
 | [0013](0013-license.md) | License: BSD-3-Clause | Accepted |
-| [0014](0014-pluggable-connector-transports.md) | Connector transports are pluggable | Proposed |
+| [0014](0014-pluggable-connector-transports.md) | Connector transports are pluggable, and a host names each remote provider by contract in `NEOLITH["REMOTE_PROVIDERS"]` | Proposed |
 | [0015](0015-specification-first-django-reference-implementation.md) | Specification first; django-neolith is the reference implementation | Accepted |
 | [0016](0016-an-app-may-run-attached-and-detached-at-once.md) | An app may run attached and detached at the same time | Proposed |
 | [0017](0017-call-context-explicit-at-the-action-ambient-for-propagation.md) | The call context is explicit at the action and ambient for propagation | Accepted |
@@ -39,3 +39,5 @@ Questions not yet decided are in [open-questions.md](../open-questions.md).
 | [0022](0022-the-app-host-builds-settings-and-checks-before-it-serves.md) | The app host builds settings from declarations, checks at app loading, and boots when a handler is built | Accepted |
 | [0023](0023-a-request-principal-comes-from-ordered-backends.md) | A request's principal comes from ordered backends that declare their request inputs, and a Django user is named by a deployer-given issuer and its primary key | Accepted |
 | [0024](0024-user-documentation-is-built-with-sphinx-from-this-repository.md) | User documentation is built with Sphinx from this repository | Proposed |
+| [0025](0025-drain-counts-a-request-from-its-request-line.md) | Drain counts a request from its request line | Accepted |
+| [0026](0026-set-up-keeps-an-unknown-recorded-identity.md) | Set-up keeps a recorded identity it does not know, so the next set-up reports it again | Accepted |
