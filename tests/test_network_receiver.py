@@ -803,9 +803,9 @@ def test_an_entry_named_like_a_key_error_is_an_entry() -> None:
 # Review of #122: a deep text, the order of the walk, the double reading, and
 # what a validator's message may hold.
 
-_SMALL_STACK = """
-import sys, threading
-from typing import Protocol
+_ONE_MEGABYTE_STACK = """
+import threading
+from typing import Optional, Protocol
 from pydantic import BaseModel
 from neolith import Contract, action, contract
 from neolith._crossing import Refusal, codec
@@ -813,17 +813,23 @@ from neolith._crossing import Refusal, codec
 class Deep(BaseModel):
     n: int = 0
 
+class Node(BaseModel):
+    child: Optional["Node"] = None
+
 @contract("deep.v1")
 class Deeply(Protocol):
     @action
     def go(self, request: Deep) -> None: ...
 
+    @action
+    def walk(self, request: Node) -> None: ...
+
 texts = [
-    b"[" * 5000 + b"]" * 5000,
-    b'{"a":' * 5000 + b"1" + b"}" * 5000,
-    b'["\\\\ud800",' + b"[" * 5000 + b"]" * 5000 + b"]",
-    b"[" + b"1" * 5000 + b"," + b"[" * 5000 + b"]" * 5000 + b"]",
-    b'["\\\\"[",' + b"[" * 5000,
+    b"[" * 20000 + b"]" * 20000,
+    b'{"a":' * 20000 + b"1" + b"}" * 20000,
+    b'["\\\\ud800",' + b"[" * 20000 + b"]" * 20000 + b"]",
+    b"[" + b"1" * 5000 + b"," + b"[" * 20000 + b"]" * 20000 + b"]",
+    b'["\\\\"[",' + b"[" * 20000,
 ]
 said = []
 
@@ -833,8 +839,13 @@ def run():
             codec(Contract.of(Deeply), Deep).receive(text, "the request")
         except Refusal as refusal:
             said.append(str(refusal))
+    # A record that contains itself, read as deep as pydantic-core's reader
+    # admits: its validators recurse on the same stack.
+    deepest = b'{"child":' * 200 + b"null" + b"}" * 200
+    node = codec(Contract.of(Deeply), Node).receive(deepest, "the request")
+    said.append(type(node).__name__)
 
-threading.stack_size(128 * 1024)
+threading.stack_size(1024 * 1024)
 thread = threading.Thread(target=run)
 thread.start()
 thread.join()
@@ -843,23 +854,25 @@ print("\\n".join(said))
 
 
 @pytest.mark.spec("CON-42")
-def test_a_deep_text_is_refused_on_a_small_thread_stack() -> None:
-    # musl's default thread stack is 128 KB, where the json module's reader
-    # ends the process on Python 3.12 and 3.13 before RecursionError, so the
-    # depth is bounded before it reads. A process of its own, since a crash
-    # would end the test run.
+def test_a_deep_text_is_refused_on_a_one_megabyte_thread_stack() -> None:
+    # Alpine's Python builds give a thread 1 MB of stack, where the json
+    # module's reader ends the process on Python 3.12 and 3.13 before
+    # RecursionError, so the depth is bounded before it reads. Every reader
+    # on the path is run at its deepest: the json module, pydantic-core's
+    # reader, the description check and a record that contains itself. A
+    # process of its own, since a crash would end the test run.
     ran = subprocess.run(  # noqa: S603
-        [sys.executable, "-c", _SMALL_STACK],
+        [sys.executable, "-c", _ONE_MEGABYTE_STACK],
         capture_output=True,
         text=True,
         check=False,
         env={"PYTHONPATH": os.pathsep.join(sys.path)},
     )
     assert (ran.returncode, ran.stderr[-600:]) == (0, "")
-    assert (
-        ran.stdout.splitlines()
-        == ["the request is nested too deeply to be read as JSON text"] * 5
-    )
+    assert ran.stdout.splitlines() == [
+        *["the request is nested too deeply to be read as JSON text"] * 5,
+        "Node",
+    ]
 
 
 @pytest.mark.spec("CON-42")

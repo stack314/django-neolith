@@ -458,11 +458,13 @@ _DOUBLE_DIGITS = len(str(_DOUBLE_MAX))
 
 # How deep a text may nest before the json module reads it. Its reader
 # recurses on the C stack, and on Python 3.12 and 3.13 the recursion limit
-# assumes a stack of about 2 MB, so on a thread with less, such as musl's
-# default of 128 KB, a few thousand levels end the process before
+# assumes a stack of about 2 MB, so on a thread with less, such as the 1 MB
+# that Alpine's Python builds set, deep text ends the process before
 # RecursionError is raised. pydantic-core's reader, which the description
 # check runs next, admits 201 levels, so this bound refuses nothing it would
-# admit, and the json module reads 256 levels on a 128 KB stack.
+# admit. Below about 1 MB, pydantic-core's validators can still exhaust the
+# stack on a record that contains itself, so smaller stacks are not
+# supported.
 _DEPTH = 256
 # A string, from its opening quote to its closing one or to the end of an
 # unterminated text; possessive, so a text of many quotes stays linear.
@@ -481,6 +483,10 @@ def _deeper_than(text: bytes, limit: int) -> bool:
     recurses sees it. A text that is not JSON may be counted deeper than a
     reader would go, which only refuses it sooner.
     """
+    # Nesting is never deeper than the number of openers, which is cheap to
+    # count, so most texts need no closer look.
+    if text.count(b"[") + text.count(b"{") <= limit:
+        return False
     brackets = _STRING.sub(b"", text).translate(None, _NOT_BRACKETS)
     return (
         max(itertools.accumulate(map(_NESTING.__getitem__, brackets)), default=0)
