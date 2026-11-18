@@ -40,3 +40,4 @@ Questions not yet decided are in [open-questions.md](../open-questions.md).
 | [0023](0023-a-request-principal-comes-from-ordered-backends.md) | A request's principal comes from ordered backends that declare their request inputs, and a Django user is named by a deployer-given issuer and its primary key | Accepted |
 | [0024](0024-user-documentation-is-built-with-sphinx-from-this-repository.md) | User documentation is built with Sphinx from this repository | Proposed |
 | [0025](0025-drain-counts-a-request-from-its-request-line.md) | Drain counts a request from its request line | Accepted |
+| [0026](0026-set-up-keeps-an-unknown-recorded-identity.md) | Set-up keeps a recorded identity it does not know, so the next set-up reports it again | Proposed |
