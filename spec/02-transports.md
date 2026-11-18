@@ -131,7 +131,7 @@ An explicit root closes when the code it was opened for ends, by return or by an
 
 ### Request roots
 
-A host that serves ordinary requests, such as web pages, opens a root for each one ([ADR 0017](../docs/adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md) Decision 4, [ADR 0022](../docs/adr/0022-the-app-host-builds-settings-and-checks-before-it-serves.md) Decision 6). The code that handles the request runs in it, and so does a body the response produces after that code has returned. The root's principal and trace are the subject of the principal backends ([ADR 0023](../docs/adr/0023-a-request-principal-comes-from-ordered-backends.md)).
+A host that serves ordinary requests, such as web pages, opens a root for each one ([ADR 0017](../docs/adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md) Decision 4, [ADR 0022](../docs/adr/0022-the-app-host-builds-settings-and-checks-before-it-serves.md) Decision 6). The code that handles the request runs in it, and so does a body the response produces after that code has returned. The root starts a new trace when it opens, and its principal is resolved as [05](05-app-declaration.md#a-requests-principal) says ([ADR 0023](../docs/adr/0023-a-request-principal-comes-from-ordered-backends.md)).
 
 **TRN-55.** A host MUST open a request root for each ordinary request it serves when it starts to handle the request, before any other code that handles the request runs.
 

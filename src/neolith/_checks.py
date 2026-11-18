@@ -14,10 +14,12 @@ with models in a closed host, ``neolith.E006`` for ``MIDDLEWARE``,
 ``neolith.E014`` for a hosted app with models and no database,
 ``neolith.E015`` for a ``default`` that nothing lives on, ``neolith.E016``
 for a database cache in a closed host, ``neolith.E017`` for a table name
-that ``default`` shortened (ADR 0009) and ``neolith.W001`` for an admin
-class in no installed app. ``neolith.E005``, the comparison of the settings
-the host builds, runs at the first set-up only (``neolith._configure``),
-and Boot's ids are in ``neolith._boot``.
+that ``default`` shortened (ADR 0009), ``neolith.E019`` for a principal
+backend that set-up could not build and ``neolith.E020`` for Django's cache
+middleware listed after the principal middleware (ADR 0023), and
+``neolith.W001`` for an admin class in no installed app. ``neolith.E005``,
+the comparison of the settings the host builds, runs at the first set-up
+only (``neolith._configure``), and Boot's ids are in ``neolith._boot``.
 """
 
 import math
@@ -32,7 +34,7 @@ from django.core import checks
 from django.db.backends.utils import strip_quotes
 from django.utils.module_loading import import_string
 
-from neolith import _databases, _naming
+from neolith import _databases, _naming, _principal
 from neolith._declaration import Declaration, declaration_of
 from neolith._serving import admin_code
 
@@ -40,6 +42,7 @@ __all__ = [
     "DEFAULT_REQUEST_DEADLINE",
     "KEYS",
     "MISSING",
+    "PRINCIPAL_MIDDLEWARE",
     "ROOT_MIDDLEWARE",
     "TAG",
     "admin_check",
@@ -55,6 +58,7 @@ __all__ = [
     "middleware_problems",
     "neolith_check",
     "neolith_problems",
+    "principal_check",
     "register",
     "request_deadline",
     "silenced_check",
@@ -66,6 +70,10 @@ __all__ = [
 
 TAG: Final = "neolith"
 ROOT_MIDDLEWARE: Final = "neolith.middleware.RootMiddleware"
+PRINCIPAL_MIDDLEWARE: Final = _principal.PRINCIPAL_MIDDLEWARE
+# Where set-up records what building the principal backends refused, on the
+# neolith app config that ran it, for neolith.E019.
+PRINCIPAL_REFUSALS: Final = "_neolith_principal_refusals"
 # The request deadline when NEOLITH has no REQUEST_DEADLINE (ADR 0017
 # Decision 4), in seconds.
 DEFAULT_REQUEST_DEADLINE: Final = 30.0
@@ -74,9 +82,14 @@ DEFAULT_REQUEST_DEADLINE: Final = 30.0
 _SHORTEST: Final = 0.001
 _LONGEST: Final = 9999999.999
 _DEADLINE: Final = 'NEOLITH["REQUEST_DEADLINE"]'
-# The key table of NEOLITH (ADR 0022 Decision 3). ADR 0023 adds its key with
-# the principal backends.
-KEYS: Final = ("DATABASES", "REQUEST_DEADLINE", "UNDECLARED_APPS")
+# The key table of NEOLITH (ADR 0022 Decision 3, and ADR 0023 for the
+# principal backends).
+KEYS: Final = (
+    "DATABASES",
+    "PRINCIPAL_BACKENDS",
+    "REQUEST_DEADLINE",
+    "UNDECLARED_APPS",
+)
 # Stands for a setting that is absent.
 MISSING: Final = object()
 _MISSING: Final = MISSING
@@ -109,13 +122,14 @@ def _shown_number(value: int | float) -> str:
 
 def middleware_problems(value: object, *, by_class: bool = True) -> list[str]:
     """Judge ``MIDDLEWARE``: a ``list`` of ``str`` whose first entry is the
-    root middleware, which is listed once (ADR 0022, the builder's table).
+    root middleware, which is listed once, and which lists the principal
+    middleware once (ADR 0022, the builder's table; ADR 0023 Decision 6).
     Pass ``MISSING`` for a setting that is absent.
 
-    The builder, set-up (``neolith.E006``) and the root middleware's
-    constructor all run this one function. "Once" is judged by class: every
-    entry that imports as the root middleware, under any path, or as a
-    subclass of it, counts. An entry that does not import is Django's to
+    The builder, set-up (``neolith.E006``) and both middleware classes'
+    constructors run this one function. "Once" is judged by class: every
+    entry that imports as the middleware, under any path, or as a subclass
+    of it, counts. An entry that does not import is Django's to
     report when it builds the handler. The builder passes ``by_class=False``
     and counts the root middleware's own path only, since it runs before
     settings exist and imports nothing a deployer listed; set-up judges by
@@ -135,26 +149,40 @@ def middleware_problems(value: object, *, by_class: bool = True) -> list[str]:
     if not first:
         problems.append(f"MIDDLEWARE: {ROOT_MIDDLEWARE} must be the first entry")
     count = sum(
-        _is_root(entry) if by_class else entry == ROOT_MIDDLEWARE for entry in entries
+        _is(entry, ROOT_MIDDLEWARE) if by_class else entry == ROOT_MIDDLEWARE
+        for entry in entries
     )
     if count > 1:
         problems.append(f"MIDDLEWARE: {ROOT_MIDDLEWARE} is listed {count} times")
+    count = sum(
+        _is(entry, PRINCIPAL_MIDDLEWARE) if by_class else entry == PRINCIPAL_MIDDLEWARE
+        for entry in entries
+    )
+    if count == 0:
+        problems.append(
+            f"MIDDLEWARE: {PRINCIPAL_MIDDLEWARE} is required, listed once after "
+            f"{ROOT_MIDDLEWARE}; with no principal backend it does nothing"
+        )
+    elif count > 1:
+        problems.append(f"MIDDLEWARE: {PRINCIPAL_MIDDLEWARE} is listed {count} times")
     return problems
 
 
-def _is_root(entry: object) -> bool:
+def _is(entry: object, path: str) -> bool:
+    """Whether ``entry`` imports as the class at ``path`` or a subclass."""
     if type(entry) is not str:
         return False
-    if entry == ROOT_MIDDLEWARE:
+    if entry == path:
         return True
     # Imported here: neolith.middleware imports this module.
-    from neolith.middleware import RootMiddleware
+    from neolith import middleware
 
+    base = getattr(middleware, path.rpartition(".")[2])
     try:
         found = import_string(entry)
     except Exception:  # Django reports it when it builds the handler
         return False
-    return issubclass(type(found), type) and issubclass(found, RootMiddleware)
+    return issubclass(type(found), type) and issubclass(found, base)
 
 
 def _deadline_problems(value: object) -> list[str]:
@@ -202,6 +230,8 @@ def neolith_problems(
             problems.extend(_databases.databases_problems(item, with_database(hosted)))
         elif key == "UNDECLARED_APPS":
             problems.extend(_undeclared_problems(item, hosted))
+        elif key == _principal.KEY:
+            problems.extend(_principal.shape_problems(item))
     if "DATABASES" not in entries:
         problems.extend(
             f"app {label}: no connection settings for its database"
@@ -313,6 +343,30 @@ def middleware_check(**kwargs: object) -> list[checks.CheckMessage]:
         checks.Error(problem, id="neolith.E006")
         for problem in middleware_problems(getattr(settings, "MIDDLEWARE", _MISSING))
     ]
+
+
+def principal_check(**kwargs: object) -> list[checks.CheckMessage]:
+    """``neolith.E019``: what set-up recorded when it built the principal
+    backends, so a later run builds nothing again; and ``neolith.E020``:
+    with a backend configured, Django's cache middleware listed after the
+    principal middleware.
+    """
+    if not _hosting():
+        return []
+    config = global_apps.get_app_config(TAG)
+    found: list[checks.CheckMessage] = [
+        checks.Error(problem, id="neolith.E019")
+        for problem in vars(config).get(PRINCIPAL_REFUSALS, ())
+    ]
+    neolith = _checked_neolith()
+    if neolith is not None and _principal.KEY in neolith:
+        found += [
+            checks.Error(problem, id="neolith.E020")
+            for problem in _principal.cache_problems(
+                getattr(settings, "MIDDLEWARE", None)
+            )
+        ]
+    return found
 
 
 def hosted_declarations(configs: Iterable[AppConfig]) -> list[Declaration]:
@@ -641,6 +695,7 @@ def register() -> None:
         silenced_check,
         installed_check,
         middleware_check,
+        principal_check,
         admin_check,
         database_check,
         default_check,

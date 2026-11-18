@@ -11,6 +11,12 @@ import sys
 import textwrap
 from collections.abc import Mapping, Sequence
 
+# The tail of every unknown-key refusal of NEOLITH: one copy, so a new key in
+# the host's table changes one line of the tests (ADR 0022 Decision 3).
+NEOLITH_KEYS = (
+    "the keys are DATABASES, PRINCIPAL_BACKENDS, REQUEST_DEADLINE, UNDECLARED_APPS"
+)
+
 _PREAMBLE = """\
 import json
 import sys
@@ -20,7 +26,10 @@ from django.conf import settings
 settings.configure(
     **{
         "INSTALLED_APPS": json.loads(sys.argv[1]),
-        "MIDDLEWARE": ["neolith.middleware.RootMiddleware"],
+        "MIDDLEWARE": [
+            "neolith.middleware.RootMiddleware",
+            "neolith.middleware.PrincipalMiddleware",
+        ],
         "NEOLITH": {},
         "DATABASES": {"default": {}},
         "DATABASE_ROUTERS": ["neolith.routers.AppRouter"],
@@ -42,7 +51,10 @@ settings.configure(
     **build_settings(
         json.loads(sys.argv[1]),
         {
-            "MIDDLEWARE": ["neolith.middleware.RootMiddleware"],
+            "MIDDLEWARE": [
+            "neolith.middleware.RootMiddleware",
+            "neolith.middleware.PrincipalMiddleware",
+        ],
             "USE_TZ": True,
             **json.loads(sys.argv[2]),
         },
