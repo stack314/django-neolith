@@ -116,8 +116,13 @@ If `PY_FLOOR` or `PY_NEWEST` is not installed, use the closest Python you have, 
 - [ ] `README.md`. This file is also the description on PyPI.
   - [ ] The status line: `**Status: alpha (<VERSION>). The API may change before 0.1.**`, with the right status word.
   - [ ] The install line: `pip install --pre django-neolith` while the release is a pre-release. *Recommendation:* for a final release, decide whether `--pre` stays, since it also admits pre-release versions of the dependencies.
-  - [ ] The *Features* list and its "Not yet on `next`" line match the changelog.
+  - [ ] The *Features* list, its "Not yet in this version" line and the example describe only what this version contains, as the changelog lists it up to this version. Between releases, `main` keeps this README, so it must not describe unreleased API.
   - [ ] The specification's status in *Links* matches `spec/README.md`.
+- [ ] Files that ship in the package or are built at a tag (the README, and the documentation site's pages) say "this version" and name no branch, since a reader sees them long after the branch has moved.
+  ```
+  git grep -nE '`(main|next)`|\b(main|next) branch' -- README.md docs/site
+  ```
+  Expected: no output. Reword any line it finds, in this pull request.
 - [ ] `pyproject.toml`:
   - [ ] The `Development Status` classifier matches the status word: `3 - Alpha` for an alpha. *Recommendation:* `4 - Beta` for a beta or release candidate, and `5 - Production/Stable` only from 1.0.
   - [ ] `requires-python`, the `Programming Language :: Python :: 3.N` classifiers and the `Framework :: Django :: X.Y` classifiers match [ADR 0012](adr/0012-supported-python-and-django-versions.md) and the CI matrix in `.github/workflows/ci.yml`.
@@ -326,7 +331,7 @@ If a job fails before *Publish to PyPI* runs, nothing was published. See [sectio
   done
   ```
   Expected: `neolith <VERSION> on Django ...` for each pair, then the tests pass. `pip install --group test` installs only the test tools, so the tests import the release from PyPI. A new release can take a few minutes to reach every PyPI mirror; if pip cannot find it, wait and try again.
-- [ ] Create the GitHub Release, with the changelog section as its notes. The release workflow does not create one, and the changelog links to it. Relative links in the section are made absolute at the tag.
+- [ ] Create the GitHub Release, with the changelog section as its notes. This step is required: the release workflow does not create one, the changelog links to it, and the website's status reads GitHub Releases. Relative links in the section are made absolute at the tag.
   ```
   cd "$WORK/tag"
   python3 - "${VERSION}" > "$WORK/notes.md" <<'PY'
@@ -366,13 +371,15 @@ If a job fails before *Publish to PyPI* runs, nothing was published. See [sectio
 
 ## 7. The landing page
 
-The page https://stack314.com/neolith/ is updated at every release. Its source is in the website's own repository, which is not public; changes are requested and made there, by that repository's process. Each request gives the current text, the replacement ready to paste, and how to check it. Where a value comes "from the tag", read it with `git show "v${VERSION}:<path>"`.
+The page https://stack314.com/neolith/ is updated at every release. Its source is in the website's own repository, which is not public. Changes are requested there as issues, and the website's maintainer makes them; no pull request is opened there from this project. The release is not done until the issues are filed and the live page is checked against the released version.
+
+Go through the items below on the live page. Where a value comes "from the tag", read it with `git show "v${VERSION}:<path>"`.
 
 - [ ] The page's description (meta and structured data) and its status word everywhere it appears (the kicker, the status sheet, the introductions) match the `Development Status` classifier at the tag, with "the API may change" for as long as the version is before 1.0.
 - [ ] The status sheet's *latest release* links to `https://pypi.org/project/django-neolith/<VERSION>/`, and that URL returns 200.
 - [ ] The status sheet's *python* and *django* match `requires_python` on PyPI and the `Framework :: Django :: X.Y` classifiers at the tag.
 - [ ] The status sheet's *specification* matches the status line of `spec/README.md` at the tag.
-- [ ] Every sentence that names a version, a mode or what is built (for example "runs apps attached", "detached is not built yet") matches the changelog section and the README's "Not yet on" line at the tag.
+- [ ] Every sentence that names a version, a mode or what is built (for example "runs apps attached", "detached is not built yet") matches the changelog section and the README's "Not yet in this version" line at the tag.
 - [ ] The evidence rows:
   - [ ] *Specification*: the number of documents still outlines matches the status lines of `spec/0*.md` at the tag.
   - [ ] *Design decisions*: the counts of Accepted and Proposed records match `docs/adr/README.md` at the tag.
@@ -399,6 +406,8 @@ The page https://stack314.com/neolith/ is updated at every release. Its source i
   ```
   Expected: `200` on every line.
 - [ ] The same facts elsewhere on the website (its home page, about page, FAQ and `llms.txt`) are checked at the same time.
+- [ ] File the issues on the website's repository: one tracking issue for the release, and one issue for each independent change, linked from the tracking issue. Each change issue gives the exact current text, the replacement ready to paste, and how to check it.
+- [ ] Once the website's maintainer closes them, go through this section again on the live page. Expected: every item matches the released version.
 
 ## 8. After the release
 
@@ -411,7 +420,23 @@ The page https://stack314.com/neolith/ is updated at every release. Its source i
   grep -n -A1 '^## \[Unreleased\]' CHANGELOG.md
   ```
   Expected: `__version__ = "<NEXT_DEV>"`, and an empty `## [Unreleased]` section at the top of the changelog (add one if the version pull request did not). *Recommendation:* the title `chore: start <NEXT_DEV> after releasing <VERSION>`, and `NEXT_DEV` is the version the next release is expected to have, plus `.dev0`. Until this merges, the documentation build treats `next` as a release (`docs/site/conf.py`).
-- [ ] The release's milestone is closed, after the checks in section 6 pass. Open issues left in it move to the next milestone first, each with a one-line comment saying why.
+- [ ] Close the issues the release carries. A `Closes #N` line does not close an issue when its pull request merges into `next` ([G1](../CONTRIBUTING.md#commits-and-pull-requests)), so list them from the release's commits and close any still open.
+  ```
+  for n in $(git log --format=%B "v${PREVIOUS}..v${VERSION}" \
+      | grep -oiE '\b(close[sd]?|fix(e[sd])?|resolve[sd]?) #[0-9]+' | grep -oE '[0-9]+' | sort -un); do
+    gh issue view "$n" --repo "$REPO" --json number,state,title -q '"\(.number) \(.state) \(.title)"'
+  done
+  gh issue close <number> --repo "$REPO" --comment "Released in ${VERSION}."
+  ```
+  Expected: after closing, every listed issue is `CLOSED`.
+- [ ] Close the release's milestone, after the checks in sections 6 and 7 pass. Open issues left in it move to the next milestone first, each with a one-line comment saying why.
+  ```
+  gh issue list --repo "$REPO" --milestone "${VERSION}" --state open
+  MILESTONE=$(gh api "repos/${REPO}/milestones" -q ".[] | select(.title == \"${VERSION}\") | .number")
+  gh api -X PATCH "repos/${REPO}/milestones/${MILESTONE}" -f state=closed -q '.title + " " + .state'
+  ```
+  Expected: no open issues, then `<VERSION> closed`.
+- [ ] The next release's milestone is now the current one: the `.dev` pull request and every later pull request into `next` go in it.
 - [ ] The roadmap issue this release finishes is closed, or its open parts are moved to the next milestone, and its task list is ticked. The project board shows the release's issues and pull requests as done.
 - [ ] `docs/roadmap.md` still describes what is left. It changes only when a step's scope changes.
 - [ ] Announcements: the repository names no place where releases are announced. If one is added, list it here.
