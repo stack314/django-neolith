@@ -42,7 +42,7 @@ import inspect
 import logging
 import re
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 
 import griffe
@@ -276,15 +276,32 @@ def _live(found: griffe.Object) -> object:
     return live
 
 
-def _signed(found: griffe.Object) -> list[object]:
-    """The callables whose defaults the reference shows for an object.
+def _merged(found: griffe.Object) -> frozenset[str] | None:
+    """The parameters whose live default an overloaded function shows.
 
-    A class shows its own ``__new__`` and ``__init__``; a single-dispatch
-    function also shows each function registered on it. An overloaded
-    function shows its overloads, with the implementation's default in place
-    of each ``...`` (Sphinx's ``_merge_default_value``), so the
-    implementation is read too; an overload's other defaults are shown as
-    written and read by name.
+    Sphinx shows only the overloads of an overloaded function, and puts the
+    implementation's default in place of each one written ``...``
+    (``_merge_default_value``); an overload's other defaults are shown as
+    written and read by name. ``None`` for a function with no overload,
+    whose every default is shown.
+    """
+    if not isinstance(found, griffe.Function) or not found.overloads:
+        return None
+    return frozenset(
+        parameter.name
+        for overload in found.overloads
+        for parameter in overload.parameters
+        if parameter.default == "..."
+    )
+
+
+def _signed(found: griffe.Object) -> list[tuple[object, frozenset[str] | None]]:
+    """Each callable whose defaults the reference shows, and which of them.
+
+    As Sphinx 9.2 chooses them: a class shows its own ``__new__`` and
+    ``__init__``, and a function itself; a ``functools`` single-dispatch
+    function or method also shows each function registered on it but the
+    one for ``object``. Which defaults are shown is ``_merged``'s.
     """
     if not isinstance(found, griffe.Class | griffe.Function):
         return []
@@ -292,21 +309,30 @@ def _signed(found: griffe.Object) -> list[object]:
     if isinstance(found, griffe.Class):
         assert isinstance(live, type)
         return [
-            getattr(live, name)
+            (getattr(live, name), _merged(_target(found.members[name])))
+            if name in found.members
+            # A method griffe does not read, such as a dataclass's __init__,
+            # has no overload.
+            else (getattr(live, name), None)
             for name in ("__new__", "__init__")
             if name in vars(live)
         ]
+    signed: list[tuple[object, frozenset[str] | None]] = [(live, _merged(found))]
+    registry: Mapping[object, object] = {}
     if isinstance(found.parent, griffe.Class):
         raw = inspect.getattr_static(_live(found.parent), found.name)
         if isinstance(raw, functools.singledispatchmethod):
-            return [live, *raw.dispatcher.registry.values()]
-    registry = getattr(live, "registry", None)
-    if callable(getattr(live, "dispatch", None)) and registry is not None:
-        return [
-            live,
-            *(function for kind, function in registry.items() if kind is not object),
-        ]
-    return [live]
+            registry = raw.dispatcher.registry
+    elif (
+        inspect.isfunction(live)
+        and hasattr(live, "register")
+        and getattr(getattr(live, "dispatch", None), "__module__", None) == "functools"
+    ):
+        registry = getattr(live, "registry", {})
+    signed += [
+        (function, None) for kind, function in registry.items() if kind is not object
+    ]
+    return signed
 
 
 def _shown_default_problems(found: griffe.Object) -> Iterator[tuple[str, str, str]]:
@@ -320,9 +346,10 @@ def _shown_default_problems(found: griffe.Object) -> Iterator[tuple[str, str, st
     try:
         shown = [
             (parameter.name, _shown(parameter.default))
-            for live in _signed(found)
+            for live, merged in _signed(found)
             for parameter in inspect.signature(live).parameters.values()  # type: ignore[arg-type]
             if parameter.default is not parameter.empty
+            and (merged is None or parameter.name in merged)
         ]
     except Exception as error:  # an import that fails is reported, not raised
         yield "defaults", "", f"its defaults cannot be read: {error!r}"
@@ -1242,6 +1269,18 @@ def test_a_default_shown_as_neither_a_literal_nor_a_marker_is_refused(
         f"sample.make: its default for strict shows as {shown}, which is "
         "neither a literal nor a marker such as <missing>"
     ]
+
+
+def test_an_overload_that_writes_a_literal_hides_the_implementation_default(
+    tmp_path: Path, records: Records
+) -> None:
+    # Sphinx shows the overload's False, not the implementation's _Hidden().
+    source = _GOOD.replace(
+        "def make[T](kind: type[T], /, *names: str, strict: bool = False",
+        "@overload\ndef make[T](kind: type[T], /, *, strict: bool = False) -> T: ..."
+        "\n\n\ndef make[T](kind: type[T], /, *names: str, strict: bool = _Hidden()",
+    )
+    assert _sample(tmp_path, source, records) == []
 
 
 @pytest.mark.parametrize(
