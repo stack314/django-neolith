@@ -18,6 +18,7 @@ It prints one line per problem and a summary line, and exits 1 on a problem.
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import tarfile
@@ -45,7 +46,8 @@ def tracked(root: Path) -> set[str]:
         )
     except (OSError, subprocess.CalledProcessError) as error:
         raise SdistError(f"git ls-files failed in {root}: {error}") from error
-    return {name for name in done.stdout.decode("utf-8").split("\0") if name}
+    # As tarfile decodes member names: a name that is not UTF-8 still compares.
+    return {os.fsdecode(name) for name in done.stdout.split(b"\0") if name}
 
 
 def contents(sdist: Path) -> tuple[set[str], list[str]]:
@@ -108,7 +110,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         noun = "problem" if len(problems) == 1 else "problems"
         print(f"sdist: {args.sdist.name} has {len(problems)} {noun}")
         return 1
-    print(f"sdist: {args.sdist.name} carries the {len(files)} tracked files")
+    noun = "file" if len(files) == 1 else "files"
+    print(f"sdist: {args.sdist.name} carries the {len(files)} tracked {noun}")
     return 0
 
 

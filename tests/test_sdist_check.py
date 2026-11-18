@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import os
 import subprocess
 import tarfile
 from pathlib import Path
@@ -26,7 +27,7 @@ def _sdist(tmp_path: Path, names: list[str], *, dirs: tuple[str, ...] = ()) -> P
             member.type = tarfile.DIRTYPE
             tar.addfile(member)
         for name in names:
-            data = name.encode()
+            data = b"x\n"
             member = tarfile.TarInfo(name)
             member.size = len(data)
             tar.addfile(member, io.BytesIO(data))
@@ -159,4 +160,21 @@ def test_main_counts_one_problem_in_the_singular(
     assert sdist_check.main([str(sdist), "--root", str(root)]) == 1
     assert capsys.readouterr().out == (
         f"b.md: in the sdist, but not tracked\nsdist: {TOP}.tar.gz has 1 problem\n"
+    )
+
+
+def test_a_name_that_is_not_utf8_compares_as_tarfile_reads_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    name = b"caf\xe9.txt"
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / os.fsdecode(name)).write_text("x\n", encoding="utf-8")
+    git = ["git", "-C", str(root)]
+    subprocess.run([*git, "init", "-q"], check=True)  # noqa: S603
+    subprocess.run([*git, "add", "-f", "--", os.fsdecode(name)], check=True)  # noqa: S603
+    sdist = _sdist(tmp_path, [f"{TOP}/PKG-INFO", f"{TOP}/{os.fsdecode(name)}"])
+    assert sdist_check.main([str(sdist), "--root", str(root)]) == 0
+    assert (
+        capsys.readouterr().out == f"sdist: {TOP}.tar.gz carries the 1 tracked file\n"
     )
