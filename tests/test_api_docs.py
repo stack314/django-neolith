@@ -681,7 +681,7 @@ import enum
 import functools
 import json
 from collections.abc import Mapping
-from typing import Annotated, overload
+from typing import Annotated, NamedTuple, overload
 
 __all__ = ["Bigger", "Limit", "Problem", "Thing", "Unreadable", "make"]
 
@@ -1049,6 +1049,34 @@ def test_a_sample_in_every_admitted_shape_passes(
             id="private-default-of-a-registered-function",
         ),
         pytest.param(
+            "    @staticmethod\n    def plain(",
+            "    @functools.singledispatchmethod\n    def meth(self, value: object) -> "
+            'object:\n        """Convert it."""\n        return value\n\n'
+            "    @meth.register\n    def _(self, value: int, strict: object = "
+            "_Hidden()) -> object:\n        return value\n\n"
+            "    @staticmethod\n    def plain(",
+            "sample.Thing.meth: its default for strict shows as "
+            "<sample._Hidden object>",
+            id="private-default-of-a-registered-method",
+        ),
+        pytest.param(
+            "    def __init__(self, name: str, parts: Mapping[str, object] | None = "
+            "None) -> None:",
+            "    @overload\n    def __init__(self, name: str, parts: None = ...) -> "
+            "None: ...\n\n    def __init__(self, name: str, parts: Mapping[str, "
+            "object] | None = _Hidden()) -> None:",
+            "sample.Thing: its default for parts shows as <sample._Hidden object>",
+            id="private-default-behind-an-overloaded-init-ellipsis",
+        ),
+        pytest.param(
+            "\n\nclass Bigger(Thing):",
+            '\n\nclass Pair(NamedTuple):\n    """Two values."""\n\n    left: int\n'
+            '    right: object = _Hidden()\n\n\n__all__ += ["Pair"]'
+            "\n\n\nclass Bigger(Thing):",
+            "sample.Pair: its default for right shows as <sample._Hidden object>",
+            id="private-default-of-a-generated-new",
+        ),
+        pytest.param(
             '    """Not exported."""\n\n\nclass Problem(ValueError):',
             '    """Not exported."""\n\n    def extra(self) -> None:\n'
             "        return None\n\n\nclass Problem(ValueError, _Hidden):",
@@ -1269,6 +1297,37 @@ def test_a_default_shown_as_neither_a_literal_nor_a_marker_is_refused(
         f"sample.make: its default for strict shows as {shown}, which is "
         "neither a literal nor a marker such as <missing>"
     ]
+
+
+def test_an_overloaded_init_that_writes_a_literal_hides_its_default(
+    tmp_path: Path, records: Records
+) -> None:
+    source = _GOOD.replace(
+        "    def __init__(self, name: str, parts: Mapping[str, object] | None = "
+        "None) -> None:",
+        "    @overload\n    def __init__(self, name: str, parts: None = None) -> "
+        "None: ...\n\n    def __init__(self, name: str, parts: Mapping[str, "
+        "object] | None = _Hidden()) -> None:",
+    )
+    assert _sample(tmp_path, source, records) == []
+
+
+def test_a_static_single_dispatch_method_hides_its_registrations(
+    tmp_path: Path, records: Records
+) -> None:
+    # Sphinx reads registrations only of a singledispatchmethod, so it shows
+    # stat(value: object) alone.
+    source = _GOOD.replace(
+        "    @staticmethod\n    def plain(",
+        "    @staticmethod\n    @functools.singledispatch\n    def stat(value: "
+        'object) -> object:\n        """Convert it."""\n        return value\n\n'
+        "    @staticmethod\n    def plain(",
+    ).replace(
+        "\n\nclass Bigger(Thing):",
+        "\n\n@Thing.stat.register\ndef _(value: int, strict: object = _Hidden()) -> "
+        "object:\n    return value\n\n\nclass Bigger(Thing):",
+    )
+    assert _sample(tmp_path, source, records) == []
 
 
 def test_an_overload_that_writes_a_literal_hides_the_implementation_default(
