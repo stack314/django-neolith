@@ -154,6 +154,7 @@ HOSTILE: dict[str, object] = {
     "renamed function": _function,
     "eq-raising class's instance": Equated(),
     "hash-raising class's instance": Hashed(),
+    "str subclass": Trap("trap"),
 }
 
 
@@ -641,6 +642,93 @@ def test_a_private_attribute_with_hostile_parts_is_named() -> None:
         match=re.escape("cannot be read (HostileError: <the message cannot be read>)"),
     ):
         declare_with_field(unsigned)
+
+
+# An app config class whose metaclass, or whose own body, runs code.
+
+_CONFIG_METACLASSES: dict[str, type] = {
+    "eq-raising": EqRaises,
+    "hash-raising": HashRaises,
+    "attribute-raising": HostileMeta,
+}
+
+
+def _config(metaclass: type, body: dict[object, object], *bases: type) -> type:
+    namespace: dict[object, object] = {"__module__": __name__, **body}
+    made: type = metaclass("HostileConfig", bases or (NeolithAppConfig,), namespace)
+    return made
+
+
+@pytest.mark.parametrize(
+    "metaclass", _CONFIG_METACLASSES.values(), ids=_CONFIG_METACLASSES.keys()
+)
+def test_an_app_config_class_whose_metaclass_runs_code_is_refused(
+    metaclass: type,
+) -> None:
+    with pytest.raises(DeclarationError, match="label"):
+        _config(metaclass, {"name": "shop.stock", "label": "Bad Label"})
+    parent = type(
+        "ParentConfig",
+        (NeolithAppConfig,),
+        {"__module__": __name__, "name": "shop.stock", "label": "stock"},
+    )
+    with pytest.raises(DeclarationError, match="which holds a declaration"):
+        _config(metaclass, {}, parent)
+    mixin = metaclass("Mixin", (), {"helper": 1})
+    with pytest.raises(DeclarationError, match=r"helper: .*Mixin holds it"):
+        _config(
+            metaclass, {"name": "shop.stock", "label": "stock"}, mixin, NeolithAppConfig
+        )
+
+
+@pytest.mark.filterwarnings("ignore:non-string key:RuntimeWarning")
+@pytest.mark.parametrize("key", [Trap("extra"), 5], ids=["str subclass", "int"])
+def test_an_app_config_body_with_a_key_that_is_not_a_str_is_refused(
+    key: object,
+) -> None:
+    with pytest.raises(DeclarationError) as refused:
+        _config(type, {key: 1, "name": "shop.stock", "label": "Bad Label"})
+    said = str(refused.value)
+    assert "HostileConfig has an attribute whose name is not exactly a str" in said
+    assert "label: " in said
+    mixin = type("Mixin", (), cast("dict[str, object]", {key: 1}))
+    with pytest.raises(DeclarationError, match="Mixin has an attribute whose name"):
+        _config(type, {"name": "shop.stock", "label": "stock"}, mixin, NeolithAppConfig)
+
+
+class LateHash(str):
+    """A key whose hash raises once armed, after the dict holding it is built."""
+
+    armed = False
+
+    def __hash__(self) -> int:
+        if LateHash.armed:
+            raise RuntimeError("hostile code ran")
+        return str.__hash__(self)
+
+
+def test_settings_keys_that_run_code_at_any_depth_are_refused() -> None:
+    sqlite = "django.db.backends.sqlite3"
+    built = {"default": {"ENGINE": sqlite, "NAME": "/db.sqlite3", "OPTIONS": {}}}
+    for found in (
+        {"default": {"ENGINE": sqlite, "NAME": "/db.sqlite3", LateHash("CUSTOM"): 1}},
+        {
+            "default": {
+                "ENGINE": sqlite,
+                "NAME": "/db.sqlite3",
+                "OPTIONS": {LateHash("x"): 1},
+            }
+        },
+    ):
+        LateHash.armed = True
+        try:
+            difference = _configure.databases_difference(found, built)
+        finally:
+            LateHash.armed = False
+        assert difference is not None
+        assert difference.endswith("['CUSTOM'] is not one the host builds") or (
+            difference.endswith("['x'] is not one the host builds")
+        )
 
 
 # Every name read goes through neolith._naming.

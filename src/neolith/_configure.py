@@ -381,6 +381,10 @@ def _difference(
         if not _naming.is_a(found, dict):
             return f"{where or 'it'} is a {_type(found)}, the host builds a dict"
         found = cast("dict[Any, Any]", found)
+        # Before any key is looked up, so that no key's own code runs.
+        for key in found:
+            if type(key) is not str:
+                return f"{where}[{_repr(key)}] is not one the host builds"
         own: dict[str, Any] = expected
         if not where:
             extra = [k for k in found if k not in own]

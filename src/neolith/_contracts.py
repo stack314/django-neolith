@@ -103,8 +103,6 @@ _UNTYPED_SIZE = 10_000
 
 _CONTRACT_ATTR = "__neolith_contract__"
 _ACTION_ATTR = "__neolith_action__"
-# A class's own namespace, read without asking its metaclass.
-_OWN_NAMESPACE = type.__dict__["__dict__"]
 _BASES = type.__dict__["__bases__"]
 _UNIONS: tuple[object, ...] = (typing.Union, types.UnionType)
 _DIALECT = "https://json-schema.org/draft/2020-12/schema"
@@ -529,7 +527,7 @@ class Contract:
         # Read by type() and type's own descriptor, never the object's own
         # attributes, so no code of the object runs before it is refused.
         found = (
-            _own(_OWN_NAMESPACE.__get__(declaration), _CONTRACT_ATTR)
+            _naming.entry(_naming.namespace(declaration), _CONTRACT_ATTR)
             if issubclass(type(declaration), type)
             else None
         )
@@ -704,7 +702,7 @@ def contract[T](identity: str, /) -> Callable[[type[T]], type[T]]:
             raise ContractDefinitionError(
                 f"{identity}: @contract decorates a class, not {_name(declaration)}"
             )
-        namespace = _OWN_NAMESPACE.__get__(declaration)
+        namespace = _naming.namespace(declaration)
         # Before any name is looked up, so that no key's own __eq__ runs.
         if any(type(key) is not str for key in namespace):
             raise ContractDefinitionError(
@@ -739,7 +737,7 @@ def contract[T](identity: str, /) -> Callable[[type[T]], type[T]]:
 
         for attr, value in namespace.items():
             marked = (
-                _own(vars(value), _ACTION_ATTR)
+                _naming.entry(vars(value), _ACTION_ATTR)
                 if type(value) is types.FunctionType
                 else None
             )
@@ -1057,16 +1055,6 @@ def _nests_deeper(
     return height(schema) > limit
 
 
-def _own(namespace: Mapping[Any, object], name: str) -> object:
-    """The entry ``name`` of a namespace, or None, compared only with keys
-    that are exactly ``str``, so that no key's own ``__eq__`` runs.
-    """
-    for key, value in namespace.items():
-        if type(key) is str and key == name:
-            return value
-    return None
-
-
 def _parse_identity(identity: object) -> tuple[str, int]:
     # Judged by type(): isinstance would read the object's own __class__.
     is_text = issubclass(type(identity), str)
@@ -1142,6 +1130,12 @@ def _signature(
             f"{where}: cannot read its signature ({_naming.cause(error, None)})"
         ) from error
     parameters = list(signature.parameters.values())
+    # Before any name is compared, looked up or shown, so that no name's own
+    # code runs: a __signature__ the author set may name them with anything.
+    if any(type(p.name) is not str for p in parameters):
+        raise ContractDefinitionError(
+            f"{where}: a parameter's name is not exactly a str"
+        )
     if len(parameters) not in ((2,) if declared else (2, 3)) or any(
         p.kind is not inspect.Parameter.POSITIONAL_OR_KEYWORD
         or p.default is not inspect.Parameter.empty
@@ -1150,7 +1144,7 @@ def _signature(
         raise ContractDefinitionError(
             f"{where}: an action takes exactly (self, request)"
             + ("" if declared else " or (self, request, ctx: CallContext)")
-            + f", not {signature}"
+            + f", not {_naming.text(signature, None)}"
         )
     if declared and parameters[1].name in _RESERVED_PARAMETERS:
         raise ContractDefinitionError(
@@ -1169,6 +1163,10 @@ def _signature(
         raise ContractDefinitionError(
             f"{where}: cannot read its annotations ({_naming.cause(error, None)})"
         ) from error
+    if any(type(key) is not str for key in hints):
+        raise ContractDefinitionError(
+            f"{where}: an annotation's name is not exactly a str"
+        )
     request = hints.get(parameters[1].name)
     if request is None:
         raise ContractDefinitionError(f"{where}: annotate its request type")

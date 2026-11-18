@@ -204,7 +204,7 @@ def declaration_of(config: object) -> Declaration | None:
     """
     if not issubclass(type(config), type):
         return None
-    found = vars(config).get(_SNAPSHOT_ATTR)
+    found = _naming.entry(_naming.namespace(config), _SNAPSHOT_ATTR)
     if type(found) is not Declaration or found.config is not config:
         return None
     return found
@@ -280,7 +280,9 @@ class NeolithAppConfig(AppConfig):
         if snapshot is None:
             cls.default = False
             return
-        if "default" not in vars(cls):
+        # Every key of the class's own body is exactly a str, or it was
+        # refused above.
+        if "default" not in _naming.namespace(cls):
             cls.default = True
         setattr(cls, _SNAPSHOT_ATTR, snapshot)
 
@@ -333,27 +335,42 @@ class NeolithAppConfig(AppConfig):
 
 def _check(cls: type[NeolithAppConfig]) -> tuple[list[str], Declaration | None]:
     """Check a new subclass; return its refusals and, if it declares, its snapshot."""
-    extras = [k for k in cls.__mro__ if k not in NeolithAppConfig.__mro__]
+    # Classes are read through type's own descriptors and compared by
+    # identity, and a name is looked up only in a body whose keys are each
+    # exactly a str, so that no code of the classes, or of their keys, runs.
+    ours = _naming.mro(NeolithAppConfig)
+    extras = [k for k in _naming.mro(cls) if not _naming.one_of(k, ours)]
     refusals: list[str] = []
-    checked: set[type] = set()
+    checked: set[int] = set()
     for parent in extras[1:]:
-        if _SNAPSHOT_ATTR in vars(parent):
+        if _naming.entry(_naming.namespace(parent), _SNAPSHOT_ATTR) is not None:
             refusals.append(
                 f"it extends {_class_name(parent)}, which holds a declaration; "
                 "a declaration cannot be extended or relabelled"
             )
             # The parent's own classes were checked when it was defined.
-            checked.update(parent.__mro__)
-    extras = [k for k in extras if k not in checked]
+            checked.update(map(id, _naming.mro(parent)))
+    extras = [k for k in extras if id(k) not in checked]
+    bodies: dict[int, dict[str, Any]] = {}
+    for klass in extras:
+        body: dict[str, Any] = {}
+        for key, value in _naming.namespace(klass).items():
+            if type(key) is str:
+                body[key] = value
+        if len(body) != len(_naming.namespace(klass)):
+            refusals.append(
+                f"{_class_name(klass)} has an attribute whose name is not exactly a str"
+            )
+        bodies[id(klass)] = body
 
-    own = dict(vars(cls))
+    own = bodies[id(cls)]
     declares = "name" in own
     # A part of the declaration written in a base class or a mixin is refused
     # for where it is, and its value is checked all the same, so that moving
     # it shows no new refusal.
     written: dict[str, Any] = {}
     for klass in extras:
-        body = own if klass is cls else dict(vars(klass))
+        body = bodies[id(klass)]
         whole = klass is cls and declares
         for attribute in body:
             if attribute.startswith("_"):

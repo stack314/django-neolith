@@ -25,16 +25,19 @@ refusal; ``one_of`` and ``derives`` compare classes by identity alone.
 """
 
 import types
-from collections.abc import Iterable
-from typing import Final
+from collections.abc import Iterable, Mapping
+from typing import Any, Final
 
 __all__ = [
     "cause",
     "derives",
+    "entry",
     "full_name",
     "is_a",
     "module",
+    "mro",
     "name",
+    "namespace",
     "one_of",
     "qualname",
     "shown",
@@ -48,6 +51,7 @@ _NAME: Final = type.__dict__["__name__"]
 _MODULE: Final = type.__dict__["__module__"]
 _FUNCTION_QUALNAME: Final = types.FunctionType.__dict__["__qualname__"]
 _MRO: Final = type.__dict__["__mro__"]
+_NAMESPACE: Final = type.__dict__["__dict__"]
 
 
 def _exact(found: object, limit: int | None) -> str | None:
@@ -154,6 +158,28 @@ def one_of(kind: object, kinds: Iterable[object]) -> bool:
     return any(kind is each for each in kinds)
 
 
+def mro(cls: type) -> tuple[type, ...]:
+    """A class's method resolution order, read without asking its metaclass."""
+    return _MRO.__get__(cls)  # type: ignore[no-any-return]
+
+
+def namespace(cls: object) -> Mapping[Any, Any]:
+    """A class's own namespace, read without asking its metaclass. Its keys
+    may be anything the author put there: look a name up with ``entry``.
+    """
+    return _NAMESPACE.__get__(cls)  # type: ignore[no-any-return]
+
+
+def entry(held: Mapping[Any, object], name: str) -> object:
+    """The entry ``name`` of a namespace or dict, or None, compared only with
+    keys that are exactly ``str``, so that no key's own ``__eq__`` runs.
+    """
+    for key, value in held.items():
+        if type(key) is str and key == name:
+            return value
+    return None
+
+
 def derives(kind: type, base: type) -> bool:
     """Whether ``base`` is in the method resolution order of the class
     ``kind``, compared by identity.
@@ -162,7 +188,7 @@ def derives(kind: type, base: type) -> bool:
     metaclass ``__hash__``; a virtual subclass registered with the ABC is not
     counted.
     """
-    return any(each is base for each in _MRO.__get__(kind))
+    return any(each is base for each in mro(kind))
 
 
 def type_name(value: object, limit: int | None = LIMIT) -> str:
