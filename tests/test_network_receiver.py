@@ -745,3 +745,36 @@ def test_a_refusal_in_a_maps_key_says_so_without_showing_it(
     said = str(refused.value)
     assert f", at {place}: " in said
     assert "s3cr3t" not in said
+
+
+@pytest.mark.spec("CON-42", "CON-39")
+@pytest.mark.parametrize(
+    ("text", "place"),
+    [
+        # A member or entry named like Pydantic's mark for a key's error.
+        (b'{"notes":{"k":{"[key]":NaN}}}', "Order.notes[entry 0]"),
+        (b'{"notes":{"[key]":{"qty":NaN}}}', "Order.notes[entry 0].qty"),
+        # A list where the description has none is not stepped into.
+        (b'{"ratio":[NaN]}', "Order.ratio"),
+        (b"[NaN]", "Order"),
+        (b'{"count":["\\udc00"]}', "Order.count"),
+        (b'{"lines":{"x":NaN}}', "Order.lines"),
+    ],
+)
+def test_a_place_is_named_only_through_what_the_description_holds(
+    text: bytes, place: str
+) -> None:
+    said = _receive(text)
+    assert said is not None
+    assert said.endswith(f", at {place}")
+
+
+@pytest.mark.spec("CON-39")
+def test_an_entry_named_like_a_key_error_is_an_entry() -> None:
+    class Nested(BaseModel):
+        nested: dict[str, dict[str, int]] = {}
+
+    found, _ = _contract_for(Nested)
+    with pytest.raises(Refusal) as refused:
+        codec(found, Nested).receive(b'{"nested":{"k1":{"[key]":"x"}}}', "x")
+    assert ", at Nested.nested[entry 0][entry 0]: " in str(refused.value)

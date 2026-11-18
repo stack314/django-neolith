@@ -252,7 +252,11 @@ class Codec[R: BaseModel]:
         name = _naming.name(self.record)
         parsed, broken, path = _interchange(text)
         if broken is not None:
-            place = f", at {self._place(parsed, path)}" if parsed is not None else ""
+            place = (
+                f", at {self._place(parsed, path, keyed=False)}"
+                if parsed is not None
+                else ""
+            )
             raise Refusal(f"{subject} {broken}{place}")
         failed: ValidationError | None = None
         try:
@@ -282,12 +286,18 @@ class Codec[R: BaseModel]:
             f"{self._place(parsed, first['loc'])} ({first['type']})"
         )
 
-    def _place(self, value: object, loc: tuple[int | str, ...]) -> str:
+    def _place(
+        self, value: object, loc: tuple[int | str, ...], *, keyed: bool = True
+    ) -> str:
         """Name the place in ``value`` that an error's location leads to.
 
         A record's field is named, a list's item counted, and a map's entry
-        counted by where it comes in the text, so that no key is shown. A
-        step that leads nowhere in the value ends the place there.
+        counted by where it comes in the text, so that no key is shown. Each
+        step is taken only where the description and the value agree on what
+        is there; a step that leads nowhere described ends the place there.
+        With ``keyed``, the location is a validation error's, which ends with
+        ``"[key]"`` when the error is in a map entry's key, and only a map
+        whose keys the description constrains has such an error.
         """
         name = _naming.name(self.record)
         steps = [name]
@@ -307,12 +317,16 @@ class Codec[R: BaseModel]:
                 if type(step) is not str or step not in entries:
                     break
                 steps.append(f"[entry {list(entries).index(step)}]")
-                if loc[at + 1 : at + 2] == ("[key]",):
+                if (
+                    keyed
+                    and "propertyNames" in described
+                    and loc[at + 1 :] == ("[key]",)
+                ):
                     # The error is in the entry's key, not its value.
                     steps.append(" (its key)")
                     break
                 schema, value = described["additionalProperties"], entries[step]
-            elif type(value) is list and type(step) is int:
+            elif type(value) is list and type(step) is int and "items" in described:
                 items = typing.cast(list[object], value)
                 if not 0 <= step < len(items):
                     break
@@ -465,7 +479,9 @@ def _interchange(text: bytes) -> tuple[object, str | None, tuple[int | str, ...]
     """Read a text as I-JSON, as spec 01 asks of a receiver (CON-42).
 
     Returns the value it holds, and, when it breaks a rule, the rule and the
-    path of the first place in the text that breaks it. The text is UTF-8
+    path of a place that breaks it: the first found walking the value in the
+    order of the text, where an object's member names are checked before
+    its members. The text is UTF-8
     JSON text (RFC 8259), with no member name twice in one object, no lone
     surrogate in a string or a member name, and no number outside the range
     of a double. ``NaN`` and ``Infinity`` are not JSON numbers. A number is
