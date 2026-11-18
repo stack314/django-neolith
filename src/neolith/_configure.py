@@ -16,7 +16,9 @@ does not run:
    no label the host reserves, no battery that is a hosted app or
    ``neolith``.
 3. **Resolve.** ADR 0021's function, whose refusals are one
-   ``DeclarationError``.
+   ``DeclarationError``, with the remote providers that the deployer's
+   ``NEOLITH["REMOTE_PROVIDERS"]`` names (ADR 0014) and the problems of
+   that key's form, which Resolve reads.
 4. **Configure.** The deployer's mapping, row by row.
 
 ``settings_problems`` is the same Configure, run at the first set-up on the
@@ -107,7 +109,10 @@ def configure(
     declarations = [declaration for _, declaration in pairs]
     from neolith._host import resolve
 
-    _, refusals = resolve(declarations)
+    neolith = _naming.entry(deployer, "NEOLITH") if type(deployer) is dict else None
+    remote, problems = _checks.remote_identities(neolith)
+    _, refusals = resolve(declarations, remote)
+    refusals += problems
     if refusals:
         raise DeclarationError("\n".join(sorted(refusals)))
     names, problems = _names(deployer)

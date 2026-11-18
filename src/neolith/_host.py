@@ -53,7 +53,7 @@ import logging
 import sys
 import threading
 import types
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final, NoReturn, cast, final
 
@@ -71,6 +71,7 @@ from neolith import (
     _checks,
     _configure,
     _context,
+    _http,
     _http_transport,
     _naming,
     _principal,
@@ -301,6 +302,7 @@ def set_up(config: AppConfig) -> None:
         )
         published = dataclasses.replace(
             host,
+            connectors=_remote(host.connectors, configs, callers),
             request_deadline=deadline,
             warned=warned,
             principals=principals,
@@ -527,6 +529,35 @@ def _principals(config: AppConfig) -> tuple[_principal.Built, ...]:
     return built
 
 
+def _remote(
+    connectors: Mapping[str, Bound],
+    configs: Iterable[AppConfig],
+    callers: _caller.Callers,
+) -> Mapping[str, Bound]:
+    """``connectors`` with a connector over HTTP to each remote provider of
+    ``settings.NEOLITH``, which set-up's checks have passed: under
+    ``single``, a contract's one provider is the app of the host that
+    provides it, else its remote provider (ADR 0014 Decision 2). The
+    transports share one pool per origin and open nothing until a call.
+    """
+    urls = _checks.remote_urls(getattr(settings, "NEOLITH", {}))
+    if not urls:
+        return connectors
+    required = {
+        contract.identity: contract
+        for declaration in _checks.hosted_declarations(configs)
+        for contract in declaration.requires
+    }
+    pools = _http.Pools()
+    chosen = dict(connectors)
+    for identity, url in urls.items():
+        declaration = required[identity].declaration
+        pool = pools.pool(_http.Origin.parse(url))
+        transport = _http_transport.HTTPTransport(declaration, pool, callers)
+        chosen.setdefault(identity, Bound(declaration, transport))
+    return types.MappingProxyType(chosen)
+
+
 def _setting_changed(
     *, setting: str, value: object, enter: bool, **kwargs: object
 ) -> None:
@@ -644,14 +675,19 @@ def build(registry: Apps) -> tuple[Host, list[str]]:
 
     Returns the table and every refusal; the table is used only when there is
     none. Every check runs whatever the others found, so one refusal hides
-    none behind it.
+    none behind it. Resolve reads the remote providers that
+    ``settings.NEOLITH`` names, and reports the problems of that key's form
+    with its own refusals; set-up adds their transports to the table once
+    its checks have passed (``_remote``).
     """
     hosted = [
         (config, found)
         for config in registry.get_app_configs()
         if (found := declaration_of(type(config))) is not None
     ]
-    contracts, refusals = resolve([declaration for _, declaration in hosted])
+    remote, problems = _checks.remote_identities(getattr(settings, "NEOLITH", None))
+    contracts, refusals = resolve([declaration for _, declaration in hosted], remote)
+    refusals += problems
     connectors: dict[str, Bound] = {}
     for config, declaration in hosted:
         for provision in declaration.provides:
@@ -701,13 +737,16 @@ def build(registry: Apps) -> tuple[Host, list[str]]:
 
 
 def resolve(
-    declarations: Sequence[Declaration],
+    declarations: Sequence[Declaration], remote: Collection[str] = ()
 ) -> tuple[dict[str, Contract], list[str]]:
     """Resolve: the contracts the host knows by identity, and the refusals.
 
     Each identity keeps the first class named for it, in the order of the
     declarations; a later app that names another class with that identity,
-    or provides it again, is refused naming the first.
+    or provides it again, is refused naming the first. A requirement is
+    met by the app that provides it or by a remote provider, one of the
+    identities ``remote`` names; a remote identity that no app requires, or
+    that an app provides, is refused (ADR 0014, the Resolve rows).
     """
     refusals: list[str] = []
     named: dict[str, tuple[Contract, str]] = {}
@@ -733,13 +772,26 @@ def resolve(
                     f"app {app}: provides: {identity} is provided by app "
                     f"{provider} too; in a host, one app provides a contract"
                 )
+    required = {c.identity for d in declarations for c in d.requires}
+    for identity in sorted(remote):
+        if identity not in required:
+            refusals.append(
+                f"{_checks.REMOTE}: {identity} is required by no hosted app; remove it"
+            )
+        if identity in providers:
+            refusals.append(
+                f"{_checks.REMOTE}: {identity} is provided by app "
+                f"{providers[identity]} in this host; a contract provided in the "
+                "host and remotely at once needs a routing policy other than "
+                "single, which arrives with step 6 (ADR 0016)"
+            )
     for declaration in declarations:
         for contract in declaration.requires:
-            if contract.identity not in providers:
+            if contract.identity not in providers and contract.identity not in remote:
                 refusals.append(
                     f"app {declaration.label}: requires: {contract.identity} has "
-                    "no provider; no app of this host provides it, so install "
-                    "the app that does"
+                    "no provider; no app of this host provides it and "
+                    f"{_checks.REMOTE} has no entry for it"
                 )
     return {identity: found for identity, (found, _) in named.items()}, refusals
 

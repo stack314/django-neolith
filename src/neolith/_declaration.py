@@ -253,7 +253,10 @@ class NeolithAppConfig(AppConfig):
             app on its own. ``False`` on this class and on a base class;
             ``True`` on a declaring class unless its own body sets it.
         provides: The contracts the app provides, one ``Provided`` each.
-        requires: The contract classes the app calls.
+        requires: The contract classes the app calls. The host finds each
+            one's provider: the app of the host that provides it, or the
+            remote provider the deployer names for it in
+            ``NEOLITH["REMOTE_PROVIDERS"]``.
         resources: The kinds of resource the app needs; ``"database"`` is
             the one kind admitted.
         batteries: The Django apps the app relies on, each by its dotted

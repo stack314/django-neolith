@@ -18,16 +18,21 @@ that ``default`` shortened (ADR 0009), ``neolith.E019`` for a principal
 backend that set-up could not build and ``neolith.E020`` for Django's cache
 middleware listed after the principal middleware (ADR 0023),
 ``neolith.E021`` for a caller backend or signing key that set-up
-refused (ADR 0027), ``neolith.W001`` for an admin class in no installed
-app, and ADR 0027's warnings ``neolith.W004`` (no caller backend),
-``neolith.W005`` (a principal backend that declares a ``neolith-`` header)
-and, under ``check --deploy``, ``neolith.W006`` (the shared-secret backend
-listed). ``neolith.E005``, the comparison of the settings the host builds,
+refused (ADR 0027), and for a hosted app that requires a remote provider's
+contract with no signing key (ADR 0027 Decision 9), ``neolith.W001`` for an
+admin class in no installed app, ``neolith.W002`` for a remote provider at a
+plain ``http`` url that is not loopback (ADR 0014), and ADR 0027's
+warnings ``neolith.W004`` (no caller backend), ``neolith.W005`` (a
+principal backend that declares a ``neolith-`` header) and, under
+``check --deploy``, ``neolith.W006`` (the shared-secret backend listed).
+``neolith.E005``, the comparison of the settings the host builds,
 runs at the first set-up only (``neolith._configure``), and Boot's ids are
 in ``neolith._boot``.
 """
 
+import ipaddress
 import math
+import re
 import sys
 from collections.abc import Iterable, Sequence
 from typing import Any, Final
@@ -39,7 +44,8 @@ from django.core import checks
 from django.db.backends.utils import strip_quotes
 from django.utils.module_loading import import_string
 
-from neolith import _caller, _databases, _naming, _principal
+from neolith import _caller, _databases, _http_transport, _naming, _principal
+from neolith._contracts import _IDENTITY
 from neolith._declaration import Declaration, declaration_of
 from neolith._serving import admin_code
 
@@ -48,6 +54,7 @@ __all__ = [
     "KEYS",
     "MISSING",
     "PRINCIPAL_MIDDLEWARE",
+    "REMOTE",
     "ROOT_MIDDLEWARE",
     "TAG",
     "admin_check",
@@ -67,11 +74,17 @@ __all__ = [
     "neolith_problems",
     "principal_check",
     "register",
+    "remote_check",
+    "remote_identities",
+    "remote_problems",
+    "remote_urls",
+    "remote_warnings",
     "request_deadline",
     "silenced_check",
     "silenced_problems",
     "table_name_check",
     "table_name_problems",
+    "unsigned_problems",
     "with_database",
 ]
 
@@ -90,11 +103,13 @@ _SHORTEST: Final = 0.001
 _LONGEST: Final = 9999999.999
 _DEADLINE: Final = 'NEOLITH["REQUEST_DEADLINE"]'
 # The key table of NEOLITH (ADR 0022 Decision 3, ADR 0023 for the principal
-# backends, and ADR 0027 for the caller backends and signing keys).
+# backends, ADR 0027 for the caller backends and signing keys, and ADR 0014
+# for the remote providers).
 KEYS: Final = (
     "CALLER_BACKENDS",
     "DATABASES",
     "PRINCIPAL_BACKENDS",
+    "REMOTE_PROVIDERS",
     "REQUEST_DEADLINE",
     "SIGNING_SECRETS",
     "UNDECLARED_APPS",
@@ -245,6 +260,8 @@ def neolith_problems(
             problems.extend(_caller.shape_problems(item))
         elif key == _caller.SIGNING:
             problems.extend(_caller.signing_problems(item, [d.label for d in hosted]))
+        elif key == _REMOTE_KEY:
+            problems.extend(remote_problems(item))
     if "DATABASES" not in entries:
         problems.extend(
             f"app {label}: no connection settings for its database"
@@ -304,6 +321,243 @@ def _undeclared_problems(value: object, hosted: Sequence[Declaration]) -> list[s
                 f"{_UNDECLARED}: {entry} is installed as a battery of {named[entry]}"
             )
     return problems
+
+
+# NEOLITH["REMOTE_PROVIDERS"] (ADR 0014, the admitted set).
+_REMOTE_KEY: Final = "REMOTE_PROVIDERS"
+REMOTE: Final = f'NEOLITH["{_REMOTE_KEY}"]'
+_TRANSPORT: Final = "neolith.transports.HTTPTransport"
+_ENTRY_KEYS: Final = ("BACKEND", "OPTIONS")
+_URL: Final = "url"
+# A refused key or name is shown only when it is written like a name: such
+# text is no url, so it holds no credential (ADR 0014 Decision 3).
+_NAME_LIKE: Final = re.compile(r"[A-Za-z0-9_.-]{1,80}", re.ASCII)
+
+
+def _name(value: object) -> str:
+    """A refused key or name for a message, never text that could hold a
+    secret: a ``str`` written like a name by its ``repr``, any other ``str``
+    as not shown, and anything else by its type alone.
+    """
+    if type(value) is str:
+        text: str = value
+        return repr(text) if _NAME_LIKE.fullmatch(text) else "(not shown)"
+    return f"of type {_type(value)}"
+
+
+def remote_problems(value: object) -> list[str]:
+    """Judge the form of ``NEOLITH["REMOTE_PROVIDERS"]`` (ADR 0014, the
+    builder's rows): a ``dict`` of one or more contract identities, each
+    mapped to a ``list`` of exactly one entry, a ``dict`` with exactly
+    ``BACKEND``, ``"neolith.transports.HTTPTransport"`` as written, and
+    ``OPTIONS``, a ``dict`` with exactly ``url``, an origin in its one
+    spelling. Every container is exactly the type named.
+
+    Every problem found is returned, those under a refused key included. No
+    message shows a refused ``url``, in whole or in part, nor a key or name
+    that is not written like one.
+    """
+    if type(value) is not dict:
+        return [f"{REMOTE}: expected a dict of contract identities, got {_type(value)}"]
+    entries: dict[object, object] = value
+    if not entries:
+        return [f"{REMOTE}: is empty; leave the key out"]
+    problems: list[str] = []
+    # Items are read, never looked up, so no key's own hooks run.
+    for key, providers in entries.items():
+        if type(key) is str and _IDENTITY.fullmatch(key):
+            where, named = f'{REMOTE}["{key}"]', key
+        else:
+            shown = _name(key)
+            problems.append(
+                f"{REMOTE}: key {shown}: expected a contract identity, such as "
+                "<contract>.v1"
+            )
+            where, named = f"{REMOTE}[{shown}]", "it"
+        problems.extend(_providers_problems(where, named, providers))
+    return problems
+
+
+def _providers_problems(where: str, named: str, value: object) -> list[str]:
+    if type(value) is not list:
+        return [f"{where}: expected a list of providers, got {_type(value)}"]
+    providers: list[object] = value
+    if not providers:
+        return [f"{where}: is empty; leave {named} out"]
+    problems: list[str] = []
+    if len(providers) > 1:
+        problems.append(
+            f"{where}: lists {len(providers)} providers; with the single routing "
+            "policy a contract has one provider, and routing between several "
+            "arrives with step 6 (ADR 0016)"
+        )
+    for index, entry in enumerate(providers):
+        problems.extend(_entry_problems(f"{where}[{index}]", entry))
+    return problems
+
+
+def _entry_problems(where: str, value: object) -> list[str]:
+    if type(value) is not dict:
+        return [
+            f"{where}: expected a dict with the keys BACKEND and OPTIONS, got "
+            f"{_type(value)}"
+        ]
+    entry: dict[object, object] = value
+    problems = _keys_problems(
+        where, entry, _ENTRY_KEYS, "the keys are BACKEND, OPTIONS"
+    )
+    backend = _naming.entry(entry, "BACKEND", MISSING)
+    if backend is not MISSING:
+        if type(backend) is not str:
+            problems.append(f'{where}["BACKEND"]: expected a str, got {_type(backend)}')
+        elif backend != _TRANSPORT:
+            problems.append(
+                f'{where}["BACKEND"]: {_name(backend)} is not a transport of this '
+                f"host; the one remote transport in 0.1 is {_TRANSPORT}"
+            )
+    options = _naming.entry(entry, "OPTIONS", MISSING)
+    if options is not MISSING:
+        problems.extend(_options_problems(f'{where}["OPTIONS"]', options))
+    return problems
+
+
+def _options_problems(where: str, value: object) -> list[str]:
+    if type(value) is not dict:
+        return [f"{where}: expected a dict, got {_type(value)}"]
+    options: dict[object, object] = value
+    problems = _keys_problems(
+        where, options, (_URL,), "the HTTP transport's options are url"
+    )
+    url = _naming.entry(options, _URL, MISSING)
+    if url is MISSING:
+        return problems
+    if type(url) is not str:
+        problems.append(f'{where}["url"]: expected a str, got {_type(url)}')
+        return problems
+    reason = _http_transport.origin_problem(url)
+    if reason is not None:
+        problems.append(f'{where}["url"]: is not an origin: {reason}')
+    return problems
+
+
+def _keys_problems(
+    where: str, held: dict[object, object], keys: Sequence[str], advice: str
+) -> list[str]:
+    """A missing key of ``keys``, and any other key, in ``held``."""
+    problems = [
+        f"{where}: unknown key {_name(key)}; {advice}"
+        for key in held
+        if type(key) is not str or key not in keys
+    ]
+    problems.extend(
+        f"{where}: missing key {key}" for key in keys if not _naming.holds(held, key)
+    )
+    return problems
+
+
+def remote_identities(neolith: object) -> tuple[frozenset[str], list[str]]:
+    """What Resolve reads of ``NEOLITH["REMOTE_PROVIDERS"]`` in ``neolith``:
+    the contract identities it names, and every problem of its form.
+
+    Resolve reads the key before the rest of ``NEOLITH`` is judged, so it
+    reports the form's problems with its own refusals: a requirement it
+    finds unmet may be one the deployer meant to list. The identities are
+    the keys that are contract identities, of a ``dict`` under that key of
+    a ``dict`` ``neolith``; none otherwise.
+    """
+    if type(neolith) is not dict:
+        return frozenset(), []
+    value = _naming.entry(neolith, _REMOTE_KEY, MISSING)
+    if value is MISSING:
+        return frozenset(), []
+    problems = remote_problems(value)
+    if type(value) is not dict:
+        return frozenset(), problems
+    entries: dict[object, object] = value
+    return frozenset(
+        key for key in entries if type(key) is str and _IDENTITY.fullmatch(key)
+    ), problems
+
+
+def remote_urls(neolith: dict[str, Any]) -> dict[str, str]:
+    """Each remote provider's identity with its ``url``, in a ``NEOLITH``
+    that passed ``neolith_problems``.
+    """
+    value: dict[str, list[dict[str, Any]]] = neolith.get(_REMOTE_KEY, {})
+    return {
+        identity: providers[0]["OPTIONS"][_URL] for identity, providers in value.items()
+    }
+
+
+def _loopback(url: str) -> bool:
+    """Whether an admitted ``url``'s host is ``localhost`` or a loopback
+    address; a name under ``.localhost`` is not (ADR 0014 Decision 3).
+    """
+    authority = url.partition("://")[2]
+    if authority.startswith("["):
+        host = authority[1 : authority.index("]")]
+    else:
+        host = authority.partition(":")[0]
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def remote_warnings(neolith: dict[str, Any]) -> list[str]:
+    """``neolith.W002``: each remote provider of a checked ``NEOLITH`` at a
+    plain ``http`` url whose host is not loopback. An admitted url holds no
+    credential, so it is shown.
+    """
+    return [
+        f'{REMOTE}["{identity}"]: {url} is plain HTTP to a host that is not '
+        "loopback; anyone who can watch the network can read and replay the "
+        "calling app's token (spec 03)"
+        for identity, url in sorted(remote_urls(neolith).items())
+        if url.startswith("http://") and not _loopback(url)
+    ]
+
+
+def unsigned_problems(
+    neolith: dict[str, Any], hosted: Sequence[Declaration]
+) -> list[str]:
+    """Each hosted app that requires a contract of a checked
+    ``NEOLITH["REMOTE_PROVIDERS"]`` and has no signing key, with the
+    message its call would get (ADR 0027 Decision 9).
+    """
+    remote = remote_urls(neolith)
+    signing: dict[str, object] = neolith.get(_caller.SIGNING, {})
+    return sorted(
+        _caller.no_signing_key(declaration.label, contract.identity)
+        for declaration in hosted
+        if declaration.label not in signing
+        for contract in declaration.requires
+        if contract.identity in remote
+    )
+
+
+def remote_check(**kwargs: object) -> list[checks.CheckMessage]:
+    """``neolith.W002``: a remote provider at a plain ``http`` url that is
+    not loopback; and ``neolith.E021``: a hosted app that requires a
+    contract of a remote provider and has no signing key, so set-up stops
+    rather than every such call failing with ``unauthenticated``.
+    """
+    if not _hosting():
+        return []
+    neolith = _checked_neolith()
+    if neolith is None:
+        return []
+    hosted = hosted_declarations(global_apps.get_app_configs())
+    found: list[checks.CheckMessage] = [
+        checks.Error(problem, id="neolith.E021")
+        for problem in unsigned_problems(neolith, hosted)
+    ]
+    return found + [
+        checks.Warning(problem, id="neolith.W002")
+        for problem in remote_warnings(neolith)
+    ]
 
 
 def silenced_problems(value: object) -> list[str]:
@@ -766,6 +1020,7 @@ def register() -> None:
         middleware_check,
         principal_check,
         caller_check,
+        remote_check,
         admin_check,
         database_check,
         default_check,
