@@ -259,12 +259,16 @@ def test_a_change_markdown_shows_no_text_for_is_refused(
     assert docs.same_text(original, staged) is not None
 
 
-def _mirrored(root: Path, text: str) -> tuple[dict[str, str], list[str]]:
+def _mirrored(
+    monkeypatch: pytest.MonkeyPatch, root: Path, text: str
+) -> tuple[dict[str, str], list[str]]:
     """Mirror ``text`` as CONTRIBUTING.md, beside a VISION.md, under ``root``.
 
     It goes through ``docs._mirror``, the step staging runs, so what is
-    checked is the proof staging reports.
+    checked is the proof staging reports. The commit is pinned, so that the
+    links are built with one wherever the tests run, not ``main``.
     """
+    monkeypatch.setattr(docs, "commit", lambda root: SHA)
     (root / "pyproject.toml").write_text(
         f'[project]\nurls = {{Repository = "{REPO}"}}\n', encoding="utf-8"
     )
@@ -305,12 +309,12 @@ def _mirrored(root: Path, text: str) -> tuple[dict[str, str], list[str]]:
     ],
 )
 def test_a_link_the_rewrite_misses_fails_closed(
-    tmp_path: Path, text: str, refusal: str
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, text: str, refusal: str
 ) -> None:
     # Each input is one where a regex of the rewrite reads the Markdown
     # differently from markdown-it-py; the proof refuses the result, and
     # staging reports it once.
-    _, problems = _mirrored(tmp_path, text)
+    _, problems = _mirrored(monkeypatch, tmp_path, text)
     assert len([problem for problem in problems if refusal in problem]) == 1, problems
     assert len(problems) == len(set(problems)), problems
 
@@ -325,11 +329,11 @@ def test_a_link_the_rewrite_misses_fails_closed(
     ],
 )
 def test_a_bad_link_the_rewrite_finds_is_reported_once(
-    tmp_path: Path, link: str, problem: str
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, link: str, problem: str
 ) -> None:
     # The rewrite and the proof both read this link; only the proof's
     # problems are reported, so staging names it once, not once for each.
-    _, problems = _mirrored(tmp_path, f"See {link}\n")
+    _, problems = _mirrored(monkeypatch, tmp_path, f"See {link}\n")
     assert len(problems) == 1, problems
     assert problems[0].startswith("CONTRIBUTING.md: links to "), problems
     assert problems[0].endswith(problem), problems
@@ -344,13 +348,14 @@ def test_a_bad_link_the_rewrite_finds_is_reported_once(
     ],
 )
 def test_a_link_to_an_unmirrored_file_with_a_blank_is_proved(
-    tmp_path: Path, link: str
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, link: str
 ) -> None:
     (tmp_path / "docs" / "site").mkdir(parents=True)
     (tmp_path / "docs" / "site" / "a b.txt").write_text("x", encoding="utf-8")
-    pages, problems = _mirrored(tmp_path, f"See {link}\n")
+    pages, problems = _mirrored(monkeypatch, tmp_path, f"See {link}\n")
     assert problems == []
-    assert "/docs/site/a b.txt>" in pages["project/contributing.md"]
+    blob = f"<{REPO}/blob/{SHA}/docs/site/a b.txt>"
+    assert blob in pages["project/contributing.md"]
 
 
 def test_every_mirrored_target_is_proved() -> None:
