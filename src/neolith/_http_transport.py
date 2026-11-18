@@ -330,8 +330,13 @@ def origin_problem(url: str) -> str | None:
     origin, within ADR 0014's grammar: ``http`` or ``https``, a host name
     of RFC 1123 labels, a dotted-decimal IPv4 address or a compressed IPv6
     address that is neither zoned nor IPv4-mapped, and a port that is not
-    the scheme's default. The reason is fixed text, the first of ADR 0014's
-    list that applies, and never shows any part of the value.
+    the scheme's default. A label that begins with ``xn--`` is taken as
+    written, never decoded: an A-label keeps its spelling under the URL
+    Standard, while a Fake A-label such as ``xn--zz``, whose host the URL
+    Standard refuses, is admitted and fails at the first call, as a
+    misspelt host name does (ADR 0014, fact 11). The reason is fixed text,
+    the first of ADR 0014's list that applies, and never shows any part of
+    the value.
     """
     scheme, separator, rest = url.partition("://")
     if not separator or scheme not in _DEFAULT_PORTS:

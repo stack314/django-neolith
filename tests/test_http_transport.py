@@ -911,6 +911,29 @@ def test_an_origin_in_its_one_spelling_is_admitted(url: str) -> None:
 
 
 @pytest.mark.parametrize(
+    "url",
+    [
+        # A-labels, which the URL Standard keeps as they are written.
+        "http://xn--mnchen-3ya.example",
+        "https://xn--zca:8443",
+        # Fake A-labels: not valid IDNA, so the URL Standard refuses the
+        # host; taken as written, and found at the first call.
+        "http://xn--zz",
+        "http://xn--a-ecp.example",
+    ],
+)
+def test_a_label_that_begins_with_xn_is_taken_as_written(url: str) -> None:
+    assert origin_problem(url) is None
+
+
+def test_a_name_written_in_unicode_is_refused_so_its_a_label_is_its_one_spelling() -> (
+    None
+):
+    assert origin_problem("http://münchen.example") == _http_transport.CASE
+    assert origin_problem("http://xn--mnchen-3ya.example") is None
+
+
+@pytest.mark.parametrize(
     ("url", "reason"),
     [
         ("HTTP://localhost", _http_transport.SCHEME),
