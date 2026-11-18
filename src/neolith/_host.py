@@ -236,6 +236,7 @@ def set_up(config: AppConfig) -> None:
             for problem in _configure.settings_problems(configs)
         ]
     with _LOCK:
+        _name_entries()
         installed = frozenset(c.name for c in configs) | {
             f"{type(c).__module__}.{type(c).__qualname__}" for c in configs
         }
@@ -304,22 +305,56 @@ def _loading_app() -> str | None:
     Otherwise the frame of ``Apps.populate`` for Django's global registry
     names it: once app modules are imported, its ``app_config`` is the app
     whose models are imported or whose ``ready()`` runs; before, its
-    ``entry`` is the entry of ``INSTALLED_APPS`` being imported. The same at
-    Django 5.2 and 6.1.
+    ``entry`` is the entry of ``INSTALLED_APPS`` being imported, which
+    ``_name_entries`` turns into the app's name at that load's set-up. The
+    same at Django 5.2 and 6.1.
     """
     validating = _VALIDATING.get()
     if validating is not None:
         return validating
+    loading = _populating()
+    if loading is None:
+        return None
+    found = loading.get("app_config" if global_apps.apps_ready else "entry")
+    if isinstance(found, AppConfig):
+        return found.name
+    return found if type(found) is str else None
+
+
+def _name_entries() -> None:
+    """Tie to its app's name each call site tied to an entry of the
+    ``INSTALLED_APPS`` this set-up's load imported, so that a later set-up
+    of the app matches it however the entry spelt the app: a module, a
+    config class, a class re-exported or aliased, or a config whose ``name``
+    differs from its package.
+
+    Phase 1 of ``Apps.populate`` adds one config per entry, in order.
+    """
+    loading = _populating()
+    entries = None if loading is None else loading.get("installed_apps")
+    if entries is None:
+        return
+    names: dict[str, str] = {}
+    for entry, made in zip(entries, global_apps.app_configs.values(), strict=False):
+        if type(entry) is str:
+            names[entry] = made.name
+    for places in _RECORDED.values():
+        for place, loads in places.items():
+            if any(app in names for app in loads):
+                places[place] = {
+                    app if app is None else names.get(app, app): None for app in loads
+                }
+
+
+def _populating() -> Mapping[str, object] | None:
+    """The local variables of ``Apps.populate`` for Django's global registry,
+    if this thread runs it.
+    """
     frame = inspect.currentframe()
     try:
         while frame is not None:
             if frame.f_code is _POPULATE and frame.f_locals.get("self") is global_apps:
-                found = frame.f_locals.get(
-                    "app_config" if global_apps.apps_ready else "entry"
-                )
-                if isinstance(found, AppConfig):
-                    return found.name
-                return found if type(found) is str else None
+                return frame.f_locals
             frame = frame.f_back
         return None
     finally:

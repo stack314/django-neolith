@@ -1631,6 +1631,85 @@ def test_each_set_up_after_any_override_decides_as_in_a_fresh_process(
     assert printed.splitlines() == [[*fresh, "admitted"][i] for i in walk]
 
 
+_PLAIN_CONFIG = """
+from django.apps import AppConfig
+
+
+class Config(AppConfig):
+    name = "{name}"
+    default = True
+"""
+
+
+@pytest.mark.spec("APP-14", "APP-15")
+@pytest.mark.parametrize(
+    "form", ["module", "config class", "re-exported class", "alias", "other name"]
+)
+def test_an_app_named_in_any_form_asks_at_import_and_is_refused(
+    write_app: WriteApp, form: str
+) -> None:
+    # The app's package asks for nope.v1 when Django imports the entry of
+    # INSTALLED_APPS, in each way an entry can name the app; a fresh set-up
+    # and an override are refused, and the first apps restored are not.
+    asks = 'from neolith import connect\n\nconnect("nope.v1")\n'
+    if form == "other name":
+        real = write_app("")
+        package = write_app(_PLAIN_CONFIG.replace("{name}", real), __init__=asks)
+        entry = package
+    else:
+        package = write_app(
+            _PLAIN_CONFIG.replace("{name}", "{package}")
+            # Django refuses a module entry whose apps module has two defaults.
+            + ("\nDefault = Config\n" if form == "alias" else ""),
+            __init__=asks
+            + ("from .apps import Config\n" if form == "re-exported class" else ""),
+        )
+        entry = {
+            "module": package,
+            "config class": f"{package}.apps.Config",
+            "re-exported class": f"{package}.Config",
+            "alias": f"{package}.apps.Default",
+        }[form]
+    neolith = {
+        **host_apps.NEOLITH,
+        "UNDECLARED_APPS": [*host_apps.NEOLITH["UNDECLARED_APPS"], entry],
+    }
+    fresh = in_built_host(
+        """
+        import django
+
+        try:
+            django.setup()
+            print("admitted")
+        except Exception as error:
+            print(type(error).__name__)
+        """,
+        host_apps.HOSTED,
+        {"NEOLITH": neolith},
+    )
+    overridden = in_built_host(
+        f"""
+        import django
+        from django.test.utils import override_settings
+
+        django.setup()
+        installed = list(settings.INSTALLED_APPS)
+        for added in ([{entry!r}], [], [{entry!r}]):
+            try:
+                with override_settings(INSTALLED_APPS=[*added, *installed]):
+                    print("admitted")
+            except Exception as error:
+                print(type(error).__name__)
+        """,
+        host_apps.HOSTED,
+        {"NEOLITH": host_apps.NEOLITH},
+    )
+    assert fresh.splitlines() == ["DeclarationError"]
+    # In an override, Django imports the entry before neolith's app is made,
+    # so connect() is refused at once against the restored table (APP-15).
+    assert overridden.splitlines() == ["UsageError", "admitted", "UsageError"]
+
+
 @pytest.mark.spec("APP-14")
 def test_a_place_two_apps_ask_from_belongs_to_both(write_app: WriteApp) -> None:
     # One helper line asks for nope.v1 on behalf of two apps, each added by
