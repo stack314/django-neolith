@@ -1,0 +1,59 @@
+[
+  {
+    "name": "error_message_at_its_edges",
+    "part": "contract",
+    "state": "An app of the host that may call reference.v1.",
+    "procedure": "1. For each kind of refuse and each of the messages (empty, one character, quotes, controls, line separators, U+FFFF, astral characters, composed and decomposed text, 100,000 characters) call refuse with that kind and message.",
+    "expected": "Each leg's caller receives that kind, that message and, for gone, a Gone whose reason is the message; no other kind has a detail. The two legs give the same outcome (CNF-1).",
+    "requirements": [
+      "CNF-1",
+      "CON-25",
+      "CON-26",
+      "CON-27",
+      "CON-43",
+      "HTTP-1"
+    ]
+  },
+  {
+    "name": "error_generated",
+    "part": "contract",
+    "state": "An app of the host that may call reference.v1.",
+    "procedure": "1. Draw a kind and a message of Unicode text with no lone surrogate. 2. Call refuse with them.",
+    "expected": "Each leg's caller receives that kind and that message, over both transports.",
+    "requirements": [
+      "CNF-1",
+      "CON-25",
+      "CON-26",
+      "CON-27",
+      "CON-43",
+      "HTTP-1"
+    ]
+  },
+  {
+    "name": "failure_is_internal_and_names_nothing",
+    "part": "contract",
+    "state": "An app of the host that may call reference.v1, in a scope with a timeout of 10 seconds.",
+    "procedure": "1. Call boom, then leak.",
+    "expected": "Each leg's caller receives internal with the fixed text and the call's trace identifier, no cause and no context, and the leg's host has logged the failure under that identifier. The two legs give the same outcome (CNF-1).",
+    "requirements": [
+      "CNF-1",
+      "CON-44",
+      "CON-46",
+      "HTTP-1",
+      "TRN-18"
+    ]
+  },
+  {
+    "name": "error_then_reply",
+    "part": "contract",
+    "state": "An app of the host that may call reference.v1.",
+    "procedure": "1. In one scope call refuse with conflict. 2. In the same scope call echo with a Values.",
+    "expected": "The first call fails with conflict and the second returns the value sent, over both transports.",
+    "requirements": [
+      "CNF-1",
+      "CON-43",
+      "HTTP-1",
+      "TRN-3"
+    ]
+  }
+]

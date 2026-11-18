@@ -4,6 +4,10 @@ Resolve and Validate are checked on built registries, with ``build``, so a
 test needs no host of its own. Set-up in Django's global registry runs on
 the test host (``tests.host_apps``) in this process, since a process hosts
 one set of apps, and on any other set in a fresh process.
+
+These tests stay outside the contract suite (CONTRIBUTING T2): they check the
+host's own apps, what set-up does with them, and how it refuses a mistake in
+them, not what a contract's semantics are over each transport.
 """
 
 import copy

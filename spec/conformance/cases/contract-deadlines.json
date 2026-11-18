@@ -1,0 +1,59 @@
+[
+  {
+    "name": "deadline_reaches_the_provider",
+    "part": "contract",
+    "state": "An app of the host that may call reference.v1.",
+    "procedure": "1. In a scope with no timeout, one of 10 seconds, of half a second, and of more than the cap, call seen.",
+    "expected": "The provider sees a deadline exactly when the scope has a timeout, over both transports.",
+    "requirements": [
+      "CNF-1",
+      "HTTP-1",
+      "TRN-27",
+      "TRN-29",
+      "TRN-36",
+      "TRN-48"
+    ]
+  },
+  {
+    "name": "deadline_passed_before_the_call",
+    "part": "contract",
+    "state": "An app of the host that may call reference.v1. Every account the case names is new to the reference provider.",
+    "procedure": "1. In a scope with a timeout of zero or less, call deposit of 1 on a new account. 2. Read that account's total in-process.",
+    "expected": "Each leg fails with timeout and is never sent: the total is 0. The two legs give the same outcome (CNF-1).",
+    "requirements": [
+      "CNF-1",
+      "HTTP-1",
+      "TRN-28",
+      "TRN-4",
+      "TRN-48"
+    ]
+  },
+  {
+    "name": "deadline_passed_in_the_scope",
+    "part": "contract",
+    "state": "An app of the host that may call reference.v1. Every account the case names is new to the reference provider.",
+    "procedure": "1. In a scope with a timeout of 0.2 seconds call stall. 2. In the same scope call deposit of 1 on a new account. 3. Read that account's total in-process.",
+    "expected": "Both calls fail with timeout, the second without being sent: the total is 0. The two legs give the same outcome (CNF-1).",
+    "requirements": [
+      "CNF-1",
+      "HTTP-1",
+      "TRN-28",
+      "TRN-38",
+      "TRN-4"
+    ]
+  },
+  {
+    "name": "deadline_passed_leaves_the_next_scope_fit",
+    "part": "contract",
+    "state": "An app of the host that may call reference.v1. Every account the case names is new to the reference provider.",
+    "procedure": "1. In a scope with a timeout of 0.1 seconds call stall. 2. In a new scope with a timeout of 10 seconds call deposit of 3 on a new account. 3. Read that account's total in-process.",
+    "expected": "The first call fails with timeout; the second returns a total of 3 over both transports.",
+    "requirements": [
+      "CNF-1",
+      "HTTP-1",
+      "TRN-38",
+      "TRN-4",
+      "TRN-48"
+    ]
+  }
+]

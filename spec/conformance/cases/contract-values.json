@@ -1,0 +1,48 @@
+[
+  {
+    "name": "value_at_its_edges",
+    "part": "contract",
+    "state": "An app of the host that may call reference.v1.",
+    "procedure": "1. For each edge of a form (the integer and number ranges, a decimal's scale and length, every byte value, a string of controls and astral characters, timestamps at years 1 and 9999 and at the extreme offsets, the ends of the date and duration ranges, each optional form empty) call echo with a Values holding it. 2. Compare each reply with what was sent.",
+    "expected": "Each reply holds the sent value by its portable form and exact types, over both transports: -0 comes back as 0, a decimal keeps its trailing zeros, a timestamp keeps its instant.",
+    "requirements": [
+      "CNF-1",
+      "CON-34",
+      "CON-35",
+      "CON-37",
+      "HTTP-1",
+      "HTTP-41",
+      "TRN-1",
+      "TRN-16"
+    ]
+  },
+  {
+    "name": "value_the_description_admits",
+    "part": "contract",
+    "state": "An app of the host that may call reference.v1.",
+    "procedure": "1. Draw Values from the committed description of reference.v1. 2. Call echo with each. 3. Compare each reply with what was sent.",
+    "expected": "Every value the description admits comes back as it went, over both transports.",
+    "requirements": [
+      "CNF-1",
+      "CON-16",
+      "CON-34",
+      "HTTP-1",
+      "HTTP-41",
+      "TRN-1",
+      "TRN-16"
+    ]
+  },
+  {
+    "name": "value_refused_at_the_caller",
+    "part": "contract",
+    "state": "An app of the host that may call reference.v1.",
+    "procedure": "1. For each value no form admits (an integer outside 2^53-1, a number that is not finite, a decimal of 35 digits, a timestamp with no offset, a lone surrogate in a string or a map key, a boolean or text for an integer, text for an enum, a record of another kind) call echo with it, built without validation.",
+    "expected": "The caller refuses each with an error that is not a contract error, of one type over both transports.",
+    "requirements": [
+      "CNF-1",
+      "HTTP-1",
+      "TRN-14",
+      "TRN-15"
+    ]
+  }
+]
