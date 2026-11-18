@@ -102,6 +102,8 @@ def _with(name: str, value: str) -> list[tuple[str, str]]:
 REFUSED_FIELDS = {
     "a CR LF in a value": _with("Authorization", TOKEN + "\r\nX-A: b"),
     "no Authorization": list(FIELDS[1:]),
+    "no Idempotency-Key": [FIELDS[0], FIELDS[1], FIELDS[3]],
+    "no traceparent": list(FIELDS[:3]),
     "out of order": [FIELDS[0], FIELDS[2], FIELDS[1]],
     "twice": [*FIELDS, FIELDS[3]],
     "a name not admitted": [*FIELDS, ("User-Agent", "neolith")],
@@ -135,7 +137,7 @@ ADMITTED_FIELDS = {
     "a multi-tenant tracestate key": [*FIELDS, ("tracestate", "t0@sys=v, b=w")],
     "a token of 4096": _with("Authorization", "Bearer a.b." + "c" * 4092),
     "a principal": [FIELDS[0], ("Neolith-Principal", "eyJ9"), *FIELDS[1:]],
-    "Authorization alone": [FIELDS[0]],
+    "only the fields every call carries": [FIELDS[0], FIELDS[2], FIELDS[3]],
 }
 
 
@@ -1334,3 +1336,129 @@ def test_a_client_error_copies_and_pickles_with_its_fields() -> None:
             "reading",
             "OSError: 'x'",
         )
+
+
+@pytest.mark.spec("HTTP-6", "TRN-64")
+@pytest.mark.parametrize(
+    "line",
+    [
+        b"X-A:" + b" " * 65000 + b"\x01",
+        b"X-A:" + b"\t" * 65000 + b"\x01",
+        b"X-A: a" + b" a" * 32000 + b"\x01",
+        b"X" * 65000 + b" :",
+    ],
+    ids=["spaces", "tabs", "words", "name"],
+)
+def test_a_hostile_field_line_is_refused_in_linear_time(
+    provide: Callable[..., tuple[Pool, Provider]], line: bytes
+) -> None:
+    pool, _ = provide(answer(b"HTTP/1.1 200 OK\r\n" + line + b"\r\n\r\n"))
+    started = now()
+    error = fails(pool, deadline=started + 5)
+    assert error.message.endswith("did not answer in HTTP/1.1")
+    assert now() - started < 1
+
+
+@pytest.mark.filterwarnings(
+    "ignore:This process .* is multi-threaded:DeprecationWarning"
+)
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="fork is POSIX only")
+def test_a_forked_child_gets_a_pool_while_another_thread_held_the_setups_lock() -> None:
+    pools = Pools()
+    held = threading.Event()
+    release = threading.Event()
+
+    def hold_the_lock() -> None:
+        with pools._lock:
+            held.set()
+            release.wait(10)
+
+    holder = threading.Thread(target=hold_the_lock)
+    holder.start()
+    assert held.wait(10)
+    child = os.fork()
+    if child == 0:  # pragma: no cover (the child's outcome is its exit status)
+        status = 1
+        try:
+            pool = pools.pool(Origin.parse("http://b.test"))
+            status = 0 if pool.take() is None else 2
+        finally:
+            os._exit(status)
+    release.set()
+    holder.join(10)
+    waited = threading.Event()
+    for _ in range(100):
+        done, code = os.waitpid(child, os.WNOHANG)
+        if done:
+            break
+        waited.wait(0.05)
+    else:
+        os.kill(child, 9)
+        os.waitpid(child, 0)
+        pytest.fail("the child waited on the parent's lock")
+    assert os.waitstatus_to_exitcode(code) == 0
+    pools.close()
+
+
+def test_a_resolution_thread_that_cannot_start_is_unavailable_and_forgotten(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real = threading.Thread.start
+    refused: list[str] = []
+
+    def start(thread: threading.Thread) -> None:
+        if not refused:
+            refused.append(thread.name)
+            raise RuntimeError("can't start new thread")
+        real(thread)
+
+    def resolve(*args: object) -> list[object]:
+        raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+
+    monkeypatch.setattr(threading.Thread, "start", start)
+    monkeypatch.setattr(_http, "_getaddrinfo", resolve)
+    pool = Pool(Origin.parse("http://inventory.test"))
+    first = fails(pool, deadline=now() + 5)
+    assert first.message.endswith("could not be reached: its name did not resolve")
+    assert first.cause.startswith("RuntimeError")
+    assert pool._lookup is None
+    second = fails(pool, deadline=now() + 5)
+    assert second.message.endswith("could not be reached: its name did not resolve")
+    assert second.cause.startswith("gaierror")
+    assert refused == ["neolith-resolve"]
+
+
+class GatedLock:
+    """A lock at which the thread named "giver" stops until the test lets it on."""
+
+    def __init__(self) -> None:
+        self.inner = threading.Lock()
+        self.arrived = threading.Event()
+        self.gate = threading.Event()
+
+    def __enter__(self) -> None:
+        if threading.current_thread().name == "giver":
+            self.arrived.set()
+            self.gate.wait(10)
+        self.inner.acquire()
+
+    def __exit__(self, *exc: object) -> None:
+        self.inner.release()
+
+
+def test_a_connection_given_back_while_the_pool_closes_is_closed() -> None:
+    pool = Pool(Origin.parse("http://inventory.test"))
+    gated = GatedLock()
+    pool._lock = gated  # type: ignore[assignment]
+    a, b = socket.socketpair()
+    giver = threading.Thread(
+        target=pool.give, args=(_http._Connection(a),), name="giver"
+    )
+    giver.start()
+    assert gated.arrived.wait(10)
+    pool.close()
+    gated.gate.set()
+    giver.join(10)
+    assert a.fileno() == -1
+    assert pool._idle == []
+    b.close()

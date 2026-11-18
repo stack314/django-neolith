@@ -385,3 +385,35 @@ def test_a_body_to_the_end_needs_close_notify(
             "the provider at https://provider.test did not answer in HTTP/1.1"
         )
         assert error.cause
+
+
+@pytest.mark.spec("TRN-65")
+def test_an_early_refusal_on_a_reused_tls_connection_is_read_and_never_resent(
+    ca: trustme.CA,
+    trust: Callable[[Trust], None],
+    secure: Callable[..., tuple[Pool, Provider]],
+) -> None:
+    trust(ca.configure_trust)
+    server = serve(ca.issue_cert("provider.test"))
+    heads: list[bytes] = []
+    refusal = (
+        b"HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 2\r\n\r\n{}"
+    )
+
+    def script(sock: socket.socket) -> None:
+        read_request(sock)
+        sock.sendall(OK)
+        data = b""
+        while b"\r\n\r\n" not in data:
+            data += sock.recv(65536)
+        heads.append(data[: data.index(b"\r\n")])
+        sock.sendall(refusal)
+
+    pool, provider = secure(
+        tls(server, script, close_notify=False), tls(server, script)
+    )
+    assert call(pool) == Response(200, b"{}")
+    big = b"[" + b"0," * 2_000_000 + b"0]"
+    assert call(pool, body=big) == Response(401, b"{}")
+    assert provider.opened == 1
+    assert heads == [b"POST /inventory/v1/reserve HTTP/1.1"]

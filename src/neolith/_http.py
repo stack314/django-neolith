@@ -47,6 +47,9 @@ FIELD_LIMIT = 100  # field lines in one header or trailer section
 LOG_LIMIT = 200  # characters of a failure's text kept for the log
 _KEEPALIVE = (("TCP_KEEPIDLE", 60), ("TCP_KEEPINTVL", 10), ("TCP_KEEPCNT", 6))
 _CHUNK = 65536  # bytes asked of one recv_into
+# Bytes given to one send over TLS: one record's plaintext at most, so a send
+# that fails has delivered nothing the provider can decrypt.
+_RECORD = 16384
 
 # Seams for the tests: the clock, the resolver and the TLS context's builder.
 _now = _context.now
@@ -78,15 +81,14 @@ _FIELDS: Final = {
     ),
 }
 _KEY_LIMIT = _context.KEY_LIMIT
+# Every call carries these; the others only when the call has a value for them.
+_REQUIRED = frozenset({"Authorization", "Idempotency-Key", "traceparent"})
 
 # The response the client accepts (ADR 0028, the response table).
 _STATUS = re.compile(rb"HTTP/1\.([01]) ([1-5][0-9]{2}) [\t\x20-\x7e\x80-\xff]*")
 _TOKEN = rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+"
-_FIELD = re.compile(
-    rb"(" + _TOKEN + rb"):[ \t]*"
-    rb"((?:[\x21-\x7e\x80-\xff](?:[\t\x20-\x7e\x80-\xff]*[\x21-\x7e\x80-\xff])?)?)"
-    rb"[ \t]*"
-)
+_NAME = re.compile(_TOKEN)
+_VALUE = re.compile(rb"[\t\x20-\x7e\x80-\xff]*")  # field-value with its OWS
 _QUOTED = rb'"(?:[\t \x21\x23-\x5b\x5d-\x7e\x80-\xff]|\\[\t \x21-\x7e\x80-\xff])*"'
 _CHUNK_SIZE = re.compile(
     rb"([0-9A-Fa-f]{1,16})(?:[ \t]*;[ \t]*"
@@ -260,6 +262,7 @@ class _Lookup:
 Opener = Callable[[float], socket.socket]
 
 _POOLS: "weakref.WeakSet[Pool]" = weakref.WeakSet()
+_SETUPS: "weakref.WeakSet[Pools]" = weakref.WeakSet()
 
 
 @final
@@ -333,8 +336,8 @@ class Pool:
         """Keep ``connection`` for the next call, or close it."""
         self._here()
         surplus: _Connection | None = connection
-        if not self._closed:
-            with self._lock:
+        with self._lock:
+            if not self._closed:
                 self._idle.append((connection, _now()))
                 surplus = self._idle.pop(0)[0] if len(self._idle) > IDLE_LIMIT else None
         if surplus is not None:
@@ -342,8 +345,8 @@ class Pool:
 
     def close(self) -> None:
         """Close the idle connections now, and each one in use when its call ends."""
-        self._closed = True
         with self._lock:
+            self._closed = True
             idle, self._idle = self._idle, []
         for connection, _ in idle:
             connection.close()
@@ -354,12 +357,16 @@ class Pool:
             lookup = self._lookup
             if lookup is None:
                 lookup = self._lookup = _Lookup()
-                threading.Thread(
-                    target=self._run_lookup,
-                    args=(lookup,),
-                    name="neolith-resolve",
-                    daemon=True,
-                ).start()
+                try:
+                    threading.Thread(
+                        target=self._run_lookup,
+                        args=(lookup,),
+                        name="neolith-resolve",
+                        daemon=True,
+                    ).start()
+                except RuntimeError as error:
+                    self._lookup = None
+                    raise _Unreachable("its name did not resolve", error) from None
         left = until - _now()
         if left <= 0 or not lookup.done.wait(left):
             stop()
@@ -450,6 +457,7 @@ class Pools:
         self._pools: dict[str, Pool] = {}
         self._context: ssl.SSLContext | None = None
         self._lock = threading.Lock()
+        _SETUPS.add(self)
 
     def pool(self, origin: Origin) -> Pool:
         """The pool for ``origin``, built the first time it is asked for."""
@@ -488,7 +496,14 @@ def _make_context() -> ssl.SSLContext:
 
 
 def _after_fork() -> None:
-    """Empty every pool in a forked child; its resolution threads are gone."""
+    """Empty every pool in a forked child and give every lock a new one.
+
+    The child has only the thread that forked, so a lock another thread held
+    at the fork would never be released, and a resolution in flight never
+    ends.
+    """
+    for setup in list(_SETUPS):
+        setup._lock = threading.Lock()
     for pool in list(_POOLS):
         pool._reset()
 
@@ -643,6 +658,9 @@ def _open(pool: Pool, deadline: float | None) -> _Connection:
             suppress_ragged_eofs=False,
             do_handshake_on_connect=False,
         )
+    except (OSError, ValueError) as error:
+        sock.close()
+        raise _unreachable(origin, "the TLS handshake failed", error) from None
     except BaseException:
         sock.close()
         raise
@@ -686,8 +704,9 @@ def _head(
         ):
             raise ValueError(f"the {name} field does not match its grammar")
         lines.append(f"{name}: {value}")
-    if not given or given[0][0] != "Authorization":
-        raise ValueError("the Authorization field is missing")
+    missing = _REQUIRED.difference(name for name, _ in given)
+    if missing:
+        raise ValueError(f"the field {sorted(missing)[0]} is missing")
     return ("\r\n".join(lines) + "\r\n\r\n").encode("ascii")
 
 
@@ -713,14 +732,18 @@ def _send(
     The error is returned, not raised, so that a response the provider sent
     before it, an early refusal, can still be read. ``_Unsent`` is raised for
     a first ``send`` on a reused connection (``first``) that took no byte.
+    Over TLS each ``send`` is given one record at most: ``SSLSocket.send``
+    reports no count when it fails, and a record that was not written whole
+    holds nothing the provider can read.
     """
     sock = connection.sock
+    step = _RECORD if isinstance(sock, ssl.SSLSocket) else len(data)
     done = 0
     with memoryview(data) as view:
         while done < len(view):
             try:
                 sock.settimeout(_left(deadline))
-                done += sock.send(view[done:])
+                done += sock.send(view[done : done + step])
             except TimeoutError as error:
                 raise _stop("timeout", _LATE, "writing", _cause(error)) from None
             except OSError as error:
@@ -793,10 +816,10 @@ def _section(
             return fields
         if len(fields) == FIELD_LIMIT:
             raise _Outside(f"more than {FIELD_LIMIT} field lines")
-        found = _FIELD.fullmatch(line)
-        if found is None:
+        name, colon, value = line.partition(b":")
+        if not colon or not _NAME.fullmatch(name) or not _VALUE.fullmatch(value):
             raise _Outside(f"a field line is not admitted: {line!r}")
-        fields.append((found[1].lower(), found[2]))
+        fields.append((name.lower(), value.strip(b" \t")))
 
 
 def _response(connection: _Connection, deadline: float | None) -> tuple[Response, bool]:
