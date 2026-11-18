@@ -401,16 +401,22 @@ def _tied(tie: str | None, installed: frozenset[str]) -> bool:
 def _module_ties(module: str, *loads: Sequence[AppConfig]) -> set[str | None]:
     """What a request made as ``module`` was imported belongs to besides the
     app whose loading imported it: the app Django's own rule finds for the
-    module among the configs of ``loads``, in turn; nothing more when the
-    module lies in an app installed at an earlier set-up but not found here;
-    else no app, so that every set-up checks it (ADR 0029).
+    module among the configs of ``loads``, in turn, when the module is that
+    app's apps or models module, which Django imports for it; nothing more
+    for another module of an app, found here or installed at an earlier
+    set-up; else no app, so that every set-up checks it (ADR 0029).
     """
     if not module:
         return {None}
     for configs in loads:
         found = _containing(module, configs)
         if found is not None:
-            return {found.name}
+            # Django itself imports an app's apps and models modules, so a
+            # fresh set-up of that app runs the request again; another module
+            # of it only when some app's code imports it, which the loading
+            # app's tie stands for.
+            django_imports = (f"{found.name}.apps", f"{found.name}.models")
+            return {found.name} if module in django_imports else set()
     if any(_within(module, app) for app in _ONCE_INSTALLED):
         return set()
     return {None}

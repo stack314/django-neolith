@@ -1961,6 +1961,32 @@ def test_a_request_made_while_a_package_imports_belongs_to_apps_below_it(
 
 
 @pytest.mark.spec("APP-14")
+@pytest.mark.parametrize("module", ["models", "apps"])
+def test_a_helper_of_an_app_another_app_imports_does_not_refuse_its_own_app(
+    write_app: WriteApp, module: str
+) -> None:
+    # One app's models or apps module imports a helper of another app, which
+    # asks for nope.v1. The other app alone never imports the helper, so it
+    # is admitted, after a refused set-up and after a load that stopped.
+    owner = write_app("", helpers=_UNDECLARED_CONNECTS)
+    importer = write_app(
+        f"import {owner}.helpers\n" + _PLAIN_CONFIG.replace("{name}", "{package}")
+        if module == "apps"
+        else "",
+        models=f"import {owner}.helpers\n" if module == "models" else "",
+    )
+    assert _walk([[importer, owner], [owner], [importer]]) == [
+        "DeclarationError",
+        "admitted",
+        "DeclarationError",
+    ]
+    assert _walk([[importer, "no_such_app"], [owner]]) == [
+        "ModuleNotFoundError",
+        "admitted",
+    ]
+
+
+@pytest.mark.spec("APP-14")
 def test_a_place_two_apps_ask_from_belongs_to_both(write_app: WriteApp) -> None:
     # One helper line asks for nope.v1 on behalf of two apps, each added by
     # its own override: each override is refused every time it is entered.
