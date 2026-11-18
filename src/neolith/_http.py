@@ -30,9 +30,10 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Final, Literal, NoReturn, final
 
-from neolith import _context
+from neolith import _context, _naming
 from neolith._connector import _LATE, _NOT_SENT
 from neolith._contracts import _SEGMENT
+from neolith._frozen import once
 
 __all__ = ["ClientError", "Origin", "Pool", "Pools", "Response", "exchange"]
 
@@ -123,6 +124,7 @@ class ClientError(Exception):
 
 
 @final
+@once
 @dataclass(frozen=True, slots=True)
 class Response:
     """The final response of a call: its status and its body's bytes."""
@@ -132,6 +134,7 @@ class Response:
 
 
 @final
+@once
 @dataclass(frozen=True, slots=True)
 class Origin:
     """A provider's origin, from a url that is exactly its serialisation.
@@ -209,7 +212,7 @@ def _cause(error: BaseException | None) -> str:
     """The class of ``error`` and the ``repr`` of its text, cut for the log."""
     if error is None:
         return ""
-    return f"{type(error).__name__}: {repr(str(error))[:LOG_LIMIT]}"
+    return f"{_naming.type_name(error)}: {repr(_naming.text(error, None))[:LOG_LIMIT]}"
 
 
 @final

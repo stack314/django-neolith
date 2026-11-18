@@ -34,6 +34,7 @@ from neolith._declaration import Declaration, Provision
 from neolith._forms import _Form
 from neolith._frozen import once
 from neolith._host import Connector, Host
+from neolith._http import Origin, Response
 from neolith._principal import Built
 from neolith._server import _Request
 from neolith.principals import PrincipalBackend
@@ -82,6 +83,16 @@ _CASES: dict[type, Case] = {
         lambda: Sent(None, "a" * 32, "", 1000, "k", "shop"),
         ((b"p", "f" * 32, "x=1", None, "other", "admin"), {}),
         state=[b"p", "f" * 32, "x=1", None, "other", "admin"],
+    ),
+    Origin: Case(
+        lambda: Origin.parse("https://inventory.test:8443"),
+        (("http://evil.test", "http", "evil.test", 80, "evil.test"), {}),
+        state=["http://evil.test", "http", "evil.test", 80, "evil.test"],
+    ),
+    Response: Case(
+        lambda: Response(200, b"{}"),
+        ((500, b"evil"), {}),
+        state=[500, b"evil"],
     ),
     Action: Case(
         lambda: Action("ask", True, Ask, Told),
