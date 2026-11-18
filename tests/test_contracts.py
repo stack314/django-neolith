@@ -5,6 +5,7 @@ implementation is loaded, before any transport exists, so these tests run
 without one (T2 does not apply yet).
 """
 
+import contextlib
 import dataclasses
 import enum
 import functools
@@ -2346,8 +2347,9 @@ def _iterable_coroutine(self: object, request: Ping) -> Pong:
 
 # Every kind of function whose call returns an object standing for the work,
 # not the reply: a generator, an async generator, a coroutine, a generator
-# made awaitable by types.coroutine, and a plain function marked as a
-# coroutine function. For an empty reply the body would never even run.
+# made awaitable by types.coroutine, a plain function marked as a coroutine
+# function, and contextlib's context-manager wrappers. For an empty reply the
+# body would never even run.
 _NOT_RETURNING = [
     pytest.param("greet", _generator, "generator", id="generator"),
     pytest.param("forget", _generator_forget, "generator", id="generator-empty"),
@@ -2356,6 +2358,18 @@ _NOT_RETURNING = [
     pytest.param("greet", _coroutine, "synchronous", id="coroutine"),
     pytest.param(
         "greet", inspect.markcoroutinefunction(_marked), "synchronous", id="marked"
+    ),
+    pytest.param(
+        "greet",
+        contextlib.contextmanager(cast(Any, _generator)),
+        "context manager",
+        id="contextmanager",
+    ),
+    pytest.param(
+        "greet",
+        contextlib.asynccontextmanager(cast(Any, _async_generator)),
+        "context manager",
+        id="asynccontextmanager",
     ),
 ]
 
