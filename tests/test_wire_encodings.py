@@ -1141,13 +1141,16 @@ def test_checking_written_bytes_copies_nothing() -> None:
 
 
 @pytest.mark.parametrize(
-    "digits", ["1" * _SIZE, "0." + "1" * _SIZE], ids=["integer", "fraction"]
+    "digits",
+    ["1" * _SIZE, "0." + "1" * _SIZE, "NaN" + "1" * _SIZE],
+    ids=["integer", "fraction", "NaN payload"],
 )
 def test_a_decimal_of_many_digits_is_refused_without_copying_them(
     digits: str,
 ) -> None:
     # Its digits as a tuple took about 24 times the value's own size; it is
-    # now refused by its digit count first, which copies the value once.
+    # now refused first, by being a NaN or by its digit count, which copies
+    # the value once.
     value = Decimal(digits)
     record = _record(Decimal128)
     record.model_validate({"v": Decimal(1)})

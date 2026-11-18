@@ -134,13 +134,16 @@ def _decimal_text(value: Decimal) -> str | None:
     checked before it is written out, so a huge exponent of either sign cannot
     make a huge string.
     """
-    # A value whose coefficient has more than 34 digits has no form, as its
-    # text would hold them all. as_tuple holds each digit as an entry, about
-    # 24 times the value's own size, so such a value is refused before it.
+    # as_tuple holds each digit as an entry, about 24 times the value's own
+    # size, so a value with no form is refused before it when that can be
+    # told otherwise: a NaN, whose payload is digits too, or a coefficient of
+    # more than 34 digits, as the text would hold them all.
+    if not value.is_finite():
+        return None
     if not value.is_zero() and _has_more_digits(value):
         return None
     sign, digits, exponent = value.as_tuple()
-    if not isinstance(exponent, int):  # infinity or NaN
+    if not isinstance(exponent, int):  # unreachable: the value is finite
         return None
     if -exponent > _DECIMAL_DIGITS:
         return None
