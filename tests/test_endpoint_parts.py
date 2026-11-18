@@ -696,25 +696,26 @@ def _responses(port: int, *heads: str) -> list[tuple[int, dict[str, str], bytes]
 
 
 @pytest.mark.parametrize(
-    "heads",
+    "head",
     [
-        (_head(POST), _head(POST)),
-        (_head(POST, authorization=None), _head(POST)),
-        ("GET /.well-known/neolith/health HTTP/1.1\nHost: testserver\n", _head(POST)),
-        ("HEAD /.well-known/neolith/health HTTP/1.1\nHost: testserver\n", _head(POST)),
-        ("GET /ledger/v1/none HTTP/1.1\nHost: testserver\n", _head(POST)),
+        None,
+        _head(POST, authorization=None),
+        "GET /.well-known/neolith/health HTTP/1.1\nHost: testserver\n",
+        "HEAD /.well-known/neolith/health HTTP/1.1\nHost: testserver\n",
+        "GET /ledger/v1/none HTTP/1.1\nHost: testserver\n",
     ],
     ids=["reply", "refusal", "health", "health-head", "not-found"],
 )
 def test_neolith_run_keeps_the_connection_after_each_answer(
-    live: int, site: Site, heads: tuple[str, str]
+    live: int, site: Site, head: str | None
 ) -> None:
     """Each response the host writes states its length, so a caller's pool
     can send the next call on the same connection. A 204 states none (RFC
     9110, section 8.6), and Django's development server closes the
-    connection after it.
+    connection after it. Each token is minted when the test runs: one
+    minted at collection would expire on a slow run.
     """
-    first, second = _responses(live, *heads)
+    first, second = _responses(live, head or _head(POST), _head(POST))
     assert first[1].get("connection") != "close"
     assert (second[0], second[2]) == (200, ENTRY)
 
