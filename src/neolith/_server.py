@@ -10,7 +10,9 @@ development, tests and the 0.1 proof, not for production.
 **Repeated body header fields.** A request with more than one
 ``Content-Type`` or ``Content-Length`` field is answered with 400, and its
 connection closed, before Django sees it, as gunicorn answers it (ADR 0011,
-the admitted set): Django's server keeps only the first of each.
+the admitted set): Django's server keeps only the first of each. So is a
+request with a header line that is not a field, after which the standard
+library's parser reads no more fields.
 
 **Which requests are in flight.** One lock holds the state of each open
 connection: idle, or busy with a request. A request is in flight from the
@@ -209,6 +211,12 @@ class _Handler(WSGIRequestHandler):
             self.close_connection = True
             return False
         found: bool = super().parse_request()
+        if found and self.headers.defects:
+            # A line that is not a field ends the header section where the
+            # parser stops, so every field after it, a second Content-Length
+            # or an Authorization among them, would go unread.
+            self.send_error(400, explain="a header field line cannot be read")
+            return False
         if found and any(
             len(self.headers.get_all(name, ())) > 1 for name in _SINGLE_FIELDS
         ):

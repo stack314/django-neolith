@@ -17,6 +17,8 @@ import logging
 import sys
 import time
 from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any
 
 import pytest
 from django.test import override_settings
@@ -234,6 +236,20 @@ def test_row_1_a_backend_that_fails_is_internal_and_its_cause_logged(
     assert not hasattr(cause, "request")
     trace = error["message"].rsplit(" ", 1)[1]
     assert trace in cause.getMessage()
+    (line,) = [r for r in calls.records if r.name == "neolith.calls"]
+    assert line.levelno == logging.ERROR
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_an_action_that_fails_is_internal_logged_at_error_with_its_cause(
+    site: Site, mode: str, calls: pytest.LogCaptureFixture
+) -> None:
+    served = call(mode, body=b'{"amount":500}')
+    assert served.status == 500
+    trace = served.error()["message"].rsplit(" ", 1)[1]
+    levels = {r.name: r.levelno for r in calls.records}
+    assert levels == {"django.neolith": logging.ERROR, "neolith.calls": logging.ERROR}
+    assert all(trace in r.getMessage() for r in calls.records)
 
 
 @pytest.mark.spec("HTTP-46", "TRN-43")
@@ -301,10 +317,12 @@ def test_row_5_plain_http_is_refused_when_the_host_redirects_to_https(
         served = call(mode)
         refused(served, 400, "invalid_argument", message)
         assert "location" not in served.headers
-    with override_settings(
-        SECURE_SSL_REDIRECT=True, SECURE_REDIRECT_EXEMPT=[r"^ledger/"]
-    ):
-        assert call(mode).status == 200
+    # Searched anywhere in the path, as SecurityMiddleware searches it.
+    for exempt in (r"^ledger/", r"v1/post"):
+        with override_settings(
+            SECURE_SSL_REDIRECT=True, SECURE_REDIRECT_EXEMPT=[exempt]
+        ):
+            assert call(mode).status == 200
     with override_settings(
         SECURE_SSL_REDIRECT=True,
         SECURE_PROXY_SSL_HEADER=("HTTP_X_FORWARDED_PROTO", "https"),
@@ -387,6 +405,9 @@ def test_row_6_each_header_s_nearest_admitted_form_passes(
         None,
         f"01-{TRACE}-b7ad6b7169203331-01",  # a later version, read by its fields
         f"00-{TRACE.upper()}-b7ad6b7169203331-01",
+        f"00-{TRACE}-B7AD6B7169203331-01",
+        f"00-{TRACE}-b7ad6b7169203331-0A",
+        f"0A-{TRACE}-b7ad6b7169203331-01",
         f"00-{'0' * 32}-b7ad6b7169203331-01",
         f"00-{TRACE}-{'0' * 16}-01",
         f"ff-{TRACE}-b7ad6b7169203331-01",
@@ -397,6 +418,9 @@ def test_row_6_each_header_s_nearest_admitted_form_passes(
         "absent",
         "version-01",
         "upper",
+        "upper-parent",
+        "upper-flags",
+        "upper-version",
         "zero-trace",
         "zero-parent",
         "ff",
@@ -415,7 +439,8 @@ def test_row_7_an_invalid_traceparent_starts_a_fresh_trace_and_drops_tracestate(
     if traceparent is not None and traceparent.startswith("01-"):
         assert (seen.trace_id, seen.tracestate) == (TRACE, "a=1")
     else:
-        assert seen.trace_id != TRACE
+        # Not the trace sent, in any case.
+        assert seen.trace_id.lower() != TRACE
         assert len(seen.trace_id) == 32
         assert seen.tracestate == ""
 
@@ -536,8 +561,36 @@ def test_row_11_a_content_length_that_is_not_one_field_of_digits_is_refused(
         call(mode, content_length=length),
         400,
         "invalid_argument",
-        "the request body is sent with one Content-Length of digits",
+        _endpoint._CONTENT_LENGTH,
     )
+
+
+@pytest.mark.spec("HTTP-38")
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize(
+    "length",
+    ["1" + "0" * 19, "0" * 4299 + "12", "0" * 5000 + "12"],
+    ids=["20-digits", "4301-characters", "5002-characters"],
+)
+def test_row_11_a_content_length_of_more_than_19_digits_is_refused(
+    site: Site, mode: str, length: str
+) -> None:
+    """Python reads at most 4,300 digits as an int, and Django's
+    HttpRequest.body reads the field with int() too, so no length is read
+    before it is known to have at most 19.
+    """
+    refused(
+        call(mode, content_length=length),
+        400,
+        "invalid_argument",
+        _endpoint._CONTENT_LENGTH,
+    )
+
+
+@pytest.mark.spec("HTTP-38")
+@pytest.mark.parametrize("mode", MODES)
+def test_row_11_a_content_length_of_19_digits_is_read(site: Site, mode: str) -> None:
+    assert call(mode, content_length="0" * 17 + "12").status == 200
 
 
 @pytest.mark.spec("HTTP-38", "HTTP-36")
@@ -557,12 +610,7 @@ def test_row_11_repeated_body_headers_under_asgi_are_joined_and_refused(
         ],
         ENTRY,
     )
-    refused(
-        lengths,
-        400,
-        "invalid_argument",
-        "the request body is sent with one Content-Length of digits",
-    )
+    refused(lengths, 400, "invalid_argument", _endpoint._CONTENT_LENGTH)
     types = asgi(
         "POST",
         POST,
@@ -592,7 +640,7 @@ def test_row_11_leading_zeros_and_ows_are_one_length(site: Site, mode: str) -> N
 
 @pytest.mark.spec("HTTP-40")
 @pytest.mark.parametrize("mode", MODES)
-@pytest.mark.parametrize("length", ["13", "1" + "0" * 30, "9" * 5000])
+@pytest.mark.parametrize("length", ["13", "0013", "1" + "0" * 18])
 def test_row_12_a_content_length_above_the_limit_is_refused_before_reading(
     site: Site, mode: str, length: str
 ) -> None:
@@ -614,7 +662,7 @@ def test_row_12_with_no_limit_any_readable_length_is_read(
     with override_settings(DATA_UPLOAD_MAX_MEMORY_SIZE=None):
         assert call(mode).status == 200
         refused(
-            call(mode, content_length="9" * 30),
+            call(mode, content_length="9" * 19),
             400,
             "invalid_argument",
             f"the request body is larger than this host admits, {sys.maxsize} bytes",
@@ -667,6 +715,194 @@ def test_row_13_a_body_the_receive_check_refuses_is_invalid_argument(
     assert error["kind"] == "invalid_argument"
     assert error["message"].startswith(message)
     assert site.books.seen == []
+
+
+_STRANGER = (
+    "app stranger may not assert a principal on a call to ledger.v1: the "
+    "contract's allow-list does not name it"
+)
+_MEMBERS = (
+    "Neolith-Principal: a principal object has exactly the members issuer and "
+    "subject, and optionally claims"
+)
+_NOT_RUN = "the deadline passed before the action was run"
+_LATE = [("Neolith-Timeout", "1000")]  # past, behind a backend that takes 2 s
+
+
+@dataclass(frozen=True)
+class Pair:
+    """A call that two neighbouring checks refuse, and what the earlier
+    one says.
+    """
+
+    sent: dict[str, Any]
+    status: int
+    message: str
+    settings: dict[str, Any] = field(default_factory=dict)
+    slow: bool = False
+
+
+# Each neighbouring pair in the order of ADR 0011's table (ADR 0017
+# Decision 9's steps), so moving either check of a pair fails its case.
+PAIRS = {
+    "credential-then-allow-list": Pair(
+        {"authorization": None, "fields": [("Neolith-Principal", PRINCIPAL)]},
+        401,
+        _caller.NO_AUTHORIZATION,
+    ),
+    "allow-list-then-method": Pair(
+        {
+            "authorization": "stranger",
+            "method": "GET",
+            "fields": [("Neolith-Principal", PRINCIPAL)],
+        },
+        403,
+        _STRANGER,
+    ),
+    "method-then-query": Pair(
+        {"method": "GET", "query": "a=1"}, 400, _endpoint._METHOD
+    ),
+    "query-then-scheme": Pair(
+        {"query": "a=1"}, 400, _endpoint._QUERY, {"SECURE_SSL_REDIRECT": True}
+    ),
+    "scheme-then-principal": Pair(
+        {"fields": [("Neolith-Principal", "e30")]},
+        400,
+        _endpoint._SCHEME,
+        {"SECURE_SSL_REDIRECT": True},
+    ),
+    "principal-then-timeout": Pair(
+        {"fields": [("Neolith-Timeout", "0050"), ("Neolith-Principal", "e30")]},
+        400,
+        _MEMBERS,
+    ),
+    "timeout-then-key": Pair(
+        {"fields": [("Idempotency-Key", "k"), ("Neolith-Timeout", "0050")]},
+        400,
+        _endpoint._TIMEOUT_FORM,
+    ),
+    "key-then-deadline": Pair(
+        {"fields": [*_LATE, ("Idempotency-Key", "k")]},
+        400,
+        _endpoint._KEY_FORM,
+        slow=True,
+    ),
+    "deadline-then-content-type": Pair(
+        {"fields": _LATE, "content_type": "text/plain"}, 504, _NOT_RUN, slow=True
+    ),
+    "deadline-then-body": Pair(
+        {"fields": _LATE, "content_length": "40"}, 504, _NOT_RUN, slow=True
+    ),
+    "content-type-then-encoding": Pair(
+        {"content_type": "text/plain", "fields": [("Content-Encoding", "gzip")]},
+        400,
+        _endpoint._CONTENT_TYPE,
+    ),
+    "encoding-then-length": Pair(
+        {"content_length": "x", "fields": [("Content-Encoding", "gzip")]},
+        400,
+        _endpoint._CONTENT_ENCODING,
+    ),
+    "length-then-limit": Pair(
+        {"content_length": "1" * 20},
+        400,
+        _endpoint._CONTENT_LENGTH,
+        {"DATA_UPLOAD_MAX_MEMORY_SIZE": 12},
+    ),
+    "limit-then-body-length": Pair(
+        {"content_length": "40"},
+        400,
+        "the request body is larger than this host admits, 12 bytes",
+        {"DATA_UPLOAD_MAX_MEMORY_SIZE": 12},
+    ),
+    "body-length-then-receive-check": Pair(
+        {"content_length": "40", "body": b"not json"},
+        400,
+        "the request body ended before its Content-Length",
+    ),
+}
+
+
+@pytest.mark.spec("TRN-35", "HTTP-42")
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("name", list(PAIRS))
+def test_of_two_checks_that_refuse_a_call_the_earlier_answers(
+    site: Site, mode: str, name: str, clock: Clock
+) -> None:
+    pair = PAIRS[name]
+    if pair.slow:
+        site.backends[:] = [built(Watches(clock, cost=2.0))]
+    sent = dict(pair.sent)
+    if sent.get("authorization") == "stranger":
+        sent["authorization"] = token("stranger")
+    with override_settings(**pair.settings):
+        served = call(mode, **sent)
+    assert (served.status, served.error()["message"]) == (pair.status, pair.message)
+    assert site.books.seen == []
+
+
+@pytest.mark.spec("HTTP-29", "HTTP-42")
+@pytest.mark.parametrize("mode", MODES)
+def test_the_host_is_checked_before_the_credential(site: Site, mode: str) -> None:
+    serve = wsgi if mode == "wsgi" else asgi
+    served = serve("POST", POST, "", [("Host", "evil.example")], ENTRY)
+    assert served.status == 400
+    assert "www-authenticate" not in served.headers
+
+
+@pytest.mark.spec("HTTP-32", "HTTP-33")
+@pytest.mark.parametrize("mode", MODES)
+def test_on_a_well_known_path_the_method_is_checked_before_the_query(
+    site: Site, mode: str
+) -> None:
+    served = call(
+        mode, method="POST", path=_endpoint.HEALTH, query="v=2", authorization=None
+    )
+    assert (served.status, served.headers["allow"]) == (405, ["GET, HEAD"])
+
+
+def _principal_of(size: int) -> str:
+    """A valid principal header of exactly ``size`` characters, a multiple
+    of 4, or 2 past one.
+    """
+    data = size // 4 * 3 + {0: 0, 2: 1}[size % 4]
+    shell = b'{"issuer":"i","subject":"s","claims":{"x":""}}'
+    form = shell[:-3] + b"x" * (data - len(shell)) + shell[-3:]
+    text = _context.b64url(form)
+    assert len(text) == size
+    return text
+
+
+@pytest.mark.spec("HTTP-21")
+@pytest.mark.parametrize("mode", MODES)
+def test_a_principal_of_4096_characters_is_read_and_one_longer_is_refused(
+    site: Site, mode: str
+) -> None:
+    assert call(mode, fields=[("Neolith-Principal", _principal_of(4096))]).status == 200
+    for longer in (_principal_of(4096) + "A", _principal_of(4098)):
+        refused(
+            call(mode, fields=[("Neolith-Principal", longer)]),
+            400,
+            "invalid_argument",
+            _endpoint._PRINCIPAL_FORM,
+        )
+
+
+@pytest.mark.spec("HTTP-23")
+@pytest.mark.parametrize("mode", MODES)
+def test_an_idempotency_key_counts_its_characters_after_unescaping(
+    site: Site, mode: str
+) -> None:
+    escaped = '"' + '\\"' * 255 + '"'
+    assert call(mode, fields=[("Idempotency-Key", escaped)]).status == 200
+    (seen,) = site.books.seen
+    assert seen.idempotency_key == '"' * 255
+    refused(
+        call(mode, fields=[("Idempotency-Key", '"' + '\\"' * 256 + '"')]),
+        400,
+        "invalid_argument",
+        _endpoint._KEY_FORM,
+    )
 
 
 @pytest.mark.spec("HTTP-42", "TRN-35")

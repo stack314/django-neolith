@@ -103,12 +103,14 @@ On a contract path, a provider's host checks a call in the order of [ADR 0017](.
 - **HTTP-35.** when its request target has a query;
 - **HTTP-36.** when its `Content-Type` is not `application/json`, optionally followed by OWS `;` OWS `charset=` and either the token `utf-8` or the quoted-string `"utf-8"`, with the type, the subtype, the parameter's name and its value compared ignoring ASCII case, with `Accept-Post: application/json`;
 - **HTTP-37.** when it has a `Content-Encoding` field, with `Accept-Encoding: identity`;
-- **HTTP-38.** when it has no `Content-Length` field, more than one, or one that is not all ASCII digits;
+- **HTTP-38.** when it has no `Content-Length` field, or one whose value is not 1 to 19 ASCII digits, which several fields joined with `,` are not;
 - **HTTP-39.** when its body, as received, is not as long as its `Content-Length` says.
 
 **HTTP-40.** A provider's host MAY fail a call whose `Content-Length` is above a limit of its own with `invalid_argument`, before it reads the body.
 
-A provider's host never refuses a body for its length alone in any other way, and the body itself gets the receive check of [01](01-contracts.md).
+A repeated `Content-Type` or `Content-Length` reaches the host joined with `,` under ASGI, and so fails HTTP-36 or HTTP-38; under WSGI the server decides first ([ADR 0011](../docs/adr/0011-django-ninja-for-contract-endpoints.md), a repeated body header): gunicorn and `neolith run` answer it with a 400 of their own, and `runserver` keeps the first field.
+
+The body itself then gets the receive check of [01](01-contracts.md).
 
 **HTTP-41.** A provider's host MUST answer a reply with status 200, `Content-Type: application/json` and the reply's JSON text as the body, and an empty reply with status 204 and no body.
 

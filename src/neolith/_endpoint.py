@@ -97,7 +97,9 @@ _KEY_FORM: Final = (
 )
 _CONTENT_TYPE: Final = "the request body is sent as Content-Type application/json"
 _CONTENT_ENCODING: Final = "the request body is sent without Content-Encoding"
-_CONTENT_LENGTH: Final = "the request body is sent with one Content-Length of digits"
+_CONTENT_LENGTH: Final = (
+    "the request body is sent with one Content-Length of 1 to 19 digits"
+)
 _ENDED: Final = "the request body ended before its Content-Length"
 _LONGER: Final = "the request body is longer than its Content-Length"
 _CHALLENGE: Final = 'Bearer realm="neolith"'
@@ -109,10 +111,10 @@ _MEDIA_TYPE: Final = re.compile(
     r'application/json(?:[ \t]*;[ \t]*charset=(?:utf-8|"utf-8"))?',
     re.ASCII | re.IGNORECASE,
 )
-_DIGITS: Final = re.compile(r"[0-9]+")
-# A length with more significant digits than the largest size a process
-# can hold is past it, and int() is never asked to read it.
-_LENGTH_DIGITS: Final = len(str(sys.maxsize))
+# HTTP-38: 1 to 19 ASCII digits, so neither this host nor Django's
+# HttpRequest.body, which reads the field with int() too, meets Python's
+# 4,300-digit limit on reading an int.
+_DIGITS: Final = re.compile(r"[0-9]{1,19}")
 _B64: Final = re.compile(r"[A-Za-z0-9_-]*")
 _TIMEOUT: Final = re.compile(r"[1-9][0-9]{0,9}")
 _KEY: Final = re.compile(r'"(?:[\x20\x21\x23-\x5b\x5d-\x7e]|\\["\\])+"')
@@ -137,7 +139,9 @@ _TIMEOUT_KEY: Final = "HTTP_NEOLITH_TIMEOUT"
 _NEOLITH: Final = "HTTP_NEOLITH_"
 _KNOWN_NEOLITH: Final = frozenset({_PRINCIPAL, _TIMEOUT_KEY})
 _HEADER_NAME: Final = re.compile(r"neolith-[a-z0-9-]+")
-_APP_NAME: Final = re.compile(r"[a-z][a-z0-9_]*")
+# An app's name as the log line shows a token's iss: longer ones are
+# "malformed", so a crafted token cannot write a long line.
+_APP_NAME: Final = re.compile(r"[a-z][a-z0-9_]{0,63}")
 
 
 @final
@@ -751,10 +755,9 @@ def _body(request: HttpRequest) -> bytes:
         raise _Refused("invalid_argument", _CONTENT_LENGTH)
     limit: int | None = settings.DATA_UPLOAD_MAX_MEMORY_SIZE
     bound = sys.maxsize if limit is None else limit
-    significant = digits.lstrip("0")
-    if len(significant) > _LENGTH_DIGITS or int(digits) > bound:
-        raise _Refused("invalid_argument", _larger(bound))
     length = int(digits)
+    if length > bound:
+        raise _Refused("invalid_argument", _larger(bound))
     try:
         body = request.body
     except RequestDataTooBig:

@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import re
+import secrets
 import socket
 import sys
 import threading
@@ -26,7 +27,7 @@ from django.views.debug import ExceptionReporter
 from hypothesis import given
 from hypothesis import strategies as st
 
-from neolith import _boot, _endpoint, _http, _openapi, _server
+from neolith import _boot, _endpoint, _http, _openapi, _server, _token
 from neolith._connector import InProcess
 from neolith.callers import CallerBackend
 from neolith.middleware import RootMiddleware
@@ -111,6 +112,55 @@ def test_entries_longer_than_128_go_first_then_entries_from_the_end() -> None:
     assert _endpoint._tracestate(",".join(many)) == ",".join(many[:8])
 
 
+def _member(index: int, size: int) -> str:
+    """A list-member of exactly ``size`` characters."""
+    head = f"m{index:02d}="
+    return head + "x" * (size - len(head))
+
+
+@pytest.mark.spec("HTTP-25", "HTTP-27")
+def test_32_list_members_are_passed_on_and_33_dropped() -> None:
+    members = [_member(i, 5) for i in range(33)]
+    assert _endpoint._tracestate(",".join(members[:32])) == ",".join(members[:32])
+    assert _endpoint._tracestate(",".join(members)) == ""
+    # Empty list-members count: 32 of them in all is still a list.
+    assert _endpoint._tracestate(",".join(members[:31]) + ",") == ",".join(members[:31])
+    assert _endpoint._tracestate(",".join(members[:32]) + ",") == ""
+
+
+@pytest.mark.spec("HTTP-26")
+def test_a_list_of_512_characters_is_kept_and_one_of_513_shortened() -> None:
+    at = [_member(0, 127), _member(1, 127), _member(2, 127), _member(3, 128)]
+    assert len(",".join(at)) == 512
+    assert _endpoint._tracestate(",".join(at)) == ",".join(at)
+    past = [_member(0, 127), _member(1, 127), _member(2, 128), _member(3, 128)]
+    assert len(",".join(past)) == 513
+    # No entry is longer than 128, so entries go from the end.
+    assert _endpoint._tracestate(",".join(past)) == ",".join(past[:3])
+
+
+@pytest.mark.spec("HTTP-26")
+def test_an_entry_of_129_characters_goes_before_one_of_128() -> None:
+    long, edge = _member(0, 129), _member(1, 128)
+    rest = [_member(i, 85) for i in range(2, 5)]
+    value = ",".join([long, edge, *rest])
+    assert len(value) == 516
+    assert _endpoint._tracestate(value) == ",".join([edge, *rest])
+
+
+@pytest.mark.spec("HTTP-26")
+def test_of_two_entries_over_128_the_later_goes_first() -> None:
+    first, middle, last, tail = (
+        _member(0, 200),
+        _member(1, 100),
+        _member(2, 200),
+        _member(3, 20),
+    )
+    value = ",".join([first, middle, last, tail])
+    assert len(value) == 523
+    assert _endpoint._tracestate(value) == ",".join([first, middle, tail])
+
+
 @pytest.mark.spec("HTTP-27")
 @pytest.mark.parametrize(
     "value",
@@ -184,6 +234,22 @@ def test_only_those_spellings_are_admitted(text: str) -> None:
             "application/json;charset=utf-8",
             'application/json;charset="utf-8"',
         )
+
+
+@pytest.mark.spec("HTTP-36")
+@pytest.mark.parametrize(
+    "text",
+    [
+        "application/j\u017fon",
+        "application/json; char\u017fet=utf-8",
+        "application/json; charset=utf-8\u212a",
+    ],
+)
+def test_no_unicode_case_folding_admits_a_media_type(text: str) -> None:
+    """Django hands header values on decoded as Latin-1, which holds none of
+    these, so this pins the rule where it is written.
+    """
+    assert _endpoint._MEDIA_TYPE.fullmatch(text) is None
 
 
 # The response log, and what Django's error mail holds
@@ -340,6 +406,15 @@ def test_a_refusal_at_step_1_logs_the_token_s_iss_and_kid_only_in_their_form(
     (line,) = [r.getMessage() for r in caplog.records if r.name == "neolith.calls"]
     assert line.endswith(shown)
     assert sent.split(" ")[1] not in line
+
+
+@pytest.mark.parametrize(("size", "shown"), [(64, True), (65, False)])
+def test_the_log_shows_an_iss_of_at_most_64_characters(size: int, shown: bool) -> None:
+    app = "a" * size
+    secret = _token.secret(secrets.token_urlsafe(32), app, "k-1")
+    sent = _token.mint(secret, "ledger.v1", 1_767_225_600).authorization()
+    issuer = app if shown else "malformed"
+    assert _endpoint._credential(sent) == f"; iss {issuer}, kid k-1"
 
 
 @pytest.mark.parametrize("version", [django.VERSION[:2]])
@@ -650,6 +725,21 @@ def test_neolith_run_refuses_a_repeated_content_type_or_length(
 ) -> None:
     value = "application/json" if name == "Content-Type" else str(len(ENTRY))
     status, _, closed = _exchange(live, _head(POST, f"{name}: {value}"), ENTRY)
+    assert status == 400
+    assert closed
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["X Bad: 1", "garbage", "Content-Length : 3", f"Content-Length: {len(ENTRY)}x"],
+)
+def test_neolith_run_refuses_a_header_line_it_cannot_read(live: int, line: str) -> None:
+    """Python's parser stops at a line that is not a field, and every field
+    after it, a second Content-Length or an Authorization, would go unread.
+    """
+    status, _, closed = _exchange(
+        live, _head(POST, line, f"Content-Length: {len(ENTRY)}"), ENTRY
+    )
     assert status == 400
     assert closed
 
