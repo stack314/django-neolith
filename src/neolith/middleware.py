@@ -49,8 +49,9 @@ _REQUEST: Final[contextvars.ContextVar[_context.Scope | None]] = contextvars.Con
     "neolith_request_root", default=None
 )
 _NO_HOST: Final = (
-    f"{_checks.ROOT_MIDDLEWARE}: the host is not set up; install neolith as the "
-    "last entry of INSTALLED_APPS, after the apps it hosts"
+    f"{_checks.ROOT_MIDDLEWARE}: the host is not set up; build the settings "
+    "with neolith.host.build_settings, which installs neolith after the apps "
+    "it hosts"
 )
 
 

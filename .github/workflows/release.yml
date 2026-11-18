@@ -109,22 +109,36 @@ jobs:
           import importlib.metadata
           import os
           import pathlib
+          import sys
+          import tempfile
 
           import django
           from django.conf import settings
 
           import neolith
+          from neolith.host import build_settings
 
           version = os.environ["TAG"].removeprefix("v")
           assert neolith.__version__ == version, neolith.__version__
           assert importlib.metadata.version("django-neolith") == version
           assert "site-packages" in pathlib.Path(neolith.__file__).parts
 
-          settings.configure(
-              INSTALLED_APPS=["neolith"],
-              MIDDLEWARE=["neolith.middleware.RootMiddleware"],
-              NEOLITH={},
+          # A host of one app, built as every host is: the job has no
+          # checkout, so it writes the app itself.
+          root = pathlib.Path(tempfile.mkdtemp())
+          (root / "smoke").mkdir()
+          (root / "smoke" / "__init__.py").touch()
+          (root / "smoke" / "apps.py").write_text(
+              "from neolith import NeolithAppConfig\n\n"
+              "class SmokeConfig(NeolithAppConfig):\n"
+              "    name = 'smoke'\n"
+              "    label = 'smoke'\n"
           )
+          sys.path.insert(0, str(root))
+          settings.configure(**build_settings(
+              ["smoke"],
+              {"MIDDLEWARE": ["neolith.middleware.RootMiddleware"], "NEOLITH": {}},
+          ))
           django.setup()
           print(f"neolith {neolith.__version__} on Django {django.get_version()}")
           EOF
