@@ -17,7 +17,7 @@ The implementation merged in #64 already follows a narrower reading, and this re
 
 1. **Empty the whole set at set-up, as the sentence reads.** Simple, and the set never grows past one set-up. A retry in the same process passes with an unknown identity in place.
 2. **Drop only the identities the table knows; keep an unknown one.** A retry reports the unknown identity again. After a set-up, the set keeps only the identities that set-up did not know, and the next set-up rereads them.
-3. **Keep every record for the life of the process.** Every later set-up rechecks every identity. Once a set-up has passed, a later one is admitted only for the same hosted apps ([0022](0022-the-app-host-builds-settings-and-checks-before-it-serves.md) Decision 5), so an identity known once stays known, and rechecking it adds work without finding anything.
+3. **Keep every record for the life of the process.** Every later set-up rechecks every identity. That reports the case #94 tracks, but it also refuses the first apps when they are restored after an override that added an app whose module asked for a contract only that override's apps know: the module stays imported after its app is no longer hosted ([0022](0022-the-app-host-builds-settings-and-checks-before-it-serves.md) Decision 5).
 
 ## Decision
 
