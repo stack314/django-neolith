@@ -1,6 +1,6 @@
 # 0028. The HTTP transport calls a provider over the standard library's sockets and TLS, with a strict HTTP/1.1 reader of its own, under one deadline for every blocking step, and adds no runtime dependency
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-11-18
 
 ## Context
