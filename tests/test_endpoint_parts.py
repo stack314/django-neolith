@@ -41,12 +41,14 @@ from tests.endpoint_site import (
     Fails,
     Ledger,
     Refuses,
+    Served,
     Site,
     built,
     call,
     publish,
     token,
 )
+from tests.endpoint_site import _asgi as endpoints_async
 from tests.endpoint_site import asgi as endpoints_asgi
 from tests.endpoint_site import wsgi as endpoints_wsgi
 from tests.hosting import in_fresh_process
@@ -254,6 +256,69 @@ def test_under_asgi_no_outcome_is_logged_on_the_event_loop(
             logger.removeHandler(noted)
     assert noted.seen
     assert not any(noted.seen)
+
+
+class _Blocking(logging.Handler):
+    """Blocks each emit until ``released`` is set, as a slow mail to ADMINS
+    would, and notes whether it was released or gave up waiting.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = threading.Event()
+        self.released = threading.Event()
+        self.freed: list[bool] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.started.set()
+        self.freed.append(self.released.wait(10))
+
+
+@pytest.mark.parametrize(
+    "backend",
+    [None, Refuses("the badge is revoked"), Fails()],
+    ids=["admitted", "refused", "failed"],
+)
+def test_under_asgi_a_blocking_log_handler_never_holds_the_loop(
+    site: Site, caplog: pytest.LogCaptureFixture, backend: CallerBackend | None
+) -> None:
+    """A heartbeat on the loop releases the handler once it has started, which
+    it can only do while the handler blocks a thread other than the loop's;
+    on the loop, the handler would give up after 10 seconds instead.
+    """
+    caplog.set_level(logging.INFO, logger="neolith.calls")
+    if backend is not None:
+        site.backends[:] = [built(backend)]
+    blocking = _Blocking()
+    loggers = [logging.getLogger(name) for name in ("neolith.calls", "django.neolith")]
+
+    async def heartbeat() -> None:
+        while not blocking.started.is_set():
+            await asyncio.sleep(0.001)
+        blocking.released.set()
+
+    async def both() -> Served:
+        beating = asyncio.ensure_future(heartbeat())
+        fields = [
+            ("Host", "testserver"),
+            ("Authorization", token()),
+            ("Content-Type", "application/json"),
+            ("Content-Length", str(len(ENTRY))),
+        ]
+        served = await endpoints_async("POST", POST, "", fields, ENTRY)
+        await beating
+        return served
+
+    for logger in loggers:
+        logger.addHandler(blocking)
+    try:
+        served = asyncio.run(both())
+    finally:
+        for logger in loggers:
+            logger.removeHandler(blocking)
+    assert served.status in (200, 401, 500)
+    assert blocking.freed
+    assert all(blocking.freed)
 
 
 @pytest.mark.parametrize(
