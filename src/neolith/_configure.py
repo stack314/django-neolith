@@ -443,7 +443,11 @@ def _difference(
             return f"{where or 'it'} is a {_type(found)}, the host builds a list"
         items: list[object] = found
         for index, (have, want) in enumerate(zip(items, expected, strict=False)):
-            if type(have) is not type(want) or have != want:
+            try:
+                different = type(have) is not type(want) or bool(have != want)
+            except Exception:
+                return f"{where}[{index}] differs"
+            if different:
                 if where:
                     return _inside(f"{where}[{index}]", have, want)
                 return f"entry {index} is {_repr(have)}, the host builds {want!r}"
