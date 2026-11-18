@@ -92,7 +92,7 @@ Send calls over TLS, which is the job of the server or the proxy in front of the
 
 ### Calling: remote providers
 
-**`NEOLITH["REMOTE_PROVIDERS"]`** maps a contract identity to a list of one entry, whose `BACKEND` is the transport, `"neolith.transports.HTTPTransport"`, and whose `OPTIONS["url"]` is the provider host's origin, written exactly as its origin serializes ([ADR 0014](adr/0014-pluggable-connector-transports.md)):
+**`NEOLITH["REMOTE_PROVIDERS"]`** maps a contract identity to a list of entries, one per provider: one entry under the `single` routing policy, or two or more under `local-first` (below). Each entry's `BACKEND` is the transport, `"neolith.transports.HTTPTransport"`, and whose `OPTIONS["url"]` is the provider host's origin, written exactly as its origin serializes ([ADR 0014](adr/0014-pluggable-connector-transports.md)):
 
 ```python
 NEOLITH = {
@@ -108,7 +108,7 @@ NEOLITH = {
 }
 ```
 
-`HTTPTransport` is a name for this setting, not a class to build or subclass. A hosted app that requires the contract needs a signing key, or set-up stops. The host reads `settings.NEOLITH` only, so a url kept in the environment is read in the settings module. Plain `http` to anything but `localhost` or a loopback address gets `neolith.W002`.
+`HTTPTransport` is a name for this setting, not a class to build or subclass. A hosted app that requires the contract needs a signing key, or set-up stops. The host reads `settings.NEOLITH` only, so a url kept in the environment is read in the settings module. Plain `http` to anything but `localhost` or a loopback address gets `neolith.W002`, which names the entry by its index in the list.
 
 **`ALLOWED_HOSTS` on the provider.** A call's `Host` is the url's host and port, as written. The provider's host answers a `Host` outside its `ALLOWED_HOSTS` with Django's 400, which the caller reports as `unavailable`, so the provider lists the name its callers use.
 
@@ -133,3 +133,53 @@ NEOLITH = {
 Both ends of the TLS handshake ran on the one machine, so a caller alone pays less of the 16 ms. A caller that calls one provider less than once a second finds no idle connection and pays the new-connection cost on nearly every call.
 
 **Development servers.** `neolith run` answers without Nagle's delay. Django's `runserver` and its test live server write a response's head and body in separate writes with Nagle's algorithm on, so each call after a connection's first waits for the caller's delayed acknowledgement: about 44 ms per pooled call on the machine above, against 1.2 ms under `neolith run`. They also keep the first of a repeated `Content-Type` or `Content-Length`, which `neolith run` refuses.
+
+### Calling: routing among providers
+
+**`NEOLITH["ROUTING_POLICIES"]`** names a routing policy per contract identity ([ADR 0031](adr/0031-a-contract-version-is-routed-by-single-unless-local-first-is-named.md)). An identity left out is routed by `single`: its one provider, the app of the host that provides it or else its one remote entry, with one attempt per call. A step 5 settings module, with one entry per identity and no `ROUTING_POLICIES`, is routed as before. `"local-first"` is the one value to write. It orders two or more remote entries, tried in the order listed:
+
+```python
+NEOLITH = {
+    "ROUTING_POLICIES": {"inventory.v1": "local-first"},
+    "REMOTE_PROVIDERS": {
+        "inventory.v1": [
+            {
+                "BACKEND": "neolith.transports.HTTPTransport",
+                "OPTIONS": {"url": "https://inventory-a.internal.example"},
+            },
+            {
+                "BACKEND": "neolith.transports.HTTPTransport",
+                "OPTIONS": {"url": "https://inventory-b.internal.example"},
+            },
+        ],
+    },
+    "SIGNING_SECRETS": {"orders": {"KEY_ID": "orders-1", "SECRET": ORDERS_KEY}},
+}
+```
+
+The policy and the length of the list state one fact twice. A list of urls reads as load balancing in most proxies, so the policy is written out, and a second url added by mistake stops the host rather than turning on failover. Set-up stops when the two disagree, or the settings are otherwise outside the form: two or more entries without `local-first`, `local-first` with one entry, one url listed twice in a list, `"single"` written as a value (leave the identity out), any other policy name, and an identity named that no hosted app requires or that an app of the host provides. No refusal prints a url or a policy value it refused. `ROUTING_POLICIES` cannot change under `override_settings`.
+
+**When a call moves.** Each call starts at the first entry; nothing is remembered between calls. A call moves to the next entry only when its attempt ended with `unavailable`, the action is declared idempotent, an entry is left, and at least 1 ms of the call's deadline is left. It tries each entry at most once.
+
+| The attempt ended with | Moves to the next entry? |
+|---|---|
+| `unavailable`: the name did not resolve; the connection was refused or reset; the TLS handshake failed or the certificate did not verify; no connection within the attempt's share of the time (below); a reset or close after the request left; a response outside the admitted HTTP forms; a status other than success without a neolith error body, such as a proxy's `502` or `503`, or a `404` from a provider on an older contract version; a neolith error body of kind `unavailable` | Only for an idempotent action |
+| `timeout` | Never: the outcome is unknown, and the deadline has passed |
+| `unauthenticated`, `permission_denied`, `invalid_argument`, `not_found`, `conflict`, `internal`, or a kind the action declares | Never: the provider answered, or its answer could not be read after it may have run |
+| A refusal before sending, such as a call with no calling app or from an app with no signing key | Never: every provider would refuse it alike |
+
+A call that is not moved ends with that attempt's outcome. When less than 1 ms is left for the next entry, it ends with the last attempt's `unavailable`. A `timeout` after a move always says that the action might have run. Every attempt carries the same principal, trace identifier, `tracestate` and idempotency key; each gets its own token, span and budget. An action that should fail over is declared idempotent and keeps that promise for a repeated key (spec 01, CON-5): two providers of one app share its database, and a call moved after its request left may have run once already.
+
+**No remote entry beside an app of the host.** An identity that an app of the host provides takes no remote entry, under any policy. The app answers every call to it, and an in-process call never ends with `unavailable`, so a remote entry would never be called. An app runs attached and detached at once across hosts instead: the host that holds it attached calls it in-process and also serves it over HTTP; the app runs detached in a host of its own; and every other host lists both under `local-first`, in the order it prefers. A migration is a change of that order in the other hosts' settings, then the removal of the app from the first host.
+
+**What a provider that is down costs.** Every call tries the first entry first. One that refuses connections or whose name does not resolve costs about one round trip. One that drops packets holds the connect phase for the attempt's share of the time left: that time divided by the entries left, this one included, at least 2 seconds, and never more than the 10 second connect cap. With the default 30 second request deadline and two entries, the first gets 10 seconds (the cap, under its 15 second share) and the second the remaining 20. With three entries and the first two silent, each of the two costs 10 seconds and the third gets the last 10. A call with 8 seconds left and two entries gives the first 4 seconds. The last entry, a non-idempotent call and a call with no deadline get no share; a silent entry then costs up to the 10 second cap, or the rest of the deadline when that is less. A non-idempotent call makes one attempt and fails with `unavailable`, or with `timeout` when its deadline comes first. A provider that accepts a call and never answers holds it until the deadline, and the next entry is not tried.
+
+**Rolling restarts and overload.** A non-idempotent call that races the first provider's Drain on a kept-alive connection, or meets the refused connections of a provider that is draining, fails with `unavailable` and does not move; an idempotent one moves. A first provider that answers `unavailable` because it is overloaded sends all of its idempotent traffic to the second at once, with nothing to slow it down, so the second needs room for both. Every entry accepts the calling app's key and lists the url's host in its `ALLOWED_HOSTS`. One that does not answers `unauthenticated`, which never moves, or Django's `400`, which is `unavailable`. A credential missing at the second provider shows only when the first fails, so check each provider once when it is added.
+
+**Log lines.** The HTTP transport logs a `WARNING` for most attempts that end with `unavailable`; a neolith error body of kind `unavailable` is logged by the provider's host instead. Under `local-first` the connector adds one `INFO` line on the `neolith` logger for each routing decision after an attempt that ended with `unavailable`:
+
+- moved: `inventory.v1, action 'level': provider 1 of 2 at https://inventory-a.internal.example was unavailable, and level is idempotent; trying provider 2 at https://inventory-b.internal.example with 4980 ms left (trace <trace>)`, or `with no deadline`;
+- not moved, the action is not idempotent: `... was unavailable, and reserve is not idempotent, so the call is not moved to provider 2 (trace <trace>)`;
+- not moved, no time left: `... was unavailable, and the call's deadline left under 1 ms to try provider 2 at <origin> (trace <trace>)`.
+
+A call whose first attempt succeeds, a call whose last entry fails, and every call under `single` log nothing new. No line holds a key, a token, a principal, `tracestate` or a refused value; the trace identifier ties a call's lines together.

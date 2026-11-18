@@ -20,8 +20,9 @@ middleware listed after the principal middleware (ADR 0023),
 ``neolith.E021`` for a caller backend or signing key that set-up
 refused (ADR 0027), and for a hosted app that requires a remote provider's
 contract with no signing key (ADR 0027 Decision 9), ``neolith.W001`` for an
-admin class in no installed app, ``neolith.W002`` for a remote provider at a
-plain ``http`` url that is not loopback (ADR 0014), and ADR 0027's
+admin class in no installed app, ``neolith.W002`` for each remote
+provider entry at a plain ``http`` url that is not loopback (ADR 0014, with
+the entry's index from ADR 0031), and ADR 0027's
 warnings ``neolith.W004`` (no caller backend), ``neolith.W005`` (a
 principal backend that declares a ``neolith-`` header) and, under
 ``check --deploy``, ``neolith.W006`` (the shared-secret backend listed).
@@ -33,7 +34,7 @@ in ``neolith._boot``.
 import ipaddress
 import math
 import sys
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from typing import Any, Final, cast
 
 from django.apps import AppConfig
@@ -51,10 +52,12 @@ from neolith._serving import admin_code
 __all__ = [
     "DEFAULT_REQUEST_DEADLINE",
     "KEYS",
+    "LOCAL_FIRST",
     "MISSING",
     "PRINCIPAL_MIDDLEWARE",
     "REMOTE",
     "ROOT_MIDDLEWARE",
+    "ROUTING",
     "TAG",
     "admin_check",
     "batteries",
@@ -67,6 +70,7 @@ __all__ = [
     "hosted_declarations",
     "installed_check",
     "installed_problems",
+    "local_first",
     "middleware_check",
     "middleware_problems",
     "neolith_check",
@@ -79,6 +83,8 @@ __all__ = [
     "remote_urls",
     "remote_warnings",
     "request_deadline",
+    "routed",
+    "routing_problems",
     "silenced_check",
     "silenced_problems",
     "table_name_check",
@@ -102,14 +108,15 @@ _SHORTEST: Final = 0.001
 _LONGEST: Final = 9999999.999
 _DEADLINE: Final = 'NEOLITH["REQUEST_DEADLINE"]'
 # The key table of NEOLITH (ADR 0022 Decision 3, ADR 0023 for the principal
-# backends, ADR 0027 for the caller backends and signing keys, and ADR 0014
-# for the remote providers).
+# backends, ADR 0027 for the caller backends and signing keys, ADR 0014 for
+# the remote providers, and ADR 0031 for the routing policies).
 KEYS: Final = (
     "CALLER_BACKENDS",
     "DATABASES",
     "PRINCIPAL_BACKENDS",
     "REMOTE_PROVIDERS",
     "REQUEST_DEADLINE",
+    "ROUTING_POLICIES",
     "SIGNING_SECRETS",
     "UNDECLARED_APPS",
 )
@@ -260,7 +267,9 @@ def neolith_problems(
         elif key == _caller.SIGNING:
             problems.extend(_caller.signing_problems(item, [d.label for d in hosted]))
         elif key == _REMOTE_KEY:
-            problems.extend(remote_problems(item))
+            problems.extend(remote_problems(item, local_first(entries)))
+        elif key == _ROUTING_KEY:
+            problems.extend(routing_problems(item))
     if "DATABASES" not in entries:
         problems.extend(
             f"app {label}: no connection settings for its database"
@@ -330,13 +339,17 @@ _ENTRY_KEYS: Final = ("BACKEND", "OPTIONS")
 _URL: Final = "url"
 
 
-def remote_problems(value: object) -> list[str]:
+def remote_problems(value: object, routed: Collection[str] = ()) -> list[str]:
     """Judge the form of ``NEOLITH["REMOTE_PROVIDERS"]`` (ADR 0014, the
-    builder's rows): a ``dict`` of one or more contract identities, each
-    mapped to a ``list`` of exactly one entry, a ``dict`` with exactly
-    ``BACKEND``, ``"neolith.transports.HTTPTransport"`` as written, and
-    ``OPTIONS``, a ``dict`` with exactly ``url``, an origin in its one
-    spelling. Every container is exactly the type named.
+    builder's rows, as ADR 0031 widens them): a ``dict`` of one or more
+    contract identities, each mapped to a ``list`` of one or more entries,
+    two or more only for an identity in ``routed``, the identities
+    ``NEOLITH["ROUTING_POLICIES"]`` names ``local-first`` for (``local_first``).
+    Each entry is a ``dict`` with exactly ``BACKEND``,
+    ``"neolith.transports.HTTPTransport"`` as written, and ``OPTIONS``, a
+    ``dict`` with exactly ``url``, an origin in its one spelling, and no two
+    entries of one identity have one ``url``, compared as written. Every
+    container is exactly the type named.
 
     Every problem found is returned, those under a refused key included. A
     refused ``url`` is never shown, in whole or in part (ADR 0014 Decision
@@ -361,26 +374,53 @@ def remote_problems(value: object) -> list[str]:
                 "<contract>.v1"
             )
             where, named = f"{REMOTE}[{shown}]", "it"
-        problems.extend(_providers_problems(where, named, providers))
+        ordered = type(key) is str and key in routed
+        problems.extend(_providers_problems(where, named, providers, ordered))
     return problems
 
 
-def _providers_problems(where: str, named: str, value: object) -> list[str]:
+def _providers_problems(
+    where: str, named: str, value: object, ordered: bool
+) -> list[str]:
     if type(value) is not list:
         return [f"{where}: expected a list of providers, got {_type(value)}"]
     providers: list[object] = value
     if not providers:
         return [f"{where}: is empty; leave {named} out"]
     problems: list[str] = []
-    if len(providers) > 1:
+    if len(providers) > 1 and not ordered:
         problems.append(
             f"{where}: lists {len(providers)} providers; with the single routing "
-            "policy a contract has one provider, and routing between several "
-            "arrives with step 6 (ADR 0016)"
+            "policy a contract has one provider; to try them in order, name "
+            f"{LOCAL_FIRST} for {named} in {ROUTING}"
         )
+    first: dict[str, int] = {}
     for index, entry in enumerate(providers):
         problems.extend(_entry_problems(f"{where}[{index}]", entry))
+        url = _url_of(entry)
+        if url is None:
+            continue
+        # Compared as written: one string is one entry listed twice.
+        earlier = first.setdefault(url, index)
+        if earlier != index:
+            problems.append(
+                f'{where}[{index}]["OPTIONS"]["url"]: is the url of entry '
+                f"{earlier} too; an entry is listed once"
+            )
     return problems
+
+
+def _url_of(entry: object) -> str | None:
+    """An entry's ``url``, when it is an exact ``str`` where the form puts
+    it, whatever else the entry holds; ``None`` otherwise.
+    """
+    if type(entry) is not dict:
+        return None
+    options = _naming.entry(cast("dict[object, object]", entry), "OPTIONS")
+    if type(options) is not dict:
+        return None
+    url = _naming.entry(cast("dict[object, object]", options), _URL)
+    return url if type(url) is str else None
 
 
 def _entry_problems(where: str, value: object) -> list[str]:
@@ -444,6 +484,98 @@ def _keys_problems(
     return problems
 
 
+# NEOLITH["ROUTING_POLICIES"] (ADR 0031, the admitted set).
+_ROUTING_KEY: Final = "ROUTING_POLICIES"
+ROUTING: Final = f'NEOLITH["{_ROUTING_KEY}"]'
+LOCAL_FIRST: Final = "local-first"
+_SINGLE: Final = "single"
+
+
+def routing_problems(value: object) -> list[str]:
+    """Judge the form of ``NEOLITH["ROUTING_POLICIES"]`` (ADR 0031, the
+    builder's rows): a ``dict`` of one or more contract identities, each
+    mapped to exactly the ``str`` ``"local-first"``, compared as written.
+    ``single`` is what an identity left out means, so it is not a value.
+
+    Every problem found is returned, those under a refused key included. A
+    refused value is never shown; a refused key is shown as
+    ``remote_problems`` shows one.
+    """
+    if type(value) is not dict:
+        return [
+            f"{ROUTING}: expected a dict of contract identities, got {_type(value)}"
+        ]
+    entries: dict[object, object] = value
+    if not entries:
+        return [f"{ROUTING}: is empty; leave the key out"]
+    problems: list[str] = []
+    # Items are read, never looked up, so no key's own hooks run.
+    for key, policy in entries.items():
+        if type(key) is str and _IDENTITY.fullmatch(key):
+            where, named = f'{ROUTING}["{key}"]', key
+        else:
+            shown = _shown_key(key)
+            problems.append(
+                f"{ROUTING}: key {shown}: expected a contract identity, such as "
+                "<contract>.v1"
+            )
+            where, named = f"{ROUTING}[{shown}]", "it"
+        if type(policy) is not str:
+            problems.append(f"{where}: expected a str, got {_type(policy)}")
+        elif policy == _SINGLE:
+            problems.append(
+                f"{where}: {_SINGLE} is what leaving {named} out means; leave it out"
+            )
+        elif policy != LOCAL_FIRST:
+            problems.append(
+                f"{where}: is not a routing policy of this host; the one policy "
+                f"to name is {LOCAL_FIRST}, and leaving {named} out means "
+                f"{_SINGLE}"
+            )
+    return problems
+
+
+def _routing(neolith: object) -> dict[object, object]:
+    """``NEOLITH["ROUTING_POLICIES"]`` when both are a ``dict``; an empty
+    ``dict`` otherwise.
+    """
+    if type(neolith) is not dict:
+        return {}
+    value = _naming.entry(cast("dict[object, object]", neolith), _ROUTING_KEY)
+    return cast("dict[object, object]", value) if type(value) is dict else {}
+
+
+def local_first(neolith: object) -> frozenset[str]:
+    """The contract identities ``NEOLITH["ROUTING_POLICIES"]`` names
+    ``local-first`` for, exactly as written, whatever the rest of
+    ``neolith`` holds.
+    """
+    return frozenset(
+        key
+        for key, policy in _routing(neolith).items()
+        if type(key) is str
+        and _IDENTITY.fullmatch(key)
+        and type(policy) is str
+        and policy == LOCAL_FIRST
+    )
+
+
+def routed(neolith: object) -> dict[str, int | None]:
+    """Each contract identity ``NEOLITH["ROUTING_POLICIES"]`` names,
+    whatever its policy, as Resolve reads them (ADR 0031, the Resolve rows):
+    for one named ``local-first`` as written, the number of entries
+    ``NEOLITH["REMOTE_PROVIDERS"]`` lists for it, 0 when it has no list;
+    for any other value, which its own row refuses, ``None``.
+    """
+    listed = _listed(neolith)
+    ordered = local_first(neolith)
+    return {
+        key: (listed[key][0] if key in listed else 0) if key in ordered else None
+        for key in _routing(neolith)
+        if type(key) is str and _IDENTITY.fullmatch(key)
+    }
+
+
 def remote_identities(neolith: object) -> frozenset[str]:
     """The contract identities ``NEOLITH["REMOTE_PROVIDERS"]`` names, as
     Resolve reads them whatever the rest of the key holds: the keys that are
@@ -461,27 +593,46 @@ def remote_identities(neolith: object) -> frozenset[str]:
     )
 
 
-def remote_urls(neolith: object) -> dict[str, str]:
-    """Each remote provider whose entry is in the admitted form, with its
-    ``url``, by identity, whatever the rest of ``neolith`` holds; in a
-    ``NEOLITH`` that passed ``neolith_problems``, every one.
+def remote_urls(neolith: object) -> dict[str, tuple[str, ...]]:
+    """The ``url`` of each remote provider, in the order listed, by
+    identity, for each identity whose entries are all in the admitted form,
+    whatever the rest of ``neolith`` holds; in a ``NEOLITH`` that passed
+    ``neolith_problems``, every one.
+    """
+    return {
+        identity: tuple(url for _, url in listed)
+        for identity, (count, listed) in _listed(neolith).items()
+        if count and len(listed) == count
+    }
+
+
+def _remote(neolith: object) -> dict[object, object]:
+    """``NEOLITH["REMOTE_PROVIDERS"]`` when both are a ``dict``; an empty
+    ``dict`` otherwise.
     """
     if type(neolith) is not dict:
         return {}
-    value = _naming.entry(neolith, _REMOTE_KEY)
-    if type(value) is not dict:
-        return {}
-    entries: dict[object, object] = value
-    found: dict[str, str] = {}
-    for key, providers in entries.items():
-        if (
-            type(key) is str
-            and _IDENTITY.fullmatch(key)
-            and type(providers) is list
-            and len(providers) == 1
-            and not _entry_problems("", providers[0])
-        ):
-            found[key] = providers[0]["OPTIONS"][_URL]
+    value = _naming.entry(cast("dict[object, object]", neolith), _REMOTE_KEY)
+    return cast("dict[object, object]", value) if type(value) is dict else {}
+
+
+def _listed(neolith: object) -> dict[str, tuple[int, list[tuple[int, str]]]]:
+    """For each key of ``NEOLITH["REMOTE_PROVIDERS"]`` that is a contract
+    identity and whose value is a ``list``: the number of entries it lists,
+    and each entry in the admitted form, with its index and ``url``.
+    """
+    found: dict[str, tuple[int, list[tuple[int, str]]]] = {}
+    for key, providers in _remote(neolith).items():
+        if type(key) is str and _IDENTITY.fullmatch(key) and type(providers) is list:
+            listed: list[object] = providers
+            found[key] = (
+                len(listed),
+                [
+                    (index, cast("dict[str, dict[str, str]]", entry)["OPTIONS"][_URL])
+                    for index, entry in enumerate(listed)
+                    if not _entry_problems("", entry)
+                ],
+            )
     return found
 
 
@@ -503,15 +654,17 @@ def _loopback(url: str) -> bool:
 
 
 def remote_warnings(neolith: object) -> list[str]:
-    """``neolith.W002``: each remote provider at a plain ``http`` url whose
-    host is not loopback, among the entries in the admitted form. An
-    admitted url holds no credential, so it is shown.
+    """``neolith.W002``: each remote provider entry at a plain ``http`` url
+    whose host is not loopback, among the entries in the admitted form,
+    named by its identity and its index (ADR 0031). An admitted url holds no
+    credential, so it is shown.
     """
     return [
-        f'{REMOTE}["{identity}"]: {url} is plain HTTP to a host that is not '
-        "loopback; anyone who can watch the network can read and replay the "
-        "calling app's token (spec 03)"
-        for identity, url in sorted(remote_urls(neolith).items())
+        f'{REMOTE}["{identity}"][{index}]: {url} is plain HTTP to a host that '
+        "is not loopback; anyone who can watch the network can read and replay "
+        "the calling app's token (spec 03)"
+        for identity, (_, listed) in sorted(_listed(neolith).items())
+        for index, url in listed
         if url.startswith("http://") and not _loopback(url)
     ]
 
