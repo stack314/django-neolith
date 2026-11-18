@@ -191,15 +191,16 @@ Run every check on the tip of the release branch after the version pull request 
   "$WORK/dev/bin/python" scripts/docs.py check
   ```
   Expected: `docs: every check passed (check)`.
-- [ ] Build the sdist and the wheel with the tools the release workflow pins, and check their metadata.
+- [ ] Build the sdist and the wheel with the tools the release workflow pins, check that the sdist carries every tracked file, and check their metadata.
   ```
   "$PY_FLOOR" -m venv "$WORK/build"
   "$WORK/build/bin/python" -m pip install -c .github/release-constraints.txt pip build twine
   PIP_CONSTRAINT="$PWD/.github/release-constraints.txt" \
     "$WORK/build/bin/python" -m build --outdir "$WORK/dist"
+  "$PY_FLOOR" scripts/sdist_check.py "$WORK"/dist/*.tar.gz
   "$WORK/build/bin/python" -m twine check --strict "$WORK"/dist/*
   ```
-  Expected: `Successfully built django_neolith-<VERSION>.tar.gz and django_neolith-<VERSION>-py3-none-any.whl`, then `PASSED` for both files. For a Markdown README, `twine check` only confirms a description is present; it does not render it.
+  Expected: `Successfully built django_neolith-<VERSION>.tar.gz and django_neolith-<VERSION>-py3-none-any.whl`, then `sdist: django_neolith-<VERSION>.tar.gz carries the <N> tracked files`, then `PASSED` for both files. For a Markdown README, `twine check` only confirms a description is present; it does not render it.
 - [ ] Render the README as PyPI will, and read it. It cannot be changed on PyPI after upload.
   ```
   "$WORK/build/bin/python" -m pip install -c .github/release-constraints.txt "readme-renderer[md]"
