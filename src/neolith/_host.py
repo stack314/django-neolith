@@ -250,7 +250,7 @@ def set_up(config: AppConfig) -> None:
             for problem in _configure.settings_problems(configs)
         ]
     with _LOCK:
-        _name_pending(configs)
+        _name_pending(list(configs))
         _ONCE_INSTALLED.update(c.name for c in configs)
         installed = frozenset(c.name for c in configs) | {
             f"{type(c).__module__}.{type(c).__qualname__}" for c in configs
@@ -424,10 +424,10 @@ def _name_pending(configs: Sequence[AppConfig]) -> None:
         named[key] = ties
     _PENDING.clear()
     for places in _RECORDED.values():
-        for place, ties in places.items():
-            if any(tie in named for tie in ties if tie is not None):
+        for place, held in places.items():
+            if any(tie in named for tie in held if tie is not None):
                 tied: dict[str | None, None] = {}
-                for tie in ties:
+                for tie in held:
                     tied.update(
                         dict.fromkeys(
                             named[tie] if tie is not None and tie in named else {tie}
