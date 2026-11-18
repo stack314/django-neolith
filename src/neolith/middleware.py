@@ -474,7 +474,7 @@ def _resolution(scope: _context.Scope | None) -> _principal.Resolution | None:
     """The root's resolution for the response phase, or ``None``. A root
     that was never bound, or is bound to no app the host holds, has none:
     a call from it has no calling app or is a usage error at any time
-    (spec 02, TRN-56 and TRN-58), so the response phase has nothing to
+    (spec 02, TRN-39, TRN-56 and TRN-58), so the response phase has nothing to
     search, mark or vary for it.
     """
     resolution = None if scope is None else scope.resolution
