@@ -364,7 +364,9 @@ def _ties(module: str, at_import: bool) -> set[str | None]:
         if _naming.is_a(entry, AppConfig):
             ties = {cast(AppConfig, entry).name}
         # Django loads an entry of a str subclass as its text.
-        elif _naming.is_a(entry, str) and isinstance(entries, (list, tuple)):
+        # Its real type, not its __class__: str.__str__ reads it below, and a
+        # proxy that only claims to be a str is left to no app.
+        elif _naming.derives(type(entry), str) and isinstance(entries, (list, tuple)):
             key = f"\0{next(_PENDING_KEYS)}"
             _PENDING[key] = (
                 module if at_import else None,

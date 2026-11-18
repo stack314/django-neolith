@@ -2019,12 +2019,17 @@ def test_a_helper_another_app_imports_first_is_checked_for_its_own_app(
 def test_an_entry_never_runs_its_own_comparison(write_app: WriteApp) -> None:
     # INSTALLED_APPS holds an AppConfig whose __eq__ raises, and a str
     # subclass whose __eq__ and __hash__ raise, which Django loads as its
-    # text; both decide as their plain spellings do (#100).
+    # text; both decide as their plain spellings do (#100). A lazy proxy of
+    # a str is no str: its request belongs to no app, so it stops every
+    # later set-up instead of breaking them.
     good = write_app("")
     asks = write_app(
         _PLAIN_CONFIG.replace("{name}", "{package}"), __init__=_UNDECLARED_CONNECTS
     )
     other = write_app("")
+    lazily = write_app(
+        _PLAIN_CONFIG.replace("{name}", "{package}"), __init__=_UNDECLARED_CONNECTS
+    )
     printed = in_built_host(
         f"""
         import importlib
@@ -2032,6 +2037,7 @@ def test_an_entry_never_runs_its_own_comparison(write_app: WriteApp) -> None:
         import django
         from django.apps import AppConfig
         from django.test.utils import override_settings
+        from django.utils.functional import SimpleLazyObject
 
 
         class Hostile(AppConfig):
@@ -2057,6 +2063,9 @@ def test_an_entry_never_runs_its_own_comparison(write_app: WriteApp) -> None:
             [Spelt({asks!r})],
             [{other!r}],
             [],
+            [SimpleLazyObject(lambda: {lazily!r})],
+            [{other!r}],
+            [],
         ):
             try:
                 with override_settings(INSTALLED_APPS=[*installed, *added]):
@@ -2072,6 +2081,7 @@ def test_an_entry_never_runs_its_own_comparison(write_app: WriteApp) -> None:
         "DeclarationError",
         "admitted",
         "admitted",
+        *["DeclarationError"] * 3,
     ]
 
 
