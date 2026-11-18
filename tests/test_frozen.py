@@ -70,7 +70,7 @@ class _Backend(PrincipalBackend):
 
 
 class _Caller(CallerBackend):
-    def authenticate(self, request: object, contract: str) -> None:  # type: ignore[override]
+    def authenticate(self, request: object, contract: str) -> None:
         return None
 
 
