@@ -332,7 +332,7 @@ def _name_entries() -> None:
     """
     loading = _populating()
     entries = None if loading is None else loading.get("installed_apps")
-    if entries is None:
+    if not isinstance(entries, (list, tuple)):
         return
     names: dict[str, str] = {}
     for entry, made in zip(entries, global_apps.app_configs.values(), strict=False):
