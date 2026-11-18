@@ -1616,3 +1616,59 @@ def test_a_resolution_every_caller_gave_up_on_is_forgotten(
     finally:
         stuck.set()
         pool.close()
+
+
+class Bug(Exception):
+    """A failure in the client's own code."""
+
+
+def test_a_failure_while_the_client_handles_its_own_error_keeps_no_token(
+    provide: Callable[..., tuple[Pool, Provider]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def deep(written: bytes) -> None:
+        raise OSError("reset")
+
+    def send(connection: object, data: bytes, *args: object, **kwargs: object) -> None:
+        # The OSError's frames, not the Bug's, hold the request: only
+        # following the chain clears them.
+        try:
+            deep(data)
+        except OSError:
+            raise Bug from None
+
+    monkeypatch.setattr(_http, "_send", send)
+    pool, _ = provide(answer(OK))
+    with pytest.raises(Bug) as raised:
+        exchange(pool, TARGET, lambda: FIELDS, BODY, None)
+    assert raised.value.__context__ is not None
+    assert not _holds_token(_frames_below_exchange(raised.value))
+
+
+def _caller_inner(pool: Pool) -> None:
+    own_value = "kept-by-the-caller"  # noqa: F841 (read from the frame)
+    raise LookupError("the caller's own failure")
+
+
+def test_the_callers_handled_exception_keeps_its_frames(
+    provide: Callable[..., tuple[Pool, Provider]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def send(*args: object, **kwargs: object) -> None:
+        raise Unexpected
+
+    monkeypatch.setattr(_http, "_send", send)
+    pool, _ = provide(answer(OK))
+    handled: BaseException | None = None
+    try:
+        _caller_inner(pool)
+    except LookupError as error:
+        handled = error
+        with pytest.raises(Unexpected) as raised:
+            exchange(pool, TARGET, lambda: FIELDS, BODY, None)
+    assert handled is not None
+    assert raised.value.__context__ is handled
+    tb = handled.__traceback__
+    assert tb is not None
+    assert tb.tb_next is not None
+    assert tb.tb_next.tb_frame.f_locals["own_value"] == "kept-by-the-caller"

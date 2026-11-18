@@ -24,6 +24,7 @@ import re
 import select
 import socket
 import ssl
+import sys
 import threading
 import traceback
 import weakref
@@ -370,8 +371,9 @@ class Pool:
 
         The last caller to stop waiting on a resolution that has not ended
         forgets it, so the next call starts its own rather than wait on one
-        that may never end, as Go's ``ForgetUnshared`` does. The forgotten
-        thread ends on its own; its result is not used.
+        that may never end, unlike Go's ``ForgetUnshared``, which forgets only
+        a lookup no other call joined. The forgotten thread ends on its own;
+        its result is not used.
         """
         with self._lock:
             lookup = self._lookup
@@ -604,6 +606,7 @@ def exchange(
         ValueError: ``target`` or a field is outside its grammar: a mistake
             of the code that called this, never a transport failure.
     """
+    handled = sys.exception()
     try:
         return _exchange(pool, target, fields, body, deadline)
     except _Stop as stop:
@@ -611,23 +614,25 @@ def exchange(
     except _Refused as refused:
         error = ValueError(refused.args[0])
     except BaseException as unexpected:
-        _forget(unexpected)
+        _forget(unexpected, handled)
         raise
     raise error
 
 
-def _forget(error: BaseException) -> None:
-    """Clear the locals of every finished frame an exception holds.
+def _forget(error: BaseException, handled: BaseException | None) -> None:
+    """Clear the locals of every finished frame the client's exceptions hold.
 
     The frames below ``exchange`` hold the request's header bytes, the token
     among them, and a logger or error reporter that records frame locals
     would keep them. ``exchange``'s own frame, still running, holds none.
+    The chain is followed down to ``handled``, the exception the caller was
+    handling when it called ``exchange``, whose frames are the caller's.
     """
     seen: set[int] = set()
     pending: list[BaseException | None] = [error]
     while pending:
         found = pending.pop()
-        if found is None or id(found) in seen:
+        if found is None or found is handled or id(found) in seen:
             continue
         seen.add(id(found))
         traceback.clear_frames(found.__traceback__)
