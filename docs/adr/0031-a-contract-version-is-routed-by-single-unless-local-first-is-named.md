@@ -328,7 +328,7 @@ This table is the one list of the routing cases and their outcomes. Each case ha
 |---|---|---|---|---|---|
 | `routing_single_one_attempt` | U, under `single` | `get` | `unavailable` | exactly one to U | TRN-17, APP-new-r1 |
 | `routing_single_refused` | R, under `single` | `get` | `unavailable` | none | TRN-17, APP-new-r1 |
-| `routing_moves_on_503` | U, B | `get` | the reply | one to U, then one to B, with the same idempotency key, principal, trace identifier and `tracestate`, a different span and token, and a `Neolith-Timeout` at B that is 5 less than at U | TRN-8, TRN-new-r1, TRN-new-r4 |
+| `routing_moves_on_503` | U, B | `get` | the reply | one to U, then one to B, with the same idempotency key, principal, trace identifier and `tracestate`, a different span, and a token minted for each attempt, and a `Neolith-Timeout` at B that is 5 less than at U | TRN-8, TRN-new-r1, TRN-new-r4 |
 | `routing_moves_on_refused_connection` | R, B | `get` | the reply | one to B | TRN-8, TRN-new-r1 |
 | `routing_moves_on_unavailable_body` | N, B | `get` | the reply | one to N, then one to B | TRN-8 |
 | `routing_moves_on_reset_after_read` | X, B | `get` | the reply | one to X, then one to B with the same idempotency key | TRN-8, TRN-new-r4 |
