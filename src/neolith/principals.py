@@ -19,6 +19,14 @@ response whose request's principal was looked for varies on the request
 headers the backends declare in ``request_inputs``. The host trusts that
 declaration: a backend that reads a header it does not declare gives
 responses a shared cache may serve to another user.
+
+A principal backend never takes a principal from a ``neolith-`` header such
+as ``Neolith-Principal``: on an ordinary page anyone can send one. The host
+reads that header only on a contract call, from a calling app the
+contract's allow-list admits, and warns (``neolith.W005``) about a backend
+that declares a ``neolith-`` header. ``NEOLITH["CALLER_BACKENDS"]``
+(``neolith.callers``) is the other kind of backend: it names which app makes
+a contract call over HTTP.
 """
 
 import abc
@@ -49,7 +57,8 @@ class PrincipalBackend(abc.ABC):
     keyword arguments, and serves every request from every thread, so it
     keeps no state of one request on itself. A subclass defines
     ``resolve``, sets ``request_inputs``, and overrides ``aresolve`` when it
-    has an async path of its own.
+    has an async path of its own. It never takes a principal from a
+    ``neolith-`` header, which anyone can send on an ordinary page.
 
     Attributes:
         request_inputs: The request headers the backend reads, as a tuple of
@@ -69,8 +78,10 @@ class PrincipalBackend(abc.ABC):
         Called when the request's first call is synchronous, or when Django
         runs the principal middleware in sync mode. Raise to refuse: every
         call from the request then fails with ``internal``, and the host
-        logs the cause. It may be called more than once for one request and
-        gives the same answer each time.
+        logs the cause, at ``WARNING`` for ``neolith.CredentialRefused``,
+        which says the backend recognized a credential and refuses it, and
+        at ``ERROR`` for anything else. It may be called more than once for
+        one request and gives the same answer each time.
 
         Args:
             request: The request.

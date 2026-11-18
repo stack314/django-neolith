@@ -41,6 +41,7 @@ from django.utils.module_loading import import_string
 from neolith import _naming
 from neolith._context import Principal, principal_form
 from neolith._frozen import once
+from neolith.callers import CredentialRefused
 from neolith.principals import PrincipalBackend
 
 __all__ = [
@@ -48,6 +49,7 @@ __all__ = [
     "PRINCIPAL_MIDDLEWARE",
     "Built",
     "Failed",
+    "Refused",
     "Resolution",
     "asearch",
     "build",
@@ -93,6 +95,15 @@ def _cause(error: BaseException, *, bounded: bool = True) -> str:
     return f"{text[: 2 * _SHOWN - 3]}..."
 
 
+def _bounded(error: CredentialRefused) -> str:
+    """A refusal's message, bounded, never raising."""
+    try:
+        text = error.message
+    except Exception:
+        return "a refusal whose message cannot be read"
+    return text if len(text) <= 2 * _SHOWN else f"{text[: 2 * _SHOWN - 3]}..."
+
+
 def _dotted(path: str) -> bool:
     """Whether ``path`` is two or more ASCII identifiers joined by dots."""
     parts = path.split(".")
@@ -102,8 +113,14 @@ def _dotted(path: str) -> bool:
     )
 
 
-def shape_problems(value: object) -> list[str]:
-    """Judge the shape of ``NEOLITH["PRINCIPAL_BACKENDS"]``, importing nothing.
+def shape_problems(
+    value: object,
+    setting: str = SETTING,
+    example: str = "neolith.principals.DjangoUserBackend",
+) -> list[str]:
+    """Judge the shape of ``NEOLITH["PRINCIPAL_BACKENDS"]``, or of another
+    ``setting`` in the same entry form, such as ``CALLER_BACKENDS`` (ADR
+    0027), importing nothing.
 
     The value is a ``list`` of one or more entries, each a ``dict`` with
     exactly the keys ``BACKEND``, a dotted path, and ``OPTIONS``, a ``dict``
@@ -111,13 +128,13 @@ def shape_problems(value: object) -> list[str]:
     found is returned.
     """
     if type(value) is not list:
-        return [f"{SETTING}: expected a list of backends, got {_type(value)}"]
+        return [f"{setting}: expected a list of backends, got {_type(value)}"]
     entries: list[object] = value
     if not entries:
-        return [f"{SETTING}: is empty; leave the key out for no backend"]
+        return [f"{setting}: is empty; leave the key out for no backend"]
     problems: list[str] = []
     for position, entry in enumerate(entries):
-        where = f"{SETTING}[{position}]"
+        where = f"{setting}[{position}]"
         if type(entry) is not dict:
             problems.append(
                 f"{where}: expected a dict with exactly the keys BACKEND and "
@@ -139,7 +156,7 @@ def shape_problems(value: object) -> list[str]:
         if type(backend) is not str or not _dotted(backend):
             problems.append(
                 f"{where}: BACKEND {_shown(backend)} is not a dotted path, such as "
-                "'neolith.principals.DjangoUserBackend'"
+                f"{example!r}"
             )
         if type(options) is not dict:
             problems.append(f"{where}: OPTIONS: expected a dict, got {_type(options)}")
@@ -358,7 +375,18 @@ def cache_problems(middleware: object) -> list[str]:
 
 
 class Failed(Exception):
-    """A failure to resolve a request's principal; its message is logged."""
+    """A failure to resolve a request's principal; its message is logged,
+    at ``WARNING`` when a backend refused a credential and ``ERROR``
+    otherwise (ADR 0027 Decision 7).
+    """
+
+    refused = False
+
+
+class Refused(Failed):
+    """A backend raised ``neolith.CredentialRefused``."""
+
+    refused = True
 
 
 def _asked(built: Built, method: str, found: object) -> Principal | None:
@@ -396,6 +424,10 @@ def search(
     for built in backends:
         try:
             found = built.backend.resolve(request)
+        except CredentialRefused as error:
+            raise Refused(
+                f"{built.where}: resolve refused the credential: {_bounded(error)}"
+            ) from None
         except Exception as error:
             raise Failed(f"{built.where}: resolve raised {_cause(error)}") from error
         principal = _asked(built, "resolve", found)
@@ -413,6 +445,10 @@ async def asearch(
     for built in backends:
         try:
             found = await built.backend.aresolve(request)
+        except CredentialRefused as error:
+            raise Refused(
+                f"{built.where}: aresolve refused the credential: {_bounded(error)}"
+            ) from None
         except Exception as error:
             raise Failed(f"{built.where}: aresolve raised {_cause(error)}") from error
         principal = _asked(built, "aresolve", found)
@@ -510,19 +546,26 @@ class Resolution:
 
     def _record(self, outcome: _Outcome, cause: BaseException | None) -> _Outcome:
         """Write ``outcome`` unless one is written; return the one written.
-        Hold the lock. A failure is logged when it is written.
+        Hold the lock. A failure is logged when it is written: a refused
+        credential at ``WARNING`` with its message alone, anything else at
+        ``ERROR`` with its cause.
         """
         if self._outcome is None:
             self._outcome = outcome
             if outcome[1] is not None:
                 with contextlib.suppress(Exception):
-                    _log.error(
-                        "request root (trace %s): %s",
-                        self.trace_id,
-                        outcome[1],
-                        exc_info=cause,
-                        stack_info=cause is None,
-                    )
+                    if type(cause) is Refused:
+                        _log.warning(
+                            "request root (trace %s): %s", self.trace_id, outcome[1]
+                        )
+                    else:
+                        _log.error(
+                            "request root (trace %s): %s",
+                            self.trace_id,
+                            outcome[1],
+                            exc_info=cause,
+                            stack_info=cause is None,
+                        )
         return self._outcome
 
     def _begin(self) -> tuple[_Outcome | None, HttpRequest | None]:

@@ -116,10 +116,12 @@ API_GROUPS: dict[str, tuple[str, str, tuple[str, ...]]] = {
     ),
     "errors": (
         "Errors",
-        "The exceptions neolith raises.",
+        "The exceptions neolith raises, and the one a backend raises to refuse "
+        "a credential (ADR 0027).",
         (
             "ContractError",
             "ContractDefinitionError",
+            "CredentialRefused",
             "DeclarationError",
             "UsageError",
         ),

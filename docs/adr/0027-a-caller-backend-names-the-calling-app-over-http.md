@@ -1,6 +1,7 @@
 # 0027. On an HTTP call, a caller backend names the calling app from a shared-secret token, and the principal header is read only after the allow-list admits that app
 
-- **Status:** Proposed
+- **Status:** Accepted
+- **Accepted:** 2026-11-18
 - **Date:** 2026-11-18
 
 ## Context

@@ -9,6 +9,7 @@ Django's middleware chain are in ``test_request_principal.py``.
 
 import asyncio
 import dataclasses
+import logging
 import threading
 import time
 import uuid
@@ -29,7 +30,7 @@ from django.test.utils import isolate_apps
 from hypothesis import given
 from hypothesis import strategies as st
 
-from neolith import Principal, _checks, _principal
+from neolith import CredentialRefused, Principal, _checks, _principal
 from neolith._context import principal_form, read_principal
 from neolith._principal import Built, Resolution, build, search, shape_problems
 from neolith.middleware import afinish, finish
@@ -546,6 +547,31 @@ def test_a_failure_is_recorded_once_and_logged_with_the_trace(
     message = logged[0].getMessage()
     assert "0" * 31 + "1" in message
     assert f"{SETTING}[0] ({HERE}.Fixed): resolve raised RuntimeError: down" in message
+
+
+@pytest.mark.spec("APP-54")
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_a_refused_credential_fails_with_internal_and_is_logged_at_warning(
+    mode: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A backend that raises ``CredentialRefused`` fails the root as any
+    failure does, and the host logs it at WARNING, with its message alone
+    (ADR 0027 Decision 7, 0023 Open question 4)."""
+    refusing = Fixed(answer=CredentialRefused("the session was revoked"))
+    held = resolution(refusing)
+    read = held.form if mode == "sync" else async_to_sync(held.aform)
+    with pytest.raises(ValueError, match="could not be resolved"):
+        read()
+    logged = [r for r in caplog.records if r.name == "neolith.host"]
+    method = "resolve" if mode == "sync" else "aresolve"
+    assert [(r.levelno, r.getMessage(), r.exc_info) for r in logged] == [
+        (
+            logging.WARNING,
+            f"request root (trace {'0' * 31}1): {SETTING}[0] ({HERE}.Fixed): "
+            f"{method} refused the credential: the session was revoked",
+            None,
+        )
+    ]
 
 
 @pytest.mark.spec("APP-54")

@@ -273,6 +273,12 @@ _W001 = [
     f"tests.request_admin.project_admin.ItemAdmin{_REFUSED}",
     f"tests.request_admin.project_admin.OtherItemAdmin{_REFUSED}",
 ]
+# The host's other warning: it provides contracts and lists no caller
+# backend (ADR 0027).
+_W004 = (
+    'this host provides contracts and NEOLITH["CALLER_BACKENDS"] lists no caller '
+    "backend, so every call to them over HTTP fails with unauthenticated"
+)
 
 
 @pytest.fixture(scope="module")
@@ -372,13 +378,18 @@ def test_an_admin_action_on_a_project_admin_class_is_refused(
 def test_the_host_warns_about_each_admin_class_in_no_app(ran: dict[str, Any]) -> None:
     """Case 8: ``neolith.W001`` names the project's admin classes, on every
     admin site, by the rule the binding uses, and no other."""
-    assert ran["checks"] == [["neolith.W001", m] for m in _W001]
+    assert ran["checks"] == [
+        *(["neolith.W001", m] for m in _W001),
+        ["neolith.W004", _W004],
+    ]
 
 
 @pytest.mark.spec("APP-17")
 def test_set_up_logs_the_warning_and_serves(ran: dict[str, Any]) -> None:
     """A warning does not stop the host; set-up logs it once."""
-    assert ran["log"] == "".join(f"(neolith.W001) {m}\n" for m in _W001)
+    assert ran["log"] == "".join(
+        [*(f"(neolith.W001) {m}\n" for m in _W001), f"(neolith.W004) {_W004}\n"]
+    )
 
 
 def test_manage_py_check_prints_the_warning(ran: dict[str, Any]) -> None:
