@@ -8,10 +8,10 @@ invariant: for every frozen type the package defines, a built value is the
 same after ``__init__``, ``__setstate__``, ``copy.replace``, a copy and a
 pickle are tried on it, and the copies are built as before.
 
-The frozen types are found, not listed: each class of a ``neolith`` module
-that is a frozen dataclass or refuses ``__setattr__`` itself, besides the
-read-only types that refuse changes otherwise. A new one fails the first test
-until it has an example below.
+The frozen types are found, not listed: each class of a ``neolith`` module,
+subpackages included, that is a frozen dataclass or refuses ``__setattr__``
+itself, besides the read-only types that refuse changes otherwise. A new one
+fails the first test until it has an example below.
 """
 
 import contextlib
@@ -127,7 +127,7 @@ _RAISES = frozenset({"neolith._unset"})
 
 
 def _found() -> Iterator[type]:
-    for module in pkgutil.iter_modules(neolith.__path__, "neolith."):
+    for module in pkgutil.walk_packages(neolith.__path__, "neolith."):
         if module.name in _RAISES:
             continue
         for value in vars(importlib.import_module(module.name)).values():
