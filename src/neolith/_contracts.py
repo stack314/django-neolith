@@ -18,6 +18,7 @@ An action declares its own error kinds with
 declaration.
 """
 
+import contextlib
 import copy
 import functools
 import inspect
@@ -25,7 +26,7 @@ import math
 import re
 import types
 import typing
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import AsyncIterator, Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Annotated, Any, NoReturn, Protocol, final, overload
 
@@ -848,9 +849,11 @@ def implements[T](declaration: type[Any], /) -> Callable[[type[T]], type[T]]:
 
     The class has one instance method per action, taking ``(self, request)``
     annotated with the action's request type and returning its reply type
-    (``None`` for an empty reply). An action that reads the call context takes
-    it after the request, as ``(self, request, ctx: CallContext)``. Any other
-    public method is an error; helpers start with ``_``.
+    (``None`` for an empty reply). It returns the reply, so it is neither an
+    ``async def`` nor a generator function. An action that reads the call
+    context takes it after the request, as ``(self, request, ctx:
+    CallContext)``. Any other public method is an error; helpers start with
+    ``_``.
 
     Args:
         declaration: The class marked with ``@contract``.
@@ -1030,6 +1033,22 @@ def _parse_identity(identity: object) -> tuple[str, int]:
 _RESERVED_PARAMETERS = frozenset({"context", "timeout"})
 
 
+def _probe() -> Iterator[None]:
+    yield
+
+
+async def _async_probe() -> AsyncIterator[None]:
+    yield
+
+
+_CONTEXT_MANAGER_CODES = frozenset(
+    {
+        contextlib.contextmanager(_probe).__code__,
+        contextlib.asynccontextmanager(_async_probe).__code__,
+    }
+)
+
+
 def _signature(
     where: str, function: Callable[..., Any], *, declared: bool = False
 ) -> tuple[object, object, bool]:
@@ -1044,6 +1063,23 @@ def _signature(
     if inspect.iscoroutinefunction(function) or inspect.isasyncgenfunction(function):
         raise ContractDefinitionError(
             f"{where}: actions are synchronous in this version"
+        )
+    # A generator function's call returns a generator and runs none of its
+    # body, so it never returns the reply. That includes one that
+    # types.coroutine made awaitable. Only the function's own code is read: a
+    # wrapper's body decides what its call returns.
+    if inspect.isgeneratorfunction(function):
+        raise ContractDefinitionError(
+            f"{where}: it is a generator function, so a call returns a "
+            "generator, not the reply; return the reply instead of yielding it"
+        )
+    # contextlib's two decorators return a plain function whose call always
+    # returns a context manager. Every function they return shares one code
+    # object, so that code identifies them.
+    if function.__code__ in _CONTEXT_MANAGER_CODES:
+        raise ContractDefinitionError(
+            f"{where}: it is wrapped by contextlib's contextmanager, so a call "
+            "returns a context manager, not the reply; return the reply instead"
         )
     try:
         signature = inspect.signature(function)

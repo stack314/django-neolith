@@ -38,6 +38,7 @@ from neolith._declaration import Declaration, DeclarationError, declaration_of
 __all__ = [
     "HOST_NAMES",
     "ROUTER",
+    "EarlyRead",
     "built_settings",
     "configure",
     "databases_difference",
@@ -54,6 +55,16 @@ HOST_NAMES: Final = {
 # Labels the host reserves (ADR 0009, the admitted set).
 _RESERVED: Final = ("default", "django_cache")
 _SHOWN: Final = 160
+
+
+class EarlyRead(ImproperlyConfigured):
+    """A setting was read while the command line read the deployer's module
+    or an app's declaration, before settings exist: ``neolith._unset``, the
+    settings module Django is pointed at meanwhile, raises it.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("a setting was read before settings exist")
 
 
 def _type(value: object) -> str:
@@ -77,8 +88,14 @@ def _refuse(problems: list[str]) -> None:
         raise ImproperlyConfigured("\n".join(sorted(problems)))
 
 
-def configure(apps: object, deployer: object) -> dict[str, Any]:
+def configure(
+    apps: object, deployer: object, *, closed: bool = False
+) -> dict[str, Any]:
     """Run Declare, Resolve and Configure; return the whole settings mapping.
+
+    ``closed`` is for a host named on the command line, which hosts declared
+    apps only in 0.1 (ADR 0022 Decision 4): Configure then also refuses a
+    ``default`` in ``NEOLITH["DATABASES"]``.
 
     Raises:
         DeclarationError: A hosted app's declaration is refused when its
@@ -98,7 +115,10 @@ def configure(apps: object, deployer: object) -> dict[str, Any]:
     if refusals:
         raise DeclarationError("\n".join(sorted(refusals)))
     names, problems = _names(deployer)
-    _refuse(problems + _deployer_problems(names, declarations))
+    problems += _deployer_problems(names, declarations)
+    if closed:
+        problems += _open_problems(names.get("NEOLITH"))
+    _refuse(problems)
     return {**names, **built_settings(declarations, names["NEOLITH"])}
 
 
@@ -139,15 +159,14 @@ def _read(path: str) -> Declaration | str:
         config = AppConfig.create(path)
     except DeclarationError:
         raise
+    except EarlyRead as error:
+        raise ImproperlyConfigured(_reads(where)) from error
     except Exception as error:
         raise ImproperlyConfigured(
             f"{where}: cannot be read: {_cause(error)}"
         ) from error
     if not was and settings.configured:
-        raise ImproperlyConfigured(
-            f"{where}: reads Django settings at import; a declaration is read "
-            "before settings exist"
-        )
+        raise ImproperlyConfigured(_reads(where))
     cls = type(config)
     declaration = declaration_of(cls)
     if declaration is None:
@@ -160,6 +179,13 @@ def _read(path: str) -> Declaration | str:
             "package the declaration names"
         )
     return declaration
+
+
+def _reads(where: str) -> str:
+    return (
+        f"{where}: reads Django settings at import; a declaration is read before "
+        "settings exist"
+    )
 
 
 def _compared(pairs: Sequence[tuple[str, Declaration]]) -> list[str]:
@@ -227,6 +253,17 @@ def _deployer_problems(
         names.get("SILENCED_SYSTEM_CHECKS", _checks.MISSING)
     )
     return problems
+
+
+def _open_problems(neolith: object) -> list[str]:
+    """The refusal of a ``default`` database in a host that must be closed."""
+    databases = neolith.get("DATABASES") if type(neolith) is dict else None
+    if type(databases) is dict and _databases.DEFAULT in databases:
+        return [
+            f"database {_databases.DEFAULT}: neolith run hosts declared apps only "
+            "in 0.1"
+        ]
+    return []
 
 
 def built_settings(

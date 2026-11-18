@@ -5,9 +5,11 @@ implementation is loaded, before any transport exists, so these tests run
 without one (T2 does not apply yet).
 """
 
+import contextlib
 import dataclasses
 import enum
 import functools
+import inspect
 import json
 import re
 import types
@@ -2152,7 +2154,7 @@ def test_post_init_under_another_name_is_refused() -> None:
 
 # Pydantic builds a record's private attributes after validation, in the
 # model_post_init it generates. Each factory below notes whether Pydantic
-# called it with arguments: at 2.14, unlike 2.12, a factory that takes one
+# called it with arguments: from 2.13, unlike 2.12, a factory that takes one
 # positional argument is handed the validated data, which it can change.
 _FACTORY_ARGUMENTS: list[bool] = []
 _NOTHING = object()
@@ -2562,6 +2564,126 @@ def test_implementation_is_synchronous() -> None:
     impl = type("Impl", (), {"greet": greet, "forget": forget})
     with pytest.raises(ContractDefinitionError, match="synchronous"):
         implements(Greeter)(impl)
+
+
+def _generator(self: object, request: Ping) -> Pong:  # type: ignore[misc]
+    yield Pong(text=request.text)
+
+
+async def _async_generator(self: object, request: Ping) -> Pong:  # type: ignore[misc]
+    yield Pong(text=request.text)
+
+
+async def _coroutine(self: object, request: Ping) -> Pong:
+    return Pong(text=request.text)
+
+
+def _marked(self: object, request: Ping) -> Pong:
+    return Pong(text=request.text)
+
+
+def _greet(self: object, request: Ping) -> Pong:
+    return Pong(text=request.text)
+
+
+def _forget(self: object, request: Ping) -> None:
+    return None
+
+
+def _generator_forget(self: object, request: Ping) -> None:  # type: ignore[misc]
+    yield
+
+
+@types.coroutine
+def _iterable_coroutine(self: object, request: Ping) -> Pong:
+    yield Pong(text=request.text)
+
+
+# Every kind of function whose call returns an object standing for the work,
+# not the reply: a generator, an async generator, a coroutine, a generator
+# made awaitable by types.coroutine, a plain function marked as a coroutine
+# function, and contextlib's context-manager wrappers. For an empty reply the
+# body would never even run.
+_NOT_RETURNING = [
+    pytest.param("greet", _generator, "generator", id="generator"),
+    pytest.param("forget", _generator_forget, "generator", id="generator-empty"),
+    pytest.param("greet", _iterable_coroutine, "generator", id="types-coroutine"),
+    pytest.param("greet", _async_generator, "synchronous", id="async-generator"),
+    pytest.param("greet", _coroutine, "synchronous", id="coroutine"),
+    pytest.param(
+        "greet", inspect.markcoroutinefunction(_marked), "synchronous", id="marked"
+    ),
+    pytest.param(
+        "greet",
+        contextlib.contextmanager(cast(Any, _generator)),
+        "context manager",
+        id="contextmanager",
+    ),
+    pytest.param(
+        "greet",
+        contextlib.asynccontextmanager(cast(Any, _async_generator)),
+        "context manager",
+        id="asynccontextmanager",
+    ),
+]
+
+
+@pytest.mark.spec("CON-18", "CON-19")
+@pytest.mark.parametrize(("name", "function", "message"), _NOT_RETURNING)
+def test_action_whose_call_does_not_return_the_reply_is_rejected(
+    name: str, function: Callable[..., object], message: str
+) -> None:
+    members = {"greet": _greet, "forget": _forget, name: function}
+    impl = type("Impl", (), members)
+    with pytest.raises(ContractDefinitionError, match=message) as raised:
+        implements(Greeter)(impl)
+    assert f"action {name!r}" in str(raised.value)
+
+
+@pytest.mark.spec("CON-18", "CON-19")
+@pytest.mark.parametrize(
+    "member",
+    [
+        pytest.param(staticmethod(_greet), id="staticmethod"),
+        pytest.param(classmethod(_greet), id="classmethod"),
+        pytest.param(property(cast(Any, _greet)), id="property"),
+        pytest.param(
+            functools.cached_property(cast(Any, _greet)), id="cached_property"
+        ),
+        pytest.param(functools.partial(_greet), id="partial"),
+        pytest.param(functools.partialmethod(_greet), id="partialmethod"),
+        pytest.param(functools.singledispatchmethod(_greet), id="singledispatch"),
+        pytest.param(len, id="builtin"),
+        pytest.param(type("Call", (), {"__call__": _greet})(), id="callable"),
+    ],
+)
+def test_action_that_is_not_a_function_is_rejected(member: object) -> None:
+    impl = type("Impl", (), {"greet": member, "forget": _forget})
+    with pytest.raises(
+        ContractDefinitionError, match="action 'greet' must be an instance method"
+    ):
+        implements(Greeter)(impl)
+
+
+@pytest.mark.spec("CON-18", "CON-19")
+def test_action_that_builds_a_generator_inside_is_accepted() -> None:
+    class Impl:
+        def greet(self, request: Ping) -> Pong:
+            return Pong(text="".join(c for c in request.text))
+
+        def forget(self, request: Ping) -> None:
+            return None
+
+    assert implements(Greeter)(Impl) is Impl
+    assert Impl().greet(Ping(text="hi")) == Pong(text="hi")
+
+
+def test_declared_action_is_not_a_generator() -> None:
+    def ping(self: object, request: Ping) -> Pong:  # type: ignore[misc]
+        yield Pong(text=request.text)
+
+    with pytest.raises(ContractDefinitionError, match=r"'ping'.*generator"):
+        contract("echo.v1")(declaration("Echo", {"ping": action(ping)}))
 
 
 @pytest.mark.parametrize(

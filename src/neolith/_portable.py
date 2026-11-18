@@ -1468,7 +1468,7 @@ def _private_attribute_problem(cls: type[Any]) -> str | None:
 
     Pydantic builds a record's private attributes after validation, in the
     model_post_init it generates (``init_private_attributes`` in
-    pydantic/_internal/_model_construction.py). At 2.14 it hands the
+    pydantic/_internal/_model_construction.py). From 2.13 it hands the
     record's validated data, the very field values, to a default factory that
     Pydantic's ``default_factory_takes_validated_data`` says takes it (one
     positional parameter without a default), and that factory can change them

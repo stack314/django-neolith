@@ -10,7 +10,9 @@ State the module owns (CONTRIBUTING K6): the first refusal, which every
 later call in the process raises again.
 """
 
+import contextlib
 import threading
+from collections.abc import Iterator
 from typing import Any, Final
 
 from django.conf import settings
@@ -21,6 +23,9 @@ __all__ = ["build_settings"]
 
 _LOCK: Final = threading.Lock()
 _refused: BaseException | None = None
+# The deployer's module the command line is importing, if it is: a call of
+# the builder meanwhile comes from a module of the other kind.
+_importing: str | None = None
 
 
 def build_settings(apps: list[str], deployer: dict[str, Any]) -> dict[str, Any]:
@@ -57,6 +62,26 @@ def build_settings(apps: list[str], deployer: dict[str, Any]) -> dict[str, Any]:
         ImproperlyConfigured: Any other input is outside what the host
             admits, or an earlier call in this process was refused.
     """
+    return _build(apps, deployer, closed=False)
+
+
+@contextlib.contextmanager
+def _deployer_import(name: str) -> Iterator[None]:
+    """While the command line imports the deployer's module ``name``, refuse
+    every call of the builder (ADR 0022, the command line's row).
+    """
+    global _importing
+    _importing = name
+    try:
+        yield
+    finally:
+        _importing = None
+
+
+def _build(apps: object, deployer: object, *, closed: bool) -> dict[str, Any]:
+    """``build_settings``, and the entry of the command line, whose host is
+    ``closed`` (ADR 0022 Decision 4).
+    """
     global _refused
     from django.core.exceptions import ImproperlyConfigured
 
@@ -71,11 +96,17 @@ def build_settings(apps: list[str], deployer: dict[str, Any]) -> dict[str, Any]:
             and getattr(settings, "SETTINGS_MODULE", None) == calling
         )
         try:
+            if _importing is not None:
+                raise ImproperlyConfigured(
+                    f"settings: {_importing} already calls build_settings; pass the "
+                    "module that holds the deployer's names, or serve this one "
+                    "through DJANGO_SETTINGS_MODULE"
+                )
             if early:
                 raise ImproperlyConfigured(
                     "settings: a setting was read before build_settings was called"
                 )
-            return _configure.configure(apps, deployer)
+            return _configure.configure(apps, deployer, closed=closed)
         except Exception as error:
             _refused = error
             if early or (not before and settings.configured):
