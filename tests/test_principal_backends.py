@@ -116,6 +116,28 @@ class SyncAresolve(PrincipalBackend):
         return None
 
 
+class StaticAresolve(PrincipalBackend):
+    request_inputs = ()
+
+    def resolve(self, request: HttpRequest) -> Principal | None:
+        return None
+
+    @staticmethod
+    async def aresolve(request: HttpRequest) -> Principal | None:
+        return None
+
+
+class ClassAresolve(PrincipalBackend):
+    request_inputs = ()
+
+    def resolve(self, request: HttpRequest) -> Principal | None:
+        return None
+
+    @classmethod
+    async def aresolve(cls, request: HttpRequest) -> Principal | None:
+        return None
+
+
 class Raises(PrincipalBackend):
     request_inputs = ()
 
@@ -322,6 +344,17 @@ def test_a_backend_set_up_cannot_build_is_refused_naming_its_entry(
     assert len(problems) == 1
     assert problems[0].startswith(f"{SETTING}[0] ({given['BACKEND']}): ")
     assert message in problems[0]
+
+
+@pytest.mark.spec("APP-16")
+@pytest.mark.parametrize("backend", [StaticAresolve, ClassAresolve])
+def test_an_aresolve_that_is_a_static_or_class_method_builds(
+    backend: type[PrincipalBackend],
+) -> None:
+    """The coroutine function is read from under the staticmethod or classmethod."""
+    found, problems = build([entry(f"{HERE}.{backend.__name__}")])
+    assert problems == []
+    assert type(found[0].backend) is backend
 
 
 @pytest.mark.spec("APP-16")
