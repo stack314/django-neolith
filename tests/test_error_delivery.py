@@ -31,7 +31,7 @@ from neolith import (
 from neolith._connector import Connector, Failure, InProcess, internal_message
 from neolith._context import Scope, Sent
 from neolith._contracts import Action, is_received, untyped_problem
-from neolith._crossing import codec
+from neolith._crossing import Receiver, codec
 from tests.strategies import admitted_by
 from tests.test_contract_round_trip import _HYPOTHESIS, _TYPES, _name, _records
 from tests.test_crossing import _shared
@@ -368,6 +368,7 @@ class Arriving:
     """A transport that answers every call with one failure."""
 
     contract = SHOP
+    receiver = Receiver.IN_PROCESS
 
     def __init__(self, failure: Failure) -> None:
         self._failure = failure
