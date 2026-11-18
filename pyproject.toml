@@ -82,9 +82,11 @@ path = "src/neolith/__init__.py"
 packages = ["src/neolith"]
 
 [tool.hatch.build.targets.sdist]
-# docs/, VISION.md, CONTRIBUTING.md and CODE_OF_CONDUCT.md: the tests read the
-# records and the site's sources, and the site links them (ADR 0024).
+# Every file git tracks, and nothing else: the tests and the docs checks read
+# files from across the repository, so they run from the sdist as from a
+# checkout. scripts/sdist_check.py holds a built sdist to this list.
 include = [
+    ".github",
     "src/neolith",
     "tests",
     "scripts",
@@ -96,6 +98,7 @@ include = [
     "VISION.md",
     "CONTRIBUTING.md",
     "CODE_OF_CONDUCT.md",
+    "SECURITY.md",
 ]
 
 [tool.pytest.ini_options]
