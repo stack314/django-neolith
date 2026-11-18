@@ -1058,7 +1058,6 @@ def _near_bytes_text(draw: st.DrawFn) -> str:
     return text[:at] + text[at + 1 :]
 
 
-@pytest.mark.spec("CON-39")
 @_HYPOTHESIS
 @given(_near_bytes_text())
 def test_binary_reads_exactly_the_text_its_pattern_matches(text: str) -> None:
