@@ -26,7 +26,7 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import timedelta
-from decimal import Decimal
+from decimal import MAX_EMAX, MIN_EMIN, Context, Decimal, Rounded
 from typing import Annotated, Any
 
 from pydantic import GetCoreSchemaHandler, GetJsonSchemaHandler
@@ -51,6 +51,10 @@ _DURATION_LIMIT = timedelta(seconds=10**11)
 _MICROSECOND = timedelta(microseconds=1)
 # A decimal has at most 34 digits, which its second pattern states.
 _DECIMAL_DIGITS = 34
+# Rounding to 34 digits, which flags Rounded when a value has more (#45).
+_DECIMAL_ROUNDING = Context(
+    prec=_DECIMAL_DIGITS, Emax=MAX_EMAX, Emin=MIN_EMIN, traps=[], flags=[]
+)
 
 
 # Python's re holds state for each repetition of BYTES_PATTERN's group, about
@@ -115,6 +119,13 @@ def _write_duration(value: timedelta) -> str:
     return f"{sign}{seconds}.{fraction:06d}s"
 
 
+def _has_more_digits(value: Decimal) -> bool:
+    """True if a nonzero decimal's coefficient has more than 34 digits."""
+    context = _DECIMAL_ROUNDING.copy()
+    context.plus(value)
+    return bool(context.flags[Rounded])
+
+
 def _decimal_text(value: Decimal) -> str | None:
     """The decimal's form, or None if it has none.
 
@@ -123,6 +134,11 @@ def _decimal_text(value: Decimal) -> str | None:
     checked before it is written out, so a huge exponent of either sign cannot
     make a huge string.
     """
+    # A value whose coefficient has more than 34 digits has no form, as its
+    # text would hold them all. as_tuple holds each digit as an entry, about
+    # 24 times the value's own size, so such a value is refused before it.
+    if not value.is_zero() and _has_more_digits(value):
+        return None
     sign, digits, exponent = value.as_tuple()
     if not isinstance(exponent, int):  # infinity or NaN
         return None

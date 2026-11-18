@@ -15,6 +15,7 @@ import contextlib
 import gc
 import json
 import re
+import sys
 import tracemalloc
 import types
 from collections.abc import Callable
@@ -1088,7 +1089,7 @@ def _peak(work: Callable[[], object]) -> int:
     gc.collect()
     tracemalloc.start()
     try:
-        with contextlib.suppress(ValidationError):
+        with contextlib.suppress(ValidationError, PydanticSerializationError):
             work()
         return tracemalloc.get_traced_memory()[1]
     finally:
@@ -1137,3 +1138,22 @@ def test_checking_written_bytes_copies_nothing() -> None:
     encoding_problem(BYTES, {}, "")
     peak = _peak(lambda: encoding_problem(BYTES, {}, text))
     assert peak < _SIZE // 8, f"{peak / _SIZE:.2f} times the size"
+
+
+@pytest.mark.parametrize(
+    "digits", ["1" * _SIZE, "0." + "1" * _SIZE], ids=["integer", "fraction"]
+)
+def test_a_decimal_of_many_digits_is_refused_without_copying_them(
+    digits: str,
+) -> None:
+    # Its digits as a tuple took about 24 times the value's own size; it is
+    # now refused by its digit count first, which copies the value once.
+    value = Decimal(digits)
+    record = _record(Decimal128)
+    record.model_validate({"v": Decimal(1)})
+    held = record.model_construct(v=value)
+    size = sys.getsizeof(value)
+    read = _peak(lambda: record.model_validate({"v": value}))
+    written = _peak(held.model_dump_json)
+    assert read < 3 * size, f"read: {read / size:.1f} times the size"
+    assert written < 3 * size, f"written: {written / size:.1f} times the size"
