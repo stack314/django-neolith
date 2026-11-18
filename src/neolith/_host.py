@@ -116,7 +116,9 @@ _RECORDED: dict[str, dict[str, dict[str | None, None]]] = {}
 # importing an entry of INSTALLED_APPS: each load's entries and the dict of
 # app configs it fills, one per entry in order, which outlives the load even
 # when it stops before its set-up.
-_LOADS: list[tuple[Sequence[object], dict[str, AppConfig]]] = []
+_LOADS: list[tuple[tuple[object, ...], dict[str, AppConfig]]] = []
+# The names of the apps installed at any set-up of this process.
+_ONCE_INSTALLED: set[str] = set()
 # The app whose implementation Validate imports and builds now, if any.
 _VALIDATING: Final = contextvars.ContextVar[str | None]("_VALIDATING", default=None)
 # The hosted apps of the first set-up that passed: label to config class.
@@ -241,6 +243,7 @@ def set_up(config: AppConfig) -> None:
             for problem in _configure.settings_problems(configs)
         ]
     with _LOCK:
+        _ONCE_INSTALLED.update(c.name for c in configs)
         _name_entries()
         installed = frozenset(c.name for c in configs) | {
             f"{type(c).__module__}.{type(c).__qualname__}" for c in configs
@@ -326,17 +329,52 @@ def _loading_app() -> str | None:
     if type(found) is not str:
         return None
     entries = loading.get("installed_apps")
+    # One dict of app configs per load; a copy of its entries, since the list
+    # given can change after the load.
     if isinstance(entries, (list, tuple)) and not any(
-        kept is entries for kept, _ in _LOADS
+        made is global_apps.app_configs for _, made in _LOADS
     ):
-        _LOADS.append((entries, global_apps.app_configs))
+        _LOADS.append((tuple(entries), global_apps.app_configs))
     return found
 
 
+def _import_ties(module: str) -> set[str | None]:
+    """What a ``connect()`` at the top level of ``module``, run as it is
+    imported, is tied to besides the app whose loading imported it.
+
+    Python imports a module once, so every later set-up that would import
+    it in a fresh process must still check the call. A module of an app this
+    load installs is tied to that app too; a module of no app installed in
+    any load of the process is tied to no app, so every set-up checks it.
+    A module of an app installed earlier but not now is left to its loading
+    app alone (ADR 0029).
+    """
+    if not module:
+        return {None}
+    if global_apps.apps_ready:
+        found = global_apps.get_containing_app_config(module)
+        if found is not None:
+            return {found.name}
+    else:
+        # Importing an INSTALLED_APPS entry: its own package is the entry's.
+        loading = _populating()
+        entry = None if loading is None else loading.get("entry")
+        if type(entry) is str and (
+            entry == module
+            or entry.startswith(f"{module}.")
+            or module.startswith(f"{entry}.")
+        ):
+            return set()
+    apps = _ONCE_INSTALLED | {c.name for c in global_apps.app_configs.values()}
+    if any(module == app or module.startswith(f"{app}.") for app in apps):
+        return set()
+    return {None}
+
+
 def _name_entries() -> None:
-    """Tie to its app's name each call site tied to an entry of
-    ``INSTALLED_APPS``, so that a set-up of the app matches it however the
-    entry spelt the app: a module, a config class, a class re-exported or
+    """Tie each call site tied to an entry of ``INSTALLED_APPS`` to the
+    config the entry made, so that a set-up of that config matches it however
+    the entry spelt it: a module, a config class, a class re-exported or
     aliased, or a config whose ``name`` differs from its package.
 
     Phase 1 of ``Apps.populate`` adds one config per entry, in order, to the
@@ -348,7 +386,16 @@ def _name_entries() -> None:
     for entries, made in _LOADS:
         for entry, config in zip(entries, list(made.values()), strict=False):
             if type(entry) is str:
-                names[entry] = config.name
+                # The config class, which every spelling of the entry makes;
+                # an app's name would also match the app a config with
+                # another name points at, installed alone. Django's own
+                # AppConfig is shared by many apps, so its apps go by name.
+                kind = type(config)
+                names[entry] = (
+                    config.name
+                    if kind is AppConfig
+                    else f"{kind.__module__}.{kind.__qualname__}"
+                )
     _LOADS.clear()
     for places in _RECORDED.values():
         for place, loads in places.items():
@@ -804,8 +851,12 @@ def connect(identity: str, /) -> "Connector":
         if host is None:
             host = _restored_elsewhere()
         if host is None:
-            place = _RECORDED.setdefault(identity, {}).setdefault(_place(), {})
-            place[_loading_app()] = None
+            where, module, at_import = _place()
+            ties = {_loading_app()}
+            if at_import:
+                ties |= _import_ties(module)
+            place = _RECORDED.setdefault(identity, {}).setdefault(where, {})
+            place.update(dict.fromkeys(ties))
         elif identity not in host.known:
             raise UsageError(
                 f"connect({_quoted(identity)}): no app of this host provides or "
@@ -814,14 +865,22 @@ def connect(identity: str, /) -> "Connector":
     return Connector._made(identity)
 
 
-def _place() -> str:
-    """The file and line of the ``connect()`` call, for the message only."""
+def _place() -> tuple[str, str, bool]:
+    """The file and line of the ``connect()`` call, for the message only; the
+    name of its module, or ``""``; and whether it runs as the module is
+    imported, at the module's top level.
+    """
     frame = inspect.currentframe()
     try:
         caller = None if frame is None or frame.f_back is None else frame.f_back.f_back
         if caller is None:
-            return "an unknown place"
-        return f"{caller.f_code.co_filename}:{caller.f_lineno}"
+            return "an unknown place", "", False
+        module = caller.f_globals.get("__name__")
+        return (
+            f"{caller.f_code.co_filename}:{caller.f_lineno}",
+            module if type(module) is str else "",
+            caller.f_code.co_name == "<module>",
+        )
     finally:
         del frame
 

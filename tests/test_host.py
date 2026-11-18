@@ -1740,6 +1740,106 @@ def test_an_app_named_in_any_form_asks_at_import_and_is_refused(
         assert printed.splitlines() == decided, walk
 
 
+def _walk(overrides: list[list[str]]) -> list[str]:
+    """What each override, the first apps then ``overrides[i]``, decides,
+    in one process."""
+    return in_built_host(
+        f"""
+        import django
+        from django.test.utils import override_settings
+
+        django.setup()
+        installed = list(settings.INSTALLED_APPS)
+        for added in {overrides!r}:
+            try:
+                with override_settings(INSTALLED_APPS=[*installed, *added]):
+                    print("admitted")
+            except Exception as error:
+                print(type(error).__name__)
+        """,
+        host_apps.HOSTED,
+        {"NEOLITH": host_apps.NEOLITH},
+    ).splitlines()
+
+
+@pytest.mark.spec("APP-14")
+def test_a_module_imported_once_is_checked_for_every_app_that_imports_it(
+    write_app: WriteApp, tmp_path: Path
+) -> None:
+    # Python imports a module once, so a later set-up whose apps import it
+    # again in a fresh process does not run its connect() line: the record
+    # has to reach that set-up anyway.
+    shared = tmp_path / f"{write_app('')}_lib"
+    shared.mkdir()
+    (shared / "__init__.py").write_text(_UNDECLARED_CONNECTS, encoding="utf-8")
+    first = write_app("", models=f"import {shared.name}\n")
+    second = write_app("", models=f"import {shared.name}\n")
+    # A module of no app stops every later set-up, as 0021 says of any
+    # module imported by the end of set-up.
+    assert _walk([[first], [second], []]) == ["DeclarationError"] * 3
+    # One app's models imported by another's: the app whose module asks.
+    owner = write_app("", models=_UNDECLARED_CONNECTS)
+    importer = write_app("", models=f"import {owner}.models\n")
+    assert _walk([[importer, owner], [owner], []]) == [
+        "DeclarationError",
+        "DeclarationError",
+        "admitted",
+    ]
+
+
+@pytest.mark.spec("APP-14")
+def test_an_entry_whose_config_has_another_name_is_not_its_named_app(
+    write_app: WriteApp,
+) -> None:
+    # The entry's package asks; the app its config names, installed alone,
+    # does not import that package, so it is admitted as in a fresh process.
+    named = write_app("")
+    entry = write_app(
+        _PLAIN_CONFIG.replace("{name}", named), __init__=_UNDECLARED_CONNECTS
+    )
+    assert _walk([[entry], [named], [entry]]) == [
+        "DeclarationError",
+        "admitted",
+        "DeclarationError",
+    ]
+
+
+@pytest.mark.spec("APP-14")
+def test_an_installed_apps_list_changed_after_a_load_names_its_own_apps(
+    write_app: WriteApp,
+) -> None:
+    # The list given to an override that stopped is changed and given again:
+    # its first load's entries still name the configs that load made.
+    asks = write_app("", __init__=_UNDECLARED_CONNECTS)
+    printed = in_built_host(
+        f"""
+        import django
+        from django.test.utils import override_settings
+
+        django.setup()
+        installed = list(settings.INSTALLED_APPS)
+        given = [*installed, {asks!r}, "no_such_app"]
+        for change in (None, [a for a in installed if "contenttypes" not in a]):
+            if change is not None:
+                given[:] = [*change, {asks!r}]
+            try:
+                with override_settings(INSTALLED_APPS=given):
+                    print("admitted")
+            except Exception as error:
+                print(type(error).__name__)
+        with override_settings(INSTALLED_APPS=installed):
+            print("the first apps are admitted")
+        """,
+        host_apps.HOSTED,
+        {"NEOLITH": host_apps.NEOLITH},
+    )
+    assert printed.splitlines() == [
+        "ModuleNotFoundError",
+        "DeclarationError",
+        "the first apps are admitted",
+    ]
+
+
 @pytest.mark.spec("APP-14")
 def test_a_place_two_apps_ask_from_belongs_to_both(write_app: WriteApp) -> None:
     # One helper line asks for nope.v1 on behalf of two apps, each added by
