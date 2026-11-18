@@ -378,7 +378,9 @@ def test_an_admin_action_on_a_project_admin_class_is_refused(
 def test_the_host_warns_about_each_admin_class_in_no_app(ran: dict[str, Any]) -> None:
     """Case 8: ``neolith.W001`` names the project's admin classes, on every
     admin site, by the rule the binding uses, and no other."""
-    assert ran["checks"] == [
+    # Django keeps its registered checks in a set, so the order they run in
+    # is not fixed.
+    assert sorted(ran["checks"]) == [
         *(["neolith.W001", m] for m in _W001),
         ["neolith.W004", _W004],
     ]

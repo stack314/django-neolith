@@ -1105,7 +1105,7 @@ def test_credential_refused_holds_fixed_text() -> None:
 
 
 def test_an_app_with_a_signing_key_mints_a_token_the_backend_accepts() -> None:
-    callers = Callers((), {"orders": KEYS["orders"]["orders-1"]})
+    callers = Callers((), (KEYS["orders"]["orders-1"],))
     token = callers.mint("orders", IDENTITY)
     assert token is not None
     assert repr(token) == "<token orders to inventory.v1>"
@@ -1217,7 +1217,7 @@ def test_a_failure_inside_the_hmac_in_the_signer_shows_no_secret_or_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     secret = KEYS["orders"]["orders-1"]
-    callers = Callers((), {"orders": secret})
+    callers = Callers((), (secret,))
     expected = mint(secret, IDENTITY, NOW).authorization().removeprefix("Bearer ")
     monkeypatch.setattr(time, "time", lambda: float(NOW))
     monkeypatch.setattr(hmac, "digest", _failing_digest)
@@ -1231,7 +1231,7 @@ def test_a_failure_inside_the_hmac_in_the_signer_shows_no_secret_or_token(
 def test_secrets_and_tokens_show_by_name_and_are_not_pickled() -> None:
     secret = KEYS["orders"]["orders-1"]
     token = mint(secret, IDENTITY, NOW)
-    callers = Callers(built(shared()), {"orders": secret})
+    callers = Callers(built(shared()), (secret,))
     shown = [repr(secret), repr(token), repr(callers), repr(vars(shared()))]
     assert repr(secret) == "<secret orders/orders-1>"
     text_of = token.authorization().removeprefix("Bearer ")

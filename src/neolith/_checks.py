@@ -19,12 +19,12 @@ backend that set-up could not build and ``neolith.E020`` for Django's cache
 middleware listed after the principal middleware (ADR 0023),
 ``neolith.E021`` for a caller backend or signing key that set-up
 refused (ADR 0027), ``neolith.W001`` for an admin class in no installed
-app, and
-ADR 0027's warnings ``neolith.W004`` (no caller backend), ``neolith.W005``
-(a principal backend that declares a ``neolith-`` header) and, under
-``check --deploy``, ``neolith.W006`` (the shared-secret backend listed). ``neolith.E005``,
-the comparison of the settings the host builds, runs at the first set-up
-only (``neolith._configure``), and Boot's ids are in ``neolith._boot``.
+app, and ADR 0027's warnings ``neolith.W004`` (no caller backend),
+``neolith.W005`` (a principal backend that declares a ``neolith-`` header)
+and, under ``check --deploy``, ``neolith.W006`` (the shared-secret backend
+listed). ``neolith.E005``, the comparison of the settings the host builds,
+runs at the first set-up only (``neolith._configure``), and Boot's ids are
+in ``neolith._boot``.
 """
 
 import math

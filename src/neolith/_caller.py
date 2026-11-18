@@ -18,9 +18,8 @@ plain functions of what they work on, as in ``neolith._principal``:
 import inspect
 import re
 import time
-import types
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Final, final
 
 from django.apps import AppConfig
@@ -167,9 +166,8 @@ class Callers:
     """The caller backends and signing keys of one set-up."""
 
     backends: tuple[Built, ...] = ()
-    signing: Mapping[str, _token.Secret] = field(
-        default_factory=lambda: types.MappingProxyType({})
-    )
+    # Each hosted app's one signing key, named by the app it signs for.
+    signing: tuple[_token.Secret, ...] = ()
 
     def mint(self, app: str, identity: str) -> _token.Token | None:
         """A fresh token of ``app`` for a call to ``identity``, or ``None``
@@ -178,10 +176,10 @@ class Callers:
         Raises:
             neolith._token.Failure: With fixed text, if signing fails.
         """
-        secret = self.signing.get(app)
-        if secret is None:
-            return None
-        return _token.mint(secret, identity, int(time.time()))
+        for secret in self.signing:
+            if secret.app == app:
+                return _token.mint(secret, identity, int(time.time()))
+        return None
 
 
 # A table with no caller backend and no signing key.
@@ -377,7 +375,7 @@ def set_up(config: AppConfig, principals: Sequence[_principal.Built]) -> Callers
         FINDINGS,
         Findings(tuple(refusals), headers, shared[0].where if shared else None),
     )
-    return Callers(backends, types.MappingProxyType(signing))
+    return Callers(backends, tuple(signing.values()))
 
 
 class Refused(Exception):
