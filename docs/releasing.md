@@ -2,12 +2,16 @@
 
 This is the checklist for publishing a release to PyPI. Follow it from top to bottom, every release. Each step gives the command to run and what it should print. Steps marked **(maintainer)** are done by the maintainer; anyone with write access can do the rest.
 
-A release walks through these branches and pull requests ([CONTRIBUTING G5, G7 and G8](../CONTRIBUTING.md#commits-and-pull-requests)):
+A release walks through these branches and pull requests ([CONTRIBUTING G5, G7 and G8](../CONTRIBUTING.md#commits-and-pull-requests)). It is built on its own branch, `release/<version>`, made from `main` when the previous release was published. Each work pull request into that branch is squash-merged, so it adds one commit there.
 
-1. A **version pull request** into `next` sets the version and dates the changelog section. It is squash-merged.
-2. A **release pull request** from `next` into `main` lists the changes and every decision record whose status changes. The maintainer merges it with a merge commit.
-3. An annotated **tag** `vX` on that merge commit starts [the release workflow](../.github/workflows/release.yml). It builds and checks the files, smoke-tests the wheel, and waits for the maintainer to approve the `release` deployment. Then it publishes to PyPI.
-4. A **`.dev` pull request** into `next` starts the next development version.
+1. A **version pull request** into `release/<version>` sets the version and dates the changelog section. It is squash-merged: one commit on the release branch.
+2. A **release pull request** from `release/<version>` into `main` lists the changes and every decision record whose status changes. The maintainer merges it with a merge commit: one commit on `main`, whose second parent is the tip of the release branch. GitHub then deletes the release branch.
+3. An annotated **tag** `v<version>` on that merge commit starts [the release workflow](../.github/workflows/release.yml). It builds and checks the files, smoke-tests the wheel, and waits for the maintainer to approve the `release` deployment. Then it publishes to PyPI. From then on, the tag marks the release.
+4. A **GitHub Release** for the tag carries the changelog section as its notes. It adds no commit.
+5. The **next release's branch**, `release/<next version>`, is made from `main`, at the release's merge commit. It adds no commit.
+6. A **`.dev` pull request** into that branch starts the next development version. It is squash-merged: the first commit on the new branch.
+
+A hotfix walks the same path on a second release branch, made from `main` while the open release branch stays as it is ([section 9](#9-when-something-goes-wrong)).
 
 Lines marked *Recommendation* are this runbook's advice, not a rule the project has recorded.
 
@@ -16,13 +20,16 @@ Lines marked *Recommendation* are this runbook's advice, not a rule the project 
 Every command below reads these. Set them once, in a bash or zsh shell, from a clone of the repository whose `origin` is `stack314/django-neolith` on GitHub.
 
 ```
-VERSION=0.1.0a2           # the version this release publishes
-PREVIOUS=0.1.0a1          # the last published version
-NEXT_DEV=0.1.0a3.dev0     # the development version next starts after this release
+VERSION=0.1.0a2                        # the version this release publishes
+BRANCH="release/${VERSION}"            # the branch it is built on
+PREVIOUS=0.1.0a1                       # the last published version
+NEXT_VERSION=0.1.0a3                   # the version the next release is expected to have
+NEXT_BRANCH="release/${NEXT_VERSION}"  # the branch made for it after this release
+NEXT_DEV="${NEXT_VERSION}.dev0"        # the development version that branch starts with
 REPO=stack314/django-neolith
-PY_FLOOR=python3.12       # pairs with Django 5.2 (ADR 0012)
-PY_NEWEST=python3.15      # pairs with Django 6.1 (ADR 0012)
-WORK=$(mktemp -d)         # builds, virtual environments and notes
+PY_FLOOR=python3.12                    # pairs with Django 5.2 (ADR 0012)
+PY_NEWEST=python3.15                   # pairs with Django 6.1 (ADR 0012)
+WORK=$(mktemp -d)                      # builds, virtual environments and notes
 git fetch origin --tags
 ```
 
@@ -43,23 +50,28 @@ If `PY_FLOOR` or `PY_NEWEST` is not installed, use the closest Python you have, 
 - [ ] Everything meant for this release is merged. Each release has a milestone named after its version.
   ```
   gh issue list --repo "$REPO" --milestone "${VERSION}" --state open
-  gh pr list --repo "$REPO" --base next --state open --search "milestone:${VERSION}"
+  gh pr list --repo "$REPO" --base "$BRANCH" --state open --search "milestone:${VERSION}"
   ```
   Expected: no pull requests, and no issues except the ones that track the release itself. Move anything that will not ship to the next milestone, with a one-line comment saying why.
-- [ ] CI passed on the tip of `next`.
+- [ ] CI passed on the tip of the release branch.
   ```
-  gh run list --repo "$REPO" --workflow ci.yml --commit "$(git rev-parse origin/next)" \
+  gh run list --repo "$REPO" --workflow ci.yml --commit "$(git rev-parse "origin/${BRANCH}")" \
     --json status,conclusion -q '.[] | "\(.status) \(.conclusion)"'
   ```
   Expected: `completed success`. No output means no run exists yet for that commit.
-- [ ] You know what is on `next` since the last release.
+- [ ] Everything on `main` is on the release branch. After a hotfix, this holds only once `main` was merged into the open release branch ([section 9](#9-when-something-goes-wrong)).
   ```
-  git log --first-parent --format='- %s' "v${PREVIOUS}..origin/next"
+  git merge-base --is-ancestor origin/main "origin/${BRANCH}" && echo "main is in ${BRANCH}" || echo "MAIN NOT IN ${BRANCH}"
+  ```
+  Expected: `main is in release/<VERSION>`. If not, merge `main` into the release branch as section 9 describes, before going on.
+- [ ] You know what is on the release branch since the last release.
+  ```
+  git log --first-parent --format='- %s' "v${PREVIOUS}..origin/${BRANCH}"
   ```
   Compare it with `## [Unreleased]` in `CHANGELOG.md` by reading both: every change a user can notice needs an entry. Keep this list for the release pull request.
 - [ ] You know which decision records change status.
   ```
-  git switch --detach origin/next
+  git switch --detach "origin/${BRANCH}"
   git rev-parse -q --verify "v${PREVIOUS}^{commit}" >/dev/null || echo "MISSING TAG v${PREVIOUS}"
   for f in docs/adr/[0-9]*.md; do
     old=$(git show "v${PREVIOUS}:${f}" 2>/dev/null | grep -m1 '^- \*\*Status' || echo "(new)")
@@ -74,7 +86,7 @@ If `PY_FLOOR` or `PY_NEWEST` is not installed, use the closest Python you have, 
   ```
 - [ ] For 0.1 itself: the gate in the [roadmap](roadmap.md) holds, verified on Python 3.15 with Django 6.1 ([ADR 0012](adr/0012-supported-python-and-django-versions.md)).
 
-## 2. The version pull request into `next`
+## 2. The version pull request into the release branch
 
 - [ ] The version follows [PEP 440](https://peps.python.org/pep-0440/) in its normalized form: `0.1.0a2` for an alpha, `0.1.0b1` for a beta, `0.1.0rc1` for a release candidate, `0.1.0` for a final release. It is never a `.dev` version, and it sorts after the last release.
   ```
@@ -90,9 +102,9 @@ If `PY_FLOOR` or `PY_NEWEST` is not installed, use the closest Python you have, 
   PY
   ```
   Expected: `0.1.0a2 is a pre-release` (or `is a final release`). `packaging` is in the `test` dependency group.
-- [ ] Make a branch from `next`.
+- [ ] Make a branch from the release branch.
   ```
-  git switch -c "chore/version-${VERSION}" origin/next
+  git switch -c "chore/version-${VERSION}" "origin/${BRANCH}"
   ```
 - [ ] Find every line that carries the version or a status.
   ```
@@ -104,14 +116,14 @@ If `PY_FLOOR` or `PY_NEWEST` is not installed, use the closest Python you have, 
 - [ ] `CHANGELOG.md` ([Keep a Changelog](https://keepachangelog.com/en/1.1.0/)):
   - [ ] `## [Unreleased]` becomes `## [<VERSION>] - <YYYY-MM-DD>`, dated the day you expect to tag.
   - [ ] A new, empty `## [Unreleased]` sits above it. *Recommendation*, following Keep a Changelog.
-  - [ ] The links at the bottom: `[Unreleased]` compares the new tag with `next`, where unreleased work is, and the new version links to its release page.
+  - [ ] The links at the bottom: `[Unreleased]` compares the new tag with `main`, since `main` and the tag keep this file and the release branch will be gone; the `.dev` pull request points it at the next release branch (section 8). The new version links to its release page.
     ```
-    [Unreleased]: https://github.com/stack314/django-neolith/compare/v<VERSION>...next
+    [Unreleased]: https://github.com/stack314/django-neolith/compare/v<VERSION>...main
     [<VERSION>]: https://github.com/stack314/django-neolith/releases/tag/v<VERSION>
     ```
   - [ ] Every breaking change is listed under *Changed* or *Removed* ([G6](../CONTRIBUTING.md#commits-and-pull-requests)). These commands list the pull requests that declared one:
     ```
-    git log --format='%s' "v${PREVIOUS}..origin/next" | grep -E '^[a-z]+(\([^)]*\))?!:'
+    git log --format='%s' "v${PREVIOUS}..origin/${BRANCH}" | grep -E '^[a-z]+(\([^)]*\))?!:'
     ```
 - [ ] `README.md`. This file is also the description on PyPI.
   - [ ] The status line: `**Status: alpha (<VERSION>). The API may change before 0.1.**`, with the right status word.
@@ -120,7 +132,7 @@ If `PY_FLOOR` or `PY_NEWEST` is not installed, use the closest Python you have, 
   - [ ] The specification's status in *Links* matches `spec/README.md`.
 - [ ] Files that ship in the package or are built at a tag (the README, and the documentation site's pages) say "this version" and name no branch, since a reader sees them long after the branch has moved.
   ```
-  git grep -nE '`(main|next)`|\b(main|next) branch' -- README.md docs/site
+  git grep -nE '`(main|release/[^`]*)`|\b(main|release) branch' -- README.md docs/site
   ```
   Expected: no output. Reword any line it finds, in this pull request.
 - [ ] `pyproject.toml`:
@@ -130,23 +142,23 @@ If `PY_FLOOR` or `PY_NEWEST` is not installed, use the closest Python you have, 
 - [ ] `CONTRIBUTING.md`: "It is in alpha" in the opening paragraph.
 - [ ] `SECURITY.md`: *Supported versions* describes the released versions.
 - [ ] `spec/README.md`: the specification's status line. It changes only when the specification's own status changes.
-- [ ] Commit, push and open the pull request into `next`, in the milestone. Its title follows [G2](../CONTRIBUTING.md#commits-and-pull-requests). *Recommendation:* `chore: set version <VERSION>`.
+- [ ] Commit, push and open the pull request into the release branch, in the milestone. Its title follows [G2](../CONTRIBUTING.md#commits-and-pull-requests). *Recommendation:* `chore: set version <VERSION>`.
   ```
-  gh pr create --repo "$REPO" --base next --title "chore: set version ${VERSION}" \
+  gh pr create --repo "$REPO" --base "$BRANCH" --title "chore: set version ${VERSION}" \
     --body-file "$WORK/version-pr.md" --milestone "${VERSION}"
   ```
 - [ ] It is reviewed, CI passes, and it is squash-merged ([G5, G7](../CONTRIBUTING.md#commits-and-pull-requests)).
 
-*Recommendation:* from here until the release pull request merges, merge nothing else into `next`. The release pull request's head is `next` itself, so a later merge would join the release unverified. Step 4 guards this with `--match-head-commit`.
+*Recommendation:* from here until the release pull request merges, merge nothing else into the release branch. The release pull request's head is the release branch itself, so a later merge would join the release unverified. Step 4 guards this with `--match-head-commit`.
 
 ## 3. Verify what will be released
 
-Run every check on the tip of `next` after the version pull request merged. If one fails, fix it by a pull request into `next`, and run this section again from the start.
+Run every check on the tip of the release branch after the version pull request merged. If one fails, fix it by a pull request into the release branch, and run this section again from the start.
 
 - [ ] Check out that commit in a clean worktree, and record it.
   ```
   git fetch origin
-  git worktree add --detach "$WORK/src" origin/next
+  git worktree add --detach "$WORK/src" "origin/${BRANCH}"
   cd "$WORK/src"
   VERIFIED=$(git rev-parse HEAD); echo "$VERIFIED"
   grep -qx "__version__ = \"${VERSION}\"" src/neolith/__init__.py && echo "version ${VERSION}" || echo "WRONG VERSION"
@@ -247,7 +259,7 @@ Run every check on the tip of `next` after the version pull request merged. If o
   ```
   Expected: no `NO SMOKE SCRIPT` line, then `neolith <VERSION> on Django 5.2.<n>` and `neolith <VERSION> on Django 6.1.<n>`. A wrong version fails with an `AssertionError`. The script is run from `$WORK`, where there is no source tree, so it can only import the installed wheel.
 
-## 4. The release pull request, `next` into `main`
+## 4. The release pull request, `release/<version>` into `main`
 
 - [ ] Write the description in `$WORK/release-pr.md` ([G4, G8](../CONTRIBUTING.md#commits-and-pull-requests)):
   - a summary of three or four bullets: the version, what it delivers, and the milestone;
@@ -258,7 +270,7 @@ Run every check on the tip of `next` after the version pull request merged. If o
   The merge commit takes this title and description, so they are what `main` records.
 - [ ] Open it. *Recommendation:* the title `chore: release <VERSION>` ([G2](../CONTRIBUTING.md#commits-and-pull-requests)).
   ```
-  gh pr create --repo "$REPO" --base main --head next --title "chore: release ${VERSION}" \
+  gh pr create --repo "$REPO" --base main --head "$BRANCH" --title "chore: release ${VERSION}" \
     --body-file "$WORK/release-pr.md" --milestone "${VERSION}"
   ```
 - [ ] The required checks pass, and it has an approving review.
@@ -266,15 +278,16 @@ Run every check on the tip of `next` after the version pull request merged. If o
   gh pr checks <number> --repo "$REPO" --required --watch
   ```
   Expected: the lint job and the four test jobs pass.
-- [ ] **(maintainer)** Merge it with a merge commit, only if `next` is still the commit section 3 verified. Never squash or rebase, and never delete the branch.
+- [ ] **(maintainer)** Merge it with a merge commit, only if the release branch is still the commit section 3 verified. Never squash or rebase.
   ```
   gh pr merge <number> --repo "$REPO" --merge --match-head-commit "$VERIFIED"
   ```
-  Expected: the pull request is merged. If `next` moved, the merge is refused: verify the new tip (section 3) and update the description first.
-- [ ] `next` still exists.
+  Expected: the pull request is merged. If the release branch moved, the merge is refused: verify the new tip (section 3) and update the description first.
+- [ ] GitHub deleted the release branch when the pull request merged. From section 5 on, the tag marks the release.
   ```
-  git ls-remote origin refs/heads/next
+  git ls-remote origin "refs/heads/${BRANCH}"
   ```
+  Expected: no output. If the branch is still there, check the merge settings (section 10); the maintainer can delete it with `gh api -X DELETE "repos/${REPO}/git/refs/heads/${BRANCH}"`. Open pull requests that targeted it now target `main`; section 8 moves them to the next release branch.
 
 ## 5. Tag and publish
 
@@ -445,17 +458,42 @@ Go through the items below on the live page. Where a value comes "from the tag",
 
 ## 8. After the release
 
-- [ ] Start the next development version with a pull request into `next` ([G8](../CONTRIBUTING.md#commits-and-pull-requests)). Run this in your own clone, not in the worktrees under `$WORK`.
+Run these in your own clone, not in the worktrees under `$WORK`.
+
+- [ ] Make the next release's branch from `main`, now that the release is published and verified ([G8](../CONTRIBUTING.md#commits-and-pull-requests)). The ruleset for `release/*` covers it from the start (section 10).
   ```
   git fetch origin
-  git switch -c "chore/start-${NEXT_DEV}" origin/next
+  git merge-base --is-ancestor "v${VERSION}" origin/main && echo "v${VERSION} is on main" || echo "TAG NOT ON MAIN"
+  gh api "repos/${REPO}/git/refs" -f ref="refs/heads/${NEXT_BRANCH}" -f sha="$(git rev-parse origin/main)" -q .ref
+  git fetch origin
+  [ "$(git rev-parse "origin/${NEXT_BRANCH}")" = "$(git rev-parse origin/main)" ] && echo "${NEXT_BRANCH} is at main" || echo "NOT AT MAIN"
+  ```
+  Expected: `v<VERSION> is on main`, `refs/heads/release/<NEXT_VERSION>`, then `release/<NEXT_VERSION> is at main`. If the branch already exists, GitHub refuses with `Reference already exists`.
+- [ ] The next release has its milestone, titled with its version, so a contributor finds the branch from it.
+  ```
+  gh api "repos/${REPO}/milestones" -q ".[] | select(.title == \"${NEXT_VERSION}\") | .title + \" \" + .state"
+  ```
+  Expected: `<NEXT_VERSION> open`. If nothing is printed, create it with `gh api "repos/${REPO}/milestones" -f title="${NEXT_VERSION}"`.
+- [ ] Move to the new branch the open pull requests that targeted the release branch. GitHub moved them to `main` when it deleted that branch.
+  ```
+  gh pr list --repo "$REPO" --base main --state open --json number,title -q '.[] | "\(.number) \(.title)"'
+  gh pr edit <number> --repo "$REPO" --base "$NEXT_BRANCH"
+  ```
+  Expected: once each is moved, the first command prints nothing.
+- [ ] Start the next development version with a pull request into the new branch ([G8](../CONTRIBUTING.md#commits-and-pull-requests)). It also points the changelog's `[Unreleased]` link at the new branch, where unreleased work now is.
+  ```
+  git fetch origin
+  git switch -c "chore/start-${NEXT_DEV}" "origin/${NEXT_BRANCH}"
   sed -i.bak "s/^__version__ = .*/__version__ = \"${NEXT_DEV}\"/" src/neolith/__init__.py && rm src/neolith/__init__.py.bak
   grep -qx "__version__ = \"${NEXT_DEV}\"" src/neolith/__init__.py && echo "version ${NEXT_DEV}" || echo "WRONG VERSION"
+  LINK="[Unreleased]: https://github.com/stack314/django-neolith/compare/v${VERSION}...${NEXT_BRANCH}"
+  sed -i.bak "s|^\[Unreleased\]: .*|${LINK}|" CHANGELOG.md && rm CHANGELOG.md.bak
+  grep -qxF "$LINK" CHANGELOG.md && echo "link to ${NEXT_BRANCH}" || echo "WRONG UNRELEASED LINK"
   awk '/^## \[Unreleased\]/ {found = 1; next} found && /^## \[/ {exit} found && NF {print "UNRELEASED NOT EMPTY: " $0; bad = 1; exit}
     END {if (!found) print "NO UNRELEASED SECTION"; else if (!bad) print "Unreleased is empty"}' CHANGELOG.md
   ```
-  Expected: `version <NEXT_DEV>`, then `Unreleased is empty`. If there is no `## [Unreleased]` section, add an empty one at the top of the changelog. *Recommendation:* the title `chore: start <NEXT_DEV> after releasing <VERSION>`, and `NEXT_DEV` is the version the next release is expected to have, plus `.dev0`. Until this merges, the documentation build treats `next` as a release (`docs/site/conf.py`).
-- [ ] Close the issues the release carries. A `Closes #N` line does not close an issue when its pull request merges into `next` ([G1](../CONTRIBUTING.md#commits-and-pull-requests)), so list them from the release's commits and close any still open.
+  Expected: `version <NEXT_DEV>`, `link to release/<NEXT_VERSION>`, then `Unreleased is empty`. If there is no `## [Unreleased]` section, add an empty one at the top of the changelog. Open the pull request into `$NEXT_BRANCH`, in the next release's milestone. *Recommendation:* the title `chore: start <NEXT_DEV> after releasing <VERSION>`. Until this merges, the documentation build treats the new branch as a release (`docs/site/conf.py`).
+- [ ] Close the issues the release carries. A `Closes #N` line does not close an issue when its pull request merges into a release branch ([G1](../CONTRIBUTING.md#commits-and-pull-requests)), so list them from the release's commits and close any still open.
   ```
   for n in $(git log --format=%B "v${PREVIOUS}..v${VERSION}" \
       | grep -oiE '\b(close[sd]?|fix(e[sd])?|resolve[sd]?) #[0-9]+' | grep -oE '[0-9]+' | sort -un); do
@@ -472,7 +510,7 @@ Go through the items below on the live page. Where a value comes "from the tag",
   gh api -X PATCH "repos/${REPO}/milestones/${MILESTONE}" -f state=closed -q '.title + " " + .state'
   ```
   Expected: no open issues, `milestone <n>`, then `<VERSION> closed`.
-- [ ] The next release's milestone is now the current one: the `.dev` pull request and every later pull request into `next` go in it.
+- [ ] The next release's milestone is now the current one: the `.dev` pull request and every later pull request into `$NEXT_BRANCH` go in it.
 - [ ] The roadmap issue this release finishes is closed, or its open parts are moved to the next milestone, and its task list is ticked. The project board shows the release's issues and pull requests as done.
 - [ ] `docs/roadmap.md` still describes what is left. It changes only when a step's scope changes.
 - [ ] Announcements: the repository names no place where releases are announced. If one is added, list it here.
@@ -482,7 +520,7 @@ Go through the items below on the live page. Where a value comes "from the tag",
 
 **Never delete a release from PyPI, and never reuse a version number.** PyPI refuses a file name that was ever uploaded, even after deletion.
 
-**The build or a smoke test fails, before publishing.** Nothing reached PyPI. If the run is still waiting for review, reject the deployment (*Review deployments*, then *Reject*), or cancel the run with `gh run cancel "$RUN" --repo "$REPO"`. Fix the cause by a pull request into `next`, then a new release pull request. *Recommendation:* since the version never reached PyPI, keep it, and move the tag to the new merge commit once that merge is verified:
+**The build or a smoke test fails, before publishing.** Nothing reached PyPI. If the run is still waiting for review, reject the deployment (*Review deployments*, then *Reject*), or cancel the run with `gh run cancel "$RUN" --repo "$REPO"`. GitHub deleted the release branch when the release pull request merged, so make it again from `main`, which now holds the version: `gh api "repos/${REPO}/git/refs" -f ref="refs/heads/${BRANCH}" -f sha="$(git rev-parse origin/main)"`. Fix the cause by a pull request into it, then run sections 3 and 4 again. *Recommendation:* since the version never reached PyPI, keep it, and move the tag to the new merge commit once that merge is verified:
 ```
 git push origin --delete "refs/tags/v${VERSION}"
 git tag -d "v${VERSION}"
@@ -495,7 +533,34 @@ Then repeat section 5. Do not open the `.dev` pull request until the release is 
 
 **The tag is on the wrong commit.** If the release workflow refused it ("is not on main" or "does not match `__version__`"), nothing was published: delete the tag as above and tag the right commit. If the wrong commit was published, the tag stays where it is, since it records what was published; treat it as a bad release.
 
-**A fix must ship while `next` holds work that is not ready.** The repository has no recorded way to do this; `main` changes only through a release pull request from `next` ([G7](../CONTRIBUTING.md#commits-and-pull-requests)). *Recommendation:* land the fix on `next` and release `next` as it stands, since each pull request leaves `next` working. If that is not possible, the maintainer decides an exception in writing, in an issue, before any branch is made. Such a fix would merge into `main` from a branch made from the last tag, and `next` must then take `main`'s merge commit before its next release pull request; `next` accepts only squash merges today, so that step needs the maintainer too.
+**A fix must ship while the open release branch holds work that is not ready.** Make a hotfix: a release of its own, on a second release branch made from `main` ([G8](../CONTRIBUTING.md#commits-and-pull-requests)). *Recommendation:* if the open release branch can be released as it stands, release it instead, since each pull request leaves it working.
+
+1. Set the variables. `VERSION` is the hotfix's version: it sorts after the last release and before the open release's version, for example `0.1.1` while `release/0.2.0` is open. `BRANCH="release/${VERSION}"`, `PREVIOUS` is the last release, and `OPEN_BRANCH` is the open release branch. Make a milestone titled with the hotfix's version.
+2. Make the hotfix branch from `main`, as section 8 makes a release branch:
+   ```
+   gh api "repos/${REPO}/git/refs" -f ref="refs/heads/${BRANCH}" -f sha="$(git rev-parse origin/main)" -q .ref
+   ```
+3. The fix is a pull request into `$BRANCH`, squash-merged: one commit on the hotfix branch. If the fix is already on the open release branch, `git cherry-pick -x` its commit onto a branch made from `$BRANCH`.
+4. Sections 1 to 7 as for any release: the version pull request adds one commit to `$BRANCH`; the release pull request adds a merge commit to `main`, and GitHub deletes `$BRANCH`; the tag goes on that merge commit, and the GitHub Release follows. In section 8, skip every step about the next release: the open release branch already exists and keeps its `.dev` version.
+5. Bring `main` into the open release branch, so the next release carries the fix and its release pull request merges cleanly. This pull request is merged with a merge commit ([G5](../CONTRIBUTING.md#commits-and-pull-requests)). A squash would copy the changes without `main`'s history, and the next release pull request would then conflict on the version and the changelog.
+   ```
+   git fetch origin
+   git switch -c "chore/merge-${VERSION}" "origin/${OPEN_BRANCH}"
+   git merge --no-ff origin/main -m "chore: merge main after releasing ${VERSION}"
+   ```
+   Expected: conflicts in `src/neolith/__init__.py` and `CHANGELOG.md`. Keep the open branch's `.dev` version. In the changelog, keep `## [Unreleased]` with its entries, put the hotfix's section under it, and keep the hotfix's link. Point the `[Unreleased]` link at the open branch: `https://github.com/stack314/django-neolith/compare/v<VERSION>...<OPEN_BRANCH>`. Then:
+   ```
+   grep -nE '^(<<<<<<<|=======|>>>>>>>)' src/neolith/__init__.py CHANGELOG.md || echo "no conflict markers"
+   git add src/neolith/__init__.py CHANGELOG.md && git commit --no-edit
+   git merge-base --is-ancestor origin/main HEAD && echo "main is in this branch" || echo "MAIN NOT IN THIS BRANCH"
+   ```
+   Expected: `no conflict markers`, the commit, then `main is in this branch`. Push it and open the pull request into `$OPEN_BRANCH`. Once it is reviewed and CI passes, the maintainer merges it with `gh pr merge <number> --repo "$REPO" --merge`.
+6. Check that the open release branch now holds `main`:
+   ```
+   git fetch origin
+   git merge-base --is-ancestor origin/main "origin/${OPEN_BRANCH}" && echo "main is in ${OPEN_BRANCH}" || echo "MAIN NOT IN ${OPEN_BRANCH}"
+   ```
+   Expected: `main is in <OPEN_BRANCH>`. Section 1 checks this again before the next release.
 
 ## 10. One-time setup (already in place)
 
@@ -504,7 +569,8 @@ For reference, and for checking when something in section 5 fails.
 - **PyPI trusted publisher** for the project `django-neolith`: owner `stack314`, repository `django-neolith`, workflow `release.yml`, environment `release`. No API token is stored anywhere.
 - **The `release` environment** (Settings, Environments): the maintainer is a required reviewer, and only tags matching `v*` may deploy to it.
 - **Branch rulesets** (Settings, Rules):
-  - `next`: no deletion or force push; changes by pull request only, squash merge only, one approving review, stale approvals dismissed on push; the lint job and the four test jobs required.
-  - `main` (the default branch): the same, but merge commits only. A second ruleset for `main`, which would let only admins update it, exists and is disabled.
-- **Merge settings** (Settings, General): squash merging and merge commits allowed, rebase merging off. Both take the pull request's title and description as the commit's message. Head branches are deleted after merge, but the rulesets keep `next` from being deleted.
-- **CI** (`.github/workflows/ci.yml`) runs on every pull request and on every push to `main` and `next`.
+  - `release/*`, which covers each release branch from the moment it is made: no force push; changes by pull request only, one approving review, stale approvals dismissed on push; the lint job and the four test jobs required. Squash merges and merge commits are allowed: every pull request is squash-merged except the one that brings `main` in after a hotfix (section 9). Deletion is not restricted, so that GitHub can delete a release branch when its release pull request merges.
+  - `main` (the default branch): no deletion or force push; changes by pull request only, merge commits only, one approving review, stale approvals dismissed on push; the same five jobs required. A second ruleset for `main`, which would let only admins update it, exists and is disabled.
+- **Merge settings** (Settings, General): squash merging and merge commits allowed, rebase merging off. Both take the pull request's title and description as the commit's message. Head branches are deleted after merge: a release branch goes when its release pull request merges, and GitHub moves the open pull requests that targeted it to `main`.
+- **Release branches**: nothing is set per branch. Section 8 makes each release's branch from `main` once the previous release is published, and section 9 makes a hotfix's.
+- **CI** (`.github/workflows/ci.yml`) runs on every pull request and on every push to `main` and to a release branch (`release/**`).

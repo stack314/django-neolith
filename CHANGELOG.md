@@ -31,5 +31,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Each app's database (spec 05, [ADR 0009](docs/adr/0009-one-database-alias-per-app.md)): a hosted app that declares the `database` resource lives on its own alias, named by its label. `neolith.routers.AppRouter` keeps its models there and sends every other label to `default`, from labels alone: reads, writes and migrations go to the label's home, and relations are allowed only within one home, so two apps cannot share a transaction. Set-up refuses a hosted app with models and no `database` (`neolith.E014`) and a table name that `default`'s backend shortened (`neolith.E017`).
 - Runtime dependency on Pydantic v2 ([ADR 0006](docs/adr/0006-contracts-are-typed-and-published-as-openapi.md)).
 
-[Unreleased]: https://github.com/stack314/django-neolith/compare/v0.1.0a1...HEAD
+[Unreleased]: https://github.com/stack314/django-neolith/compare/v0.1.0a1...release/0.1.0a2
 [0.1.0a1]: https://github.com/stack314/django-neolith/releases/tag/v0.1.0a1

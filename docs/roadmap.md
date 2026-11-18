@@ -1,6 +1,6 @@
 # Roadmap to 0.1
 
-0.1 is a walking skeleton: one app boots alone, two apps call each other through a contract over the in-process and the HTTP transport, and one test suite passes over both. Every step is a pull request that leaves `next` working. Each step names the specification documents it implements, so the spec is written alongside the code ([ADR 0015](adr/0015-specification-first-django-reference-implementation.md)).
+0.1 is a walking skeleton: one app boots alone, two apps call each other through a contract over the in-process and the HTTP transport, and one test suite passes over both. Every step is a pull request that leaves the open release branch working. Each step names the specification documents it implements, so the spec is written alongside the code ([ADR 0015](adr/0015-specification-first-django-reference-implementation.md)).
 
 | Step | Delivers | Spec |
 |---|---|---|

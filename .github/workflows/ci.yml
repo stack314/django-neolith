@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, next]
+    branches: [main, "release/**"]
   pull_request:
 
 # Least privilege: nothing by default, read-only checkout per job.
