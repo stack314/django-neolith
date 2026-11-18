@@ -55,6 +55,18 @@ A *contract path* is the path of an action of a contract version the host provid
 
 A connector takes the kind from the body only, never from the status. A non-success response without a neolith error body maps to `unavailable`. Examples are a 404 from a host that does not provide that contract version, which is not a contract path, or an error page from a proxy. A success response whose body is not a valid reply, and a neolith error body that does not validate against the contract, map to `internal`, apart from an error of a kind the caller does not know.
 
+## Sending a call and reading its response
+
+A caller writes HTTP/1.1. These rules keep every response the caller accepts to one reading, so that what is left on a connection is never taken for the start of another call's response.
+
+**HTTP-3.** A caller MUST send a request with a `Content-Length` field that gives its body's length, never chunked, and with `Accept-Encoding: identity`, so that a provider answers in no content coding (RFC 9110, section 12.5.3).
+
+**HTTP-4.** A caller MUST NOT follow a redirect or undo a content coding. A redirect is then a non-success response without a neolith error body, and a reply in a content coding is not a valid reply ([Errors](#errors)).
+
+**HTTP-5.** A caller MUST read past every interim response (a `1xx` status) other than `101` to the final response, and take the call's outcome from the final response (RFC 9110, section 15.2). A caller can bound how many interim responses it reads; one past its bound, like a `101`, is a response it does not accept (HTTP-6).
+
+**HTTP-6.** A caller MUST fail a call with `unavailable` when the response is not one with a single reading under RFC 9112. That covers a status line other than `HTTP/1.1` or `HTTP/1.0`, a space, three digits and a space; a field line with whitespace before its colon, folded onto the line before, or holding a CR or LF that does not end it; more than one `Content-Length` field, or one that is not all digits; a `Transfer-Encoding` other than `chunked`, or any in an HTTP/1.0 response; `Content-Length` and `Transfer-Encoding` together; a chunk size that is not hexadecimal digits; and a body that ends before its framing says it does. The caller then closes the connection.
+
 ## Projection
 
 **HTTP-2.** A provider MUST serve an OpenAPI 3.1 document describing every contract version it provides, derived from the contracts. The document is the HTTP transport's publication of the contract ([01](01-contracts.md)). Its location is `GET /.well-known/neolith/openapi.json`.
