@@ -389,7 +389,12 @@ _LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 def _expected(url: str) -> bool:
     """Whether ``url`` is its origin's ASCII serialisation within the
     grammar's restrictions: RFC 1123 labels, no trailing dot, no zone, no
-    IPv4-mapped address, a port from 1."""
+    IPv4-mapped address, a port from 1.
+
+    A label is taken as written and never decoded, ``xn--`` labels included:
+    ADR 0014 admits an A-label as an ordinary RFC 1123 label, so a name that
+    is not valid IDNA fails at the first call, like any misspelt name.
+    """
     found = _LAYOUT.fullmatch(url)
     if found is None:  # a serialisation has exactly this layout
         return False
@@ -442,7 +447,10 @@ def _host(draw: st.DrawFn) -> str:
             st.lists(
                 st.text(alphabet="ab09-_AÉ", min_size=0, max_size=5)
                 | st.sampled_from(
-                    ["a", "example", "x1", "0x7f", "1", "0x", "a" * 63, "a" * 64]
+                    [
+                        *("a", "example", "x1", "0x7f", "1", "0x", "a" * 63, "a" * 64),
+                        *("xn--zz", "xn--a", "xn--bcher-kva", "xn--zca", "XN--zca"),
+                    ]
                 ),
                 min_size=1,
                 max_size=4,
@@ -498,7 +506,9 @@ _ODD: dict[str, st.SearchStrategy[str]] = {
 def _canonical_host(draw: st.DrawFn) -> str:
     kind = draw(st.sampled_from(["name", "name", "ipv4", "ipv6"]))
     if kind == "name":
-        label = st.from_regex(r"[a-z0-9]([a-z0-9-]{0,6}[a-z0-9])?", fullmatch=True)
+        label = st.from_regex(
+            r"(xn--)?[a-z0-9]([a-z0-9-]{0,6}[a-z0-9])?", fullmatch=True
+        )
         labels = draw(st.lists(label, min_size=1, max_size=4))
         if _ends_in_a_number(".".join(labels)):
             labels.append("example")
@@ -1223,3 +1233,12 @@ def test_a_set_up_that_django_drops_closes_its_connections() -> None:
     replies, unraisable = json.loads(out.splitlines()[-1])
     assert replies == [1, 1, 1, 1, 1]
     assert unraisable == []
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["http://xn--zz", "http://xn--a-ecp.example", "https://xn--bcher-kva.example"],
+)
+def test_an_a_label_is_an_ordinary_label_taken_as_written(url: str) -> None:
+    assert _expected(url)
+    assert built(remote(stock_v1=url, couriers_v3="http://localhost")) is None
