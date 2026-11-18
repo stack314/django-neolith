@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -1757,17 +1758,15 @@ def test_the_suite_hash_reads_files_in_path_order(
     for name in ["tests/a.py", "tests/a/z.py", "tests/b.py"]:
         data = (root / name).read_bytes()
         expected.update(name.encode() + b"\0" + str(len(data)).encode() + b"\0" + data)
-    walk = os.walk
+    scandir = os.scandir
 
-    def reversed_walk(
-        top: str, followlinks: bool = False
-    ) -> Iterator[tuple[str, list[str], list[str]]]:
-        for directory, subdirectories, names in walk(top, followlinks=followlinks):
-            subdirectories.reverse()
-            yield directory, subdirectories, names[::-1]
+    @contextlib.contextmanager
+    def reversed_scandir(path: str) -> Iterator[list[os.DirEntry[str]]]:
+        with scandir(path) as listing:
+            yield list(listing)[::-1]
 
     assert spec_trace.suite(root)["tests"] == expected.hexdigest()
-    monkeypatch.setattr(os, "walk", reversed_walk)
+    monkeypatch.setattr(os, "scandir", reversed_scandir)
     assert spec_trace.suite(root)["tests"] == expected.hexdigest()
 
 
@@ -1824,3 +1823,87 @@ def test_a_test_id_that_is_not_text_is_printed_escaped(
     path.write_text(json.dumps(_report(tests=tests)))
     assert spec_trace.main(["--root", str(root), "--report", str(path)]) == 1
     assert "problem: t::\\ud800: case nope is not listed" in capsys.readouterr().out
+
+
+def test_a_refused_entry_leaves_the_other_tables_entry_for_its_id(
+    suite: Suite,
+) -> None:
+    settings = (
+        '[not-tested]\nCON-2 = "x"\nCON-1 = "Shown later."\n\n'
+        '[not-implemented]\nCON-2 = "Left out."\nCON-1 = "y"\n'
+    )
+    trace = run_of(suite(tests__spec_trace_toml=settings), {})
+    assert trace.run is not None
+    records = trace.run["requirements"]
+    assert (records["CON-2"]["status"], records["CON-2"]["reason"]) == (
+        "not-implemented",
+        "Left out.",
+    )
+    assert (records["CON-1"]["status"], records["CON-1"]["reason"]) == (
+        "not-tested",
+        "Shown later.",
+    )
+
+
+def test_a_report_with_a_member_given_twice_is_refused(suite: Suite) -> None:
+    root = suite()
+    path = root / "spec-report.json"
+    entry = '{"ids": ["CON-1"], "outcome": "%s"}'
+    text = json.dumps(_report(tests={})).replace(
+        '"tests": {}',
+        '"tests": {"t::a": ' + entry % "failed" + ', "t::a": ' + entry % "passed" + "}",
+    )
+    path.write_text(text)
+    trace = spec_trace.check(root, report=path, conformance=True)
+    assert trace.problems == [
+        'report spec-report.json: cannot be read: "t::a" is given twice in one object'
+    ]
+    assert trace.run is None
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any directory")
+def test_a_directory_that_cannot_be_read_is_a_problem(suite: Suite) -> None:
+    root = suite(
+        **{"tests/sub/test_b.py": "x", "spec/conformance/cases/wire.json": "[]"}
+    )
+    for folder in ("tests/sub", "spec/conformance/cases"):
+        (root / folder).chmod(0)
+    try:
+        found: list[str] = []
+        hashes = spec_trace.suite(root, found)
+        trace = spec_trace.check(root)
+    finally:
+        for folder in ("tests/sub", "spec/conformance/cases"):
+            (root / folder).chmod(0o700)
+    assert hashes["tests"] is None
+    assert hashes["cases"] is None
+    assert sorted(found) == [
+        "spec/conformance/cases: cannot be read for the suite's hash: "
+        "Permission denied",
+        "tests/sub: cannot be read for the suite's hash: Permission denied",
+    ]
+    assert trace.problems == ["conformance/cases: cannot be read: Permission denied"]
+
+
+def test_the_suite_hash_does_not_depend_on_which_name_is_listed_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # tests/x and a link tests/y to it: both names are read, in either order.
+    root = tmp_path
+    (root / "tests/x").mkdir(parents=True)
+    (root / "tests/x/f.py").write_text("f")
+    (root / "tests/y").symlink_to(root / "tests/x", target_is_directory=True)
+    first = spec_trace.suite(root)["tests"]
+    scandir = os.scandir
+
+    @contextlib.contextmanager
+    def reversed_scandir(path: str) -> Iterator[list[os.DirEntry[str]]]:
+        with scandir(path) as listing:
+            yield list(listing)[::-1]
+
+    monkeypatch.setattr(os, "scandir", reversed_scandir)
+    assert spec_trace.suite(root)["tests"] == first
+    expected = hashlib.sha256()
+    for name in ["tests/x/f.py", "tests/y/f.py"]:
+        expected.update(name.encode() + b"\0" + b"1" + b"\0" + b"f")
+    assert first == expected.hexdigest()

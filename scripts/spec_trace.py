@@ -70,7 +70,8 @@ the settings, plus ``--enforce``), every must-level requirement (MUST, MUST
 NOT, REQUIRED) needs a passing test that cites it, or a ``[not-tested]``
 entry. Enforcing without ``--report`` is a problem, so the gate cannot be
 skipped by leaving the report out. The report must be format 2, as the plugin
-writes it; any other member or value is a problem, and a report with an entry
+writes it; any other member or value, or a member given twice, is a
+problem, and a report with an entry
 the checker cannot read counts no test at all, since that test may have
 failed. Whatever the checker refuses takes no effect: a refused
 ``[not-tested]`` or ``[not-implemented]`` entry gives no status, and a refused
@@ -89,12 +90,14 @@ With ``--report`` and ``--conformance PATH``, it writes the conformance run
   ``reference`` is the hash of ``spec/conformance/reference.v1.openapi.json``,
   or ``null`` while it does not exist. ``cases`` is over every file under
   ``spec/conformance/cases/``, and ``tests`` over every file under ``tests/``
-  apart from ``__pycache__`` directories, following links to directories:
-  for each file, in the byte order of its path from the repository root,
-  written with ``/``, the hash takes the path's bytes as the file system
-  gives them (UTF-8 for a name that is UTF-8), a NUL byte, its size in bytes
-  in decimal, a NUL byte and its bytes. A hash that cannot be computed, as
-  when a file cannot be read, is ``null`` and a problem;
+  apart from ``__pycache__`` directories, following links (a directory
+  reached by two names is read under both, and a link back to a directory
+  that holds it is left out): for each file, in the byte order of its path
+  from the repository root, written with ``/``, the hash takes the path's
+  bytes as the file system gives them (UTF-8 for a name that is UTF-8), a
+  NUL byte, its size in bytes in decimal, a NUL byte and its bytes. A hash
+  that cannot be computed, as when a file or directory cannot be read, is
+  ``null`` and a problem;
 - ``implementation``: ``{"name": "django-neolith", "version"}``, and
   ``environment``, both from the report;
 - ``requirements``: for each live requirement ID of every level, in the
@@ -136,7 +139,7 @@ import os
 import re
 import sys
 import tomllib
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -702,7 +705,12 @@ def read_cases(spec_dir: Path, trace: Trace) -> None:
         if folder.exists() or folder.is_symlink():
             trace.problems.append(f"{CASES}: is not a directory")
         return
-    for path in sorted(folder.iterdir()):
+    try:
+        paths = sorted(folder.iterdir())
+    except OSError as error:
+        trace.problems.append(f"{CASES}: cannot be read: {error.strerror or error}")
+        return
+    for path in paths:
         label = f"{CASES}/{path.name}"
         match = _CASE_FILE.fullmatch(path.name)
         if match is None or not path.is_file():
@@ -727,6 +735,15 @@ def _members(pairs: list[tuple[str, Any]]) -> _Members:
         if key in members:
             members.repeated.append(key)
         members[key] = value
+    return members
+
+
+def _once(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """A JSON object in which no member is given twice."""
+    members = dict(pairs)
+    if len(members) < len(pairs):
+        repeated = sorted(k for k in members if [p[0] for p in pairs].count(k) > 1)
+        raise ValueError(f"{_shown(repeated[0])} is given twice in one object")
     return members
 
 
@@ -905,7 +922,7 @@ def read_report(path: Path, trace: Trace) -> None:
     """Read the report the pytest plugin wrote."""
     where = f"report {path.name}"
     try:
-        report = json.loads(path.read_text(encoding="utf-8"))
+        report = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_once)
     except (OSError, ValueError, RecursionError) as error:
         trace.problems.append(f"{where}: cannot be read: {error}")
         return
@@ -995,7 +1012,7 @@ def check(
             trace.problems.append(
                 f"{citation.test}: cites withdrawn requirement {citation.rid}"
             )
-    refused: list[str] = []
+    refused: list[tuple[dict[str, str], str]] = []
     for rid in trace.not_tested:
         requirement = trace.requirements.get(rid)
         if requirement is None or requirement.withdrawn:
@@ -1007,7 +1024,7 @@ def check(
         else:
             continue
         trace.problems.append(f"{SETTINGS}: [not-tested] {rid} {reason}")
-        refused.append(rid)
+        refused.append((trace.not_tested, rid))
     for rid in trace.not_implemented:
         requirement = trace.requirements.get(rid)
         if requirement is None or requirement.withdrawn:
@@ -1021,11 +1038,11 @@ def check(
         else:
             continue
         trace.problems.append(f"{SETTINGS}: [not-implemented] {rid}: {reason}")
-        refused.append(rid)
-    # A refused entry gives no status in the run.
-    for rid in refused:
-        trace.not_tested.pop(rid, None)
-        trace.not_implemented.pop(rid, None)
+        refused.append((trace.not_implemented, rid))
+    # A refused entry gives no status in the run; the other table's entry for
+    # the same ID stands on its own.
+    for table, rid in refused:
+        del table[rid]
     if not trace.measured:
         return trace
     for requirement in trace.requirements.values():
@@ -1072,11 +1089,15 @@ def _check_markers(trace: Trace) -> None:
 # The conformance run
 
 
-def _digest(root: Path, files: Iterable[Path], problems: list[str]) -> str | None:
-    """SHA-256 over each file's path from ``root``, its size and its bytes.
+def _digest(root: Path, folder: Path, problems: list[str]) -> str | None:
+    """SHA-256 over each file under ``folder``: its path from ``root``, its
+    size and its bytes.
 
-    None, with a problem, if a file cannot be read.
+    None, with a problem, if a file or a directory cannot be read.
     """
+    files = _files(root, folder, problems)
+    if files is None:
+        return None
     digest = hashlib.sha256()
     named = sorted(
         (os.fsencode(path.relative_to(root).as_posix()), path) for path in files
@@ -1085,37 +1106,51 @@ def _digest(root: Path, files: Iterable[Path], problems: list[str]) -> str | Non
         try:
             data = path.read_bytes()
         except OSError as error:
-            shown = name.decode("utf-8", "backslashreplace")
-            problems.append(
-                f"{shown}: cannot be read for the suite's hash: "
-                f"{error.strerror or error}"
-            )
+            problems.append(_unreadable(name, error))
             return None
         digest.update(name + b"\0" + str(len(data)).encode() + b"\0")
         digest.update(data)
     return digest.hexdigest()
 
 
-def _files(folder: Path) -> list[Path]:
-    """Every file under ``folder``, apart from ``__pycache__`` directories.
+def _unreadable(name: bytes, error: OSError) -> str:
+    shown = name.decode("utf-8", "backslashreplace")
+    return f"{shown}: cannot be read for the suite's hash: {error.strerror or error}"
 
-    Links to directories are followed, each real directory once.
+
+def _files(root: Path, folder: Path, problems: list[str]) -> list[Path] | None:
+    """Every file under ``folder``, apart from ``__pycache__`` directories;
+    None, with a problem, if a directory cannot be read.
+
+    Links are followed, so a directory reached by two names is read under
+    both. A link back to a directory that holds it would never end, so it is
+    left out, whatever order the directories are listed in.
     """
     found: list[Path] = []
-    seen: set[str] = set()
-    for directory, subdirectories, names in os.walk(folder, followlinks=True):
-        real = os.path.realpath(directory)
-        if real in seen:
-            subdirectories[:] = []
-            continue
-        seen.add(real)
-        subdirectories[:] = [d for d in subdirectories if d != "__pycache__"]
-        found.extend(
-            Path(directory, name)
-            for name in names
-            if os.path.isfile(os.path.join(directory, name))
-        )
-    return found
+
+    def visit(directory: Path, ancestors: frozenset[str]) -> bool:
+        try:
+            with os.scandir(directory) as listing:
+                entries = list(listing)
+        except OSError as error:
+            name = os.fsencode(directory.relative_to(root).as_posix())
+            problems.append(_unreadable(name, error))
+            return False
+        for entry in entries:
+            path = Path(entry.path)
+            if entry.is_dir():
+                real = os.path.realpath(path)
+                if entry.name == "__pycache__" or real in ancestors:
+                    continue
+                if not visit(path, ancestors | {real}):
+                    return False
+            elif entry.is_file():
+                found.append(path)
+        return True
+
+    if not folder.is_dir():
+        return []
+    return found if visit(folder, frozenset({os.path.realpath(folder)})) else None
 
 
 def suite(root: Path, problems: list[str] | None = None) -> dict[str, str | None]:
@@ -1135,9 +1170,9 @@ def suite(root: Path, problems: list[str] | None = None) -> dict[str, str | None
                 f"{error.strerror or error}"
             )
     return {
-        "cases": _digest(root, _files(root / "spec" / CASES), problems),
+        "cases": _digest(root, root / "spec" / CASES, problems),
         "reference": reference,
-        "tests": _digest(root, _files(root / "tests"), problems),
+        "tests": _digest(root, root / "tests", problems),
     }
 
 
