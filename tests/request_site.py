@@ -128,6 +128,24 @@ def project_page(request: HttpRequest) -> HttpResponse:
     return HttpResponse(ask())
 
 
+def unnamed_stream(request: HttpRequest) -> StreamingHttpResponse:
+    """A streamed body that makes no call, with an authenticated user the
+    Django-user backend fails on: a search for the root would log a
+    failure and add Vary."""
+
+    class Unnamed:
+        is_authenticated = True
+        pk = 7
+
+    request.user = Unnamed()  # type: ignore[assignment]
+    return StreamingHttpResponse(iter([b"ok"]))
+
+
+def project_stream(request: HttpRequest) -> StreamingHttpResponse:
+    """``unnamed_stream`` from a view in no app."""
+    return unnamed_stream(request)
+
+
 def copies_request(
     get_response: Callable[[HttpRequest], HttpResponseBase],
 ) -> Callable[[HttpRequest], HttpResponseBase]:

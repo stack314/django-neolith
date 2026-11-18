@@ -23,12 +23,13 @@ that wiring.
 
 import asyncio
 import contextlib
+import contextvars
 import inspect
 import keyword
 import logging
 import re
 import threading
-from collections.abc import Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any, Final, final
 
@@ -342,13 +343,23 @@ def _asked(built: Built, found: object) -> Principal | None:
     )
 
 
-def search(backends: Sequence[Built], request: HttpRequest) -> Principal | None:
+def _never() -> bool:
+    return False
+
+
+def search(
+    backends: Sequence[Built],
+    request: HttpRequest,
+    settled: Callable[[], bool] = _never,
+) -> Principal | None:
     """Ask each backend's ``resolve``, in order (ADR 0023 Decision 5).
 
     The first principal decides, ``None`` abstains, and when every backend
     abstains there is no principal. A backend that raises an ``Exception``,
     or returns anything else, ends the search with ``Failed``; any other
-    ``BaseException`` goes on unchanged.
+    ``BaseException`` goes on unchanged. Once ``settled`` is true after a
+    backend answers, the outcome is fixed elsewhere and no later backend is
+    asked.
     """
     for built in backends:
         try:
@@ -356,12 +367,16 @@ def search(backends: Sequence[Built], request: HttpRequest) -> Principal | None:
         except Exception as error:
             raise Failed(f"{built.where}: resolve raised {_cause(error)}") from error
         principal = _asked(built, found)
-        if principal is not None:
+        if principal is not None or settled():
             return principal
     return None
 
 
-async def asearch(backends: Sequence[Built], request: HttpRequest) -> Principal | None:
+async def asearch(
+    backends: Sequence[Built],
+    request: HttpRequest,
+    settled: Callable[[], bool] = _never,
+) -> Principal | None:
     """``search`` with each backend's ``aresolve``, awaited."""
     for built in backends:
         try:
@@ -369,7 +384,7 @@ async def asearch(backends: Sequence[Built], request: HttpRequest) -> Principal 
         except Exception as error:
             raise Failed(f"{built.where}: aresolve raised {_cause(error)}") from error
         principal = _asked(built, found)
-        if principal is not None:
+        if principal is not None or settled():
             return principal
     return None
 
@@ -386,6 +401,27 @@ _LATE: Final = (
     "middleware outside the principal middleware opens its own scope with "
     "neolith.command_scope"
 )
+_REENTERED: Final = (
+    "a call was made from the request root while its principal was being "
+    "resolved, from a principal backend or code it runs; a backend that calls "
+    "opens its own scope with neolith.command_scope"
+)
+
+# The resolutions whose search runs in this context. A call from a root
+# whose search is running here comes from inside that search, from a backend
+# or code it runs: a thread or task the backend starts copies the context.
+_SEARCHING: contextvars.ContextVar[tuple["Resolution", ...]] = contextvars.ContextVar(
+    "neolith_principal_searching", default=()
+)
+
+
+@contextlib.contextmanager
+def _searching(resolution: "Resolution") -> Iterator[None]:
+    token = _SEARCHING.set((*_SEARCHING.get(), resolution))
+    try:
+        yield
+    finally:
+        _SEARCHING.reset(token)
 
 
 @final
@@ -403,7 +439,7 @@ class Resolution:
         backends: The host's built backends, in order.
         vary: Their union of request inputs, which the response phase adds.
         request: The request the backends are given, or ``None`` for a
-            root that was never bound, for which no search starts.
+            root bound to no app the host holds, for which no search starts.
         trace_id: The root's trace, which the log names.
     """
 
@@ -459,10 +495,14 @@ class Resolution:
     def _begin(self) -> tuple[_Outcome | None, HttpRequest | None]:
         """The outcome, if one is fixed; else mark a search as started and
         return the request to search with. A first call after the response
-        phase fixes a failure. Hold the lock.
+        phase, or from inside one of the root's own searches, fixes a
+        failure, so a backend that calls neither recurses nor waits for
+        itself. Hold the lock.
         """
         if self._outcome is not None:
             return self._outcome, None
+        if any(running is self for running in _SEARCHING.get()):
+            return self._record((None, _REENTERED), None), None
         if self._marked or self.request is None:
             return self._record((None, _LATE), None), None
         self._started = True
@@ -504,7 +544,8 @@ class Resolution:
             outcome, request = self._begin()
         if outcome is None:
             try:
-                found = search(self.backends, request)  # type: ignore[arg-type]
+                with _searching(self):
+                    found = search(self.backends, request, self._fixed)  # type: ignore[arg-type]
             except Failed as error:
                 outcome = self._failed(error)
             else:
@@ -540,7 +581,8 @@ class Resolution:
                 await asyncio.shield(running)
                 continue
             try:
-                found = await asearch(self.backends, request)  # type: ignore[arg-type]
+                with _searching(self):
+                    found = await asearch(self.backends, request, self._fixed)  # type: ignore[arg-type]
             except Failed as error:
                 outcome = self._failed(error)
             else:
@@ -556,6 +598,9 @@ class Resolution:
     @property
     def fixed(self) -> bool:
         """Whether an outcome is written."""
+        return self._fixed()
+
+    def _fixed(self) -> bool:
         with self._lock:
             return self._outcome is not None
 

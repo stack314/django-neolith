@@ -71,9 +71,12 @@ urlpatterns = [
     path("principal/bearer/", principals.bearer),
     path("principal/stranger/", principals.stranger),
     path("principal/cached/", principals.cached),
+    path("principal/page-cached/", principals.page_cached),
     path("principal/pair/", principals.pair),
     path("principal/apair/", principals.apair),
     path("principal/alogout-stream/", principals.alogout_stream),
+    path("principal/project-stream/", site.project_stream),
+    path("principal/plain-stream/", plain.stream),
 ]
 
 handler404 = "tests.host_apps.web.views.not_found"

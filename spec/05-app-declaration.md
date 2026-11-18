@@ -208,7 +208,7 @@ Resolving the principal means asking the backends, which is the *search*. A call
 
 **APP-53.** When every backend abstains, or the host has no backend, the request root MUST have no principal.
 
-**APP-54.** When a backend fails, or gives something other than a principal or an abstention, the host MUST record a failure to resolve on the request root, and no later backend is asked.
+**APP-54.** When a backend fails, gives something other than a principal or an abstention, or makes a call from the request root whose principal it is resolving, the host MUST record a failure to resolve on the request root, and no later backend is asked.
 
 **APP-55.** A call from a request root on which a failure to resolve is recorded MUST fail with `internal` at the caller's first step ([ADR 0017](../docs/adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md) Decision 9), and is not sent.
 

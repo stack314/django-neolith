@@ -9,6 +9,8 @@ from collections.abc import AsyncIterator, Iterator
 from asgiref.sync import sync_to_async
 from django.contrib.auth import alogin, alogout, get_user_model, login, logout
 from django.http import HttpRequest, HttpResponse, StreamingHttpResponse
+from django.views.decorators.cache import cache_page
+from django.views.decorators.vary import vary_on_headers
 
 from tests import request_site as site
 
@@ -98,6 +100,15 @@ def stranger(request: HttpRequest) -> HttpResponse:
 def cached(request: HttpRequest) -> HttpResponse:
     """A page Django's cache middleware may store."""
     _ran("cached")
+    return HttpResponse(site.whom())
+
+
+@cache_page(60)
+@vary_on_headers("Authorization", "Cookie")
+def page_cached(request: HttpRequest) -> HttpResponse:
+    """A page ``cache_page`` stores at the view, varied on the Django-user
+    backend's inputs as the host notes say (docs/django-host.md)."""
+    _ran("page_cached")
     return HttpResponse(site.whom())
 
 

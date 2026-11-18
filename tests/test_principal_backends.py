@@ -798,6 +798,121 @@ def test_a_cancelled_first_call_records_nothing_for_a_later_one() -> None:
     assert held.form() == principal_form(BOB)
 
 
+# A call from inside the root's own search
+
+_REENTERED = (
+    "a call was made from the request root while its principal was being resolved"
+)
+
+
+def _again(held: Resolution) -> str:
+    """What a call from the root, made by a backend, came to."""
+    try:
+        held.form()
+    except ValueError as error:
+        return str(error)
+    return "answered"
+
+
+async def _aagain(held: Resolution) -> str:
+    try:
+        await held.aform()
+    except ValueError as error:
+        return str(error)
+    return "answered"
+
+
+def _in_thread(held: Resolution) -> str:
+    """The call made on a thread the backend starts with a copy of its
+    context, as an executor given a copy does."""
+    import contextvars
+
+    got: list[str] = []
+    context = contextvars.copy_context()
+    thread = threading.Thread(
+        target=context.run, args=(lambda: got.append(_again(held)),)
+    )
+    thread.start()
+    thread.join(timeout=30)
+    return got[0]
+
+
+async def _in_task(held: Resolution) -> str:
+    return await asyncio.create_task(_aagain(held))
+
+
+async def _through_thread(held: Resolution) -> str:
+    return await sync_to_async(_again, thread_sensitive=False)(held)
+
+
+# How a backend reaches its own root again: (name, sync route, async route).
+_ROUTES: list[tuple[str, Any, Any]] = [
+    ("directly", _again, _aagain),
+    ("from a thread or task it starts", _in_thread, _in_task),
+    ("through sync_to_async", _again, _through_thread),
+]
+
+
+@pytest.mark.spec("APP-54", "APP-55")
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["resolve", "aresolve"])
+@pytest.mark.parametrize("route", _ROUTES, ids=[r[0] for r in _ROUTES])
+def test_a_backend_that_calls_from_the_root_it_resolves_fails_once(
+    route: tuple[str, Any, Any], asynchronous: bool, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A backend that calls from its own root, as one asking an identity app
+    would, fixes a failure: its call fails at once rather than searching
+    again or waiting for the search it is in, no later backend is asked,
+    and one failure is logged."""
+    _, sync_route, async_route = route
+    seen: list[str] = []
+    later = Fixed(answer=ALICE)
+
+    class Calls(PrincipalBackend):
+        request_inputs = ()
+
+        def resolve(self, request: HttpRequest) -> Principal | None:
+            seen.append(sync_route(held))
+            return None
+
+        async def aresolve(self, request: HttpRequest) -> Principal | None:
+            seen.append(await async_route(held))
+            return None
+
+    held = resolution(Calls(), later)
+
+    async def first() -> bytes | None:
+        return await asyncio.wait_for(held.aform(), timeout=10)
+
+    with pytest.raises(ValueError, match="could not be resolved"):
+        asyncio.run(first()) if asynchronous else held.form()
+    with pytest.raises(ValueError, match="could not be resolved"):
+        held.form()
+    assert len(seen) == 1
+    assert "could not be resolved" in seen[0]
+    assert later.calls == 0
+    logged = [r.getMessage() for r in caplog.records if r.name == "neolith.host"]
+    assert len(logged) == 1
+    assert _REENTERED in logged[0]
+
+
+@pytest.mark.spec("APP-56")
+def test_a_call_from_another_root_s_search_is_not_a_reentry() -> None:
+    """Only a call from the root being resolved is refused: a backend may
+    resolve another root's principal, which searches as usual."""
+    other = resolution(Fixed(answer=BOB))
+
+    class Asks(PrincipalBackend):
+        request_inputs = ()
+
+        def resolve(self, request: HttpRequest) -> Principal | None:
+            other.form()
+            return ALICE
+
+    held = resolution(Asks())
+    assert held.form() == principal_form(ALICE)
+    assert other.form() == principal_form(BOB)
+
+
 # Django's cache middleware, called directly
 
 

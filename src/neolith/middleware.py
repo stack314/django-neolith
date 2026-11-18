@@ -141,8 +141,8 @@ class RootMiddleware:
         view_kwargs: dict[str, Any],
     ) -> None:
         """Bind the request's root to the app whose code serves the view,
-        and, in a host with a principal backend, give the root the request
-        and the backends in the same step.
+        and, in a host with a principal backend, give a root bound to an
+        app the host holds the request and the backends in the same step.
 
         Django calls it once the URL is resolved, before any other
         middleware's ``process_view``, since this middleware comes first.
@@ -196,9 +196,9 @@ def _leave(scope: _context.Scope, tokens: _Tokens, handed: bool) -> None:
 
 
 def _bind(request: HttpRequest, view: object) -> None:
-    """Bind the request's root to the view's app. In a host with a backend
-    the root gets its resolution first, so a call that sees the root bound,
-    in any thread, sees its resolution too.
+    """Bind the request's root to the view's app. In a host with a backend,
+    a root bound to an app the host holds gets its resolution first, so a
+    call that sees the root bound, in any thread, sees its resolution too.
     """
     scope = _REQUEST.get()
     if scope is None:
@@ -208,7 +208,14 @@ def _bind(request: HttpRequest, view: object) -> None:
     host = _host._current()
     if label is not None and host is not None and label in host.apps:
         requires = frozenset(host.apps[label])
-    if host is not None and host.principals and scope.resolution is None:
+    # A root of no app, or of one this host does not hold, makes no call
+    # that is sent (TRN-56, TRN-58), so no search starts for it.
+    if (
+        requires is not None
+        and host is not None
+        and host.principals
+        and scope.resolution is None
+    ):
         scope.resolution = _principal.Resolution(
             host.principals, host.vary, request, scope.held.trace_id
         )
@@ -379,9 +386,10 @@ class PrincipalMiddleware:
     Listed once in every host, with or without backends; with none it does
     nothing per request. Django runs it in the mode of the handler inside
     it, sync or async. The root middleware gives a root its request and the
-    host's backends when it binds the root, so a call from a bound root
-    resolves the principal (``neolith._principal.Resolution``) wherever it
-    is made, before this middleware's place in the list too.
+    host's backends when it binds the root to an app the host holds, so a
+    call from such a root resolves the principal
+    (``neolith._principal.Resolution``) wherever it is made, before this
+    middleware's place in the list too.
 
     Its response phase, for a root that has its backends:
 
@@ -450,8 +458,9 @@ class PrincipalMiddleware:
 
 def _resolution(scope: _context.Scope | None) -> _principal.Resolution | None:
     """The root's resolution for the response phase. A root that was never
-    bound, in a host with a backend, gets one with no request, so a first
-    call made after the response phase fails as it does on a bound root.
+    bound, or is bound to no app the host holds, in a host with a backend,
+    gets one with no request, so nothing is searched for it and a first
+    call made after the response phase fails as it does on any root.
     """
     if scope is None:
         return None
@@ -471,8 +480,9 @@ def finish(resolution: _principal.Resolution, response: HttpResponseBase) -> Non
     and its response (ADR 0023 Decision 6): search now for a streamed body
     the root keeps, when a search could start (``Resolution.open``); mark
     the root; and patch ``Vary`` with the resolution's union when a search
-    has started. A root never bound has no request, so nothing is searched
-    or recorded for it here: a failure is recorded only for a caller.
+    has started. A root bound to no app the host holds has no request, so
+    nothing is searched or recorded for it here: a failure is recorded only
+    for a caller.
     """
     if _kept(response) and resolution.open:
         with contextlib.suppress(ValueError):  # only recorded

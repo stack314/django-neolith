@@ -517,6 +517,70 @@ def test_a_stream_from_a_root_never_bound_records_nothing(
     assert [r.getMessage() for r in caplog.records if r.levelname == "ERROR"] == []
 
 
+@pytest.mark.spec("APP-57", "APP-61")
+@pytest.mark.filterwarnings("ignore:StreamingHttpResponse must consume")
+@pytest.mark.parametrize(
+    "path",
+    ["/principal/project-stream/", "/principal/plain-stream/"],
+    ids=["in no app", "in an app the host does not hold"],
+)
+@pytest.mark.parametrize("mode", MODES)
+def test_a_stream_from_a_root_of_no_hosted_app_searches_for_nobody(
+    site: None, mode: str, path: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A root bound to no app the host holds makes no call that is sent
+    (TRN-58), so its streamed answer starts no search, even with a user
+    the backend would fail on: nothing is logged and Vary gains nothing."""
+    with (
+        caplog.at_level("DEBUG", logger="neolith"),
+        override_settings(MIDDLEWARE=_middleware(mode)),
+    ):
+        served = serve(mode, path)
+    assert (served.status, served.body) == (200, b"ok")
+    assert "authorization" not in [n.lower() for n in served.vary]
+    assert [r.getMessage() for r in caplog.records if r.levelname == "ERROR"] == []
+
+
+@pytest.mark.spec("APP-54", "APP-55")
+@pytest.mark.parametrize("mode", MODES)
+def test_a_backend_that_calls_from_its_root_fails_the_root_once(
+    users: dict[str, str],
+    mode: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A backend that makes a call from the root it resolves, as one asking
+    an identity app would: its own call and the view's fail with
+    ``internal``, and one failure is logged."""
+    from asgiref.sync import sync_to_async
+
+    from neolith.principals import DjangoUserBackend
+
+    resolve, aresolve = DjangoUserBackend.resolve, DjangoUserBackend.aresolve
+
+    def calling(self: DjangoUserBackend, request: Any) -> Any:  # noqa: ANN401
+        request_site.whom()
+        return resolve(self, request)
+
+    async def acalling(self: DjangoUserBackend, request: Any) -> Any:  # noqa: ANN401
+        await sync_to_async(request_site.whom)()
+        return await aresolve(self, request)
+
+    monkeypatch.setattr(DjangoUserBackend, "resolve", calling)
+    monkeypatch.setattr(DjangoUserBackend, "aresolve", acalling)
+    with override_settings(MIDDLEWARE=_middleware(mode)):
+        served = serve(mode, "/principal/who/", {"Cookie": users["first"]})
+    assert served.body == b"refused internal"
+    assert request_site.WHOM == ["refused internal", "refused internal"]
+    reentered = [
+        r
+        for r in caplog.records
+        if r.name == "neolith.host"
+        and "while its principal was being resolved" in r.getMessage()
+    ]
+    assert len(reentered) == 1
+
+
 # The latest point
 
 
@@ -651,6 +715,26 @@ def test_two_logged_in_users_never_share_a_cache_entry(
     assert one.body == again.body == f"user {_subject('first')}".encode()
     assert other.body == f"user {_subject('second')}".encode()
     assert views.RAN["cached"] == 2
+
+
+@pytest.mark.spec("APP-60")
+@pytest.mark.parametrize("mode", MODES)
+def test_a_cache_page_view_varied_on_the_inputs_keeps_users_apart(
+    users: dict[str, str], mode: str
+) -> None:
+    """``cache_page`` stores at the view, where the host cannot add to Vary;
+    a view that varies on the backend's inputs itself, as the host notes
+    say, keeps each user's page apart, and a user's second request is
+    served from the cache, so the case is not vacuous."""
+    cache.clear()
+    with override_settings(MIDDLEWARE=_middleware(mode)):
+        one = serve(mode, "/principal/page-cached/", {"Cookie": users["first"]})
+        again = serve(mode, "/principal/page-cached/", {"Cookie": users["first"]})
+        other = serve(mode, "/principal/page-cached/", {"Cookie": users["second"]})
+    cache.clear()
+    assert one.body == again.body == f"user {_subject('first')}".encode()
+    assert other.body == f"user {_subject('second')}".encode()
+    assert views.RAN["page_cached"] == 2
 
 
 @pytest.mark.spec("APP-16")
