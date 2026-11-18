@@ -34,7 +34,9 @@ from neolith._declaration import Declaration, Provision
 from neolith._forms import _Form
 from neolith._frozen import once
 from neolith._host import Connector, Host
+from neolith._principal import Built
 from neolith._server import _Request
+from neolith.principals import PrincipalBackend
 
 
 class Ask(BaseModel):
@@ -57,6 +59,14 @@ class Case:
     callable: bool = True
 
 
+class _Backend(PrincipalBackend):
+    request_inputs = ()
+
+    def resolve(self, request: object) -> None:
+        return None
+
+
+_EVIL = Built(9, "evil.Evil", _Backend(), ("x",))
 _ALICE = Principal("https://id.example", "alice", {"role": "admin"})
 _CASES: dict[type, Case] = {
     Principal: Case(
@@ -94,8 +104,13 @@ _CASES: dict[type, Case] = {
     ),
     Host: Case(
         lambda: Host(frozenset({"shop.v1"}), {}, {"shop": ()}),
-        ((frozenset(), {}, {}, None, frozenset({"w"})), {}),
-        state=[frozenset(), {}, {}, None, frozenset({"w"})],
+        ((frozenset(), {}, {}, None, frozenset({"w"}), (_EVIL,), ("x",)), {}),
+        state=[frozenset(), {}, {}, None, frozenset({"w"}), (_EVIL,), ("x",)],
+    ),
+    Built: Case(
+        lambda: Built(0, "shop.Backend", _Backend(), ("cookie",)),
+        ((1, "evil.Evil", _Backend(), ("x",)), {}),
+        state=[1, "evil.Evil", _Backend(), ("x",)],
     ),
     _Form: Case(
         lambda: _Form("Binary", bytes, bytes, str, {}),

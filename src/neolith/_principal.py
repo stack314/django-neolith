@@ -36,6 +36,7 @@ from django.http import HttpRequest
 from django.utils.module_loading import import_string
 
 from neolith._context import Principal, principal_form
+from neolith._frozen import once
 from neolith.principals import PrincipalBackend
 
 __all__ = [
@@ -148,6 +149,7 @@ def shape_problems(value: object) -> list[str]:
 
 
 @final
+@once
 @dataclass(frozen=True, slots=True)
 class Built:
     """One backend that set-up built: its place, its path and its inputs."""
