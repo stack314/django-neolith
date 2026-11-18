@@ -774,6 +774,8 @@ class _Other(Protocol):
         (1e6 + 0.003, 1e6, 3),
         (1e8 + 0.00099998, 1e8, 0),
         (1e9 + 0.002, 1e9, 2),
+        # One ulp short of a millisecond, where the product rounds up.
+        (414.57220743837627, 3.0782074383762925, 411493),
         (1000.0, 1000.0, 0),
         (999.0, 1000.0, -1000),
         (1e9, 0.0, 9_999_999_999),
@@ -977,10 +979,12 @@ def _serving(
 
 @pytest.fixture
 def signing(monkeypatch: pytest.MonkeyPatch) -> _caller.Callers:
-    """The test host's table, with a signing key for each hosted app."""
+    """The test host's table, with a signing key for each app that calls:
+    the providing app, couriers, has none, as a test host's may not.
+    """
     host, installed = _host._table()
     assert host is not None
-    callers = _callers("stock", "web", "couriers")
+    callers = _callers("stock", "web")
     signed = dataclasses.replace(host, callers=callers)
     monkeypatch.setattr(_host, "_table", lambda: (signed, installed))
     return callers

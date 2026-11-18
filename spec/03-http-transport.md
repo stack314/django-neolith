@@ -63,7 +63,7 @@ A caller writes HTTP/1.1. These rules keep every response the caller accepts to 
 
 **HTTP-3.** A caller MUST send a request with a `Content-Length` field that gives its body's length, never chunked, and with `Accept-Encoding: identity`, so that a provider answers in no content coding (RFC 9110, section 12.5.3).
 
-**HTTP-4.** A caller MUST NOT follow a redirect or undo a content coding. A redirect is then a non-success response without a neolith error body, and a reply in a content coding is not a valid reply ([Errors](#errors)).
+**HTTP-4.** A caller MUST NOT follow a redirect or undo a content coding. A redirect is then a non-success response, mapped by HTTP-19 like any other, and a reply in a content coding is not a valid reply ([Errors](#errors)).
 
 **HTTP-5.** A caller MUST read past every interim response (a `1xx` status) other than `101` to the final response, and take the call's outcome from the final response (RFC 9110, section 15.2). A caller can bound how many interim responses it reads; one past its bound, like a `101`, is a response it does not accept (HTTP-6).
 
