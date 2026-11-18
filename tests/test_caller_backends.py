@@ -363,8 +363,16 @@ def test_a_first_part_nested_more_than_64_levels_abstains(
     assert check(bearer(token), IDENTITY, KEYS, NOW) == expected
 
 
-def test_many_sibling_arrays_are_not_nesting() -> None:
-    head = text(header())[:-1] + ',"x":[' + ",".join(["[]"] * 5000) + "]}"
+@pytest.mark.spec("HTTP-7")
+@pytest.mark.parametrize("before", ['"\\""', '"\\\\"', '"\\\\\\""'])
+def test_a_string_before_the_nesting_does_not_hide_it(before: str) -> None:
+    head = text(header())[:-1] + ',"y":' + before + ',"x":' + "[" * 64 + "]" * 64 + "}"
+    assert check(bearer(signed(raw_head=head)), IDENTITY, KEYS, NOW) == (None, None)
+
+
+@pytest.mark.parametrize("sibling", ["[]", "{}"])
+def test_many_sibling_arrays_are_not_nesting(sibling: str) -> None:
+    head = text(header())[:-1] + ',"x":[' + ",".join([sibling] * 5000) + "]}"
     token = signed(raw_head=head)
     assert check(bearer(token), IDENTITY, KEYS, NOW) == (None, _token.PARTS)
 
