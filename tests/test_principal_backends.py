@@ -36,6 +36,7 @@ from neolith.middleware import afinish, finish
 from neolith.principals import DjangoUserBackend, PrincipalBackend, key_problem
 from neolith.principals import order_problems as user_order_problems
 from tests import host_apps
+from tests.hosting import in_built_host
 
 SETTING = 'NEOLITH["PRINCIPAL_BACKENDS"]'
 HERE = "tests.test_principal_backends"
@@ -510,6 +511,18 @@ def test_a_backend_that_reads_beyond_the_headers_makes_vary_a_star() -> None:
     assert response.headers["Vary"] == "*"
 
 
+@pytest.mark.spec("APP-60")
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_backends_that_declare_no_input_add_no_vary(mode: str) -> None:
+    """A search started, but the union of the inputs is empty: the response
+    gains no ``Vary`` header, not an empty one."""
+    held = resolution(Fixed(answer=ALICE, inputs=()))
+    held.form()
+    response = HttpResponse()
+    (finish if mode == "sync" else _run_afinish)(held, response)
+    assert "Vary" not in response.headers
+
+
 @pytest.mark.spec("APP-61")
 def test_a_root_whose_search_never_started_gains_no_vary() -> None:
     held = resolution(Header())
@@ -543,6 +556,29 @@ def test_a_coroutine_returned_by_resolve_is_closed_and_refused() -> None:
     held = resolution(Fixed(answer=coroutine()))
     with pytest.raises(ValueError, match="could not be resolved"):
         held.form()
+
+
+@pytest.mark.spec("APP-54")
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["resolve", "aresolve"])
+def test_a_wrong_value_is_logged_under_the_method_that_returned_it(
+    asynchronous: bool, caplog: pytest.LogCaptureFixture
+) -> None:
+    class Wrong(PrincipalBackend):
+        request_inputs = ()
+
+        def resolve(self, request: HttpRequest) -> Principal | None:
+            return 3  # type: ignore[return-value]
+
+        async def aresolve(self, request: HttpRequest) -> Principal | None:
+            return 3  # type: ignore[return-value]
+
+    held = resolution(Wrong())
+    with pytest.raises(ValueError, match="could not be resolved"):
+        asyncio.run(held.aform()) if asynchronous else held.form()
+    method = "aresolve" if asynchronous else "resolve"
+    logged = [r.getMessage() for r in caplog.records if r.name == "neolith.host"]
+    assert len(logged) == 1
+    assert f"<locals>.Wrong): {method} returned a int, not a" in logged[0]
 
 
 @pytest.mark.spec("APP-54")
@@ -602,16 +638,15 @@ def test_a_host_with_no_backend_gives_a_root_no_resolution(
 
 
 @pytest.mark.spec("APP-59")
-def test_a_root_never_bound_is_marked_by_the_response_phase() -> None:
+def test_a_root_never_bound_has_no_resolution_to_mark() -> None:
+    """A call from it has no calling app at any time (TRN-56), so the
+    response phase leaves it as it is, and its principal stays none."""
     from neolith import _context, middleware
 
     with _context.opened(**_context.root_fields()) as scope:
-        resolution = middleware._resolution(scope)
-        assert resolution is not None
-        assert resolution.request is None
-        finish(resolution, HttpResponse())
-        with pytest.raises(ValueError, match="could not be resolved"):
-            scope.principal()
+        assert middleware._resolution(scope) is None
+        assert scope.resolution is None
+        assert scope.principal() is None
 
 
 @pytest.mark.spec("APP-56")
@@ -796,6 +831,52 @@ def test_a_cancelled_first_call_records_nothing_for_a_later_one() -> None:
     asyncio.run(cancelled())
     assert not held.fixed
     assert held.form() == principal_form(BOB)
+
+
+@pytest.mark.spec("APP-59", "APP-56")
+def test_a_call_after_the_mark_fixes_a_failure_over_a_search_still_running(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A thread that copied the root's context is still searching when the
+    response phase marks the root. A call made then fixes the failure, and
+    the running search's principal is dropped: its caller fails too, and
+    every later call, with one log."""
+    started, release = threading.Event(), threading.Event()
+
+    class Slow(PrincipalBackend):
+        request_inputs = ()
+
+        def resolve(self, request: HttpRequest) -> Principal | None:
+            started.set()
+            release.wait(timeout=30)
+            return ALICE
+
+    held = resolution(Slow())
+    outcomes: list[str] = []
+
+    def first() -> None:
+        try:
+            held.form()
+        except ValueError as error:
+            outcomes.append(str(error))
+        else:
+            outcomes.append("answered")
+
+    thread = threading.Thread(target=first)
+    thread.start()
+    assert started.wait(timeout=30)
+    finish(held, HttpResponse())
+    with pytest.raises(ValueError, match="could not be resolved"):
+        held.form()
+    release.set()
+    thread.join(timeout=30)
+    assert len(outcomes) == 1
+    assert "could not be resolved" in outcomes[0]
+    with pytest.raises(ValueError, match="could not be resolved"):
+        held.form()
+    logged = [r.getMessage() for r in caplog.records if r.name == "neolith.host"]
+    assert len(logged) == 1
+    assert "a call came after the principal middleware's response phase" in logged[0]
 
 
 # A call from inside the root's own search
@@ -1197,6 +1278,150 @@ def test_a_plain_user_is_used_as_it_is_on_the_async_path(
 
     request.auser = other  # type: ignore[assignment]
     assert asyncio.run(backend.aresolve(request)) == Principal(ISSUER, "7")
+
+
+def test_the_django_user_backend_s_refusal_reaches_e019_whole() -> None:
+    """``build`` bounds a constructor's cause, but not the backend's own
+    refusal, which lists every problem it found (ADR 0023 Decision 10)."""
+    with override_settings(MIDDLEWARE=[ROOT, PRINCIPAL]):
+        _, problems = build(
+            [entry("neolith.principals.DjangoUserBackend", issuer="a b", extra=1)]
+        )
+    assert len(problems) == 1
+    for part in (
+        "the option 'extra' is not taken",
+        "(hosts that share a user table share the issuer)",
+        f"{SESSION}, or a subclass, is not listed before",
+        f"{AUTH}, or a subclass, is not listed before",
+    ):
+        assert part in problems[0]
+
+
+_SET_UP_BODY = """
+import django
+from django.core.exceptions import ImproperlyConfigured
+try:
+    django.setup()
+except ImproperlyConfigured as error:
+    print(error)
+else:
+    print("set up")
+"""
+_CONTENTTYPES = "django.contrib.contenttypes"
+_SESSIONS = "django.contrib.sessions"
+_AUTH_APP = "django.contrib.auth"
+_GOOD = {"issuer": ISSUER}
+_IN_ORDER = [ROOT, SESSION, AUTH, PRINCIPAL]
+
+
+@pytest.mark.parametrize(
+    ("undeclared", "middleware", "options", "deployer", "said"),
+    [
+        pytest.param(
+            [_CONTENTTYPES, _AUTH_APP, _SESSIONS],
+            _IN_ORDER,
+            {"issuer": "a b"},
+            {},
+            ["the option 'issuer' is required", "share the issuer"],
+            id="issuer outside the grammar",
+        ),
+        pytest.param(
+            [_CONTENTTYPES, _AUTH_APP, _SESSIONS],
+            _IN_ORDER,
+            {**_GOOD, "extra": 1},
+            {},
+            ["the option 'extra' is not taken"],
+            id="another option",
+        ),
+        pytest.param(
+            [_CONTENTTYPES, _SESSIONS],
+            _IN_ORDER,
+            _GOOD,
+            {},
+            ["django.contrib.auth is not installed; add it to"],
+            id="auth not installed",
+        ),
+        pytest.param(
+            [_CONTENTTYPES, _SESSIONS],
+            [ROOT, SESSION, PRINCIPAL],
+            _GOOD,
+            {},
+            [
+                "django.contrib.auth is not installed; add it to",
+                f"{AUTH}, or a subclass, is not listed before",
+            ],
+            id="auth not installed nor listed",
+        ),
+        pytest.param(
+            [_CONTENTTYPES, _AUTH_APP, _SESSIONS, "tests.principal_apps.textkey"],
+            _IN_ORDER,
+            _GOOD,
+            {"AUTH_USER_MODEL": "textkey.User"},
+            ["the user model textkey.User's key is a CharField"],
+            id="key field",
+        ),
+        pytest.param(
+            [_CONTENTTYPES, _AUTH_APP, _SESSIONS],
+            [ROOT, PRINCIPAL, SESSION, AUTH],
+            _GOOD,
+            {},
+            [
+                f"{SESSION}, or a subclass, is not listed before",
+                f"{AUTH}, or a subclass, is not listed before",
+            ],
+            id="middleware order",
+        ),
+        pytest.param(
+            [_CONTENTTYPES, _AUTH_APP, _SESSIONS],
+            [ROOT, PRINCIPAL],
+            {"issuer": "a b", "extra": 1},
+            {},
+            [
+                "the option 'extra' is not taken",
+                "share the issuer",
+                f"{SESSION}, or a subclass, is not listed before",
+                f"{AUTH}, or a subclass, is not listed before",
+            ],
+            id="every row at once",
+        ),
+    ],
+)
+def test_each_refusal_of_the_django_user_backend_reaches_set_up(
+    undeclared: list[str],
+    middleware: list[str],
+    options: dict[str, object],
+    deployer: dict[str, object],
+    said: list[str],
+) -> None:
+    """Decision 10's rows for the Django-user backend, as a deployer meets
+    them: set-up in a fresh process, where nothing has imported auth's
+    models before, reports each under the constructor's row of E019."""
+    printed = in_built_host(
+        _SET_UP_BODY,
+        host_apps.HOSTED,
+        {
+            **deployer,
+            "MIDDLEWARE": middleware,
+            "NEOLITH": {
+                **host_apps.NEOLITH,
+                "UNDECLARED_APPS": undeclared,
+                "PRINCIPAL_BACKENDS": [
+                    {
+                        "BACKEND": "neolith.principals.DjangoUserBackend",
+                        "OPTIONS": options,
+                    }
+                ],
+            },
+        },
+    )
+    rows = [line for line in printed.splitlines() if "(neolith.E019)" in line]
+    assert len(rows) == 1, printed
+    assert rows[0].startswith(
+        f"(neolith.E019) {SETTING}[0] (neolith.principals.DjangoUserBackend): "
+        "the constructor raised"
+    ), printed
+    for part in said:
+        assert part in rows[0], printed
 
 
 def test_set_up_reports_a_backend_it_cannot_build(registered: None) -> None:

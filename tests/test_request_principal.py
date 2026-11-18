@@ -167,6 +167,11 @@ def _middleware(mode: str, *outside: str, after: tuple[str, ...] = ()) -> list[s
     return [ROOT, *outside, SESSION, AUTH, PRINCIPAL, *after, *inside]
 
 
+# The installed apps with tests.plain_app too, an app the host does not hold
+# (as tests/test_request_root.py installs it).
+WITH_PLAIN = [*host_apps.INSTALLED[:-1], "tests.plain_app", "neolith"]
+
+
 # The test database's connections this module opened, kept open: Django
 # never closes an in-memory SQLite database, since that would drop it.
 _KEPT: list[Any] = []
@@ -389,10 +394,10 @@ def test_a_sync_call_in_the_event_loop_that_reads_the_session_fails(
 ) -> None:
     """A synchronous first call made in the event loop reads the session
     there, Django refuses it, and the failure is the root's (ADR 0023
-    Consequences): async code calls through ``sync_to_async``."""
+    Consequences), so a later call through ``sync_to_async`` fails too."""
     with override_settings(MIDDLEWARE=_middleware(mode)):
-        served = serve(mode, "/principal/awho/", {"Cookie": users["first"]})
-    assert served.body == b"refused internal"
+        served = serve(mode, "/principal/awho/?then=thread", {"Cookie": users["first"]})
+    assert served.body == b"refused internal, refused internal"
 
 
 # Case 11: concurrent first calls
@@ -533,7 +538,7 @@ def test_a_stream_from_a_root_of_no_hosted_app_searches_for_nobody(
     the backend would fail on: nothing is logged and Vary gains nothing."""
     with (
         caplog.at_level("DEBUG", logger="neolith"),
-        override_settings(MIDDLEWARE=_middleware(mode)),
+        override_settings(INSTALLED_APPS=WITH_PLAIN, MIDDLEWARE=_middleware(mode)),
     ):
         served = serve(mode, path)
     assert (served.status, served.body) == (200, b"ok")
@@ -602,18 +607,28 @@ def test_a_first_call_after_the_response_phase_fails_and_reads_nothing(
     assert "authorization" not in served.vary
 
 
-@pytest.mark.spec("APP-59", "APP-61")
+@pytest.mark.spec("TRN-56", "TRN-58", "TRN-39", "APP-61")
+@pytest.mark.parametrize(
+    ("path", "status", "refusal"),
+    [
+        ("/no-such-page/", 404, "refused unauthenticated"),
+        ("/project/", 200, "refused unauthenticated"),
+        ("/plain/", 200, "usage error"),
+    ],
+    ids=["never bound", "in no app", "in an app the host does not hold"],
+)
 @pytest.mark.parametrize("mode", MODES)
-def test_a_late_first_call_from_a_root_never_bound_fails_too(
-    site: None, mode: str
+def test_a_late_call_from_a_root_of_no_hosted_app_keeps_its_refusal(
+    site: None, mode: str, path: str, status: int, refusal: str
 ) -> None:
-    """An unresolved URL's root is never bound: its error view's call has no
-    caller, and a call after the response phase fails as on a bound root."""
+    """A call after the response phase from a root of no hosted app is
+    refused as one made at any other time: the principal middleware has
+    nothing to mark for it, and its response gains no Vary."""
     middleware = _middleware(mode, "tests.request_site.LateCaller")
-    with override_settings(MIDDLEWARE=middleware):
-        served = serve(mode, "/no-such-page/")
-    assert served.status == 404
-    assert request_site.WHOM == ["refused internal"]
+    with override_settings(INSTALLED_APPS=WITH_PLAIN, MIDDLEWARE=middleware):
+        served = serve(mode, path)
+    assert served.status == status
+    assert [refusal] == request_site.WHOM
     assert served.vary == []
 
 

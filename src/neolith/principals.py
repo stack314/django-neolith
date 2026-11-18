@@ -273,8 +273,15 @@ def key_problem(model: type) -> str | None:
 def order_problems(middleware: object) -> list[str]:
     """``SessionMiddleware`` and ``AuthenticationMiddleware``, each as the
     class or a subclass, are listed before the principal middleware.
+
+    ``AuthenticationMiddleware`` is imported only when
+    ``django.contrib.auth`` is installed: its module imports auth's models,
+    which Django refuses otherwise, and that refusal would hide the
+    constructor's own (ADR 0023 Decision 10). Without the app only its own
+    path is found, since no subclass of it can be imported either.
+    ``SessionMiddleware``'s module imports no model.
     """
-    from django.contrib.auth.middleware import AuthenticationMiddleware
+    from django.apps import apps
     from django.contrib.sessions.middleware import SessionMiddleware
 
     from neolith._principal import PRINCIPAL_MIDDLEWARE, first_index
@@ -286,14 +293,21 @@ def order_problems(middleware: object) -> list[str]:
     principal = first_index(entries, PrincipalMiddleware)
     if principal is None:
         return []
-    required = (
-        (_SESSION, SessionMiddleware),
-        (_AUTHENTICATION, AuthenticationMiddleware),
+    before = entries[:principal]
+    if apps.is_installed("django.contrib.auth"):
+        from django.contrib.auth.middleware import AuthenticationMiddleware
+
+        authentication = first_index(before, AuthenticationMiddleware) is not None
+    else:
+        authentication = any(type(e) is str and e == _AUTHENTICATION for e in before)
+    listed = (
+        (_SESSION, first_index(before, SessionMiddleware) is not None),
+        (_AUTHENTICATION, authentication),
     )
     return [
         f"MIDDLEWARE: {path}, or a subclass, is not listed before "
         f"{PRINCIPAL_MIDDLEWARE}; list it before, since the Django-user backend "
         "reads the user it provides"
-        for path, base in required
-        if first_index(entries[:principal], base) is None
+        for path, found in listed
+        if not found
     ]

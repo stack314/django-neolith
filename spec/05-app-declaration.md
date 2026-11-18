@@ -200,7 +200,7 @@ Decision records: [0003](../docs/adr/0003-apps-communicate-through-contracts.md)
 
 A host that serves ordinary requests, such as web pages, opens a request root for each one ([02](02-transports.md), Request roots). The principal of the calls made from that root is the principal of the request: the party on whose behalf the request acts, such as a logged-in user. The host finds it through *principal backends*, which the deployer configures in an order ([ADR 0010](../docs/adr/0010-pluggable-principal-resolution.md) Decision 6, [ADR 0023](../docs/adr/0023-a-request-principal-comes-from-ordered-backends.md)). A backend, given a request, gives a principal, abstains, or fails. Each backend declares the request inputs it reads: request header names, or that it reads something outside the URL and the headers. The host trusts the declaration and does not check it.
 
-Resolving the principal means asking the backends, which is the *search*. A call made from the root before the host has found the code that serves the request has no principal and starts no search (TRN-56).
+Resolving the principal means asking the backends, which is the *search*. A call made from the root before the host has found the code that serves the request, or from a root whose serving code is in no app the host holds, has no principal and starts no search, at any time: it has no calling app and is refused (TRN-56, TRN-58), or it belongs to an app the host does not hold, which requires nothing here, and is not sent (TRN-39). The requirements below are about the other request roots, those that belong to an app the host holds.
 
 **APP-51.** A host MUST resolve a request root's principal by asking its configured backends one at a time, in the configured order.
 
@@ -220,7 +220,7 @@ Two first calls made at once may each run a search, so a backend may be asked mo
 
 **APP-58.** When the body of a response is produced inside its request root after the code that handles the request has returned, and no search has fixed the root's outcome, the host MUST search before it returns the response. A failure found then is only recorded: the response is unchanged.
 
-**APP-59.** In a host with a backend, a first call made from a request root after the host has finished the headers of its response MUST fail as APP-55 says, and starts no search.
+**APP-59.** In a host with a backend, a call made from a request root after the host has finished the headers of its response, while no search has fixed the root's outcome, MUST fail as APP-55 says, and starts no search. That failure is the root's outcome: it comes before APP-56, so a search still running then does not change it.
 
 **APP-60.** When a search has started for a request root, the host MUST add every request header name that its configured backends declare to the `Vary` header of the response, before the response leaves the host, or make the header `*` when a backend declares that it reads something outside the URL and the headers.
 

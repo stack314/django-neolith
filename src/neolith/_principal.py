@@ -33,6 +33,7 @@ from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any, Final, final
 
+from django.core.exceptions import ImproperlyConfigured
 from django.http import HttpRequest
 from django.utils.module_loading import import_string
 
@@ -80,13 +81,17 @@ def _shown(value: object) -> str:
     return text if len(text) <= _SHOWN else f"{text[: _SHOWN - 3]}..."
 
 
-def _cause(error: BaseException) -> str:
-    """An error's class and message, bounded, never raising."""
+def _cause(error: BaseException, *, bounded: bool = True) -> str:
+    """An error's class and message, bounded unless ``bounded`` is false,
+    never raising.
+    """
     try:
         text = f"{_type(error)}: {error}"
     except Exception:
         text = _type(error)
-    return text if len(text) <= 2 * _SHOWN else f"{text[: 2 * _SHOWN - 3]}..."
+    if not bounded or len(text) <= 2 * _SHOWN:
+        return text
+    return f"{text[: 2 * _SHOWN - 3]}..."
 
 
 def _dotted(path: str) -> bool:
@@ -244,9 +249,11 @@ def build(value: list[dict[str, Any]]) -> tuple[tuple[Built, ...], list[str]]:
             backend = found(**options)
         except Exception as error:
             names = ", ".join(sorted(options)) or "none"
+            # A backend's own refusal lists every problem it found (ADR 0023
+            # Decision 10), so it is kept whole; any other cause is bounded.
+            cause = _cause(error, bounded=not isinstance(error, ImproperlyConfigured))
             problems.append(
-                f"{where}: the constructor raised, with the options {names}: "
-                f"{_cause(error)}"
+                f"{where}: the constructor raised, with the options {names}: {cause}"
             )
             continue
         try:
@@ -330,7 +337,8 @@ class Failed(Exception):
     """A failure to resolve a request's principal; its message is logged."""
 
 
-def _asked(built: Built, found: object) -> Principal | None:
+def _asked(built: Built, method: str, found: object) -> Principal | None:
+    """What ``method`` of a backend answered, or ``Failed``."""
     if found is None:
         return None
     if type(found) is Principal:
@@ -338,7 +346,7 @@ def _asked(built: Built, found: object) -> Principal | None:
     if inspect.iscoroutine(found):
         found.close()  # never awaited; closed so it does not warn
     raise Failed(
-        f"{built.where}: resolve returned a {_type(found)}, not a "
+        f"{built.where}: {method} returned a {_type(found)}, not a "
         "neolith.Principal or None"
     )
 
@@ -366,7 +374,7 @@ def search(
             found = built.backend.resolve(request)
         except Exception as error:
             raise Failed(f"{built.where}: resolve raised {_cause(error)}") from error
-        principal = _asked(built, found)
+        principal = _asked(built, "resolve", found)
         if principal is not None or settled():
             return principal
     return None
@@ -383,7 +391,7 @@ async def asearch(
             found = await built.backend.aresolve(request)
         except Exception as error:
             raise Failed(f"{built.where}: aresolve raised {_cause(error)}") from error
-        principal = _asked(built, found)
+        principal = _asked(built, "aresolve", found)
         if principal is not None or settled():
             return principal
     return None
@@ -396,8 +404,9 @@ _FAILED: Final = (
     "under trace {}"
 )
 _LATE: Final = (
-    "a first call came after the principal middleware's response phase, so "
-    "the request's principal is not resolved for it; code that calls from a "
+    "a call came after the principal middleware's response phase while no "
+    "search had resolved the request's principal, so it is not resolved for "
+    "it; code that calls from a "
     "middleware outside the principal middleware opens its own scope with "
     "neolith.command_scope"
 )
@@ -438,8 +447,8 @@ class Resolution:
     Args:
         backends: The host's built backends, in order.
         vary: Their union of request inputs, which the response phase adds.
-        request: The request the backends are given, or ``None`` for a
-            root bound to no app the host holds, for which no search starts.
+        request: The request the backends are given; the root gets a
+            resolution only once it is bound to an app the host holds.
         trace_id: The root's trace, which the log names.
     """
 
@@ -459,7 +468,7 @@ class Resolution:
         self,
         backends: tuple[Built, ...],
         vary: tuple[str, ...],
-        request: HttpRequest | None,
+        request: HttpRequest,
         trace_id: str,
     ) -> None:
         self.backends = backends
@@ -494,16 +503,19 @@ class Resolution:
 
     def _begin(self) -> tuple[_Outcome | None, HttpRequest | None]:
         """The outcome, if one is fixed; else mark a search as started and
-        return the request to search with. A first call after the response
-        phase, or from inside one of the root's own searches, fixes a
-        failure, so a backend that calls neither recurses nor waits for
-        itself. Hold the lock.
+        return the request to search with. Hold the lock.
+
+        A call after the response phase fixes a failure, whether or not
+        another thread's search is still running, whose result is then
+        dropped (spec 05, APP-59 before APP-56). So does a call from inside
+        one of the root's own searches, so a backend that calls neither
+        recurses nor waits for itself.
         """
         if self._outcome is not None:
             return self._outcome, None
         if any(running is self for running in _SEARCHING.get()):
             return self._record((None, _REENTERED), None), None
-        if self._marked or self.request is None:
+        if self._marked or self.request is None:  # the request goes at the mark
             return self._record((None, _LATE), None), None
         self._started = True
         return None, self.request

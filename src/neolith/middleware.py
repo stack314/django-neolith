@@ -457,21 +457,13 @@ class PrincipalMiddleware:
 
 
 def _resolution(scope: _context.Scope | None) -> _principal.Resolution | None:
-    """The root's resolution for the response phase. A root that was never
-    bound, or is bound to no app the host holds, in a host with a backend,
-    gets one with no request, so nothing is searched for it and a first
-    call made after the response phase fails as it does on any root.
+    """The root's resolution for the response phase, or ``None``. A root
+    that was never bound, or is bound to no app the host holds, has none:
+    a call from it has no calling app or is a usage error at any time
+    (spec 02, TRN-56 and TRN-58), so the response phase has nothing to
+    search, mark or vary for it.
     """
-    if scope is None:
-        return None
-    if scope.resolution is None:
-        host = _host._current()
-        if host is None or not host.principals:
-            return None
-        scope.resolution = _principal.Resolution(
-            host.principals, host.vary, None, scope.held.trace_id
-        )
-    resolution = scope.resolution
+    resolution = None if scope is None else scope.resolution
     return resolution if isinstance(resolution, _principal.Resolution) else None
 
 
@@ -480,9 +472,7 @@ def finish(resolution: _principal.Resolution, response: HttpResponseBase) -> Non
     and its response (ADR 0023 Decision 6): search now for a streamed body
     the root keeps, when a search could start (``Resolution.open``); mark
     the root; and patch ``Vary`` with the resolution's union when a search
-    has started. A root bound to no app the host holds has no request, so
-    nothing is searched or recorded for it here: a failure is recorded only
-    for a caller.
+    has started.
     """
     if _kept(response) and resolution.open:
         with contextlib.suppress(ValueError):  # only recorded

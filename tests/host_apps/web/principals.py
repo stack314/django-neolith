@@ -54,7 +54,11 @@ async def awho(request: HttpRequest) -> HttpResponse:
         await alogout(request)
     if request.GET.get("via") == "thread":
         return HttpResponse(await sync_to_async(site.whom)())
-    return HttpResponse(site.whom())
+    first = site.whom()
+    if request.GET.get("then") == "thread":
+        # A later call, through sync_to_async, after one in the event loop.
+        return HttpResponse(f"{first}, {await sync_to_async(site.whom)()}")
+    return HttpResponse(first)
 
 
 def _body() -> Iterator[bytes]:
