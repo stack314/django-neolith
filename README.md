@@ -43,7 +43,6 @@ What this version does. The [changelog](https://github.com/stack314/django-neoli
 - **Checks before serving.** At start-up the host resolves every required contract to a provider and validates each implementation, listing every refusal in one error; once those pass, it runs its system checks on the settings and reports all their errors together.
 - **One database per app.** `neolith.routers.AppRouter` keeps each app's data on a database alias of its own.
 - **Call context.** A principal, a trace, a deadline and the calling app travel with each call. A root is opened for each request by `RootMiddleware`, and for a command or background work by `command_scope`.
-
 - **One app alone.** `neolith run <app>` boots apps from their declarations and serves them, and `neolith migrate <app>` applies each app's migrations to its own database.
 
 Not yet in this version: the HTTP transport, the conformance suite and events. See the roadmap below.
