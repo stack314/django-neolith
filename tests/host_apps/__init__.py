@@ -27,7 +27,8 @@ NEOLITH = {
     },
     "UNDECLARED_APPS": UNDECLARED,
 }
-# The test host's NEOLITH (tests/settings.py): the Django-user backend alone.
+# The test host's NEOLITH (tests/settings.py) without its keys: the Django-user
+# backend alone. tests/settings.py adds the caller backend and signing keys.
 SERVED = {
     **NEOLITH,
     "PRINCIPAL_BACKENDS": [

@@ -8,12 +8,12 @@
 | 2 | Contracts: `@contract`, `@action`, portable types, typed errors, `@implements`, validation at import time | 01 |
 | 3 | In-process transport with serialization round-trip; connector with `single` routing | 02 |
 | 4 | App declaration and host: `NeolithAppConfig`, settings built from declarations, `neolith run <app>` boots one app on SQLite | 05 |
-| 5 | HTTP transport: provider endpoints served by the host, OpenAPI at the well-known path, connector over httpx, shared-secret tokens for the calling app, and the principal header | 03 |
+| 5 | HTTP transport: provider endpoints served by the host, OpenAPI at the well-known path, connector over the standard library's sockets and TLS, shared-secret tokens for the calling app, and the principal header | 03 |
 | 6 | Conformance suite running every contract test over both transports; `local-first` routing and a failover test with two providers | 06, 02 |
 | 7 | Boundary check: `neolith check` wrapping import-linter, report-only then enforce per app | — |
 | 8 | Two small example apps under `examples/` showing attached, detached and both-at-once; the 0.1 proof | all |
 
-Libraries named in the steps (httpx, import-linter) are working assumptions. Each needs an Accepted decision record before the step that adds it lands ([K5](../CONTRIBUTING.md)). django-ninja was one too, until [ADR 0011](adr/0011-django-ninja-for-contract-endpoints.md) had the host serve contract endpoints itself, with no web framework.
+A library named in the steps (import-linter) is a working assumption. It needs an Accepted decision record before the step that adds it lands ([K5](../CONTRIBUTING.md)).
 
 Gate for releasing 0.1: verified on Python 3.15 with Django 6.1 ([ADR 0012](adr/0012-supported-python-and-django-versions.md)).
 

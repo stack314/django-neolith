@@ -1468,7 +1468,8 @@ def test_a_changed_key_of_an_alias_is_refused_at_set_up(tmp_path: Path) -> None:
 
 @pytest.fixture
 def neolith() -> dict[str, Any]:
-    return copy.deepcopy(host_apps.SERVED)
+    """A copy of the test host's NEOLITH (tests/settings.py)."""
+    return copy.deepcopy(settings.NEOLITH)
 
 
 @pytest.mark.spec("APP-29")
@@ -1506,6 +1507,7 @@ def neolith() -> dict[str, Any]:
 def test_an_override_of_neolith_after_set_up_is_refused_by_key(
     neolith: dict[str, Any], change: Callable[[dict[str, Any]], object], message: str
 ) -> None:
+    kept = copy.deepcopy(settings.NEOLITH)
     change(neolith)
     before = _host._current()
     with (
@@ -1514,7 +1516,7 @@ def test_an_override_of_neolith_after_set_up_is_refused_by_key(
     ):
         pytest.fail("the override was admitted")
     assert str(raised.value) == message
-    assert settings.NEOLITH == host_apps.SERVED
+    assert kept == settings.NEOLITH
     assert _host._current() is before
 
 

@@ -22,6 +22,28 @@ DEBUG = False
 MIDDLEWARE = list(host_apps.MIDDLEWARE)
 ROOT_URLCONF = "tests.request_urls"
 NEOLITH = copy.deepcopy(host_apps.SERVED)
+# Each hosted app signs its calls over HTTP with a key generated per run, and
+# the shared-secret backend accepts each app under that same key (ADR 0027),
+# so a call this host sends to itself over HTTP is signed and accepted under
+# one key. The keys follow host_apps.HOSTED: an app added there signs too.
+# Each hosted app's label is the last part of its name, Django's default.
+_keys = {
+    name.rpartition(".")[2]: secrets.token_urlsafe(32) for name in host_apps.HOSTED
+}
+NEOLITH["CALLER_BACKENDS"] = [
+    {
+        "BACKEND": "neolith.callers.SharedSecretBackend",
+        "OPTIONS": {
+            "secrets": {app: {f"{app}-1": secret} for app, secret in _keys.items()}
+        },
+    }
+]
+NEOLITH["SIGNING_SECRETS"] = {
+    app: {"KEY_ID": f"{app}-1", "SECRET": secret} for app, secret in _keys.items()
+}
+# The conformance suite's live server listens on this address (Django's
+# test set-up adds "testserver" for the test client).
+ALLOWED_HOSTS = ["127.0.0.1"]
 USE_TZ = True
 
 globals().update(

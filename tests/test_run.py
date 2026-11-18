@@ -1122,6 +1122,60 @@ def test_a_request_that_ends_before_drain_leaves_its_connection_open() -> None:
     assert handler.shut()
 
 
+def test_the_open_count_holds_every_open_connection_until_it_closes() -> None:
+    # A connection counts from when it opens, before its request line is
+    # read, while a request is in flight and between requests, until it
+    # closes; one refused during Drain never counts.
+    table = _server.Connections()
+    first, second = _Handler(), _Handler()
+    assert table.open_count() == 0
+    assert table.opened(first)
+    assert table.in_flight() == []
+    assert table.open_count() == 1
+    assert table.opened(second)
+    assert table.begin(second, LINE)
+    assert table.open_count() == 2
+    assert table.ended(second) is False
+    assert table.open_count() == 2
+    table.closed(second)
+    assert table.open_count() == 1
+    table.closed(second)
+    assert table.open_count() == 1
+    assert table.drain() == 0
+    assert not table.opened(_Handler())
+    assert table.open_count() == 1
+    table.closed(first)
+    assert table.open_count() == 0
+
+
+def _answer(environ: dict[str, Any], start: Callable[..., object]) -> list[bytes]:
+    start("200 OK", [("Content-Type", "text/plain"), ("Content-Length", "2")])
+    return [b"ok"]
+
+
+def test_a_connection_is_served_without_nagle_s_delay() -> None:
+    # The status line, the header fields and the body are written apart, so
+    # with Nagle's algorithm on, each response after a connection's first
+    # would wait for the client's delayed acknowledgement.
+    server = _server.listen("127.0.0.1", 0, ipv6=False)
+    server.set_app(_answer)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        client = http.client.HTTPConnection("127.0.0.1", server.server_address[1])
+        for _ in range(2):
+            client.request("GET", "/")
+            assert client.getresponse().read() == b"ok"
+        (handler,) = server.connections._open
+        nodelay = handler.connection.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY)
+        assert nodelay != 0
+        client.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(10)
+
+
 @pytest.mark.spec("APP-44")
 def test_cutting_names_each_request_and_shuts_its_connection() -> None:
     table = _server.Connections()

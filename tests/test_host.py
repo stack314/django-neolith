@@ -23,6 +23,7 @@ import pytest
 from django.apps import AppConfig
 from django.apps import apps as global_apps
 from django.apps.registry import Apps
+from django.conf import settings
 from django.test.utils import isolate_apps, override_settings
 from hypothesis import given
 from hypothesis import strategies as st
@@ -165,8 +166,15 @@ def _invoices_app(write_app: WriteApp, service: str = _INVOICES) -> str:
 
 
 def _refusals(*entries: str) -> list[str]:
-    """Resolve and Validate the apps in a registry of their own."""
-    _, refusals = build(Apps(list(entries)))
+    """Resolve and Validate the apps in a registry of their own.
+
+    ``NEOLITH`` is the test host's without the signing keys of its own apps,
+    which these registries do not hold; it is changed in place, since an
+    override of ``NEOLITH`` after set-up is refused.
+    """
+    with override_settings():
+        settings.NEOLITH = host_apps.SERVED
+        _, refusals = build(Apps(list(entries)))
     return sorted(refusals)
 
 

@@ -1,6 +1,7 @@
 # 0011. The host serves contract endpoints itself, from its root middleware, with no web framework
 
 - **Status:** Accepted
+- Narrowed by [0033](0033-eight-points-of-the-http-transport-settled-for-0-1.md) (Decisions 3, 4, 5 and 8)
 - **Accepted:** 2026-11-18
 - **Date:** 2026-11-03; amended 2026-11-18 for roadmap step 5 (#12)
 

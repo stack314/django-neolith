@@ -1067,8 +1067,15 @@ def test_over_http_refuses_what_it_cannot_carry(signing: _caller.Callers) -> Non
         pass  # pragma: no cover
 
 
-def test_over_http_refuses_an_identity_required_by_an_app_with_no_signing_key() -> None:
-    # The test host has no SIGNING_SECRETS; stock and web require couriers.v3.
+def test_over_http_refuses_an_identity_required_by_an_app_with_no_signing_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The test host's table with no signing key; stock and web require
+    # couriers.v3.
+    host, installed = _host._table()
+    assert host is not None
+    unsigned = dataclasses.replace(host, callers=_caller.Callers())
+    monkeypatch.setattr(_host, "_table", lambda: (unsigned, installed))
     with (
         pytest.raises(neolith.UsageError) as raised,
         over_http("couriers.v3", "http://localhost:1"),

@@ -27,6 +27,7 @@ from typing import Any
 from wsgiref.util import setup_testing_defaults
 
 import pytest
+from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.core.handlers import base
 from django.core.handlers.asgi import ASGIHandler
@@ -345,7 +346,7 @@ def test_a_request_root_has_the_host_s_request_deadline(
     ``NEOLITH``, and Django loads the apps of an override before it applies
     the override's settings, so ``NEOLITH`` is overridden first."""
     request_site.SEEN.clear()
-    with override_settings(NEOLITH={**host_apps.SERVED, **neolith}), _site():
+    with override_settings(NEOLITH={**settings.NEOLITH, **neolith}), _site():
         assert serve(mode, "/page/").body == b"as web"
     assert courier_services.CONTEXTS[-1].deadline == deadline
     request_site.HELD.clear()

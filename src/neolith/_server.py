@@ -179,6 +179,13 @@ class Connections:
         with self._lock:
             return [request.line for request in self._busy().values()]
 
+    def open_count(self) -> int:
+        """The number of open connections, with a request in flight or not:
+        one whose request line is not read yet counts too.
+        """
+        with self._lock:
+            return len(self._open)
+
     def cut(self) -> list[str]:
         """Stop: shut down every connection with a request in flight, and
         return the line of each such request.
@@ -200,6 +207,12 @@ class _Handler(WSGIRequestHandler):
     """
 
     server: "_Server"
+    # wsgiref writes a response's status line, its header fields and its
+    # body in separate small writes. With Nagle's algorithm on, a write
+    # after the first waits for the client's acknowledgement, which a client
+    # delays by up to 40 ms on a reused connection, so every response after
+    # a connection's first would wait that long.
+    disable_nagle_algorithm = True
 
     def setup(self) -> None:
         super().setup()
