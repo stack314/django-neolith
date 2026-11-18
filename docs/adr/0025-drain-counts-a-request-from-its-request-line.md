@@ -1,6 +1,7 @@
 # 0025. Drain counts a request from its request line
 
-- **Status:** Proposed
+- **Status:** Accepted
+- **Accepted:** 2026-11-18
 - **Date:** 2026-11-18
 
 ## Context
@@ -19,9 +20,9 @@ Decision 10 also gives the request handler subclass each connection's state ("kn
 
 ## Decision
 
-Option 2. This narrows one sentence of 0022 Decision 10: "The host wraps the WSGI callable it serves: the count goes up on entry and comes down in a `finally`, when the callable raises or when the server closes the response."
+1. **Drain counts a request from its request line.** Option 2. This narrows one sentence of 0022 Decision 10: "The host wraps the WSGI callable it serves: the count goes up on entry and comes down in a `finally`, when the callable raises or when the server closes the response."
 
-In its place: the host's request handler counts a request as in flight from the moment its request line is read until the handler returns. That is after the server has closed the response, or after the request ended without one. The count is kept under the one lock that holds each connection's state, so a request line is either counted before Drain begins or refused after it. The rest of Decision 10 is unchanged, including that the count does not rest on Django's signal pair.
+   In its place: the host's request handler counts a request as in flight from the moment its request line is read until the handler returns. That is after the server has closed the response, or after the request ended without one. The count is kept under the one lock that holds each connection's state, so a request line is either counted before Drain begins or refused after it. The rest of Decision 10 is unchanged, including that the count does not rest on Django's signal pair.
 
 ## Consequences
 

@@ -24,4 +24,5 @@ urlpatterns = [
     path("stream/<str:name>/", views.stream),
     path("signal/", views.signal_here),
     path("signal/<str:name>/", views.signal_after),
+    path("flood/<str:name>/", views.flood),
 ]

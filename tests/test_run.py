@@ -885,6 +885,54 @@ def test_a_request_that_outlasts_the_bound_is_cut_and_named(
     assert closed_by_server(client)
 
 
+@pytest.mark.spec("APP-43", "APP-44")
+@pytest.mark.parametrize("attempt", range(3))
+def test_a_cut_request_that_writes_without_end_still_exits_1(
+    site: Site, attempt: int
+) -> None:
+    """A cut request still runs on its own thread while the host stops; one
+    that holds a standard stream's lock then must not turn the exit into an
+    abort."""
+    site.deployer({"DATABASES": site.databases("desk"), "REQUEST_DEADLINE": 0.2})
+    assert site.migrate().returncode == 0
+    held = site.hold(f"flood{attempt}")
+    process = subprocess.Popen(  # noqa: S603
+        [
+            sys.executable,
+            "-W",
+            "error",
+            "-m",
+            "neolith",
+            "run",
+            DESK,
+            "--settings",
+            "deployer",
+            "--bind",
+            "127.0.0.1:0",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        cwd=site.root,
+        env=site.env(),
+    )
+    try:
+        assert process.stdout is not None
+        line = process.stdout.readline()
+        port = int(line.split(" at http://", 1)[1].split("/", 1)[0].rsplit(":", 1)[1])
+        client = connect(port)
+        send(client, f"/flood/flood{attempt}/")
+        held.wait_started()
+        process.send_signal(signal.SIGTERM)
+        assert process.wait(timeout=_WAIT) == 1
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=_WAIT)
+        if process.stdout is not None:
+            process.stdout.close()
+
+
 @pytest.mark.spec("APP-44", "APP-45")
 def test_a_second_signal_stops_at_once(
     site: Site, served: Callable[..., Served]
@@ -1068,6 +1116,65 @@ def test_python_m_neolith_is_the_command_line(site: Site) -> None:
 
 
 # The migrate step.
+
+
+@pytest.mark.spec("APP-48")
+@pytest.mark.parametrize(
+    ("apps", "neolith", "below", "refusal"),
+    [
+        (
+            ["tests.boot_apps.fresh", "tests.boot_apps.leaning"],
+            {},
+            "",
+            "app leaning: migration 0001_initial depends on fresh",
+        ),
+        (
+            [DESK, "tests.run_apps.leaner"],
+            {},
+            "",
+            "app leaner: migration 0001_initial depends on desk",
+        ),
+        (
+            [DESK],
+            {"UNDECLARED_APPS": ["tests.run_apps.borrower"]},
+            "",
+            "app borrower: migration 0001_initial depends on desk",
+        ),
+        (
+            [DESK, "tests.run_apps.brings"],
+            {},
+            "",
+            "app borrower: migration 0001_initial depends on desk",
+        ),
+        (
+            [DESK],
+            {},
+            'MIGRATION_MODULES = {"neolith": '
+            '"tests.run_apps.neolith_extra.migrations"}\n',
+            "app neolith: migration 0001_initial depends on desk",
+        ),
+    ],
+    ids=["hosted", "declared without a database", "undeclared", "battery", "neolith"],
+)
+def test_an_edge_into_a_hosted_app_is_refused_from_every_kind_of_app(
+    site: Site,
+    apps: list[str],
+    neolith: dict[str, Any],
+    below: str,
+    refusal: str,
+) -> None:
+    """No migration depends on one whose records live in another database,
+    whatever kind of installed app holds it."""
+    hosted = [
+        label
+        for label in ("desk", "fresh", "leaning")
+        if any(app.endswith(f".{label}") for app in apps)
+    ]
+    site.deployer({"DATABASES": site.databases(*hosted), **neolith}, below=below)
+    ran = site.migrate(*apps)
+    assert ran.returncode == 1, ran.stderr
+    assert f"neolith: (neolith.E013) {refusal}" in ran.stderr.splitlines(), ran.stderr
+    assert [label for label in hosted if site.database(label).exists()] == []
 
 
 @pytest.mark.spec("APP-23")
@@ -1268,7 +1375,7 @@ def test_the_check_reports_what_boot_would_refuse_and_writes_nothing(
     assert site.database("desk").read_bytes() == after
 
 
-@pytest.mark.spec("APP-48")
+@pytest.mark.spec("APP-48", "APP-50")
 def test_an_undeclared_app_that_depends_on_a_hosted_app_is_refused(
     site: Site,
 ) -> None:
@@ -1293,6 +1400,14 @@ def test_an_undeclared_app_that_depends_on_a_hosted_app_is_refused(
     )
     assert not site.database("desk").exists()
     assert not site.database("default").exists()
+    # The check names the refusal too, beside what Boot would refuse.
+    ran = manage("migrateapps", "--check")
+    assert ran.returncode == 1
+    assert (
+        "(neolith.E013) app borrower: migration 0001_initial depends on desk"
+        in ran.stderr.splitlines()
+    ), ran.stderr
+    assert not site.database("desk").exists()
 
 
 @pytest.mark.spec("APP-49")

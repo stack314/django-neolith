@@ -146,7 +146,7 @@ Schema changes are applied by a step of their own, which the deployer runs befor
 
 **APP-49.** When applying one app's schema changes fails, the schema step MUST stop before the next app, with a diagnostic that names the apps whose changes it applied and those whose changes it did not.
 
-**APP-50.** The schema step MUST offer a check that reports what Boot would refuse in each database and schema, and writes to no database beyond what the deployer's own connection settings run on each new connection.
+**APP-50.** The schema step MUST offer a check that reports what Boot would refuse in each database and schema, and what the schema step would refuse before it changes a database, and writes to no database beyond what the deployer's own connection settings run on each new connection.
 
 ### An app's database
 

@@ -2,23 +2,20 @@
 (spec 05, the schema step; ADR 0022 Decision 11; ADR 0009 Decision 7).
 
 The step first works out its labels from the apps installed in Django's
-global registry, and refuses before it touches any database:
+global registry: each hosted app with a ``database`` resource, on its own
+alias, in the order of ``INSTALLED_APPS``, which is the order the host was
+given; then, on a real ``default``, each app without a declaration that has
+migrations, there. One without migrations is skipped with a line that says
+so. Before it touches any database it refuses, with Boot's own code checks
+(``neolith._boot.code_messages``):
 
-- each hosted app with a ``database`` resource is migrated on its own
-  alias, in the order of ``INSTALLED_APPS``, which is the order the host
-  was given. It is refused when its label has no node in the migration
-  graph (``neolith.E008``, Boot's predicate), when a migration of it
-  depends on another label (``neolith.E013``), and when its migrations do
-  not load (``neolith.E010``) or conflict (``neolith.E011``), since Django's
-  ``migrate`` judges conflicts over the whole graph and would stop every
-  label;
-- on a real ``default``, each app without a declaration that has
-  migrations is migrated there, after the hosted apps, with the same
-  ``E010`` and ``E011``, and ``E013`` for a migration that depends on a
-  hosted app's, whose records live in another database; one without
-  migrations is skipped with a line that says so;
-- every other installed app gets ``E010`` and ``E011`` too, since Django's
-  ``migrate`` loads the whole graph and judges conflicts over it.
+- a hosted app with a database and no migrations (``neolith.E008``);
+- any edge between a migration of a hosted app and one of another label,
+  whatever kind of app that label is (``neolith.E013``): no migration
+  depends on one whose records live in another database;
+- in any installed app, migrations that do not load (``neolith.E010``) or
+  conflict (``neolith.E011``), since Django's ``migrate`` loads the whole
+  graph and judges conflicts over it.
 
 Then it runs Django's ``migrate <label> --database=<alias>`` for each, and
 stops at the first that fails, naming the labels migrated, the label that
@@ -42,7 +39,7 @@ from django.db.migrations.executor import MigrationExecutor
 from neolith import _boot, _databases
 from neolith._declaration import declaration_of
 
-__all__ = ["migrate"]
+__all__ = ["check", "migrate", "refused"]
 
 _SHOWN: Final = 300
 _HOST: Final = "neolith"
@@ -77,6 +74,27 @@ def _labels() -> tuple[list[str], list[str]]:
     return hosted, undeclared
 
 
+def refused() -> tuple[list[str], list[str]]:
+    """What the step refuses before it touches a database, each as
+    ``(<id>) <message>``, sorted; and the apps without a declaration it
+    migrates on a real ``default``.
+    """
+    hosted, undeclared = _labels()
+    found, migrated = _boot.code_messages(hosted, undeclared)
+    refusals = sorted(f"({m.id}) {m.msg}" for m in found if m.level >= checks.ERROR)
+    return refusals, migrated
+
+
+def check() -> list[str]:
+    """What ``migrateapps --check`` reports, each as ``(<id>) <message>``,
+    sorted and once: what Boot would refuse in each database and schema,
+    and what the step itself would refuse before it touched a database.
+    """
+    found = _boot.schema_messages()
+    lines = {f"({m.id}) {m.msg}" for m in found if m.level >= checks.ERROR}
+    return sorted(lines.union(refused()[0]))
+
+
 def migrate(out: TextIOBase, *, verbosity: int) -> None:
     """Run the migrate step for the host Django holds.
 
@@ -85,9 +103,8 @@ def migrate(out: TextIOBase, *, verbosity: int) -> None:
             migrating a label failed; the message names the labels migrated
             and not migrated.
     """
+    refusals, migrated = refused()
     hosted, undeclared = _labels()
-    found, migrated = _boot.code_messages(hosted, undeclared)
-    refusals = sorted(f"({m.id}) {m.msg}" for m in found if m.level >= checks.ERROR)
     if refusals:
         raise CommandError(
             "the migrate step refused before it touched a database:\n"

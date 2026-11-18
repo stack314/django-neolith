@@ -30,8 +30,9 @@ deadline, or 30 seconds when there is none. A request line read after the
 mark is not served, and a busy connection closes once its response ends, so
 no request that begins after Drain is served (ADR 0022 fact 14). A second
 signal stops at once. Each request still in flight at the end is named on
-standard error and its connection shut down, and the status is 1; otherwise
-it is 0.
+standard error and its connection shut down, and the process ends at once
+with status 1, without Python's shutdown, which would meet the threads
+still running the cut requests; otherwise the status is 0.
 
 State the module owns (CONTRIBUTING K6): the connections table of the one
 server ``neolith run`` starts.
@@ -47,7 +48,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from types import FrameType
-from typing import Any, Final, Protocol, TextIO
+from typing import Any, Final, NoReturn, Protocol, TextIO
 
 from django.core.servers.basehttp import ThreadedWSGIServer, WSGIRequestHandler
 
@@ -323,7 +324,7 @@ def serve(server: _Server, bound: float, out: TextIO, err: TextIO, serving: str)
         for line in cut:
             _say(err, f"drain: {reason}: {line}")
         if cut:
-            return 1
+            _stop_now(out, err)
         if in_flight:
             _say(out, "stopped; every request in flight finished")
         else:
@@ -336,6 +337,20 @@ def serve(server: _Server, bound: float, out: TextIO, err: TextIO, serving: str)
             signal.set_wakeup_fd(woken)
         server.connections.wake(_nothing)
         wake.close()
+
+
+def _stop_now(out: TextIO | None, err: TextIO | None) -> NoReturn:
+    """End the process with status 1 at once. A request that was cut still
+    runs app code on a thread of its own, and Python's shutdown would meet
+    that thread: one that holds a standard stream's lock then aborts the
+    interpreter with another status. So the streams are flushed and the
+    process ends without that shutdown.
+    """
+    for stream in (out, err):
+        if stream is not None:
+            with contextlib.suppress(Exception):
+                stream.flush()
+    os._exit(1)
 
 
 def _requests(count: int) -> str:

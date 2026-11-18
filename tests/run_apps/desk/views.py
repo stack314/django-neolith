@@ -12,6 +12,7 @@ the server can keep its connection alive.
 
 import os
 import signal
+import sys
 import threading
 from collections.abc import Iterator
 from pathlib import Path
@@ -75,3 +76,13 @@ def signal_after(request: HttpRequest, name: str) -> HttpResponse:
     _held(name)
     signal.pthread_kill(threading.get_ident(), signal.SIGINT)
     return _sized(name)
+
+
+def flood(request: HttpRequest, name: str) -> HttpResponse:
+    """Write to standard error without end, so a cut request holds the
+    stream's lock when the host stops."""
+    pipes = Path(os.environ["NEOLITH_RUN_PIPES"])
+    with (pipes / f"{name}.started").open("w", encoding="utf-8") as started:
+        started.write("started\n")
+    while True:
+        sys.stderr.write("x" * 200 + "\n")
