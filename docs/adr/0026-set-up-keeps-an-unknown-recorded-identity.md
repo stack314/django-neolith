@@ -1,9 +1,8 @@
 # 0026. Set-up keeps a recorded identity it does not know, so the next set-up reports it again
 
-- **Status:** Proposed
+- **Status:** Accepted
+- **Accepted:** 2026-11-18
 - **Date:** 2026-11-18
-
-New record, Proposed; the pull request that accepts it adds the Narrowed by line to 0021.
 
 ## Context
 
@@ -11,7 +10,7 @@ New record, Proposed; the pull request that accepts it adds the Narrowed by line
 
 A process can run set-up more than once: once a set-up has passed, `override_settings(INSTALLED_APPS=...)` runs it again, as a test suite does. (A first set-up that a refusal stopped is not tried again in the same process, since Django's `populate()` is not reentrant.) When such a later set-up is refused for an unknown identity and the same override is entered again, the module whose `connect()` asked for the identity has already been imported, so its `connect()` line does not run again. If the refused set-up had emptied the record, the retry would have nothing left to check, and it would pass with the misspelt identity still in the code. The reading that empties the set therefore lets a retry miss what the first attempt reported, which Decision 10 itself is there to prevent ("a misspelt identity in any module imported by the end of set-up stops the host").
 
-The implementation merged in #64 already follows a narrower reading, and this record proposes to write it down.
+The implementation merged in #64 already follows a narrower reading, and this record writes it down.
 
 ## Options
 
@@ -30,4 +29,4 @@ The implementation merged in #64 already follows a narrower reading, and this re
 - A later set-up retried with the same apps reports again an unknown identity that the earlier attempt reported. `tests/test_host.py` holds this for a retry under `override_settings` (spec 05, APP-14).
 - Before any set-up, the set holds every identity asked for. After one, it holds only those that set-up did not know, with their call sites.
 - **A known gap.** An unknown identity stays until a set-up's table knows it, and that set-up may itself be refused: a later set-up with other hosted apps is refused (0022 Decision 5), but its table can know the identity, and set-up drops it then. Entering the earlier override again can then pass with the identity still unknown. #94 tracks it.
-- No behaviour changes: this records what #64 built. When this record is accepted, 0021 gains `Narrowed by 0026 (Decision 10)` under its status, and nothing else in it changes (CONTRIBUTING, D2).
+- No behaviour changes: this records what #64 built. 0021 gains a `Narrowed by` line under its status, and nothing else in it changes (CONTRIBUTING, D2).
