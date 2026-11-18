@@ -28,6 +28,8 @@ from pydantic import BaseModel
 
 import neolith
 from neolith import Action, CallContext, ContractError, Principal, Provided
+from neolith._caller import Built as CallerBuilt
+from neolith._caller import Callers, Findings
 from neolith._context import Arrived, Sent
 from neolith._contracts import _FrozenList, _FrozenMap
 from neolith._declaration import Declaration, Provision
@@ -37,6 +39,7 @@ from neolith._host import Connector, Host
 from neolith._http import Origin, Response
 from neolith._principal import Built
 from neolith._server import _Request
+from neolith.callers import CallerBackend
 from neolith.principals import PrincipalBackend
 
 
@@ -67,7 +70,13 @@ class _Backend(PrincipalBackend):
         return None
 
 
+class _Caller(CallerBackend):
+    def authenticate(self, request: object, contract: str) -> None:
+        return None
+
+
 _EVIL = Built(9, "evil.Evil", _Backend(), ("x",))
+_EVIL_CALLERS = Callers((CallerBuilt(9, "evil.Evil", _Caller()),))
 _ALICE = Principal("https://id.example", "alice", {"role": "admin"})
 _CASES: dict[type, Case] = {
     Principal: Case(
@@ -120,8 +129,44 @@ _CASES: dict[type, Case] = {
     ),
     Host: Case(
         lambda: Host(frozenset({"shop.v1"}), {}, {"shop": ()}),
-        ((frozenset(), {}, {}, None, frozenset({"w"}), (_EVIL,), ("x",)), {}),
-        state=[frozenset(), {}, {}, None, frozenset({"w"}), (_EVIL,), ("x",)],
+        (
+            (
+                frozenset(),
+                {},
+                {},
+                None,
+                frozenset({"w"}),
+                (_EVIL,),
+                ("x",),
+                _EVIL_CALLERS,
+            ),
+            {},
+        ),
+        state=[
+            frozenset(),
+            {},
+            {},
+            None,
+            frozenset({"w"}),
+            (_EVIL,),
+            ("x",),
+            _EVIL_CALLERS,
+        ],
+    ),
+    CallerBuilt: Case(
+        lambda: CallerBuilt(0, "shop.Backend", _Caller()),
+        ((1, "evil.Evil", _Caller()), {}),
+        state=[1, "evil.Evil", _Caller()],
+    ),
+    Callers: Case(
+        lambda: Callers(),
+        (((CallerBuilt(1, "evil.Evil", _Caller()),), ()), {}),
+        state=[(CallerBuilt(1, "evil.Evil", _Caller()),), ()],
+    ),
+    Findings: Case(
+        lambda: Findings(("refused",), (), "x"),
+        ((("evil",), ("w",), None), {}),
+        state=[("evil",), ("w",), None],
     ),
     Built: Case(
         lambda: Built(0, "shop.Backend", _Backend(), ("cookie",)),

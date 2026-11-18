@@ -1,6 +1,7 @@
 # 0017. The call context is explicit at the action and ambient for propagation
 
 - **Status:** Accepted
+- Narrowed by [0027](0027-a-caller-backend-names-the-calling-app-over-http.md) (Decision 11)
 - **Accepted:** 2026-11-11
 - **Date:** 2026-11-09
 

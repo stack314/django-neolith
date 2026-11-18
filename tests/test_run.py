@@ -50,6 +50,8 @@ MIDDLEWARE = [
 ]
 ROOT_URLCONF = "tests.run_apps.desk.urls"
 USE_TZ = True
+# Its apps are called in-process only, with no caller backend (ADR 0027).
+SILENCED_SYSTEM_CHECKS = ["neolith.W004"]
 NEOLITH = {neolith!r}
 """
 

@@ -113,18 +113,20 @@ The token travels as `Authorization: Bearer <token>`. It is a JSON Web Token (RF
 | `iat` | claims | When the token was issued |
 | `exp` | claims | When the token expires, at most 300 seconds after `iat` |
 
-The shared-secret backend recognizes a call whose `Authorization` uses the `Bearer` scheme (compared ignoring ASCII case) with a token whose first part decodes, under the encoding rules above, to a JSON object whose `typ` is `neolith+jwt` or `application/neolith+jwt`, ignoring ASCII case. It abstains on any other credentials, including a token whose first part breaks those rules, so a later backend can try them. A recognized token is valid only when all of these hold, with *now* the provider host's current time in seconds since the epoch:
+The shared-secret backend recognizes a call whose `Authorization` uses the `Bearer` scheme (compared ignoring ASCII case) with a token whose first part decodes, under the encoding rules above, to a JSON object whose `typ` is `neolith+jwt` or `application/neolith+jwt`, ignoring ASCII case. **HTTP-7.** It MUST abstain on any other credentials, including a token whose first part breaks those rules, so a later backend can try them. A first part nested deeper than the host's JSON reader admits (RFC 8259, section 9, lets a parser limit nesting) counts as one that does not decode, so the backend abstains on it; this changes no valid token, whose first part is three string members with no nesting.
 
-- it is at most 4096 bytes, and its three parts are base64url-encoded, the first two as JSON objects;
-- the header has exactly the members `alg`, `typ` and `kid`, and the claims exactly `iss`, `aud`, `iat` and `exp`, each of the type in the table;
-- `alg` is `HS256`;
-- `typ` is `neolith+jwt` or `application/neolith+jwt`, ignoring ASCII case (RFC 7515, section 4.1.9);
-- `kid` names a key the host holds for the app named by `iss`;
-- the signature is the HMAC SHA-256 of the first two parts joined by `.`, as sent, under that key's secret, compared in constant time;
-- `aud` is the identity of the contract in the request path;
-- `iat` < `exp` ≤ `iat` + 300, `iat` ≤ *now* + 60, and *now* < `exp` + 60.
+A provider's host MUST accept a recognized token as valid only when all of these hold, with *now* the provider host's current time in seconds since the epoch:
 
-A recognized token that is not valid fails the call with `unauthenticated`, with no fallback to a later backend. The token identifies the calling app only; it never carries the end user. A caller can reuse a token for calls to the same contract while it is valid, so a provider does not refuse a token for having seen it before.
+- **HTTP-8.** it is at most 4096 bytes, and its three parts are base64url-encoded, the first two as JSON objects;
+- **HTTP-9.** the header has exactly the members `alg`, `typ` and `kid`, and the claims exactly `iss`, `aud`, `iat` and `exp`, each of the type in the table;
+- **HTTP-10.** `alg` is `HS256`;
+- **HTTP-11.** `typ` is `neolith+jwt` or `application/neolith+jwt`, ignoring ASCII case (RFC 7515, section 4.1.9);
+- **HTTP-12.** `kid` names a key the host holds for the app named by `iss`;
+- **HTTP-13.** the signature is the HMAC SHA-256 of the first two parts joined by `.`, as sent, under that key's secret, compared in constant time;
+- **HTTP-14.** `aud` is the identity of the contract in the request path;
+- **HTTP-15.** `iat` < `exp` ≤ `iat` + 300, `iat` ≤ *now* + 60, and *now* < `exp` + 60.
+
+**HTTP-16.** A recognized token that is not valid MUST fail the call with `unauthenticated`, with no fallback to a later backend. The token identifies the calling app only; it never carries the end user. A caller can reuse a token for calls to the same contract while it is valid, so a provider does not refuse a token for having seen it before.
 
 The audience names the contract, which both sides know from the request path. It keeps a token from being used at another contract. It does not keep a token seen at one provider of a contract from being replayed at another provider of the same contract, such as the attached and detached providers of one app, until it stops being valid. With a shared secret, every provider that checks a calling app's tokens could also mint them.
 
@@ -136,7 +138,7 @@ For example, with the example secret `000102030405060708090a0b0c0d0e0f1011121314
 Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6Im5lb2xpdGgrand0Iiwia2lkIjoib3JkZXJzLTEifQ.eyJpc3MiOiJvcmRlcnMiLCJhdWQiOiJpbnZlbnRvcnkudjEiLCJpYXQiOjE3NjcyMjU2MDAsImV4cCI6MTc2NzIyNTkwMH0.AhMk-cm_SInC6ek-6CLP8pN7ciQFHuGb-i2MSGu3efU
 ```
 
-These rules become requirements, with IDs and tests, with the HTTP transport in roadmap step 5 (#12). The allow-list joins the app declaration in step 4 (#11).
+The rest of this section becomes requirements, with IDs and tests, with the HTTP transport in roadmap step 5 (#12). The allow-list joins the app declaration in step 4 (#11).
 
 ## Health
 

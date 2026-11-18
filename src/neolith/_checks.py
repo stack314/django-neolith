@@ -16,10 +16,15 @@ with models in a closed host, ``neolith.E006`` for ``MIDDLEWARE``,
 for a database cache in a closed host, ``neolith.E017`` for a table name
 that ``default`` shortened (ADR 0009), ``neolith.E019`` for a principal
 backend that set-up could not build and ``neolith.E020`` for Django's cache
-middleware listed after the principal middleware (ADR 0023), and
-``neolith.W001`` for an admin class in no installed app. ``neolith.E005``,
-the comparison of the settings the host builds, runs at the first set-up
-only (``neolith._configure``), and Boot's ids are in ``neolith._boot``.
+middleware listed after the principal middleware (ADR 0023),
+``neolith.E021`` for a caller backend or signing key that set-up
+refused (ADR 0027), ``neolith.W001`` for an admin class in no installed
+app, and ADR 0027's warnings ``neolith.W004`` (no caller backend),
+``neolith.W005`` (a principal backend that declares a ``neolith-`` header)
+and, under ``check --deploy``, ``neolith.W006`` (the shared-secret backend
+listed). ``neolith.E005``, the comparison of the settings the host builds,
+runs at the first set-up only (``neolith._configure``), and Boot's ids are
+in ``neolith._boot``.
 """
 
 import math
@@ -34,7 +39,7 @@ from django.core import checks
 from django.db.backends.utils import strip_quotes
 from django.utils.module_loading import import_string
 
-from neolith import _databases, _naming, _principal
+from neolith import _caller, _databases, _naming, _principal
 from neolith._declaration import Declaration, declaration_of
 from neolith._serving import admin_code
 
@@ -47,6 +52,8 @@ __all__ = [
     "TAG",
     "admin_check",
     "batteries",
+    "caller_check",
+    "caller_deploy_check",
     "database_check",
     "database_problems",
     "default_check",
@@ -82,12 +89,14 @@ DEFAULT_REQUEST_DEADLINE: Final = 30.0
 _SHORTEST: Final = 0.001
 _LONGEST: Final = 9999999.999
 _DEADLINE: Final = 'NEOLITH["REQUEST_DEADLINE"]'
-# The key table of NEOLITH (ADR 0022 Decision 3, and ADR 0023 for the
-# principal backends).
+# The key table of NEOLITH (ADR 0022 Decision 3, ADR 0023 for the principal
+# backends, and ADR 0027 for the caller backends and signing keys).
 KEYS: Final = (
+    "CALLER_BACKENDS",
     "DATABASES",
     "PRINCIPAL_BACKENDS",
     "REQUEST_DEADLINE",
+    "SIGNING_SECRETS",
     "UNDECLARED_APPS",
 )
 # Stands for a setting that is absent.
@@ -232,6 +241,10 @@ def neolith_problems(
             problems.extend(_undeclared_problems(item, hosted))
         elif key == _principal.KEY:
             problems.extend(_principal.shape_problems(item))
+        elif key == _caller.KEY:
+            problems.extend(_caller.shape_problems(item))
+        elif key == _caller.SIGNING:
+            problems.extend(_caller.signing_problems(item, [d.label for d in hosted]))
     if "DATABASES" not in entries:
         problems.extend(
             f"app {label}: no connection settings for its database"
@@ -368,6 +381,61 @@ def principal_check(**kwargs: object) -> list[checks.CheckMessage]:
             )
         ]
     return found
+
+
+def caller_check(**kwargs: object) -> list[checks.CheckMessage]:
+    """``neolith.E021``: what set-up refused when it built the caller
+    backends and the signing keys (ADR 0027); ``neolith.W004``: a host that
+    provides contracts with no caller backend, so every call over HTTP fails
+    with ``unauthenticated``; and ``neolith.W005``: a principal backend that
+    declares a ``neolith-`` header.
+    """
+    if not _hosting():
+        return []
+    # safe read: neolith's own app config.
+    findings = vars(global_apps.get_app_config(TAG)).get(_caller.FINDINGS)
+    found: list[checks.CheckMessage] = []
+    if type(findings) is _caller.Findings:
+        found += [checks.Error(p, id="neolith.E021") for p in findings.refusals]
+        found += [
+            checks.Warning(p, id="neolith.W005") for p in findings.principal_headers
+        ]
+    neolith = _checked_neolith()
+    hosted = hosted_declarations(global_apps.get_app_configs())
+    if (
+        neolith is not None
+        and _caller.KEY not in neolith
+        and any(d.provides for d in hosted)
+    ):
+        found.append(
+            checks.Warning(
+                f"this host provides contracts and {_caller.SETTING} lists no "
+                "caller backend, so every call to them over HTTP fails with "
+                "unauthenticated",
+                id="neolith.W004",
+            )
+        )
+    return found
+
+
+def caller_deploy_check(**kwargs: object) -> list[checks.CheckMessage]:
+    """``neolith.W006``, under ``check --deploy``: the shared-secret backend
+    is listed, which is for development (ADR 0027, spec 03).
+    """
+    if not _hosting():
+        return []
+    # safe read: neolith's own app config.
+    findings = vars(global_apps.get_app_config(TAG)).get(_caller.FINDINGS)
+    if type(findings) is not _caller.Findings or findings.shared is None:
+        return []
+    return [
+        checks.Warning(
+            f"{findings.shared}: the shared-secret backend is for development: "
+            "every provider that accepts an app holds its secret and can sign as "
+            "it, and a token seen on the network can be replayed until it expires",
+            id="neolith.W006",
+        )
+    ]
 
 
 def hosted_declarations(configs: Iterable[AppConfig]) -> list[Declaration]:
@@ -697,9 +765,11 @@ def register() -> None:
         installed_check,
         middleware_check,
         principal_check,
+        caller_check,
         admin_check,
         database_check,
         default_check,
         table_name_check,
     ):
         checks.register(check, TAG)
+    checks.register(caller_deploy_check, TAG, deploy=True)

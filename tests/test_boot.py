@@ -614,7 +614,12 @@ def test_boot_warns_about_an_admin_class_the_urlconf_registered() -> None:
     printed = in_built_host(
         _ADMIN,
         host_apps.HOSTED,
-        {"NEOLITH": host_apps.NEOLITH, "ROOT_URLCONF": "tests.boot_urls"},
+        {
+            "NEOLITH": host_apps.NEOLITH,
+            "ROOT_URLCONF": "tests.boot_urls",
+            # Its apps are called in-process only (ADR 0027).
+            "SILENCED_SYSTEM_CHECKS": ["neolith.W004"],
+        },
     )
     assert printed.splitlines() == [
         "set-up 0",
@@ -1031,7 +1036,10 @@ def test_each_admin_registration_is_warned_once_or_silenced(
                 "UNDECLARED_APPS": ["django.contrib.contenttypes", "tests.boot_admin"],
             },
             "ROOT_URLCONF": "tests.boot_urls",
-            "SILENCED_SYSTEM_CHECKS": ["neolith.W001"] if silenced else [],
+            # Its apps are called in-process only (ADR 0027).
+            "SILENCED_SYSTEM_CHECKS": ["neolith.W001", "neolith.W004"]
+            if silenced
+            else ["neolith.W004"],
         },
     )
     at_set_up, at_boot = json.loads(printed.splitlines()[-1])

@@ -66,7 +66,7 @@ from django.core.exceptions import ImproperlyConfigured
 from django.core.signals import setting_changed
 from pydantic import BaseModel
 
-from neolith import _checks, _configure, _context, _naming, _principal
+from neolith import _caller, _checks, _configure, _context, _naming, _principal
 from neolith._connector import Connector as Bound
 from neolith._connector import InProcess
 from neolith._context import Principal, UsageError
@@ -111,6 +111,8 @@ class Host:
     # union of their request inputs, which a response varies on.
     principals: tuple[_principal.Built, ...] = ()
     vary: tuple[str, ...] = ()
+    # The caller backends and signing keys set-up built (ADR 0027).
+    callers: _caller.Callers = _caller.NO_CALLERS
 
 
 _LOCK: Final = threading.Lock()
@@ -247,6 +249,7 @@ def set_up(config: AppConfig) -> None:
     # Built once per set-up, after app loading; what is refused is recorded
     # for neolith.E019, which the checks below report (ADR 0023 Decision 10).
     principals = _principals(config)
+    callers = _caller.set_up(config, principals)
     # Run outside the lock, which a check must never need; judged inside it,
     # after Resolve and Validate, so their refusals come first.
     found = checks.run_checks(tags=[_checks.TAG])
@@ -294,6 +297,7 @@ def set_up(config: AppConfig) -> None:
             warned=warned,
             principals=principals,
             vary=_principal.vary_of(principals),
+            callers=callers,
         )
         # Only a set-up that passes is done with the places it checked, all
         # of which its table knows. A refused one drops none, whatever its
