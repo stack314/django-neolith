@@ -13,7 +13,9 @@ So every helper here reads a class's names through ``type``'s own
 descriptors, which return what the class was built with; copies text to an
 exact ``str`` before it is measured or formatted; bounds it; and never
 raises. Each falls back to a fixed description when there is nothing it can
-read.
+read. ``is_a`` judges a value's class for such a check the way
+``isinstance`` does, which reads the value's own ``__class__``, and answers
+False where that read raises.
 """
 
 import types
@@ -22,6 +24,7 @@ from typing import Final
 __all__ = [
     "cause",
     "full_name",
+    "is_a",
     "module",
     "name",
     "qualname",
@@ -116,6 +119,20 @@ def full_name(cls: type, limit: int | None = LIMIT) -> str:
     """
     dotted = f"{module(cls) or '<unknown module>'}.{qualname(cls, None)}"
     return _or(_exact(dotted, limit), dotted)
+
+
+def is_a(value: object, kind: type) -> bool:
+    """``isinstance(value, kind)``, or False if the value's own ``__class__``
+    raises when ``isinstance`` reads it.
+
+    ``isinstance`` reads ``__class__`` only after ``type(value)`` does not
+    match, so a proxy such as Django's ``SimpleLazyObject`` is still judged by
+    what it wraps.
+    """
+    try:
+        return isinstance(value, kind)
+    except Exception:  # the value's own __class__ may raise anything
+        return False
 
 
 def type_name(value: object, limit: int | None = LIMIT) -> str:

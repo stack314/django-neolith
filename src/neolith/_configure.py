@@ -25,7 +25,7 @@ settings Django holds (``neolith.E005``).
 """
 
 from collections.abc import Iterable, Sequence
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from django.apps import AppConfig
 from django.conf import settings
@@ -347,6 +347,10 @@ def databases_difference(found: object, built: dict[str, Any]) -> str | None:
     if type(found) is not dict:
         return f"it is a {_type(found)}, the host builds a dict"
     entries: dict[object, object] = found
+    # Before any key is looked up, so that no key's own __eq__ runs.
+    for alias in entries:
+        if type(alias) is not str:
+            return f"alias {_repr(alias)} is not one the host builds"
     missing = [alias for alias in built if alias not in entries]
     if missing:
         return f"alias {missing[0]!r} is missing"
@@ -374,8 +378,9 @@ def _difference(
     if found is _checks.MISSING:
         return "it is absent"
     if type(expected) is dict:
-        if not isinstance(found, dict):
+        if not _naming.is_a(found, dict):
             return f"{where or 'it'} is a {_type(found)}, the host builds a dict"
+        found = cast("dict[Any, Any]", found)
         own: dict[str, Any] = expected
         if not where:
             extra = [k for k in found if k not in own]

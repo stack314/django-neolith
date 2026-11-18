@@ -14,12 +14,13 @@ keep every name read in ``src/neolith`` going through ``neolith._naming``.
 import ast
 import re
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Annotated, Any, NoReturn, Protocol, cast
 
 import pytest
 from django.core.management.base import CommandError
+from django.utils.functional import SimpleLazyObject
 from pydantic import Field, create_model
 
 import neolith
@@ -60,7 +61,7 @@ class Trap(str):
 
     __format__ = __str__ = __repr__ = __len__ = __getitem__ = _boom
     __contains__ = __add__ = __radd__ = __mod__ = __iter__ = _boom
-    __eq__ = __ne__ = __lt__ = _boom  # type: ignore[assignment]
+    __eq__ = __ne__ = __lt__ = _boom
     __hash__ = str.__hash__
 
 
@@ -392,7 +393,7 @@ def test_a_form_marker_on_a_hostile_type_is_refused(key: str) -> None:
 
 
 # Each module's own name for an error it reports.
-_CAUSES: dict[str, Callable[[BaseException], str]] = {
+_CAUSES: dict[str, Callable[[Exception], str]] = {
     "boot": _boot._cause,
     "cli": _cli._cause,
     "configure": _configure._cause,
@@ -403,7 +404,7 @@ _CAUSES: dict[str, Callable[[BaseException], str]] = {
 
 @pytest.mark.parametrize("cause", _CAUSES.values(), ids=_CAUSES.keys())
 def test_every_module_names_a_hostile_error_without_running_it(
-    cause: Callable[[BaseException], str],
+    cause: Callable[[Exception], str],
 ) -> None:
     assert cause(HostileError()) == "HostileError: <the message cannot be read>"
 
@@ -434,6 +435,119 @@ def test_settings_checks_given_hostile_values_name_them(key: str) -> None:
     assert _databases.databases_problems(value, [])
     assert _configure.databases_difference(value, {})
     assert _configure.databases_difference({value: {}}, {})
+
+
+# A check that looks a name up, or compares a class, runs none of the
+# object's code either: a key is compared only once it is exactly a str, and
+# a class only by identity.
+
+
+class EqMeta(type):
+    """A metaclass whose == raises once armed, after its classes are built."""
+
+    armed = False
+
+    def __eq__(cls, other: object) -> bool:
+        if EqMeta.armed:
+            raise RuntimeError("metaclass __eq__ ran")
+        return type.__eq__(cls, other)
+
+    __hash__ = type.__hash__
+
+
+class EqBase(metaclass=EqMeta):
+    pass
+
+
+class EqDerived(EqBase):
+    pass
+
+
+@pytest.fixture
+def armed() -> Iterator[None]:
+    EqMeta.armed = True
+    try:
+        yield
+    finally:
+        EqMeta.armed = False
+
+
+@pytest.mark.usefixtures("armed")
+def test_a_class_whose_metaclass_eq_raises_is_refused() -> None:
+    def send(self: object, request: object) -> None: ...
+
+    send.__annotations__["request"] = EqBase
+    with pytest.raises(ContractDefinitionError, match="must be a record"):
+        contract("hostile.v1")(
+            cast(Any, type("Sends", (Protocol,), {"send": action(send)}))
+        )
+    with pytest.raises(ContractDefinitionError, match=r"\(Protocol\), with no other"):
+        contract("hostile.v1")(EqDerived)
+
+
+@pytest.mark.parametrize("name", ["stray", "__neolith_contract__"])
+def test_a_class_with_a_key_that_is_not_exactly_a_str_is_refused(name: str) -> None:
+    keyed = type("Keyed", (), {Trap(name): 1})
+    with pytest.raises(ContractDefinitionError, match="is not a contract"):
+        Contract.of(keyed)
+    with pytest.raises(ContractDefinitionError, match="is not a contract"):
+        implements(keyed)
+    declared = type("Keyed", (Protocol,), {Trap(name): 1})
+    with pytest.raises(ContractDefinitionError, match="not exactly a str"):
+        contract("hostile.v1")(declared)
+
+
+def test_a_function_with_a_key_that_is_not_exactly_a_str_is_refused() -> None:
+    def send(self: object, request: Reserve) -> None: ...
+
+    vars(send)[Trap("__neolith_action__")] = 1
+    with pytest.raises(ContractDefinitionError, match="not exactly a str"):
+        action(send)
+
+
+def test_an_identity_given_as_a_str_subclass_is_read_as_its_text() -> None:
+    class Identity(str):
+        __format__ = __str__ = __repr__ = __add__ = __radd__ = __mod__ = _boom
+
+    with pytest.raises(ContractDefinitionError, match=r"hostile\.v1: @contract"):
+        contract(Identity("hostile.v1"))(cast(Any, 3))
+
+
+def test_settings_keys_and_values_that_run_code_are_refused() -> None:
+    sqlite = "django.db.backends.sqlite3"
+    built = {"default": {"ENGINE": sqlite, "NAME": "/db.sqlite3", "OPTIONS": {}}}
+    assert (
+        _configure.databases_difference(
+            {Trap("default"): {"ENGINE": sqlite, "NAME": "/db.sqlite3"}}, built
+        )
+        == "alias <Trap that cannot be shown> is not one the host builds"
+    )
+    assert (
+        _configure.databases_difference(
+            {
+                "default": {
+                    "ENGINE": sqlite,
+                    "NAME": "/db.sqlite3",
+                    "OPTIONS": Hostile(),
+                }
+            },
+            built,
+        )
+        == "['default']['OPTIONS'] is a Hostile, the host builds a dict"
+    )
+    assert _databases.databases_problems(
+        {"default": {Trap("ENGINE"): sqlite, "NAME": "x"}}, []
+    ) == ["database default: a key of type Trap is not a setting's name"]
+    assert _databases.databases_problems(
+        {"default": {"ENGINE": sqlite, "NAME": Hostile()}}, []
+    ) == ["database default: NAME: expected a str or a path, got Hostile"]
+
+
+def test_a_lazy_mapping_is_still_judged_by_what_it_wraps() -> None:
+    lazy = SimpleLazyObject(lambda: {"role": "admin"})
+    assert Principal("issuer", "subject", cast(Any, lazy)).claims == {"role": "admin"}
+    assert _naming.is_a(lazy, dict)
+    assert not _naming.is_a(Hostile(), dict)
 
 
 # Every name read goes through neolith._naming.

@@ -36,7 +36,7 @@ from pydantic_core import SchemaSerializer, SchemaValidator, ValidationError
 from neolith import _naming
 from neolith._checker import TIMES, description_checker
 from neolith._forms import FORM_FOR_KIND
-from neolith._portable import shown
+from neolith._naming import shown
 
 if typing.TYPE_CHECKING:
     from neolith._contracts import Action, Contract

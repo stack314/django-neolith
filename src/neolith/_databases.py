@@ -76,7 +76,7 @@ def _is_memory(name: object) -> bool:
     """The literal ``:memory:``, as a ``str`` or a path."""
     if type(name) is str:
         return name == MEMORY
-    return isinstance(name, pathlib.PurePath) and str(name) == MEMORY
+    return _naming.is_a(name, pathlib.PurePath) and str(name) == MEMORY
 
 
 def sqlite_path(name: object) -> str | None:
@@ -88,7 +88,7 @@ def sqlite_path(name: object) -> str | None:
     """
     if _is_memory(name):
         return None
-    text = str(name) if isinstance(name, pathlib.PurePath) else name
+    text = str(name) if _naming.is_a(name, pathlib.PurePath) else name
     if type(text) is not str:
         return ""
     if text.startswith("file:"):
@@ -170,6 +170,10 @@ def _entry_problems(alias: str, entry: object) -> list[str]:
     if type(entry) is not dict:
         return [f"{where}: expected a dict, got {_type(entry)}"]
     settings: dict[object, object] = entry
+    # Before any key is looked up, so that no key's own __eq__ runs.
+    for key in settings:
+        if type(key) is not str:
+            return [f"{where}: a key of type {_type(key)} is not a setting's name"]
     problems: list[str] = []
     engine = settings.get("ENGINE")
     if type(engine) is not str or not engine:
@@ -179,7 +183,7 @@ def _entry_problems(alias: str, entry: object) -> list[str]:
             f"{where}: ENGINE is required; the dummy backend is not a database"
         )
     name = settings.get("NAME", "")
-    if type(name) is not str and not isinstance(name, pathlib.PurePath):
+    if type(name) is not str and not _naming.is_a(name, pathlib.PurePath):
         problems.append(f"{where}: NAME: expected a str or a path, got {_type(name)}")
     elif type(name) is str and not name:
         problems.append(

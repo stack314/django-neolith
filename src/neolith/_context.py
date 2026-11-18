@@ -129,8 +129,7 @@ class Principal:
     ) -> None:
         if type(issuer) is not str or type(subject) is not str:
             raise TypeError("a principal's issuer and subject are each a str")
-        # Judged by type(): isinstance would read the object's own __class__.
-        if claims is not None and not issubclass(type(claims), Mapping):
+        if claims is not None and not _naming.is_a(claims, Mapping):
             raise TypeError(
                 f"a principal's claims are a mapping, not {_naming.type_name(claims)}"
             )

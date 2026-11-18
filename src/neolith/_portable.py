@@ -251,7 +251,9 @@ class Portable:
         """Admit a request, reply or detail type; return it and its reference."""
         # Judged by type() and the class's own method resolution order, so
         # that no code of the annotation, or of its metaclass, runs.
-        if issubclass(type(annotation), type) and BaseModel in _MRO.__get__(annotation):
+        if issubclass(type(annotation), type) and any(
+            klass is BaseModel for klass in _MRO.__get__(annotation)
+        ):
             model: type[BaseModel] = annotation  # type: ignore[assignment]  # as above
             record_name = _naming.name(model, None)
             try:

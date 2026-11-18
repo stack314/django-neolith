@@ -34,10 +34,10 @@ from pydantic import BaseModel
 from neolith import _naming
 from neolith._context import CallContext
 from neolith._crossing import Codec
+from neolith._naming import shown
 from neolith._portable import (
     Portable,
     json_value_problem,
-    shown,
     text_problem,
 )
 
@@ -521,7 +521,7 @@ class Contract:
         # Read by type() and type's own descriptor, never the object's own
         # attributes, so no code of the object runs before it is refused.
         found = (
-            _OWN_NAMESPACE.__get__(declaration).get(_CONTRACT_ATTR)
+            _own(_OWN_NAMESPACE.__get__(declaration), _CONTRACT_ATTR)
             if issubclass(type(declaration), type)
             else None
         )
@@ -687,18 +687,30 @@ def contract[T](identity: str, /) -> Callable[[type[T]], type[T]]:
             names breaks spec 01.
     """
     _parse_identity(identity)
+    # A str subclass is copied to its text, so that none of its code runs
+    # where the identity is written into a message.
+    identity = str.__str__(identity)
 
     def decorate(declaration: type[T]) -> type[T]:
         if not issubclass(type(declaration), type):
             raise ContractDefinitionError(
                 f"{identity}: @contract decorates a class, not {_name(declaration)}"
             )
-        if _CONTRACT_ATTR in _OWN_NAMESPACE.__get__(declaration):
+        namespace = _OWN_NAMESPACE.__get__(declaration)
+        # Before any name is looked up, so that no key's own __eq__ runs.
+        if any(type(key) is not str for key in namespace):
+            raise ContractDefinitionError(
+                f"{identity}: {_naming.qualname(declaration)} has an attribute "
+                "whose name is not exactly a str"
+            )
+        if _CONTRACT_ATTR in namespace:
             raise ContractDefinitionError(
                 f"{identity}: {_naming.qualname(declaration)} is already the contract "
                 f"{Contract.of(declaration).identity}"
             )
-        if _BASES.__get__(declaration) != (Protocol,):
+        bases = _BASES.__get__(declaration)
+        # By identity: == would run the base's metaclass __eq__.
+        if len(bases) != 1 or bases[0] is not Protocol:
             raise ContractDefinitionError(
                 f"{identity}: declare the contract as "
                 f"class {_naming.name(declaration)}(Protocol), with no other base"
@@ -717,9 +729,9 @@ def contract[T](identity: str, /) -> Callable[[type[T]], type[T]]:
                 except TypeError as error:
                     raise portable.fail(str(error)) from error
 
-        for attr, value in _OWN_NAMESPACE.__get__(declaration).items():
+        for attr, value in namespace.items():
             marked = (
-                vars(value).get(_ACTION_ATTR)
+                _own(vars(value), _ACTION_ATTR)
                 if type(value) is types.FunctionType
                 else None
             )
@@ -746,7 +758,7 @@ def contract[T](identity: str, /) -> Callable[[type[T]], type[T]]:
             )
             if reply_type is not None:
                 capture(reply_type)
-            idempotent, declared = marked
+            idempotent, declared = typing.cast("tuple[bool, object]", marked)
             where = f"{identity}, action {attr!r}"
             errors: dict[str, type[BaseModel]] = {}
             error_refs: dict[str, dict[str, str]] = {}
@@ -847,12 +859,19 @@ def action(
             raise ContractDefinitionError(
                 f"@action marks a function defined in a contract, not {_name(method)}"
             )
-        if _ACTION_ATTR in vars(method):
+        own = vars(method)
+        # Before any name is looked up, so that no key's own __eq__ runs.
+        if any(type(key) is not str for key in own):
+            raise ContractDefinitionError(
+                f"@action marks {_naming.qualname(method)}, which has an "
+                "attribute whose name is not exactly a str"
+            )
+        if _ACTION_ATTR in own:
             raise ContractDefinitionError(
                 f"{_naming.qualname(method)} is marked with @action twice; mark it "
                 "once, as @action(idempotent=..., errors=...)"
             )
-        vars(method)[_ACTION_ATTR] = (idempotent, errors)
+        own[_ACTION_ATTR] = (idempotent, errors)
         return method
 
     return mark if function is None else mark(function)
@@ -1028,10 +1047,20 @@ def _nests_deeper(
     return height(schema) > limit
 
 
+def _own(namespace: Mapping[Any, object], name: str) -> object:
+    """The entry ``name`` of a namespace, or None, compared only with keys
+    that are exactly ``str``, so that no key's own ``__eq__`` runs.
+    """
+    for key, value in namespace.items():
+        if type(key) is str and key == name:
+            return value
+    return None
+
+
 def _parse_identity(identity: object) -> tuple[str, int]:
     # Judged by type(): isinstance would read the object's own __class__.
     is_text = issubclass(type(identity), str)
-    match = _IDENTITY.fullmatch(identity) if is_text else None  # type: ignore[arg-type]
+    match = _IDENTITY.fullmatch(typing.cast(str, identity)) if is_text else None
     if match is None:
         raise ContractDefinitionError(
             f"{_naming.shown(identity)} is not a contract identity: write "
