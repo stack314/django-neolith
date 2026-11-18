@@ -96,10 +96,14 @@ def _cause(error: BaseException, *, bounded: bool = True) -> str:
 
 
 def _bounded(error: CredentialRefused) -> str:
-    """A refusal's message, bounded, never raising."""
+    """A refusal's message, bounded, never raising: exactly a ``str``, or
+    a fixed text when the backend's exception holds anything else.
+    """
     try:
         text = error.message
     except Exception:
+        text = None
+    if type(text) is not str:
         return "a refusal whose message cannot be read"
     return text if len(text) <= 2 * _SHOWN else f"{text[: 2 * _SHOWN - 3]}..."
 

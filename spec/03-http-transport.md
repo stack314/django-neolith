@@ -101,7 +101,7 @@ The token travels as `Authorization: Bearer <token>`. It is a JSON Web Token (RF
 | `iat` | claims | When the token was issued |
 | `exp` | claims | When the token expires, at most 300 seconds after `iat` |
 
-The shared-secret backend recognizes a call whose `Authorization` uses the `Bearer` scheme (compared ignoring ASCII case) with a token whose first part decodes, under the encoding rules above, to a JSON object whose `typ` is `neolith+jwt` or `application/neolith+jwt`, ignoring ASCII case. **HTTP-7.** It MUST abstain on any other credentials, including a token whose first part breaks those rules, so a later backend can try them.
+The shared-secret backend recognizes a call whose `Authorization` uses the `Bearer` scheme (compared ignoring ASCII case) with a token whose first part decodes, under the encoding rules above, to a JSON object whose `typ` is `neolith+jwt` or `application/neolith+jwt`, ignoring ASCII case. **HTTP-7.** It MUST abstain on any other credentials, including a token whose first part breaks those rules, so a later backend can try them. A first part nested deeper than the host's JSON reader admits (RFC 8259, section 9, lets a parser limit nesting) counts as one that does not decode, so the backend abstains on it; this changes no valid token, whose first part is three string members with no nesting.
 
 A provider's host MUST accept a recognized token as valid only when all of these hold, with *now* the provider host's current time in seconds since the epoch:
 

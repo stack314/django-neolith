@@ -38,6 +38,7 @@ from neolith.principals import DjangoUserBackend, PrincipalBackend, key_problem
 from neolith.principals import order_problems as user_order_problems
 from tests import host_apps
 from tests.hosting import in_built_host
+from tests.test_caller_backends import hostile_refusals
 
 SETTING = 'NEOLITH["PRINCIPAL_BACKENDS"]'
 HERE = "tests.test_principal_backends"
@@ -570,6 +571,26 @@ def test_a_refused_credential_fails_with_internal_and_is_logged_at_warning(
             f"request root (trace {'0' * 31}1): {SETTING}[0] ({HERE}.Fixed): "
             f"{method} refused the credential: the session was revoked",
             None,
+        )
+    ]
+
+
+@pytest.mark.spec("APP-54")
+@pytest.mark.parametrize("make", hostile_refusals())
+def test_a_refusal_whose_message_is_not_exactly_a_str_is_still_recorded(
+    make: Callable[[], CredentialRefused], caplog: pytest.LogCaptureFixture
+) -> None:
+    """The message is backend code's value: one that is not exactly a str
+    is named by fixed text, and the root still fails with ``internal``."""
+    held = resolution(Fixed(answer=make()))
+    with pytest.raises(ValueError, match="could not be resolved"):
+        held.form()
+    logged = [r for r in caplog.records if r.name == "neolith.host"]
+    assert [(r.levelno, r.getMessage()) for r in logged] == [
+        (
+            logging.WARNING,
+            f"request root (trace {'0' * 31}1): {SETTING}[0] ({HERE}.Fixed): "
+            "resolve refused the credential: a refusal whose message cannot be read",
         )
     ]
 

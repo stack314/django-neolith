@@ -401,11 +401,14 @@ def _named(built: Built, method: str, found: object) -> str | None:
 
 
 def _refused(error: CredentialRefused) -> Refused:
+    """The refusal of a call, with the backend's message when it is exactly
+    a ``str``, and ``UNRECOGNIZED`` otherwise.
+    """
     try:
         message = error.message
     except Exception:
-        message = UNRECOGNIZED
-    return Refused(message)
+        message = None
+    return Refused(message if type(message) is str else UNRECOGNIZED)
 
 
 def _nobody(request: HttpRequest) -> Refused:

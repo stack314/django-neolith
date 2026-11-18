@@ -1466,3 +1466,146 @@ def test_a_refused_constructor_holds_no_secret_in_any_frame() -> None:
     assert type(error) is ImproperlyConfigured
     options.clear()
     assert _leaks(_described(error, request()), []) == []
+
+
+# Review round 1: values from backend code are judged by exact type
+
+
+class _LongLess(str):
+    """A str subclass whose length cannot be read."""
+
+    __slots__ = ()
+
+    def __len__(self) -> int:
+        raise RuntimeError("no length")
+
+
+class _OddMessage(CredentialRefused):
+    """A refusal whose message property returns no str."""
+
+    @property
+    def message(self) -> str:
+        return 5  # type: ignore[return-value]
+
+
+def _with_args(*args: object) -> CredentialRefused:
+    refused = CredentialRefused("x")
+    refused.args = args
+    return refused
+
+
+def hostile_refusals() -> list[Any]:
+    """Refusals whose message is not exactly a str, one per way."""
+    return [
+        pytest.param(lambda: _with_args(5), id="args-int"),
+        pytest.param(lambda: _with_args(), id="args-empty"),
+        pytest.param(lambda: _OddMessage("x"), id="message-property"),
+        pytest.param(lambda: _with_args(_LongLess("y")), id="str-subclass"),
+    ]
+
+
+@pytest.mark.parametrize("make", hostile_refusals())
+def test_a_refusal_whose_message_is_not_exactly_a_str_says_unrecognized(
+    make: Callable[[], CredentialRefused],
+) -> None:
+    found = both(built(Counting(answer=make())), request("x"))
+    assert found == [(Refused, UNRECOGNIZED)] * 2
+
+
+def test_a_refusal_hides_the_backend_s_exception_from_the_chain() -> None:
+    error = _caught(
+        lambda: identify(
+            built(Counting(answer=CredentialRefused("revoked"))), request(), IDENTITY
+        )
+    )
+    assert type(error) is Refused
+    assert error.__suppress_context__ is True
+    assert error.__cause__ is None
+
+
+@pytest.mark.parametrize("stop", [KeyboardInterrupt, asyncio.CancelledError])
+def test_a_signal_to_stop_from_a_backend_goes_on_unchanged(
+    stop: type[BaseException],
+) -> None:
+    class Stopping(CallerBackend):
+        def authenticate(self, request: HttpRequest, contract: str) -> str | None:
+            raise stop
+
+        async def aauthenticate(
+            self, request: HttpRequest, contract: str
+        ) -> str | None:
+            raise stop
+
+    backends = built(Stopping())
+    with pytest.raises(stop):
+        identify(backends, request(), IDENTITY)
+    with pytest.raises(stop):
+        asyncio.run(aidentify(backends, request(), IDENTITY))
+
+
+def test_a_str_subclass_is_not_an_app_s_name() -> None:
+    found = both(built(Counting(answer=_LongLess("orders"))), request())
+    where = f"{SETTING}[0] ({HERE}.Counting)"
+    assert found[0] == (
+        Failed,
+        f"{where}: authenticate returned a _LongLess, not an app's name or None",
+    )
+
+
+def test_one_secret_under_two_apps_with_one_key_id_is_refused() -> None:
+    backend = SharedSecretBackend(secrets={"billing": {"k1": _A}})
+    problems = key_problems(_signers(orders=("k1", ORDERS)), backend)
+    assert problems == [
+        f"{SIGNING}['orders']: its secret is also under app billing key k1 in "
+        f"{SETTING}; give each key its own secret"
+    ]
+
+
+def test_a_key_id_of_exactly_32_characters_is_not_shown() -> None:
+    assert _token.shown_key_id("k" * 32) == "(a key id of 32 characters, not shown)"
+
+
+@pytest.mark.spec("HTTP-7")
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(_head(b'{"typ":"neolith+jwt","\\ud800":1}'), id="surrogate-name"),
+        pytest.param("\xa0Bearer " + signed(), id="nbsp-before-scheme"),
+        pytest.param("\nBearer " + signed(), id="newline-before-scheme"),
+    ],
+)
+def test_only_ows_is_removed_and_member_names_meet_the_json_rule(value: str) -> None:
+    assert check(value, IDENTITY, KEYS, NOW) == (None, None)
+
+
+@pytest.mark.spec("HTTP-8")
+def test_a_character_after_the_token_that_is_not_ows_stays_in_it() -> None:
+    value = "Bearer " + signed() + "\xa0"
+    assert check(value, IDENTITY, KEYS, NOW) == (None, _token.PARTS)
+
+
+@pytest.mark.spec("HTTP-10")
+def test_alg_is_judged_before_the_issuer() -> None:
+    token = signed(head=header(alg="none"), body=claims(iss="payments"))
+    assert check(bearer(token), IDENTITY, KEYS, NOW) == (None, _token.ALG)
+
+
+_LARGEST = 2**53 - 1
+
+
+@pytest.mark.spec("HTTP-9")
+@pytest.mark.parametrize(
+    ("iat", "exp", "expected"),
+    [
+        (_LARGEST - 60, _LARGEST, VALID),
+        (-_LARGEST, -_LARGEST + 60, VALID),
+        (_LARGEST - 60, _LARGEST + 1, (None, _token.MEMBERS)),
+        (-(2**60), -(2**60) + 60, (None, _token.MEMBERS)),
+        (-_LARGEST - 1, -_LARGEST + 59, (None, _token.MEMBERS)),
+    ],
+)
+def test_times_are_integers_within_the_safe_range(
+    iat: int, exp: int, expected: object
+) -> None:
+    token = signed(body=claims(iat=iat, exp=exp))
+    assert check(bearer(token), IDENTITY, KEYS, iat) == expected
