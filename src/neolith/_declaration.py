@@ -64,10 +64,13 @@ _EXAMPLES: Final = {
 
 
 class DeclarationError(ImproperlyConfigured):
-    """An app's declaration is outside the admitted form (spec 05, ADR 0021).
+    """An app's declaration is outside the admitted form, or Resolve refuses
+    the hosted apps (spec 05, ADR 0021).
 
     The message holds one line per refusal, sorted. Each line names the app
-    and the field.
+    and the field, or the place of a ``connect()``, or, for Resolve, the
+    part of ``NEOLITH`` it read, such as ``NEOLITH["REMOTE_PROVIDERS"]``
+    (ADR 0014).
     """
 
 

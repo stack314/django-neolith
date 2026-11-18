@@ -17,8 +17,8 @@ does not run:
    ``neolith``.
 3. **Resolve.** ADR 0021's function, whose refusals are one
    ``DeclarationError``, with the remote providers that the deployer's
-   ``NEOLITH["REMOTE_PROVIDERS"]`` names (ADR 0014) and the problems of
-   that key's form, which Resolve reads.
+   ``NEOLITH["REMOTE_PROVIDERS"]`` names (ADR 0014). Resolve reads
+   ``NEOLITH``, so its refusals come with every problem found there.
 4. **Configure.** The deployer's mapping, row by row.
 
 ``settings_problems`` is the same Configure, run at the first set-up on the
@@ -97,7 +97,8 @@ def configure(
 
     Raises:
         DeclarationError: A hosted app's declaration is refused when its
-            class is defined, or Resolve refuses the hosted apps.
+            class is defined, or Resolve refuses the hosted apps or the
+            remote providers, with any problem of ``NEOLITH``.
         ImproperlyConfigured: Any other row of the builder's table refuses
             its input.
     """
@@ -109,10 +110,16 @@ def configure(
     declarations = [declaration for _, declaration in pairs]
     from neolith._host import resolve
 
-    neolith = _naming.entry(deployer, "NEOLITH") if type(deployer) is dict else None
-    remote, problems = _checks.remote_identities(neolith)
-    _, refusals = resolve(declarations, remote)
-    refusals += problems
+    neolith = (
+        _naming.entry(deployer, "NEOLITH", _checks.MISSING)
+        if type(deployer) is dict
+        else _checks.MISSING
+    )
+    _, refusals = resolve(declarations, _checks.remote_identities(neolith))
+    if refusals:
+        # Resolve reads NEOLITH, so a requirement it finds unmet may come
+        # from a problem there: those are reported with its refusals.
+        refusals += _checks.neolith_problems(neolith, declarations)
     if refusals:
         raise DeclarationError("\n".join(sorted(refusals)))
     names, problems = _names(deployer)

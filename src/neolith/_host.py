@@ -676,18 +676,22 @@ def build(registry: Apps) -> tuple[Host, list[str]]:
     Returns the table and every refusal; the table is used only when there is
     none. Every check runs whatever the others found, so one refusal hides
     none behind it. Resolve reads the remote providers that
-    ``settings.NEOLITH`` names, and reports the problems of that key's form
-    with its own refusals; set-up adds their transports to the table once
-    its checks have passed (``_remote``).
+    ``settings.NEOLITH`` names; when it refuses, every problem of
+    ``NEOLITH`` comes with its refusals. Set-up adds the remote providers'
+    transports to the table once its checks have passed (``_remote``).
     """
     hosted = [
         (config, found)
         for config in registry.get_app_configs()
         if (found := declaration_of(type(config))) is not None
     ]
-    remote, problems = _checks.remote_identities(getattr(settings, "NEOLITH", None))
-    contracts, refusals = resolve([declaration for _, declaration in hosted], remote)
-    refusals += problems
+    neolith = getattr(settings, "NEOLITH", _checks.MISSING)
+    declarations = [declaration for _, declaration in hosted]
+    contracts, refusals = resolve(declarations, _checks.remote_identities(neolith))
+    if refusals:
+        # Resolve reads NEOLITH, so a requirement it finds unmet may come
+        # from a problem there: those are reported with its refusals.
+        refusals += _checks.neolith_problems(neolith, declarations)
     connectors: dict[str, Bound] = {}
     for config, declaration in hosted:
         for provision in declaration.provides:

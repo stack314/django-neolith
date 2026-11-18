@@ -32,7 +32,7 @@ from neolith._configure import configure
 from neolith._declaration import Declaration, declaration_of
 from neolith._host import resolve
 from tests.host_apps.web.apps import WebConfig
-from tests.hosting import in_fresh_process
+from tests.hosting import NEOLITH_KEYS, in_fresh_process
 from tests.test_host import _hosts
 
 REMOTE = 'NEOLITH["REMOTE_PROVIDERS"]'
@@ -101,15 +101,15 @@ _URL = f'{REMOTE}["stock.v1"][0]["OPTIONS"]["url"]'
         (
             {"Stock.V1": [entry()]},
             [
-                f"{REMOTE}: key 'Stock.V1': expected a contract identity, such as "
-                "<contract>.v1"
+                f"{REMOTE}: key 0: expected a contract identity, such as "
+                "<contract>.v1, got a str, not shown"
             ],
         ),
         (
-            {1: [entry()]},
+            {"stock.v1": [entry()], 1: [entry()]},
             [
-                f"{REMOTE}: key of type int: expected a contract identity, such as "
-                "<contract>.v1"
+                f"{REMOTE}: key 1: expected a contract identity, such as "
+                "<contract>.v1, got int"
             ],
         ),
         (
@@ -146,8 +146,8 @@ _URL = f'{REMOTE}["stock.v1"][0]["OPTIONS"]["url"]'
         (
             {"stock.v1": [{**entry(), "TIMEOUT": 5}]},
             [
-                f"{REMOTE}[\"stock.v1\"][0]: unknown key 'TIMEOUT'; the keys are "
-                "BACKEND, OPTIONS"
+                f'{REMOTE}["stock.v1"][0]: key 2 is not one of its keys, and is not '
+                "shown; the keys are BACKEND, OPTIONS"
             ],
         ),
         (
@@ -157,9 +157,9 @@ _URL = f'{REMOTE}["stock.v1"][0]["OPTIONS"]["url"]'
         (
             {"stock.v1": [{**entry(), "BACKEND": "neolith.transports.HttpTransport"}]},
             [
-                f'{REMOTE}["stock.v1"][0]["BACKEND"]: '
-                "'neolith.transports.HttpTransport' is not a transport of this "
-                f"host; the one remote transport in 0.1 is {TRANSPORT}"
+                f'{REMOTE}["stock.v1"][0]["BACKEND"]: is not a transport of this '
+                "host, and is not shown; the one remote transport in 0.1 is "
+                f"{TRANSPORT}"
             ],
         ),
         (
@@ -177,8 +177,8 @@ _URL = f'{REMOTE}["stock.v1"][0]["OPTIONS"]["url"]'
                 ]
             },
             [
-                f'{REMOTE}["stock.v1"][0]["OPTIONS"]: unknown key \'timeout\'; the '
-                "HTTP transport's options are url"
+                f'{REMOTE}["stock.v1"][0]["OPTIONS"]: key 1 is not one of its keys, '
+                "and is not shown; the HTTP transport's options are url"
             ],
         ),
         (remote(stock_v1=b"http://localhost"), [f"{_URL}: expected a str, got bytes"]),
@@ -200,7 +200,8 @@ def test_each_row_of_the_builder_admits_its_form_and_refuses_the_rest(
         assert refusal is None
     else:
         assert refusal is not None
-        assert all(problem in refusal for problem in problems)
+        lines = refusal.splitlines()
+        assert all(problem in lines for problem in problems)
 
 
 @pytest.mark.spec("APP-16")
@@ -211,17 +212,17 @@ def test_every_refusal_reaches_the_diagnostic_whatever_was_refused_first() -> No
     }
     assert sorted(_checks.remote_problems(value)) == sorted(
         [
-            f"{REMOTE}: key 'Stock': expected a contract identity, such as "
-            "<contract>.v1",
-            f"{REMOTE}['Stock']: lists 2 providers; with the single routing policy "
+            f"{REMOTE}: key 0: expected a contract identity, such as "
+            "<contract>.v1, got a str, not shown",
+            f"{REMOTE}[key 0]: lists 2 providers; with the single routing policy "
             "a contract has one provider, and routing between several arrives "
             "with step 6 (ADR 0016)",
-            f'{REMOTE}[\'Stock\'][0]["OPTIONS"]["url"]: is not an origin: '
+            f'{REMOTE}[key 0][0]["OPTIONS"]["url"]: is not an origin: '
             f"{_http_transport.CASE}",
-            f"{REMOTE}['Stock'][1]: missing key OPTIONS",
-            f"{REMOTE}['Stock'][1][\"BACKEND\"]: expected a str, got int",
-            f'{REMOTE}["couriers.v3"][0]["OPTIONS"]: unknown key \'x\'; the HTTP '
-            "transport's options are url",
+            f"{REMOTE}[key 0][1]: missing key OPTIONS",
+            f'{REMOTE}[key 0][1]["BACKEND"]: expected a str, got int',
+            f'{REMOTE}["couriers.v3"][0]["OPTIONS"]: key 1 is not one of its keys, '
+            "and is not shown; the HTTP transport's options are url",
             f'{REMOTE}["couriers.v3"][0]["OPTIONS"]["url"]: expected a str, got int',
         ]
     )
@@ -234,7 +235,8 @@ def test_the_example_of_the_record_is_admitted_by_the_builder() -> None:
     assert configure([WEB], deployer(REMOTE_PROVIDERS=value, SIGNING_SECRETS=SIGNING))
 
 
-# A refused url, key or name never shows a credential (ADR 0014 Decision 3).
+# A refusal shows nothing the deployer wrote but an identity (ADR 0014
+# Decision 3): any other text could hold a credential.
 
 _CARRIERS = [
     f"http://user:{CREDENTIAL}@inventory.internal",
@@ -246,7 +248,14 @@ _CARRIERS = [
     f"http://a_b.internal/?t={CREDENTIAL}",
     f"http://[::1%{CREDENTIAL}]",
     f"http://inventory.internal:{CREDENTIAL}",
-    f"{CREDENTIAL}",
+]
+# Text written like a name or a token, and like the slot's own values.
+_NAMES = [
+    CREDENTIAL,
+    f"ghp_{CREDENTIAL}0123",
+    f"neolith.transports.{CREDENTIAL}",
+    f"{CREDENTIAL}.v1",
+    f"eyJ{CREDENTIAL}.eyJ0.sig",
 ]
 
 
@@ -256,7 +265,7 @@ def _carrying(draw: st.DrawFn) -> object:
     one of the places a deployer can write text: an identity, an entry's or
     the options' key, ``BACKEND`` or ``url``.
     """
-    text = draw(st.sampled_from(_CARRIERS[:-1]))
+    text = draw(st.sampled_from([*_CARRIERS, *_NAMES]))
     place = draw(st.sampled_from(["identity", "entry", "backend", "options", "url"]))
     item: dict[str, object] = entry()
     if place == "url":
@@ -291,30 +300,13 @@ def test_no_refusal_shows_a_credential_written_anywhere_in_the_key(
 
 
 @pytest.mark.spec("APP-16")
-@pytest.mark.parametrize("url", _CARRIERS[:-1])
+@pytest.mark.parametrize("url", _CARRIERS)
 def test_a_refused_url_is_never_shown_and_names_its_reason(url: str) -> None:
     reason = _http_transport.origin_problem(url)
     assert reason is not None
     assert _checks.remote_problems(remote(stock_v1=url)) == [
         f"{_URL}: is not an origin: {reason}"
     ]
-
-
-@pytest.mark.parametrize(
-    "key", ["stock.v1x", "Stock.V1", "stock-v1", "a" * 80, "stock_v1"]
-)
-def test_a_key_written_like_a_name_is_shown_so_it_can_be_found(key: str) -> None:
-    (problem, *_) = _checks.remote_problems({key: [entry()]})
-    assert f"key {key!r}:" in problem
-
-
-@pytest.mark.parametrize(
-    "key", ["http://inventory.internal", "a" * 81, "stock v1", "stock.v1\n", "é.v1"]
-)
-def test_a_key_not_written_like_a_name_is_not_shown(key: str) -> None:
-    (problem, *_) = _checks.remote_problems({key: [entry()]})
-    assert problem.startswith(f"{REMOTE}: key (not shown): expected")
-    assert key not in problem
 
 
 # The url's one spelling: admitted exactly when it is its origin's
@@ -648,6 +640,59 @@ def test_the_builder_reports_the_resolve_rows_together_and_sorted() -> None:
     )
 
 
+@pytest.mark.spec("APP-12", "APP-16")
+def test_a_refused_remote_entry_hides_no_other_problem_of_neolith() -> None:
+    value = remote(stock_v1="http://Localhost", couriers_v3="http://localhost")
+    with pytest.raises(ImproperlyConfigured) as raised:
+        configure([WEB], deployer(REMOTE_PROVIDERS=value, REQUEST_DEADLINE=-1, X=1))
+    assert str(raised.value).splitlines() == sorted(
+        [
+            'NEOLITH["REQUEST_DEADLINE"]: -1 is outside 0.001 to 9999999.999 seconds',
+            f"NEOLITH: unknown key 'X'; {NEOLITH_KEYS}",
+            f"{_URL}: is not an origin: {_http_transport.CASE}",
+        ]
+    )
+
+
+_UNMET = [
+    f"app web: requires: {identity} has no provider; no app of this host "
+    f"provides it and {REMOTE} has no entry for it"
+    for identity in ("couriers.v3", "stock.v1")
+]
+
+
+@pytest.mark.spec("APP-12", "APP-8")
+@pytest.mark.parametrize(
+    ("neolith", "problem"),
+    [
+        (
+            {"REMOTE_PROVIDER": remote(stock_v1="http://localhost")},
+            f"NEOLITH: unknown key 'REMOTE_PROVIDER'; {NEOLITH_KEYS}",
+        ),
+        (
+            OrderedDict(
+                REMOTE_PROVIDERS=remote(
+                    stock_v1="http://localhost", couriers_v3="http://localhost"
+                )
+            ),
+            "NEOLITH: expected a dict, got OrderedDict",
+        ),
+        ([], "NEOLITH: expected a dict, got list"),
+        (
+            {"REMOTE_PROVIDERS": []},
+            f"{REMOTE}: expected a dict of contract identities, got list",
+        ),
+    ],
+)
+def test_resolve_reports_the_problem_of_neolith_its_refusal_may_come_from(
+    neolith: object, problem: str
+) -> None:
+    given = {"MIDDLEWARE": [ROOT, PRINCIPAL], "NEOLITH": neolith}
+    with pytest.raises(ImproperlyConfigured) as raised:
+        configure([WEB], given)
+    assert str(raised.value).splitlines() == sorted([*_UNMET, problem])
+
+
 # W002 and the signing key (ADR 0014 Decision 3, ADR 0027 Decision 9).
 
 
@@ -707,6 +752,35 @@ def test_a_hosted_app_that_requires_a_remote_contract_needs_a_signing_key() -> N
         _checks.unsigned_problems({**neolith, "SIGNING_SECRETS": SIGNING}, [web]) == []
     )
     assert _checks.unsigned_problems({}, [web]) == []
+    # Judged on what can be read, whatever else NEOLITH holds.
+    broken = {**neolith, "X": 1, "REQUEST_DEADLINE": -1}
+    assert _checks.unsigned_problems(broken, [web]) == [
+        'app web has no signing key in NEOLITH["SIGNING_SECRETS"], so it cannot '
+        "call stock.v1 over HTTP"
+    ]
+    # A SIGNING_SECRETS that cannot be read names no app: E001 reports it.
+    assert _checks.unsigned_problems({**neolith, "SIGNING_SECRETS": []}, [web]) == []
+    malformed = {"web": {"KEY_ID": "?"}}
+    assert (
+        _checks.unsigned_problems({**neolith, "SIGNING_SECRETS": malformed}, [web])
+        == []
+    )
+
+
+def test_w002_is_judged_on_each_entry_it_can_read() -> None:
+    value = {
+        "stock.v1": [entry("http://inventory.internal")],
+        "couriers.v3": [],
+        "other.v1": [entry("http://Inventory.internal")],
+        "more.v1": [entry("http://more.internal"), entry("http://more.internal")],
+    }
+    assert _checks.remote_warnings({"REMOTE_PROVIDERS": value, "X": 1}) == [
+        f'{REMOTE}["stock.v1"]: http://inventory.internal is plain HTTP to a host '
+        "that is not loopback; anyone who can watch the network can read and "
+        "replay the calling app's token (spec 03)"
+    ]
+    assert _checks.remote_warnings([]) == []
+    assert _checks.remote_warnings({"REMOTE_PROVIDERS": []}) == []
 
 
 # REMOTE_PROVIDERS cannot change after set-up (ADR 0014, Under override_settings).
@@ -917,10 +991,44 @@ def test_set_up_stops_on_each_remote_row_with_every_refusal_and_no_credential() 
         timeout=120,
     )
     refusal, logged = json.loads(out.splitlines()[-1])
-    # Resolve reads the key, so the form's problems come with its refusals.
-    assert refusal == f"{_URL}: is not an origin: {_http_transport.CREDENTIAL}"
+    # Every refusal together: the url's, and the missing signing keys'.
+    unsigned = 'app web has no signing key in NEOLITH["SIGNING_SECRETS"], so it'
+    assert refusal.splitlines() == [
+        "host: the settings are refused before the host serves:",
+        f"(neolith.E001) {_URL}: is not an origin: {_http_transport.CREDENTIAL}",
+        f"(neolith.E021) {unsigned} cannot call couriers.v3 over HTTP",
+        f"(neolith.E021) {unsigned} cannot call stock.v1 over HTTP",
+    ]
     assert any(refusal in line for line in logged)
     assert CREDENTIAL not in out
+
+
+@pytest.mark.spec("APP-1", "APP-12")
+def test_set_up_reports_a_misspelt_key_with_the_requirements_it_leaves_unmet() -> None:
+    out = in_fresh_process(
+        """
+        import django
+        from django.core.exceptions import ImproperlyConfigured
+
+        try:
+            django.setup()
+        except ImproperlyConfigured as error:
+            print(json.dumps(str(error)))
+        """,
+        [WEB, "neolith"],
+        {
+            "NEOLITH": {
+                "REMOTE_PROVIDER": remote(
+                    stock_v1="http://localhost", couriers_v3="http://localhost"
+                ),
+                "SIGNING_SECRETS": SIGNING,
+            }
+        },
+        timeout=120,
+    )
+    assert json.loads(out.splitlines()[-1]).splitlines() == sorted(
+        [*_UNMET, f"NEOLITH: unknown key 'REMOTE_PROVIDER'; {NEOLITH_KEYS}"]
+    )
 
 
 @pytest.mark.spec("APP-1")
