@@ -32,7 +32,7 @@ from django.core import checks
 from django.db.backends.utils import strip_quotes
 from django.utils.module_loading import import_string
 
-from neolith import _databases
+from neolith import _databases, _naming
 from neolith._declaration import Declaration, declaration_of
 from neolith._serving import admin_code
 
@@ -85,7 +85,7 @@ _SHOWN: Final = 80
 
 
 def _type(value: object) -> str:
-    return type(value).__qualname__
+    return _naming.type_name(value)
 
 
 def _shown_key(key: object) -> str:
@@ -384,7 +384,7 @@ def installed_problems(
     for config in configs:
         cls = type(config)
         if declaration_of(cls) is not None:
-            entries = {config.name, f"{cls.__module__}.{cls.__qualname__}"}
+            entries = {config.name, _naming.full_name(cls, None)}
             if entries & undeclared:
                 declared.append(
                     f"app {config.label}: has a declaration and is listed in "

@@ -19,6 +19,7 @@ from django.apps import AppConfig
 from django.apps import apps as global_apps
 from django.core.exceptions import ImproperlyConfigured
 
+from neolith import _naming
 from neolith._contracts import _SEGMENT, Contract, ContractDefinitionError
 
 _FIELDS: Final = ("provides", "requires", "resources", "batteries")
@@ -752,8 +753,7 @@ def _clip(text: str) -> str:
 
 
 def _class_name(klass: type) -> str:
-    name = f"{klass.__module__}.{klass.__qualname__}"
-    return name if len(name) <= 2 * _SHOWN else f"{name[: 2 * _SHOWN]}..."
+    return _naming.full_name(klass, 2 * _SHOWN + 3)
 
 
 def _show(value: object) -> str:
@@ -773,5 +773,6 @@ def _show(value: object) -> str:
         return f"the class {_class_name(shown)}"
     if kind is tuple and not value:
         return "()"
-    name = kind.__qualname__ if kind.__module__ == "builtins" else _class_name(kind)
+    builtin = _naming.module(kind) == "builtins"
+    name = _naming.qualname(kind) if builtin else _class_name(kind)
     return f"{'an' if name[:1] in 'aeiou' else 'a'} {name}"

@@ -61,16 +61,16 @@ from django.core.exceptions import ImproperlyConfigured
 from django.core.signals import setting_changed
 from pydantic import BaseModel
 
-from neolith import _checks, _configure, _context
+from neolith import _checks, _configure, _context, _naming
 from neolith._connector import Connector as Bound
 from neolith._connector import InProcess
 from neolith._context import Principal, UsageError
 from neolith._contracts import _IDENTITY, Contract
+from neolith._declaration import _SHOWN as _CLIPPED
 from neolith._declaration import (
     Declaration,
     DeclarationError,
     Provision,
-    _clip,
     _show,
     declaration_of,
 )
@@ -444,7 +444,7 @@ def resolve(
 
 def _class(contract: Contract) -> str:
     declaration = contract.declaration
-    return f"{declaration.__module__}.{declaration.__qualname__}"
+    return _naming.full_name(declaration, None)
 
 
 def validate(
@@ -510,7 +510,7 @@ def validate(
     problem = False
     # Read statically: a metaclass cannot answer for the class.
     own_module = vars(cls).get("__module__")
-    own_name: str = type.__dict__["__qualname__"].__get__(cls)
+    own_name = _naming.qualname(cls, None)
     # Only a class proven to be the app's own is built.
     foreign = True
     if type(own_module) is not str:
@@ -602,11 +602,7 @@ def _quoted(text: str) -> str:
 
 def _cause(error: Exception) -> str:
     """An error's class and message, bounded, never raising."""
-    try:
-        text = str(error)
-    except Exception:
-        text = "<the message cannot be read>"
-    return f"{type(error).__qualname__}: {_clip(text)}"
+    return _naming.cause(error, _CLIPPED + 3)
 
 
 def _log_cause(where: str, error: Exception) -> None:
@@ -644,7 +640,7 @@ def connect(identity: str, /) -> "Connector":
     if type(identity) is not str:
         raise TypeError(
             f"connect() takes a contract identity as a str, not "
-            f"{type(identity).__qualname__}"
+            f"{_naming.type_name(identity)}"
         )
     if not _IDENTITY.fullmatch(identity):
         raise ValueError(
@@ -835,11 +831,11 @@ def command_scope(
     if type(app) is not str:
         raise TypeError(
             "command_scope() takes an app's label as a str, not "
-            f"{type(app).__qualname__}"
+            f"{_naming.type_name(app)}"
         )
     if principal is not None and type(principal) is not Principal:
         raise TypeError(
-            f"principal= takes a Principal, not {type(principal).__qualname__}"
+            f"principal= takes a Principal, not {_naming.type_name(principal)}"
         )
     return _CommandScope._made(app, principal, _context.timeout_option(timeout))
 

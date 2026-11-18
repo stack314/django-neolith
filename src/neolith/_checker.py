@@ -27,6 +27,7 @@ from typing import Any
 
 from pydantic_core import CoreSchema, PydanticCustomError, SchemaValidator, core_schema
 
+from neolith import _naming
 from neolith._forms import (
     BYTES_PATTERN,
     DECIMAL_DIGITS_PATTERN,
@@ -100,7 +101,7 @@ def description_checker(defs: Mapping[str, Any], name: str) -> SchemaValidator:
         # refuses the contract, under one name.
         raise TypeError(
             f"the description of {name} is not one the description check reads "
-            f"({type(error).__name__}: {error})"
+            f"({_naming.cause(error, None)})"
         ) from error
 
 

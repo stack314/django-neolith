@@ -18,6 +18,8 @@ import re
 from decimal import Decimal
 from typing import cast
 
+from neolith import _naming
+
 __all__ = ["canonical", "canonical_text"]
 
 # JSON.stringify's short escapes; other control characters take \u00XX.
@@ -117,7 +119,7 @@ def canonical_text(text: bytes | str) -> bytes:
         except UnicodeDecodeError:
             problem = "the text is not UTF-8"
     elif type(text) is not str:
-        raise TypeError(f"JSON text is a str or bytes, not {type(text).__qualname__}")
+        raise TypeError(f"JSON text is a str or bytes, not {_naming.type_name(text)}")
     if problem is None and isinstance(text, str):
         quick = _quick(text)
         if quick is not None:
@@ -168,7 +170,7 @@ def canonical(value: object) -> bytes:
             members = cast(dict[object, object], item)
             for key in members:
                 if type(key) is not str:
-                    raise ValueError(f"a member name is {type(key).__name__}")
+                    raise ValueError(f"a member name is {_naming.type_name(key)}")
             ordered = sorted(
                 cast(dict[str, object], members),
                 key=lambda name: name.encode("utf-16-be", "surrogatepass"),
@@ -182,7 +184,7 @@ def canonical(value: object) -> bytes:
             later.append((True, "}"))
             pending.extend(reversed(later))
         else:
-            raise ValueError(f"{kind.__name__} is not a JSON value")
+            raise ValueError(f"{_naming.qualname(kind)} is not a JSON value")
     return "".join(parts).encode("utf-8")
 
 

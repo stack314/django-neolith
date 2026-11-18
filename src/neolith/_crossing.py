@@ -33,6 +33,7 @@ from typing import Any, final
 from pydantic import BaseModel
 from pydantic_core import SchemaSerializer, SchemaValidator, ValidationError
 
+from neolith import _naming
 from neolith._checker import TIMES, description_checker
 from neolith._forms import FORM_FOR_KIND
 from neolith._portable import shown
@@ -73,13 +74,13 @@ class Codec[R: BaseModel]:
             validator = SchemaValidator(core, settings)
         except Exception as error:
             raise TypeError(
-                f"record {record.__name__} cannot be built from its core schema "
-                f"({type(error).__name__}: {error})"
+                f"record {_naming.name(record)} cannot be built from its core "
+                f"schema ({_naming.cause(error)})"
             ) from error
         self.record = record
         self._serializer = serializer
         self._validator = validator
-        self._checker = description_checker(defs, record.__name__)
+        self._checker = description_checker(defs, _naming.name(record))
         self._hides = bool(config and config.get("hide_input_in_errors"))
 
     def send(self, value: object, subject: str) -> bytes:
@@ -116,9 +117,10 @@ class Codec[R: BaseModel]:
         """
         if type(value) is not self.record:
             raise TypeError(
-                f"{subject} is {_kind(value)}, not exactly a {self.record.__name__}"
+                f"{subject} is {_kind(value)}, "
+                f"not exactly a {_naming.name(self.record)}"
             )
-        name = self.record.__name__
+        name = _naming.name(self.record)
         problem: str | None = None
         failed: Exception | None = None
         text = b""
@@ -175,7 +177,7 @@ class Codec[R: BaseModel]:
         the exception is kept only as the cause, and not at all for a record
         that hides its inputs.
         """
-        kind = type(behind).__name__
+        kind = _naming.type_name(behind)
         if self._hides:
             return ValueError(f"{said} ({kind})")
         refusal = ValueError(f"{said} ({kind}; see the cause)")
@@ -367,7 +369,7 @@ def _difference(
                 # Before any key is looked up, so that no key's own code runs.
                 if type(key) is not str:
                     return (
-                        f"holds a key of type {type(key).__qualname__} at "
+                        f"holds a key of type {_naming.type_name(key)} at "
                         f"{_path(trail)}, which reads back as one of type str"
                     )
             if len(held) != len(entries) or not all(key in held for key in entries):
@@ -433,7 +435,7 @@ def _reshaped(mine: object, theirs: object, trail: object) -> str:
 
 def _type_name(value: object) -> str:
     kind = type(value)
-    return "dict" if kind is _Fields else kind.__qualname__
+    return "dict" if kind is _Fields else _naming.qualname(kind)
 
 
 def _path(trail: object) -> str:
@@ -475,7 +477,7 @@ def _check_reused(node: Mapping[str, Any]) -> None:
     cls = node.get("cls")
     if not issubclass(type(cls), type):
         return
-    name = typing.cast(type, cls).__name__
+    name = _naming.name(typing.cast(type, cls))
     own = vars(typing.cast(type, cls))
     if own.get("__pydantic_complete__") is not True:
         return
@@ -544,5 +546,5 @@ def _kind(value: object) -> str:
         return "None"
     kind = type(value)
     if issubclass(kind, type):
-        return f"the class {typing.cast(type, value).__qualname__}"
-    return f"a {kind.__qualname__}"
+        return f"the class {_naming.qualname(value)}"
+    return f"a {_naming.qualname(kind)}"

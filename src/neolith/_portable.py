@@ -38,11 +38,15 @@ from pydantic_core import (
     core_schema,
 )
 
+from neolith import _naming
 from neolith._forms import FORM_FOR_KIND, form_in, form_of
+from neolith._naming import shown
 
 # A record or enum name, as other languages' generated code will use it
 # (CON-20).
 _TYPE_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_]*")
+# A class's method resolution order, read without asking its metaclass.
+_MRO = type.__dict__["__mro__"]
 
 # The wire encodings of spec 01 (ADR 0019) that Pydantic's own types write.
 # Integers are those every JSON reader holds exactly; numbers are finite
@@ -245,18 +249,21 @@ class Portable:
         self, annotation: object, role: Literal["request", "reply", "detail"]
     ) -> tuple[type[BaseModel], Ref]:
         """Admit a request, reply or detail type; return it and its reference."""
-        if isinstance(annotation, type) and issubclass(annotation, BaseModel):
-            model: type[BaseModel] = annotation
+        # Judged by type() and the class's own method resolution order, so
+        # that no code of the annotation, or of its metaclass, runs.
+        if issubclass(type(annotation), type) and BaseModel in _MRO.__get__(annotation):
+            model: type[BaseModel] = annotation  # type: ignore[assignment]  # as above
+            record_name = _naming.name(model, None)
             try:
                 schema = self.build(model)
-                node = self.resolve(schema, model.__name__)
+                node = self.resolve(schema, record_name)
                 # A record's before or wrap model_validator wraps the model
                 # node itself.
                 while node.get("type") in _VALIDATORS | _UNCHECKED_VALIDATORS:
-                    self.validator(node, f"record {model.__name__}")
-                    node = self.resolve(node["schema"], model.__name__)
+                    self.validator(node, f"record {record_name}")
+                    node = self.resolve(node["schema"], record_name)
                 if node.get("type") == "model" and node.get("cls") is model:
-                    reference = self.record(node, model.__name__)
+                    reference = self.record(node, record_name)
                     self.built[model] = (schema, node.get("config"))
                     return model, reference
             except (KeyError, AttributeError, TypeError) as error:
@@ -267,13 +274,13 @@ class Portable:
                 # Fail closed: a core schema shape this walk does not read is
                 # refused, never passed.
                 raise self.fail(
-                    f"record {model.__name__} has a core schema shape that "
-                    f"neolith does not read ({type(error).__name__}: {error})"
+                    f"record {record_name} has a core schema shape that "
+                    f"neolith does not read ({_naming.cause(error, None)})"
                 ) from error
         empty = ", or None for an empty reply" if role == "reply" else ""
         raise self.fail(
             f"the {role} type must be a record (a pydantic model with named "
-            f"fields){empty}, not {getattr(annotation, '__qualname__', annotation)}"
+            f"fields){empty}, not {_annotation(annotation)}"
         )
 
     def build(self, model: type[BaseModel]) -> Mapping[str, Any]:
@@ -289,7 +296,7 @@ class Portable:
                 model.model_rebuild(force=True, raise_errors=True, _types_namespace={})
             except PydanticUndefinedAnnotation as error:
                 raise self.fail(
-                    f"record {model.__name__}, or a record it uses, refers to "
+                    f"record {_naming.name(model)}, or a record it uses, refers to "
                     f"{error.name!r}, which the module of that record does not "
                     "define when the contract is declared; define "
                     f"{error.name} at module level there, before the contract, or "
@@ -298,7 +305,8 @@ class Portable:
                 ) from error
             except PydanticUserError as error:
                 raise self.fail(
-                    f"record {model.__name__} cannot be built: {error}"
+                    f"record {_naming.name(model)} cannot be built: "
+                    f"{_naming.text(error, None)}"
                 ) from error
             schema = model.__pydantic_core_schema__
         self.collect(schema)
@@ -353,7 +361,7 @@ class Portable:
 
     def register(self, named: type[Any], kind: str, path: str) -> bool:
         """Check a record or enum name; False if this class was seen already."""
-        name = named.__name__
+        name = _naming.name(named, None)
         if not _TYPE_NAME.fullmatch(name):
             raise self.fail(
                 f"{kind} name {name!r} at {path} must start with an ASCII letter, "
@@ -365,8 +373,7 @@ class Portable:
         if known is not None:
             raise self.fail(
                 f"two different records or enums are named {name!r}: "
-                f"{known.__module__}.{known.__qualname__} and "
-                f"{named.__module__}.{named.__qualname__}"
+                f"{_naming.full_name(known)} and {_naming.full_name(named)}"
             )
         self.named[name] = named
         return True
@@ -417,10 +424,10 @@ class Portable:
                 raise self.fail(
                     f"{subject} has {key} set, which changes how it travels"
                 )
-        reference = {"$ref": f"#/$defs/{cls.__name__}"}
+        reference = {"$ref": f"#/$defs/{_naming.name(cls, None)}"}
         if not self.register(cls, "record", path):
             return reference
-        self.defs[cls.__name__] = {}
+        self.defs[_naming.name(cls, None)] = {}
         outer, self.config = self.config, node.get("config", {})
         try:
             return self.fields(node, cls, path, subject, reference)
@@ -458,7 +465,7 @@ class Portable:
         description: dict[str, Any] = {"type": "object", "properties": properties}
         if required:
             description["required"] = required
-        self.defs[cls.__name__] = description
+        self.defs[_naming.name(cls, None)] = description
         return reference
 
     def field(self, node: Mapping[str, Any], path: str) -> tuple[dict[str, Any], bool]:
@@ -518,7 +525,7 @@ class Portable:
             except Exception as error:  # the author's factory may raise anything
                 raise self.fail(
                     f"field {path} has a default factory that raised "
-                    f"{type(error).__name__}: {error}"
+                    f"{_naming.cause(error, None)}"
                 ) from error
             problem = _default_problem(made)
             if problem is not None:
@@ -585,7 +592,7 @@ class Portable:
         except Exception as error:  # an author's validator may raise anything
             raise self.fail(
                 f"field {path} has the default {shown(value)}, on which its validators "
-                f"raised {type(error).__name__}: {error}"
+                f"raised {_naming.cause(error, None)}"
             ) from error
         if not _unchanged(held, value):
             raise self.fail(
@@ -960,7 +967,7 @@ class Portable:
             isinstance(m.value, str) for m in members
         ):
             raise self.fail(
-                f"enum {cls.__name__} at {path} must have string values only and "
+                f"enum {_naming.name(cls)} at {path} must have string values only and "
                 "subclass str, for example as an enum.StrEnum"
             )
         self.keys(
@@ -968,19 +975,20 @@ class Portable:
             # "missing" is the enum's _missing_ hook, which maps unknown input
             # on the way in; Pydantic 2.12 records it here and 2.14 does not.
             frozenset({"cls", "members", "sub_type", "missing"}),
-            f"enum {cls.__name__} at {path}",
+            f"enum {_naming.name(cls)} at {path}",
         )
         if not members:
             raise self.fail(
-                f"enum {cls.__name__} at {path} has no members, so no value fits it"
+                f"enum {_naming.name(cls)} at {path} has no members, so no value "
+                "fits it"
             )
         if self.register(cls, "enum", path):
-            self.defs[cls.__name__] = {
+            self.defs[_naming.name(cls, None)] = {
                 "type": "string",
                 # An alias member repeats a value; JSON Schema lists it once.
                 "enum": list(dict.fromkeys(m.value for m in members)),
             }
-        return {"$ref": f"#/$defs/{cls.__name__}"}
+        return {"$ref": f"#/$defs/{_naming.name(cls, None)}"}
 
 
 def portable_scalars() -> Mapping[
@@ -1013,17 +1021,11 @@ SAFE_INTEGERS = range(-SAFE_INTEGER_MAX, SAFE_INTEGER_MAX + 1)
 _JSON_SCALARS = frozenset({str, int, float, bool, type(None)})
 
 
-def shown(value: object, limit: int = 200) -> str:
-    """``repr`` of an input for a message, cut short, and never raising.
-
-    ``repr`` of an int with more than 4300 digits raises ValueError
-    (sys.set_int_max_str_digits), and an author's ``__repr__`` may raise too.
-    """
-    try:
-        text = repr(value)
-    except Exception:  # an author's __repr__ may raise anything
-        text = f"<{type(value).__qualname__} that cannot be shown>"
-    return text if len(text) <= limit else f"{text[: limit - 3]}..."
+def _annotation(annotation: object) -> str:
+    """Name what was given as a request, reply or detail type, never raising."""
+    if issubclass(type(annotation), type):
+        return _naming.qualname(annotation)
+    return _naming.text(annotation)
 
 
 def text_problem(text: str) -> str | None:
@@ -1069,7 +1071,7 @@ def json_value_problem(value: object, max_depth: int | None = None) -> str | Non
                 return f"{shown(item)} is not a JSON number"
             continue
         if kind is not dict and kind is not list:
-            return f"it holds a {kind.__qualname__}"
+            return f"it holds a {_naming.qualname(kind)}"
         if id(item) in open_containers:
             return "it contains itself"
         if max_depth is not None and depth > max_depth:
@@ -1196,15 +1198,17 @@ def _class_hook(cls: type[Any]) -> str | None:
     ``_from_classes``, so a metaclass cannot run code here.
     """
     if type(cls) is not type(BaseModel):
-        return f"has the metaclass {type(cls).__qualname__}, not Pydantic's"
+        return f"has the metaclass {_naming.type_name(cls)}, not Pydantic's"
     for klass in type.__dict__["__mro__"].__get__(cls):
         if klass is BaseModel or klass is object:
             continue
         for key in type.__dict__["__dict__"].__get__(klass):
             if type(key) is not str:
-                return f"has a namespace key that is not text in {klass.__qualname__}"
+                return (
+                    f"has a namespace key that is not text in {_naming.qualname(klass)}"
+                )
             if key in _RECORD_HOOKS:
-                where = "" if klass is cls else f" in {klass.__qualname__}"
+                where = "" if klass is cls else f" in {_naming.qualname(klass)}"
                 return f"defines {key}{where}"
     return None
 
@@ -1240,13 +1244,13 @@ def _default_problem(default: object) -> str | None:
         if issubclass(kind, BaseModel):
             hook = _class_hook(kind)
             if hook is not None:
-                return f"a {kind.__qualname__}, which {hook}"
+                return f"a {_naming.qualname(kind)}, which {hook}"
             fields = instance_dict.__get__(item)
             extra = set(fields) - set(kind.__pydantic_fields__)
             if extra:
                 return (
-                    f"a {kind.__qualname__} with values outside its fields: "
-                    f"{', '.join(sorted(map(repr, extra)))}"
+                    f"a {_naming.qualname(kind)} with values outside its fields: "
+                    f"{', '.join(sorted(map(shown, extra)))}"
                 )
             pending.extend(fields.values())
         elif kind in (list, tuple, set, frozenset):
@@ -1254,7 +1258,7 @@ def _default_problem(default: object) -> str | None:
         elif kind is dict:
             pending.extend(cast("dict[object, object]", item).items())
         else:
-            return f"a {kind.__qualname__}"
+            return f"a {_naming.qualname(kind)}"
     return None
 
 
@@ -1318,7 +1322,7 @@ def _shared_between(first: object, second: object) -> str | None:
     held = {id(part): part for part in _changeable_parts(first)}
     for part in _changeable_parts(second):
         if held.get(id(part)) is part:
-            return type(part).__qualname__
+            return _naming.type_name(part)
     return None
 
 

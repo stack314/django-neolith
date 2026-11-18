@@ -1320,8 +1320,8 @@ def test_a_message_that_cannot_be_formatted_hides_no_problem() -> None:
     problems = Contract.of(Ledger)._implementation_problems(impl)
     assert problems == [
         "ledger.v1, implementation Impl: action 'first' is missing",
-        "ledger.v1, implementation Impl: action 'second' takes <_ReprRaises>, but "
-        "ledger.v1 declares Sku",
+        "ledger.v1, implementation Impl: action 'second' takes "
+        "<_ReprRaises that cannot be shown>, but ledger.v1 declares Sku",
     ]
     # @implements names the first problem, as before set-up listed them all.
     with pytest.raises(neolith.ContractDefinitionError) as raised:

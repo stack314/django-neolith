@@ -32,7 +32,7 @@ from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.db.utils import ConnectionHandler
 
-from neolith import _checks, _databases
+from neolith import _checks, _databases, _naming
 from neolith._declaration import Declaration, DeclarationError, declaration_of
 
 __all__ = [
@@ -68,7 +68,7 @@ class EarlyRead(ImproperlyConfigured):
 
 
 def _type(value: object) -> str:
-    return type(value).__qualname__
+    return _naming.type_name(value)
 
 
 def _shown(text: str) -> str:
@@ -76,11 +76,7 @@ def _shown(text: str) -> str:
 
 
 def _cause(error: BaseException) -> str:
-    try:
-        text = str(error)
-    except Exception:
-        text = "<the message cannot be read>"
-    return f"{type(error).__qualname__}: {_shown(text)}"
+    return _naming.cause(error, _SHOWN + 3)
 
 
 def _refuse(problems: list[str]) -> None:
@@ -172,7 +168,7 @@ def _read(path: str) -> Declaration | str:
     if declaration is None:
         return f"{where}: has no declaration"
     if declaration.name != path:
-        if path == f"{cls.__module__}.{cls.__qualname__}":
+        if path == _naming.full_name(cls, None):
             return f"{where}: name the app's package, not its config class"
         return (
             f"{where}: its declaration names {_shown(declaration.name)}; name the "
@@ -365,10 +361,7 @@ def databases_difference(found: object, built: dict[str, Any]) -> str | None:
 
 
 def _repr(value: object) -> str:
-    try:
-        return _shown(repr(value))
-    except Exception:
-        return f"a value of type {_type(value)}"
+    return _naming.shown(value, _SHOWN + 3)
 
 
 def _difference(

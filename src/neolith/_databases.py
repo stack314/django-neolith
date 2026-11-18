@@ -23,6 +23,8 @@ import urllib.parse
 from collections.abc import Iterable, Mapping
 from typing import Any, Final
 
+from neolith import _naming
+
 __all__ = [
     "DEFAULT",
     "MEMORY",
@@ -39,7 +41,7 @@ _KEY: Final = 'NEOLITH["DATABASES"]'
 
 
 def _type(value: object) -> str:
-    return type(value).__qualname__
+    return _naming.type_name(value)
 
 
 def _shown(value: object) -> str:

@@ -46,6 +46,7 @@ from django.apps import apps as global_apps
 from django.db.models.options import Options
 from django.views.generic.base import View
 
+from neolith import _naming
 from neolith._declaration import declaration_of
 
 __all__ = ["admin_code", "label_of"]
@@ -152,9 +153,8 @@ def admin_code(admin: object) -> tuple[str | None, str | None]:
 
 
 def _name(klass: type) -> str:
-    """``<module>.<qualname>`` of a class, read through ``type``'s own slot."""
-    qualname = type.__dict__["__qualname__"].__get__(klass)
-    return f"{_class_module(klass)}.{qualname}"
+    """``<module>.<qualname>`` of a class, read through ``type``'s own slots."""
+    return _naming.full_name(klass, None)
 
 
 def label_of(view: object, _depth: int = 0, _ran: bool = False) -> str | None:

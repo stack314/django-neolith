@@ -39,6 +39,8 @@ from typing import Any, Final
 from django.core.exceptions import ImproperlyConfigured
 from django.core.management.base import CommandError
 
+from neolith import _naming
+
 __all__ = ["main", "parse_bind"]
 
 _DEFAULT_BIND: Final = "127.0.0.1:8000"
@@ -242,17 +244,15 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _report(refusal: BaseException, printed: set[str]) -> None:
     from neolith import _server
 
-    for line in str(refusal).splitlines() or [type(refusal).__qualname__]:
+    for line in _naming.text(refusal, None).splitlines() or [
+        _naming.type_name(refusal)
+    ]:
         if line and line not in printed:
             _server.say(sys.stderr, f"neolith: {line}")
 
 
 def _cause(error: BaseException) -> str:
-    try:
-        text = str(error)
-    except Exception:
-        text = "<the message cannot be read>"
-    return f"{type(error).__qualname__}: {_shown(text)}"
+    return _naming.cause(error, _SHOWN + 3)
 
 
 def _set_up(arguments: argparse.Namespace, *, serving: bool) -> None:
