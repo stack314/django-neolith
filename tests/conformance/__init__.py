@@ -1,6 +1,6 @@
 """The conformance suite: spec 06's items, made executable in this repository.
 
-It is organised by what it drives (the conformance record's Decision 2):
+It is organised by what it drives (ADR 0032's Decision 2):
 ``contract/`` runs each case over every transport and compares the outcomes,
 ``wire/`` drives one transport against bytes the specification fixes, and
 ``routing/`` runs a host of its own. Each test module's docstring names its

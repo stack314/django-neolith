@@ -1,5 +1,5 @@
 """``over_both``: one contract case, run over every transport, with the
-outcomes compared (the conformance record's Decision 4).
+outcomes compared (ADR 0032's Decision 4).
 
 A case is a callable with no arguments that opens its own scope and makes
 its own calls. ``over_both`` runs it once in-process, with the host's own
