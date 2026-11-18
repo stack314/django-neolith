@@ -3,7 +3,7 @@
 The document is checked against the OpenAPI Initiative's published schema for
 OpenAPI 3.1 documents, ``tests/data/openapi-3.1-schema-2026-11-05.json``. It is
 the file served at https://spec.openapis.org/oas/3.1/schema/2026-11-05, copied
-unchanged (SHA-256 4751a777...2b7d), from the repository OAI/spec.openapis.org
+unchanged (SHA-256 4751a777...2d7b), from the repository OAI/spec.openapis.org
 at commit 3cd33f3, under the Apache License 2.0, whose text is in
 ``tests/data/openapi-3.1-schema-2026-11-05.LICENSE``. That schema leaves Schema
 Objects unchecked, so each component is also checked against JSON Schema
@@ -13,6 +13,7 @@ Objects unchecked, so each component is also checked against JSON Schema
 import enum
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -40,7 +41,7 @@ from neolith import (
     contract,
 )
 from neolith._contracts import _STANDARD_KINDS
-from neolith._openapi import _HEADERS, KIND_STATUS, _copy, document
+from neolith._openapi import _HEADERS, KEYWORDS, KIND_STATUS, _copy, document
 from tests.strategies import admitted_by
 from tests.test_contract_round_trip import (
     _FORMAT_CHECKER,
@@ -339,7 +340,19 @@ def test_document_has_the_structure_spec_03_gives() -> None:
     }
     assert components["parameters"] == {
         name: {"name": name, "in": "header", "schema": schema}
-        for name, schema in _HEADERS
+        for name, schema in [
+            (
+                "Neolith-Principal",
+                {"type": "string", "pattern": r"^[A-Za-z0-9_\-]*$", "maxLength": 4096},
+            ),
+            ("Neolith-Timeout", {"type": "string", "pattern": r"^[1-9][0-9]{0,9}$"}),
+            (
+                "Idempotency-Key",
+                {"type": "string", "pattern": r'^"([ !#-\[\]-~]|\\["\\]){1,255}"$'},
+            ),
+            ("traceparent", {"type": "string"}),
+            ("tracestate", {"type": "string"}),
+        ]
     }
     assert [p["$ref"].rpartition("/")[2] for p in _PARAMETERS] == [
         name for name, _ in _HEADERS
@@ -463,6 +476,8 @@ def test_one_identity_given_twice_is_refused() -> None:
     "schema",
     [
         {"$ref": "#/$defs/Nowhere"},
+        {"$ref": "#/$defs/Order/properties/a"},
+        {"$ref": "#/$defs/Order#"},
         {"$ref": "#/components/schemas/Order"},
         {"$ref": "other.json#/$defs/Order"},
         {"$ref": 1},
@@ -470,11 +485,24 @@ def test_one_identity_given_twice_is_refused() -> None:
         {"$defs": {}},
         {"$anchor": "a"},
         {"$dynamicRef": "#meta"},
+        {"$comment": "a"},
         {"x-unknown": 1},
+        # 2020-12 keywords a description never writes.
+        {"const": 1},
+        {"examples": [1]},
+        {"title": "a"},
+        {"not": {}},
+        {"oneOf": []},
+        {"contains": {}},
+        {"prefixItems": []},
+        {"patternProperties": {}},
+        {"dependentSchemas": {}},
         {"properties": []},
         {"anyOf": {}},
         {"items": 1},
+        {"items": {"type": "string", "x-unknown": 1}},
         [],
+        None,
     ],
 )
 def test_a_description_outside_the_admitted_set_is_refused(schema: object) -> None:
@@ -486,32 +514,126 @@ def test_a_description_outside_the_admitted_set_is_refused(schema: object) -> No
     ("schema", "expected"),
     [
         (True, True),
-        ({"not": False}, {"not": False}),
+        ({"items": False}, {"items": False}),
         (
             {"items": {"$ref": "#/$defs/Order"}},
             {"items": {"$ref": "#/components/schemas/x.v1.Order"}},
         ),
         (
-            {"prefixItems": [{"$ref": "#/$defs/Order"}], "enum": [{"$ref": "a"}]},
+            {"anyOf": [{"$ref": "#/$defs/Order"}], "enum": [{"$ref": "#/$defs/Order"}]},
             {
-                "prefixItems": [{"$ref": "#/components/schemas/x.v1.Order"}],
-                "enum": [{"$ref": "a"}],
+                "anyOf": [{"$ref": "#/components/schemas/x.v1.Order"}],
+                "enum": [{"$ref": "#/$defs/Order"}],
             },
         ),
         (
-            {"patternProperties": {"^a$": {"$ref": "#/$defs/Order"}}},
-            {"patternProperties": {"^a$": {"$ref": "#/components/schemas/x.v1.Order"}}},
+            {"additionalProperties": {"$ref": "#/$defs/Order"}, "default": {"a": 1}},
+            {
+                "additionalProperties": {"$ref": "#/components/schemas/x.v1.Order"},
+                "default": {"a": 1},
+            },
         ),
-        ({"properties": {"$ref": {"type": "string"}}}, None),
+        # A property named "$ref" is a name, not a reference.
+        (
+            {"properties": {"$ref": {"type": "string"}}},
+            {"properties": {"$ref": {"type": "string"}}},
+        ),
     ],
 )
 def test_a_description_inside_the_admitted_set_is_projected(
     schema: object, expected: object
 ) -> None:
-    # A property named "$ref" is a name, not a reference.
-    assert _copy("x.v1", {"Order": {}}, schema) == (
-        schema if expected is None else expected
-    )
+    assert _copy("x.v1", {"Order": {}}, schema) == expected
+
+
+class Every(BaseModel):
+    """A record whose description writes every keyword a description writes."""
+
+    bounded: Annotated[int, Field(gt=0, lt=10, multiple_of=2)] = 2
+    ranged: Annotated[float, Field(ge=0.5, le=9.5)]
+    text: Annotated[str, Field(min_length=1, max_length=3)]
+    items: Annotated[list[int], Field(min_length=1, max_length=2)]
+    entries: Annotated[
+        dict[Annotated[str, Field(min_length=1)], int],
+        Field(min_length=1, max_length=2),
+    ]
+    raw: Binary
+    amount: Decimal128
+    span: Duration
+    when: AwareDatetime
+    colour: Colour | None = None
+    size: Literal["s", "m"]
+    flag: bool
+    children: list["Every"] = []
+
+
+@contract("every.v1")
+class EveryV1(Protocol):
+    @action
+    def go(self, request: Every) -> None: ...
+
+
+def _keywords(node: object, found: set[str]) -> None:
+    if type(node) is list:
+        for item in node:
+            _keywords(item, found)
+    elif type(node) is dict:
+        for keyword, value in node.items():
+            found.add(keyword)
+            if keyword == "properties":
+                for item in value.values():
+                    _keywords(item, found)
+            elif keyword not in ("default", "enum"):
+                _keywords(value, found)
+
+
+def test_admitted_keywords_are_exactly_those_a_description_writes() -> None:
+    # Guards both ways: a keyword admitted but never written is a branch no
+    # contract reaches, and one written but not admitted stops set-up.
+    found: set[str] = set()
+    for schema in Contract.of(EveryV1).describe()["$defs"].values():
+        _keywords(schema, found)
+    assert found == KEYWORDS
+    _check(document([Contract.of(EveryV1)]))
+
+
+class _Stub:
+    """Stands for a contract whose description the projection must refuse."""
+
+    def __init__(self, identity: str, description: dict[str, Any]) -> None:
+        self.identity = identity
+        self.name, _, major = identity.rpartition(".v")
+        self.major = int(major)
+        self._description = description
+
+    def describe(self) -> dict[str, Any]:
+        return self._description
+
+
+def _described(**changes: object) -> dict[str, Any]:
+    described = Contract.of(EchoV1).describe()
+    described.update(changes)
+    return described
+
+
+@pytest.mark.parametrize(
+    ("description", "message"),
+    [
+        (_described(contract="other.v1"), "names another contract"),
+        (_described(jsonSchemaDialect="https://example.com/d"), "another dialect"),
+        (_described(**{"$defs": {"a b": {}}}), "not a component name"),
+        (
+            _described(**{"$defs": {"Ping": {"type": "object", "default": math.nan}}}),
+            "Out of range float",
+        ),
+    ],
+)
+def test_a_description_the_projection_cannot_hold_is_refused(
+    description: dict[str, Any], message: str
+) -> None:
+    stub = cast("Contract", _Stub("echo.v1", description))
+    with pytest.raises(ValueError, match=message):
+        document([stub])
 
 
 @pytest.mark.spec("HTTP-20")
@@ -546,7 +668,17 @@ def test_error_bodies_admit_spec_03s_forms(
     assert Draft202012Validator(schema).is_valid(body) is admitted
 
 
-def test_kind_status_covers_every_standard_kind() -> None:
+def test_kind_status_is_spec_03s_errors_table() -> None:
+    assert dict(KIND_STATUS) == {
+        "invalid_argument": 400,
+        "unauthenticated": 401,
+        "permission_denied": 403,
+        "not_found": 404,
+        "conflict": 409,
+        "timeout": 504,
+        "unavailable": 503,
+        "internal": 500,
+    }
     assert set(KIND_STATUS) == _STANDARD_KINDS
 
 
@@ -678,3 +810,50 @@ def test_header_parameter_schemas_state_the_header_forms(name: str, text: str) -
     # before a final newline; a header value never holds one.
     if not text.endswith("\n"):
         assert Draft202012Validator(schema).is_valid(text) is expected
+
+
+_ESCAPED_QUOTE = '"\\""'
+_ESCAPED_BACKSLASH = '"\\\\"'
+
+
+@pytest.mark.spec("HTTP-20")
+@pytest.mark.parametrize(
+    ("name", "text", "admitted"),
+    [
+        ("Neolith-Timeout", "1", True),
+        ("Neolith-Timeout", "9999999999", True),
+        ("Neolith-Timeout", "10000000000", False),
+        ("Neolith-Timeout", "0", False),
+        ("Neolith-Timeout", "0050", False),
+        ("Neolith-Timeout", "", False),
+        ("Neolith-Timeout", "+5", False),
+        ("Idempotency-Key", '"a"', True),
+        ("Idempotency-Key", '""', False),
+        ("Idempotency-Key", _ESCAPED_QUOTE, True),
+        ("Idempotency-Key", _ESCAPED_BACKSLASH, True),
+        ("Idempotency-Key", '"\\a"', False),
+        ("Idempotency-Key", '"%"', True),
+        ("Idempotency-Key", '" !#[]~"', True),
+        ("Idempotency-Key", '"a', False),
+        ("Idempotency-Key", 'a"', False),
+        ("Idempotency-Key", '"a";p=1', False),
+        ("Idempotency-Key", '"' + "a" * 255 + '"', True),
+        ("Idempotency-Key", '"' + "a" * 256 + '"', False),
+        ("Idempotency-Key", '"' + "\\\\" * 255 + '"', True),
+        ("Idempotency-Key", '"' + "\\\\" * 256 + '"', False),
+        ("Idempotency-Key", '"é"', False),
+        ("Idempotency-Key", '"\x7f"', False),
+        ("Idempotency-Key", '"\t"', False),
+        ("Neolith-Principal", "", True),
+        ("Neolith-Principal", "-_09azAZ", True),
+        ("Neolith-Principal", "A" * 4096, True),
+        ("Neolith-Principal", "A" * 4097, False),
+        ("Neolith-Principal", "a+b", False),
+        ("Neolith-Principal", "ab==", False),
+    ],
+)
+def test_header_parameter_schemas_at_the_edges_of_each_form(
+    name: str, text: str, admitted: bool
+) -> None:
+    assert _FORMS[name](text) is admitted
+    assert Draft202012Validator(dict(_HEADERS)[name]).is_valid(text) is admitted

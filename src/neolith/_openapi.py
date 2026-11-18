@@ -8,10 +8,10 @@ descriptions serve equal bytes.
 
 Every schema of a description is copied unchanged, apart from its references,
 which move from ``#/$defs/<Record>`` to ``#/components/schemas/<key>``. The
-copy walks each schema by the JSON Schema 2020-12 vocabulary: a keyword that
-holds schemas is walked, a keyword that holds data (``default``, ``const``,
-``enum``, ``examples``) is copied untouched, so data that looks like a
-reference is never rewritten, and any other keyword is refused. A description
+copy walks each schema by the keywords a description writes: a keyword that
+holds schemas is walked, a keyword that holds data (``default``, ``enum``) is
+copied untouched, so data that looks like a reference is never rewritten, and
+any other keyword is refused. A description
 that cannot be projected is a fault of the package, never of an app, and
 raises ``ValueError``.
 """
@@ -24,7 +24,7 @@ from typing import Any, Final
 
 from neolith._contracts import _DIALECT, Contract
 
-__all__ = ["KIND_STATUS", "document"]
+__all__ = ["KEYWORDS", "KIND_STATUS", "document"]
 
 _OPENAPI: Final = "3.1.2"
 # The version of the specification this implementation conforms to (spec
@@ -53,55 +53,35 @@ _DECLARED_STATUS: Final = 422
 _COMPONENT_KEY: Final = re.compile(r"[a-zA-Z0-9\.\-_]+")
 _LOCAL_REF: Final = re.compile(r"#/\$defs/(?P<name>[A-Za-z][A-Za-z0-9_]*)")
 
-# JSON Schema 2020-12 keywords, by what their value holds.
-_SCHEMA: Final = frozenset(
-    {
-        "additionalProperties",
-        "contains",
-        "contentSchema",
-        "else",
-        "if",
-        "items",
-        "not",
-        "propertyNames",
-        "then",
-        "unevaluatedItems",
-        "unevaluatedProperties",
-    }
-)
-_SCHEMA_MAP: Final = frozenset({"dependentSchemas", "patternProperties", "properties"})
-_SCHEMA_LIST: Final = frozenset({"allOf", "anyOf", "oneOf", "prefixItems"})
-_DATA: Final = frozenset({"const", "default", "enum", "examples"})
+# The JSON Schema 2020-12 keywords a description writes, by what their value
+# holds, and no other: a keyword the description starts to write is refused
+# until it is placed here.
+_SCHEMA: Final = frozenset({"additionalProperties", "items", "propertyNames"})
+_SCHEMA_MAP: Final = frozenset({"properties"})
+_SCHEMA_LIST: Final = frozenset({"allOf", "anyOf"})
+_DATA: Final = frozenset({"default", "enum"})
 _PLAIN: Final = frozenset(
     {
-        "$comment",
         "contentEncoding",
-        "contentMediaType",
-        "dependentRequired",
-        "deprecated",
-        "description",
         "exclusiveMaximum",
         "exclusiveMinimum",
         "format",
-        "maxContains",
         "maxItems",
         "maxLength",
         "maxProperties",
         "maximum",
-        "minContains",
         "minItems",
         "minLength",
         "minProperties",
         "minimum",
         "multipleOf",
         "pattern",
-        "readOnly",
         "required",
-        "title",
         "type",
-        "uniqueItems",
-        "writeOnly",
     }
+)
+KEYWORDS: Final = (
+    frozenset({"$ref"}) | _SCHEMA | _SCHEMA_MAP | _SCHEMA_LIST | _DATA | _PLAIN
 )
 
 # Spec 03, Call context, and ADR 0027's admitted set: each header's form, as
