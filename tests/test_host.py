@@ -1911,6 +1911,56 @@ def test_a_module_an_entry_imports_belongs_to_the_app_it_lies_in(
 
 
 @pytest.mark.spec("APP-14")
+@pytest.mark.parametrize("spelling", ["module", "config class"])
+@pytest.mark.parametrize(
+    "how",
+    [
+        "at top level",
+        "in a helper module",
+        "in a function",
+        "in a helper's function",
+        "only from its apps module",
+    ],
+)
+def test_a_request_made_while_a_package_imports_belongs_to_apps_below_it(
+    write_app: WriteApp, tmp_path: Path, how: str, spelling: str
+) -> None:
+    # An app's package asks for nope.v1 while it is imported, in each way.
+    # An app nested below it imports the package again in a fresh process,
+    # so it is refused too, unless only the app's apps module asks, which
+    # the nested app does not import.
+    function = 'from neolith import connect\n\n\ndef ask():\n    connect("nope.v1")\n'
+    init, helpers, apps = {
+        "at top level": (_UNDECLARED_CONNECTS, "", ""),
+        "in a helper module": ("from . import helpers\n", _UNDECLARED_CONNECTS, ""),
+        "in a function": (function + "\nask()\n", "", ""),
+        "in a helper's function": (
+            "from .helpers import ask\n\nask()\n",
+            function,
+            "",
+        ),
+        "only from its apps module": (
+            "",
+            _UNDECLARED_CONNECTS,
+            "from . import helpers\n",
+        ),
+    }[how]
+    package = write_app(
+        apps + _PLAIN_CONFIG.replace("{name}", "{package}"),
+        __init__=init,
+        helpers=helpers,
+    )
+    nested = tmp_path / package / "inner"
+    nested.mkdir()
+    (nested / "__init__.py").write_text("", encoding="utf-8")
+    entry = package if spelling == "module" else f"{package}.apps.Config"
+    below = "admitted" if how == "only from its apps module" else "DeclarationError"
+    for first in ([entry], [entry, "no_such_app"]):
+        stopped = "DeclarationError" if len(first) == 1 else "ModuleNotFoundError"
+        assert _walk([first, [f"{package}.inner"]]) == [stopped, below], first
+
+
+@pytest.mark.spec("APP-14")
 def test_a_place_two_apps_ask_from_belongs_to_both(write_app: WriteApp) -> None:
     # One helper line asks for nope.v1 on behalf of two apps, each added by
     # its own override: each override is refused every time it is entered.

@@ -370,21 +370,21 @@ def _ties(module: str, at_import: bool) -> set[str | None]:
                 tuple(entries),
                 global_apps.app_configs,
             )
-            return {key, *_below(module, at_import)}
+            return {key}
         else:
             return {None}
     if at_import:
         ties |= _module_ties(module, list(global_apps.app_configs.values()))
-    return ties | _below(module, at_import)
+    return ties
 
 
-def _below(module: str, at_import: bool) -> set[str | None]:
-    """A tie to every app at or below ``module`` when a request was made as
-    the module was imported: Python imports every package above a module it
-    imports, so such an app's loading imports this module again in a fresh
-    process.
+def _below(importing: tuple[str, ...]) -> set[str | None]:
+    """A tie to every app at or below each module whose import was under way
+    when a request was made: Python imports every package above a module it
+    imports, so such an app's loading imports those modules again in a fresh
+    process, and the request with them.
     """
-    return {f"\1{module}"} if at_import and module else set()
+    return {f"\1{module}" for module in importing}
 
 
 def _tied(tie: str | None, installed: frozenset[str]) -> bool:
@@ -938,9 +938,9 @@ def connect(identity: str, /) -> "Connector":
         if host is None:
             host = _restored_elsewhere()
         if host is None:
-            where, module, at_import = _place()
+            where, module, at_import, importing = _place()
             place = _RECORDED.setdefault(identity, {}).setdefault(where, {})
-            place.update(dict.fromkeys(_ties(module, at_import)))
+            place.update(dict.fromkeys(_ties(module, at_import) | _below(importing)))
         elif identity not in host.known:
             raise UsageError(
                 f"connect({_quoted(identity)}): no app of this host provides or "
@@ -949,21 +949,31 @@ def connect(identity: str, /) -> "Connector":
     return Connector._made(identity)
 
 
-def _place() -> tuple[str, str, bool]:
+def _place() -> tuple[str, str, bool, tuple[str, ...]]:
     """The file and line of the ``connect()`` call, for the message only; the
-    name of its module, or ``""``; and whether it runs as the module is
-    imported, at the module's top level.
+    name of its module, or ``""``; whether it runs as the module is imported,
+    at the module's top level; and the modules whose import is under way in
+    the loading step that asked, read from the frames between the call and
+    ``Apps.populate``, or none when no load runs.
     """
     frame = inspect.currentframe()
     try:
         caller = None if frame is None or frame.f_back is None else frame.f_back.f_back
         if caller is None:
-            return "an unknown place", "", False
+            return "an unknown place", "", False, ()
         module = caller.f_globals.get("__name__")
+        importing: list[str] = []
+        step: types.FrameType | None = caller
+        while step is not None and step.f_code is not _POPULATE:
+            name = step.f_globals.get("__name__")
+            if step.f_code.co_name == "<module>" and type(name) is str:
+                importing.append(name)
+            step = step.f_back
         return (
             f"{caller.f_code.co_filename}:{caller.f_lineno}",
             module if type(module) is str else "",
             caller.f_code.co_name == "<module>",
+            tuple(importing) if step is not None else (),
         )
     finally:
         del frame
