@@ -1,7 +1,13 @@
-"""The root middleware: a request root for each request (ADR 0017 Decision 4).
+"""The host's two middleware: a request root for each request, and its
+principal (ADR 0017 Decision 4, ADR 0022 Decision 6, ADR 0023).
 
-List ``"neolith.middleware.RootMiddleware"`` first in ``MIDDLEWARE``, once
-(ADR 0022 Decision 6). For each request it opens a root, with the host's
+List ``"neolith.middleware.RootMiddleware"`` first in ``MIDDLEWARE``, once,
+and ``"neolith.middleware.PrincipalMiddleware"`` once, after it and after
+every middleware a principal backend reads: with the Django-user backend,
+after ``SessionMiddleware`` and ``AuthenticationMiddleware``; with any
+backend, after Django's ``UpdateCacheMiddleware``.
+
+The root middleware. For each request it opens a root, with the host's
 request deadline (``NEOLITH["REQUEST_DEADLINE"]``, 30 seconds when absent,
 none when ``None``) counted from when the request reaches it. The root
 belongs to no app until the view is resolved; then it belongs to the app
@@ -29,11 +35,12 @@ from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.http import FileResponse, HttpRequest, StreamingHttpResponse
 from django.http.response import HttpResponseBase
+from django.utils.cache import patch_vary_headers
 
-from neolith import _boot, _checks, _context, _host
+from neolith import _boot, _checks, _context, _host, _principal
 from neolith._serving import label_of
 
-__all__ = ["RootMiddleware"]
+__all__ = ["PrincipalMiddleware", "RootMiddleware"]
 
 _Respond = Callable[[HttpRequest], HttpResponseBase]
 _ARespond = Callable[[HttpRequest], Awaitable[HttpResponseBase]]
@@ -206,6 +213,17 @@ def _plain_file(value: object) -> bool:
     return kind is io.BufferedReader and type(value.raw) is io.FileIO  # type: ignore[attr-defined]
 
 
+def _kept(response: HttpResponseBase) -> bool:
+    """Whether the root middleware keeps the response's body inside the
+    root: every streamed body but a ``FileResponse`` over a plain file.
+    """
+    if not isinstance(response, StreamingHttpResponse):
+        return False
+    return not (
+        isinstance(response, FileResponse) and _plain_file(response.file_to_stream)
+    )
+
+
 def _hand_over(response: HttpResponseBase, scope: _context.Scope) -> bool:
     """Hand the root to a streamed body; return whether it was handed over.
 
@@ -216,10 +234,9 @@ def _hand_over(response: HttpResponseBase, scope: _context.Scope) -> bool:
     registered so far, those of the body, and runs them inside the root
     when the body ends or the response is closed, then closes the root.
     """
-    if not isinstance(response, StreamingHttpResponse):
+    if not _kept(response):
         return False
-    if isinstance(response, FileResponse) and _plain_file(response.file_to_stream):
-        return False
+    assert isinstance(response, StreamingHttpResponse)  # noqa: S101  # _kept
     # Django's own list of what HttpResponseBase.close() runs, the same in
     # every supported version; the handlers append to it too.
     registered: list[Callable[[], object]] = response._resource_closers  # type: ignore[attr-defined]
@@ -340,3 +357,147 @@ class _AsyncBody(_Closing):
             raise
         finally:
             _context._CURRENT.reset(token)
+
+
+@final
+class PrincipalMiddleware:
+    """Hand each request's root its principal backends, and vary the
+    response on their request inputs (ADR 0023 Decision 6).
+
+    Listed once in every host, with or without backends; with none it does
+    nothing per request. Django runs it in the mode of the handler inside
+    it, sync or async. Its ``process_view``, which Django calls after the
+    root middleware's has bound the root, gives the root the request and
+    the host's backends, so a call made before then has no principal and
+    asks no backend. A call from the root then resolves the principal
+    (``neolith._principal.Resolution``).
+
+    Its response phase, for a root that has its backends:
+
+    1. a streamed body that the root keeps runs inside the root after the
+       response is returned, so the principal is resolved now, unless a
+       call has resolved it, with ``resolve`` in sync mode and ``aresolve``
+       in async mode; a failure is only recorded;
+    2. the root is marked, and a later first call fails with ``internal``;
+    3. when a search has started, ``Vary`` gains the union of the backends'
+       request inputs, or becomes ``*``.
+
+    Args:
+        get_response: The rest of the chain, as Django passes it.
+
+    Raises:
+        ImproperlyConfigured: If ``MIDDLEWARE`` does not list the root
+            middleware first and this class once, if no set-up of the host
+            has passed, or if, with a backend configured, Django's
+            ``UpdateCacheMiddleware`` is listed after this class.
+    """
+
+    sync_capable = True
+    async_capable = True
+
+    def __init__(self, get_response: _Respond | _ARespond) -> None:
+        """Check the middleware's place and the host, and keep the chain."""
+        middleware = getattr(settings, "MIDDLEWARE", None)
+        problems = _checks.middleware_problems(middleware)
+        if problems:
+            raise ImproperlyConfigured("\n".join(problems))
+        host = _host._current()
+        if host is None:
+            raise ImproperlyConfigured(_NO_HOST)
+        if host.principals:
+            problems = _principal.cache_problems(middleware)
+            if problems:
+                raise ImproperlyConfigured("\n".join(problems))
+        self._get_response = get_response
+        self._async = inspect.iscoroutinefunction(get_response)
+        if self._async:
+            inspect.markcoroutinefunction(self)
+            self.process_view = self._aprocess_view  # type: ignore[method-assign,assignment]
+
+    def __call__(
+        self, request: HttpRequest
+    ) -> HttpResponseBase | Awaitable[HttpResponseBase]:
+        """Serve one request, then run the response phase for its root."""
+        if self._async:
+            return self._acall(request)
+        scope = _REQUEST.get()
+        respond: _Respond = self._get_response  # type: ignore[assignment]
+        response = respond(request)
+        resolution = None if scope is None else scope.resolution
+        if isinstance(resolution, _principal.Resolution):
+            finish(resolution, response)
+        return response
+
+    async def _acall(self, request: HttpRequest) -> HttpResponseBase:
+        scope = _REQUEST.get()
+        respond: _ARespond = self._get_response  # type: ignore[assignment]
+        response = await respond(request)
+        resolution = None if scope is None else scope.resolution
+        if isinstance(resolution, _principal.Resolution):
+            await afinish(resolution, response)
+        return response
+
+    def process_view(
+        self,
+        request: HttpRequest,
+        view_func: object,
+        view_args: tuple[Any, ...],
+        view_kwargs: dict[str, Any],
+    ) -> None:
+        """Give the request's root the request and the host's backends.
+
+        Args:
+            request: The request, which the backends are given.
+            view_func: The resolved view.
+            view_args: Its positional arguments.
+            view_kwargs: Its keyword arguments.
+        """
+        _attach(request)
+
+    async def _aprocess_view(
+        self,
+        request: HttpRequest,
+        view_func: object,
+        view_args: tuple[Any, ...],
+        view_kwargs: dict[str, Any],
+    ) -> None:
+        _attach(request)
+
+
+def _attach(request: HttpRequest) -> None:
+    scope = _REQUEST.get()
+    host = _host._current()
+    if scope is None or host is None or not host.principals:
+        return
+    if scope.resolution is None:
+        scope.resolution = _principal.Resolution(
+            host.principals, host.vary, request, scope.held.trace_id
+        )
+
+
+def finish(resolution: _principal.Resolution, response: HttpResponseBase) -> None:
+    """The principal middleware's response phase, in sync mode, for a root
+    and its response (ADR 0023 Decision 6): search now for a streamed body
+    the root keeps, unless an outcome is fixed; mark the root; and patch
+    ``Vary`` with the resolution's union when a search has started.
+    """
+    if _kept(response) and not resolution.fixed:
+        with contextlib.suppress(ValueError):  # only recorded
+            resolution.form()
+    _vary(response, resolution)
+
+
+async def afinish(
+    resolution: _principal.Resolution, response: HttpResponseBase
+) -> None:
+    """``finish`` in async mode: the search, if any, awaits ``aresolve``."""
+    if _kept(response) and not resolution.fixed:
+        with contextlib.suppress(ValueError):  # only recorded
+            await resolution.aform()
+    _vary(response, resolution)
+
+
+def _vary(response: HttpResponseBase, resolution: _principal.Resolution) -> None:
+    """Mark the root, and patch ``Vary`` when a search has started."""
+    if resolution.finish() and resolution.vary:
+        patch_vary_headers(response, resolution.vary)

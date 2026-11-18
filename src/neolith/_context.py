@@ -395,6 +395,16 @@ class Sent:
     caller: str | None
 
 
+class Resolver(typing.Protocol):
+    """What answers for a request root's principal (``neolith._principal``)."""
+
+    def form(self) -> bytes | None:
+        """The principal's sent form, or ``None``; ``ValueError`` when none
+        could be resolved.
+        """
+        ...
+
+
 @final
 class Scope:
     """A scope this host opened: the context it issued, and what it counts.
@@ -419,6 +429,7 @@ class Scope:
         "context",
         "held",
         "owner",
+        "resolution",
     )
 
     def __init__(
@@ -437,6 +448,9 @@ class Scope:
         self._counts: dict[tuple[str, str, str], int] = {}
         # Unset until the first call; then the form, or why there is none.
         self._form: tuple[bytes | None, str | None] | None = None
+        # A request root's principal, which the principal middleware hands
+        # it once the root is bound; it then answers for the root.
+        self.resolution: Resolver | None = None
 
     @property
     def app(self) -> str | None:
@@ -460,9 +474,13 @@ class Scope:
         """The principal's sent form, or ``None`` when the scope has none.
 
         Decided by the scope's first call and fixed from then on, so every
-        call from one scope gets one answer. Raises ``ValueError`` when the
-        principal is not valid.
+        call from one scope gets one answer; a request root's resolution
+        decides it once it has one. Raises ``ValueError`` when the
+        principal is not valid, or could not be resolved.
         """
+        resolution = self.resolution
+        if resolution is not None:
+            return resolution.form()
         with self._lock:
             if self._form is None:
                 held = self.held.principal
