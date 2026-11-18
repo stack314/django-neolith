@@ -367,9 +367,11 @@ class Pool:
                         name="neolith-resolve",
                         daemon=True,
                     ).start()
-                except RuntimeError as error:
+                except BaseException as error:
                     self._lookup = None
-                    raise _Unreachable("its name did not resolve", error) from None
+                    if isinstance(error, RuntimeError):
+                        raise _Unreachable("its name did not resolve", error) from None
+                    raise
         left = until - _now()
         if left <= 0 or not lookup.done.wait(left):
             stop()

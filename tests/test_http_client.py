@@ -1462,3 +1462,30 @@ def test_a_connection_given_back_while_the_pool_closes_is_closed() -> None:
     assert a.fileno() == -1
     assert pool._idle == []
     b.close()
+
+
+@pytest.mark.parametrize("raised", [MemoryError, KeyboardInterrupt])
+def test_any_failure_to_start_the_resolution_thread_is_forgotten(
+    monkeypatch: pytest.MonkeyPatch, raised: type[BaseException]
+) -> None:
+    real = threading.Thread.start
+    refused: list[str] = []
+
+    def start(thread: threading.Thread) -> None:
+        if not refused:
+            refused.append(thread.name)
+            raise raised
+        real(thread)
+
+    def resolve(*args: object) -> list[object]:
+        raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+
+    monkeypatch.setattr(threading.Thread, "start", start)
+    monkeypatch.setattr(_http, "_getaddrinfo", resolve)
+    pool = Pool(Origin.parse("http://inventory.test"))
+    with pytest.raises(raised):
+        call(pool, deadline=now() + 5)
+    assert pool._lookup is None
+    second = fails(pool, deadline=now() + 5)
+    assert second.message.endswith("could not be reached: its name did not resolve")
+    assert second.cause.startswith("gaierror")
