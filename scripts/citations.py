@@ -35,32 +35,42 @@ JOIN = "(?:" + "|".join(JOINS) + ")"
 JOIN_SPELLINGS = tuple(
     spelling for spellings in JOINS.values() for spelling in spellings
 )
+# A joined number that is not the next of the list: a date, such as
+# "2026-11-18", and a record cited by its bare number, as the records cite one
+# another ("TRN-42, 0021 Decision 9"; a record's number has four digits and a
+# leading zero, which no requirement's or spec document's number has). Each
+# ends the list it follows, and is not read as a citation of the list's kind;
+# a number of any other shape continues it, so a typo is still checked.
+DATE = r"\d{4}-\d{2}-\d{2}(?!\d)"
+BARE_RECORD = r"0\d{3}(?!\d)"
 # A word shaped like a requirement ID: capital letters, a hyphen, digits; and
 # the numbers joined to it, as in "CON-30 and 31", "CON-30-33" or
 # "CON-30 through CON-33". A number of another area starts a word of its own.
-# A bare joined number continues the list only if a requirement can have it:
-# requirement numbers have no leading zero (scripts/spec_trace.py), so in
-# "TRN-42, 0021 Decision 9" the list ends before the record's number.
+# A number followed by a point and a digit is a decimal or a version, such as
+# "1.5 seconds", and is not joined.
 ID_SHAPED = re.compile(
     r"(?<![\w-])(?P<area>[A-Z]+)-(?P<number>\d+)"
-    rf"(?P<ends>(?:{JOIN}(?:(?P=area)-\d+|[1-9]\d*)(?!\w))*)(?!\w)"
+    rf"(?P<ends>(?:{JOIN}(?!{DATE}|{BARE_RECORD})(?:(?P=area)-)?\d+(?!\w|\.\d))*)"
+    r"(?!\w)"
 )
 # Words of that shape that are names of other things, not requirement IDs:
 # an encoding, a standard, a licence ("BSD-3-Clause") and a hash.
 NOT_IDS = frozenset({"UTF-8", "ECMA-262", "BSD-3", "SHA-256"})
 # The numbers after a citing word, joined as above: "0017", "0017 and 0019",
 # "01, 02 or 03", "0017 through 0019", "0017\u20130019". A number followed by
-# a point and a digit is a version, such as "spec 0.1", and ends the list. A
-# joined number continues the list only in its kind's width, four digits for
-# a record and two for a spec document, so that "spec 03, 0010 Decision 5"
-# cites one spec document.
-NUMBERS = r"(?P<rest>(?:\s+\d+(?!\.\d)(?:{join}\d{{{width}}}(?!\d|\.\d))*)?)"
+# a point and a digit is a version, such as "spec 0.1", and ends the list, as
+# a date does, and in a list of spec documents a bare record number
+# ("spec 03, 0010 Decision 5").
+NUMBERS = r"(?P<rest>(?:\s+\d+(?!\.\d)(?:{join}(?!{ends})\d+(?!\.\d))*)?)"
 # "ADR", "ADRs", "decision record", "Decision records"; "spec", "Spec",
 # "specs", "specification", "Specifications".
 ADR = re.compile(
-    r"\b(?:ADRs?|[Dd]ecision records?)\b" + NUMBERS.format(join=JOIN, width=4)
+    r"\b(?:ADRs?|[Dd]ecision records?)\b" + NUMBERS.format(join=JOIN, ends=DATE)
 )
-SPEC = re.compile(r"\b[Ss]pec(?:ification)?s?\b" + NUMBERS.format(join=JOIN, width=2))
+SPEC = re.compile(
+    r"\b[Ss]pec(?:ification)?s?\b"
+    + NUMBERS.format(join=JOIN, ends=f"{DATE}|{BARE_RECORD}")
+)
 
 _END = re.compile(r"(?:[A-Z]+-)?(\d+)")
 _DIGITS = re.compile(r"\d+")

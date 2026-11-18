@@ -1204,23 +1204,27 @@ def test_every_citation_rule_and_variant_uses_the_one_set_of_joins() -> None:
     ("text", "cited"),
     [
         # A record cited by its bare number after a requirement or a spec
-        # document, as the records write it: the number is not one of theirs.
+        # document, as the records write it, ends the list.
         ("(TRN-42, 0021 Decision 9)", ["TRN-42"]),
         ("(TRN-36 and 0027 Decision 1)", ["TRN-36"]),
         ("(spec 03, 0010 Decision 5)", ["03"]),
-        ("(ADR 0017, 05 is the spec)", ["0017"]),
-        # Lists of one kind are read whole.
+        # So does a date, and a decimal or a version.
+        ("(CON-30, 2026-11-18)", ["CON-30"]),
+        ("Accepted (ADR 0022, 2026-11-10).", ["0022"]),
+        ("TRN-42 and 1.5 seconds", ["TRN-42"]),
+        ("specs 01 and 0.1", ["01"]),
+        # A list of one kind is read whole, a typo in it included, so that the
+        # typo is refused.
         ("CON-23, 24 and 30", ["CON-23", "CON-24", "CON-30"]),
         ("CON-30 through CON-033", ["CON-30", "CON-033"]),
+        ("CON-30 and 031", ["CON-30", "CON-031"]),
         ("specs 01, 02 or 03", ["01", "02", "03"]),
+        ("specs 01 and 3", ["01", "3"]),
         ("ADRs 0017 and 0019", ["0017", "0019"]),
+        ("ADRs 0017 and 19", ["0017", "19"]),
     ],
 )
-def test_a_list_ends_at_a_number_its_kind_cannot_have(
-    text: str, cited: list[str]
-) -> None:
-    # A requirement number has no leading zero, a spec document has two
-    # digits, and a record four (scripts/spec_trace.py, docs/adr/).
+def test_a_list_ends_at_a_number_of_another_kind(text: str, cited: list[str]) -> None:
     assert [found.key for found in _find(text)] == cited
 
 
