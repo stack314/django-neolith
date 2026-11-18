@@ -111,17 +111,23 @@ def configure(
     declarations = [declaration for _, declaration in pairs]
     from neolith._host import resolve
 
-    given = type(deployer) is dict
-    neolith = _naming.entry(deployer, "NEOLITH", _checks.MISSING) if given else None
+    settings_given: dict[object, object] | None = (
+        deployer if type(deployer) is dict else None
+    )
+    neolith = (
+        None
+        if settings_given is None
+        else _naming.entry(settings_given, "NEOLITH", _checks.MISSING)
+    )
     _, refusals = resolve(declarations, _checks.remote_identities(neolith))
     if refusals:
         # Resolve reads NEOLITH, so a requirement it finds unmet may come
         # from a problem there, or from settings that are not a dict: those
         # are reported with its refusals.
-        if given:
-            refusals += _checks.neolith_problems(neolith, declarations)
-        else:
+        if settings_given is None:
             refusals.append(_not_settings(deployer))
+        else:
+            refusals += _checks.neolith_problems(neolith, declarations)
     if refusals:
         raise DeclarationError("\n".join(sorted(refusals)))
     names, problems = _names(deployer)
