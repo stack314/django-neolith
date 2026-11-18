@@ -39,3 +39,4 @@ Questions not yet decided are in [open-questions.md](../open-questions.md).
 | [0022](0022-the-app-host-builds-settings-and-checks-before-it-serves.md) | The app host builds settings from declarations, checks at app loading, and boots when a handler is built | Accepted |
 | [0023](0023-a-request-principal-comes-from-ordered-backends.md) | A request's principal comes from ordered backends that declare their request inputs, and a Django user is named by a deployer-given issuer and its primary key | Accepted |
 | [0024](0024-user-documentation-is-built-with-sphinx-from-this-repository.md) | User documentation is built with Sphinx from this repository | Proposed |
+| [0026](0026-set-up-keeps-an-unknown-recorded-identity.md) | Set-up keeps a recorded identity it does not know, so the next set-up reports it again | Proposed |
