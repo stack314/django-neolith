@@ -398,6 +398,44 @@ def test_a_base_class_holds_no_part_of_the_declaration(name: str) -> None:
     assert "the class whose own body sets name" in held[0]
 
 
+# Django's options that describe one app: its directory, and whether Django
+# picks this class from the app's apps module. Neither is shared (#59).
+_ONE_APP_OPTIONS = [("path", "/srv/shop/stock"), ("default", True), ("default", False)]
+
+
+@pytest.mark.spec("APP-6")
+@pytest.mark.parametrize(("option", "value"), _ONE_APP_OPTIONS)
+def test_an_option_of_one_app_in_a_mixin_is_refused_naming_the_mixin(
+    option: str, value: object
+) -> None:
+    mixin = type("Shared", (), {"__module__": __name__, option: value})
+    field, text = _refusal(_valid(), mixin)
+    assert field == option
+    assert text.startswith(f"{__name__}.Shared holds it; ")
+
+
+@pytest.mark.spec("APP-6")
+@pytest.mark.parametrize(("option", "value"), _ONE_APP_OPTIONS)
+def test_an_option_of_one_app_in_a_base_class_is_refused_naming_it(
+    option: str, value: object
+) -> None:
+    # Without ``name`` in its body a class is a base class; neolith gives it
+    # default = False, so writing even that value is refused.
+    field, text = _refusal({option: value})
+    assert field == option
+    assert text.startswith(f"{__name__}.StockConfig holds it; ")
+
+
+@pytest.mark.parametrize(("option", "value"), _ONE_APP_OPTIONS)
+def test_an_option_of_one_app_is_kept_in_the_declaring_body(
+    option: str, value: object
+) -> None:
+    mixin = type("Shared", (), {"__module__": __name__, "verbose_name": "Shop"})
+    config = _declare(_valid(**{option: value}), mixin)
+    assert vars(config)[option] == value
+    assert getattr(config, option) == value
+
+
 def test_a_base_class_is_not_a_default_and_its_declaring_subclass_is() -> None:
     def ready(self: NeolithAppConfig) -> None:
         pass
