@@ -490,7 +490,10 @@ def validate(
         # Nothing of the implementation can be read.
         return None
     try:
-        found = vars(module).get(attribute, _NOTHING)  # safe read: a module
+        held = _naming.module_dict(module)
+        if held is None:
+            raise TypeError(f"it is a {_naming.type_name(module)}")
+        found: Any = _naming.entry(held, attribute, _NOTHING)
     except Exception as error:  # what the import left has no names to read
         refusals.append(
             f"{where} does not import: {_long(module_name)} is not a module "

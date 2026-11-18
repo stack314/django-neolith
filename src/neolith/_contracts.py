@@ -1012,13 +1012,11 @@ def _carries_mark(value: object) -> bool:
             | functools.cached_property,
         ):
             pending.append(typing.cast(Any, item).func)
-        # As getattr_static finds it, the instance's own dict first, read only
-        # through the __dict__ slot its class has from type, then its class,
-        # each class read through type's own descriptors.
+        # As getattr_static finds it, the instance's own dict first, then its
+        # class, each class read through type's own descriptors.
         holder = item if issubclass(kind, type) else kind
-        slot = None if holder is item else _naming.find(kind, "__dict__")
-        own = slot.__get__(item) if type(slot) is types.GetSetDescriptorType else None
-        wrapped = _naming.entry(own, "__wrapped__") if type(own) is dict else None
+        own = None if holder is item else _naming.instance_dict(item)
+        wrapped = None if own is None else _naming.entry(own, "__wrapped__")
         if wrapped is None:
             wrapped = _naming.find(holder, "__wrapped__")
         if wrapped is not None:

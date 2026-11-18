@@ -146,7 +146,7 @@ def admin_code(admin: object) -> tuple[str | None, str | None]:
             return _app(module), f"{_name(klass)}: admin class"
         if _project(module):
             return None, f"{_name(klass)}: admin class"
-    model = vars(admin).get("model")  # safe read: an instance, not a class
+    model = _naming.entry(_naming.instance_dict(admin) or {}, "model")
     meta = (
         _naming.entry(_naming.namespace(model), "_meta")
         if issubclass(type(model), type)

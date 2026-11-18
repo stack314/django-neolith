@@ -503,9 +503,9 @@ def admin_check(**kwargs: object) -> list[checks.CheckMessage]:
     if sites is None:
         return []
     found: set[str] = set()
-    # safe read: a module, and admin sites, which are instances.
-    for site in list(vars(sites).get("all_sites", ())):
-        registry = vars(site).get("_registry")  # safe read: an instance
+    held = _naming.module_dict(sites) or {}
+    for site in list(_naming.entry(held, "all_sites", ())):  # type: ignore[call-overload]
+        registry = _naming.entry(_naming.instance_dict(site) or {}, "_registry")
         if type(registry) is not dict:
             continue
         for admin in list(registry.values()):
@@ -583,7 +583,7 @@ def table_name_problems(configs: Iterable[AppConfig]) -> list[str]:
                     or not through._meta.auto_created
                 ):
                     continue
-                if vars(field).get("db_table"):  # safe read: a field instance
+                if _naming.entry(_naming.instance_dict(field) or {}, "db_table"):
                     continue
                 whole = f"{strip_quotes(options.db_table)}_{field.name}"
                 if through._meta.db_table != whole:

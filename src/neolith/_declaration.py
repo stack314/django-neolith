@@ -318,8 +318,17 @@ class NeolithAppConfig(AppConfig):
         refusals: list[str] = []
         # As getattr_static finds them, the instance first, but each class is
         # read through type's own descriptors, never through its metaclass.
-        held = [object.__getattribute__(self, "__dict__")]
-        held += [_naming.namespace(klass) for klass in _naming.mro(config)]
+        held = [_naming.namespace(klass) for klass in _naming.mro(config)]
+        own = _naming.instance_dict(self)
+        if own is None:
+            # Fail closed: its own name and label cannot be read without
+            # running what the class holds as __dict__.
+            refusals.append(
+                f"app {snapshot.label}: the app config's own attributes cannot "
+                "be read, as its class holds __dict__; remove it"
+            )
+        else:
+            held.insert(0, own)
         for attribute, declared in (("name", snapshot.name), ("label", snapshot.label)):
             found = next(
                 (

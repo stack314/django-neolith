@@ -36,8 +36,10 @@ __all__ = [
     "find",
     "full_name",
     "holds",
+    "instance_dict",
     "is_a",
     "module",
+    "module_dict",
     "mro",
     "name",
     "namespace",
@@ -55,6 +57,7 @@ _MODULE: Final = type.__dict__["__module__"]
 _FUNCTION_QUALNAME: Final = types.FunctionType.__dict__["__qualname__"]
 _MRO: Final = type.__dict__["__mro__"]
 _NAMESPACE: Final = type.__dict__["__dict__"]
+_MODULE_DICT: Final[Any] = vars(types.ModuleType)["__dict__"]
 
 
 def _exact(found: object, limit: int | None) -> str | None:
@@ -209,6 +212,44 @@ def find(cls: object, name: str, default: object = None) -> object:
         if found is not _ABSENT:
             return found
     return default
+
+
+def instance_dict(item: object) -> dict[Any, object] | None:
+    """An object's own ``__dict__``, or None, as ``inspect.getattr_static``
+    reads it.
+
+    ``vars(item)`` looks ``__dict__`` up on the object's class, which can
+    hold anything there. Here every class in the object's order is read
+    through ``type``'s own descriptors, and the dict is read only when each
+    ``__dict__`` they hold is the genuine slot of the class that holds it
+    (``getattr_static``'s ``_shadowed_dict``), through that slot.
+    """
+    found: types.GetSetDescriptorType | None = None
+    for klass in mro(type(item)):
+        slot = entry(namespace(klass), "__dict__", _ABSENT)
+        if slot is _ABSENT:
+            continue
+        if not (
+            type(slot) is types.GetSetDescriptorType
+            and slot.__name__ == "__dict__"
+            and slot.__objclass__ is klass
+        ):
+            return None
+        if found is None:
+            found = slot
+    own = None if found is None else found.__get__(item)
+    return own if type(own) is dict else None
+
+
+def module_dict(module: object) -> dict[str, Any] | None:
+    """A module's own dict, read through ``ModuleType``'s slot rather than
+    looked up on the module's class, or None for anything that is not a
+    module.
+    """
+    if not issubclass(type(module), types.ModuleType):
+        return None
+    own = _MODULE_DICT.__get__(module)
+    return own if type(own) is dict else None
 
 
 def derives(kind: type, base: type) -> bool:

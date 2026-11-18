@@ -870,6 +870,62 @@ def test_a_wrapper_of_a_marked_stub_is_found_whatever_its_metaclass(
     assert any("is marked with @action" in problem for problem in said[0])
 
 
+class _Plain:
+    pass
+
+
+class _Slotted:
+    __slots__ = ("x",)
+
+
+def _raising_dict(self: object) -> NoReturn:
+    raise RuntimeError("hostile __dict__ ran")
+
+
+# Classes whose __dict__ is not the genuine slot of the class holding it.
+_SHADOWS: dict[str, dict[str, object]] = {
+    "a property": {"__dict__": property(_raising_dict)},
+    "another slot": {"__dict__": type.__dict__["__name__"]},
+    "another class's slot": {"__dict__": vars(_Plain)["__dict__"]},
+}
+
+
+def test_instance_dict_reads_an_instance_as_getattr_static_does() -> None:
+    plain = _Plain()
+    plain.x = 1  # type: ignore[attr-defined]
+    assert _naming.instance_dict(plain) is vars(plain)
+    assert _naming.instance_dict(_Slotted()) is None
+    for body in _SHADOWS.values():
+        shadowed = type("Shadow", (), body)()
+        assert _naming.instance_dict(shadowed) is None
+
+
+@pytest.mark.parametrize("body", _SHADOWS.values(), ids=_SHADOWS.keys())
+@pytest.mark.parametrize("position", ["_helper", "helper", "reserve"])
+def test_a_body_item_whose_class_shadows_its_dict_is_judged_as_any_other(
+    body: dict[str, object], position: str
+) -> None:
+    def reserve(self: object, request: Reserve) -> Reserved:
+        raise NotImplementedError
+
+    said = []
+    for item in (type("Shadow", (), {})(), type("Shadow", (), body)()):
+        impl = type("Impl", (), {"reserve": reserve, position: item})
+        said.append(INVENTORY._implementation_problems(impl))
+    assert said[0] == said[1]
+
+
+def test_a_config_whose_class_shadows_its_dict_is_checked_as_it_is_loaded() -> None:
+    body = {"__module__": __name__, "name": "shop.stock", "label": "stock"}
+    package = types.ModuleType("shop.other")
+    package.__path__ = ["/nowhere"]
+    shadowed = {**body, "__dict__": property(_raising_dict)}
+    config = type("StockConfig", (NeolithAppConfig,), shadowed)
+    loaded = config("shop.other", package)
+    with pytest.raises(DeclarationError, match="holds __dict__; remove it"):
+        loaded.import_models()
+
+
 # Every name read goes through neolith._naming.
 
 # Name reads on neolith's own objects, which no author can replace.
@@ -917,6 +973,14 @@ def test_every_class_body_and_order_is_read_through_naming() -> None:
                     or (
                         isinstance(node.func, ast.Attribute)
                         and node.func.attr == "getattr_static"
+                    )
+                    or (
+                        isinstance(node.func, ast.Attribute)
+                        and node.func.attr == "__getattribute__"
+                        and any(
+                            isinstance(arg, ast.Constant) and arg.value == "__dict__"
+                            for arg in node.args
+                        )
                     )
                 )
             ) or (
