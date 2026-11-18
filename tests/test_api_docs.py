@@ -1213,6 +1213,11 @@ def test_every_citation_rule_and_variant_uses_the_one_set_of_joins() -> None:
         ("Accepted (ADR 0022, 2026-11-10).", ["0022"]),
         ("TRN-42 and 1.5 seconds", ["TRN-42"]),
         ("specs 01 and 0.1", ["01"]),
+        # A word followed by a version is a name, such as a licence's; the
+        # same word at the end of a sentence is a citation.
+        ("under MPL-2.0 here", []),
+        ("as CON-30. Then", ["CON-30"]),
+        ("cited as MPL-2 here", ["MPL-2"]),
         # A list of one kind is read whole, a typo in it included, so that the
         # typo is refused.
         ("CON-23, 24 and 30", ["CON-23", "CON-24", "CON-30"]),
