@@ -108,6 +108,8 @@ These rules apply to documentation, docstrings, error messages, commit messages 
 - **G7.** A pull request merges into `next` once it has an approving review, passing checks, and every review comment answered or resolved. `main` changes only through a release pull request, which the maintainer merges.
 - **G8.** A release starts with a pull request into `next` that sets the version and dates the changelog section. The release pull request from `next` into `main` then lists the changes it carries and every decision record whose status it changes. After it merges, a pull request into `next` starts the next `.dev` version.
 
+The [release runbook](docs/releasing.md) walks through a release step by step.
+
 ## How review works
 
 Every pull request is reviewed against this document. Review comments cite the rule they apply, for example "**K2**: this is only detected on the first call". A pull request that breaks a rule is changed, or the exception is agreed in writing in the pull request by the maintainer.

@@ -1,0 +1,449 @@
+# Releasing django-neolith
+
+This is the checklist for publishing a release to PyPI. Follow it from top to bottom, every release. Each step gives the command to run and what it should print. Steps marked **(maintainer)** are done by the maintainer; anyone with write access can do the rest.
+
+A release walks through these branches and pull requests ([CONTRIBUTING G5, G7 and G8](../CONTRIBUTING.md#commits-and-pull-requests)):
+
+1. A **version pull request** into `next` sets the version and dates the changelog section. It is squash-merged.
+2. A **release pull request** from `next` into `main` lists the changes and every decision record whose status changes. The maintainer merges it with a merge commit.
+3. An annotated **tag** `vX` on that merge commit starts [the release workflow](../.github/workflows/release.yml). It builds and checks the files, smoke-tests the wheel, and waits for the maintainer to approve the `release` deployment. Then it publishes to PyPI.
+4. A **`.dev` pull request** into `next` starts the next development version.
+
+Lines marked *Recommendation* are this runbook's advice, not a rule the project has recorded.
+
+## Variables
+
+Every command below reads these. Set them once, in a bash or zsh shell, from a clone of the repository whose `origin` is `stack314/django-neolith` on GitHub.
+
+```
+VERSION=0.1.0a2           # the version this release publishes
+PREVIOUS=0.1.0a1          # the last published version
+NEXT_DEV=0.1.0a3.dev0     # the development version next starts after this release
+REPO=stack314/django-neolith
+PY_FLOOR=python3.12       # pairs with Django 5.2 (ADR 0012)
+PY_NEWEST=python3.15      # pairs with Django 6.1 (ADR 0012)
+WORK=$(mktemp -d)         # builds, virtual environments and notes
+git fetch origin --tags
+```
+
+If `PY_FLOOR` or `PY_NEWEST` is not installed, use the closest Python you have, and say which one you used in the release pull request. CI and the release workflow still run the exact pairs.
+
+## 1. Before you start
+
+- [ ] `gh` can act on the repository.
+  ```
+  gh auth status
+  ```
+  Expected: logged in to github.com, with the `repo` scope.
+- [ ] The version is free on PyPI. A version number is never reused, even one that was yanked.
+  ```
+  curl -s -o /dev/null -w '%{http_code}\n' "https://pypi.org/pypi/django-neolith/${VERSION}/json"
+  ```
+  Expected: `404`.
+- [ ] Everything meant for this release is merged. Each release has a milestone named after its version.
+  ```
+  gh issue list --repo "$REPO" --milestone "${VERSION}" --state open
+  gh pr list --repo "$REPO" --base next --state open --search "milestone:${VERSION}"
+  ```
+  Expected: no pull requests, and no issues except the ones that track the release itself. Move anything that will not ship to the next milestone, with a one-line comment saying why.
+- [ ] CI passed on the tip of `next`.
+  ```
+  git rev-parse origin/next
+  gh run list --repo "$REPO" --workflow ci.yml --branch next --event push -L 1 \
+    --json headSha,conclusion -q '.[0] | "\(.headSha) \(.conclusion)"'
+  ```
+  Expected: the same SHA twice, and `success`.
+- [ ] You know what is on `next` since the last release.
+  ```
+  git log --first-parent --format='- %s' "v${PREVIOUS}..origin/next"
+  ```
+  Expected: every change a user can notice has an entry under `## [Unreleased]` in `CHANGELOG.md`. Keep this list for the release pull request.
+- [ ] You know which decision records change status.
+  ```
+  git switch --detach origin/next
+  for f in docs/adr/[0-9]*.md; do
+    old=$(git show "v${PREVIOUS}:${f}" 2>/dev/null | grep -m1 '^- \*\*Status' || echo "(new)")
+    new=$(grep -m1 '^- \*\*Status' "$f")
+    [ "$old" != "$new" ] && echo "$f: $old -> $new"
+  done
+  ```
+  Expected: one line per record that is new or changed status. Keep the output for the release pull request.
+- [ ] Every specification document whose roadmap step is complete in this release is enforced by the spec trace ([T5](../CONTRIBUTING.md#tests)).
+  ```
+  grep '^enforce' tests/spec_trace.toml
+  ```
+- [ ] For 0.1 itself: the gate in the [roadmap](roadmap.md) holds, verified on Python 3.15 with Django 6.1 ([ADR 0012](adr/0012-supported-python-and-django-versions.md)).
+
+## 2. The version pull request into `next`
+
+- [ ] The version follows [PEP 440](https://peps.python.org/pep-0440/) in its normalized form: `0.1.0a2` for an alpha, `0.1.0b1` for a beta, `0.1.0rc1` for a release candidate, `0.1.0` for a final release. It is never a `.dev` version, and it sorts after the last release.
+  ```
+  python - "${PREVIOUS}" "${VERSION}" <<'PY'
+  import sys
+  from packaging.version import Version
+
+  previous, version = sys.argv[1], sys.argv[2]
+  assert str(Version(version)) == version, f"not normalized: write {Version(version)}"
+  assert not Version(version).is_devrelease, "a release is never a .dev version"
+  assert Version(previous) < Version(version), f"{version} does not sort after {previous}"
+  print(version, "is a pre-release" if Version(version).is_prerelease else "is a final release")
+  PY
+  ```
+  Expected: `0.1.0a2 is a pre-release` (or `is a final release`). `packaging` is in the `test` dependency group.
+- [ ] Make a branch from `next`.
+  ```
+  git switch -c "chore/version-${VERSION}" origin/next
+  ```
+- [ ] Find every line that carries the version or a status.
+  ```
+  git grep -nwiE "alpha|beta|${PREVIOUS}|--pre|no release yet|Development Status|draft 0\.1" \
+    -- ':!CHANGELOG.md' ':!tests' ':!docs/adr' ':!spec/0*'
+  ```
+  Expected: the lines below, and no others. If another line appears, add it to this list in the same pull request.
+- [ ] `src/neolith/__init__.py`: `__version__ = "<VERSION>"`. This is the only place the version is set; the build reads it, and the release workflow checks the tag against it.
+- [ ] `CHANGELOG.md` ([Keep a Changelog](https://keepachangelog.com/en/1.1.0/)):
+  - [ ] `## [Unreleased]` becomes `## [<VERSION>] - <YYYY-MM-DD>`, dated the day you expect to tag.
+  - [ ] A new, empty `## [Unreleased]` sits above it. *Recommendation*, following Keep a Changelog.
+  - [ ] The links at the bottom: `[Unreleased]` compares from the new tag, and the new version links to its release page.
+    ```
+    [Unreleased]: https://github.com/stack314/django-neolith/compare/v<VERSION>...HEAD
+    [<VERSION>]: https://github.com/stack314/django-neolith/releases/tag/v<VERSION>
+    ```
+  - [ ] Every breaking change is listed under *Changed* or *Removed* ([G6](../CONTRIBUTING.md#commits-and-pull-requests)). These commands list the pull requests that declared one:
+    ```
+    git log --format='%s' "v${PREVIOUS}..origin/next" | grep -E '^[a-z]+(\([^)]*\))?!:'
+    ```
+- [ ] `README.md`. This file is also the description on PyPI.
+  - [ ] The status line: `**Status: alpha (<VERSION>). The API may change before 0.1.**`, with the right status word.
+  - [ ] The install line: `pip install --pre django-neolith` while the release is a pre-release. *Recommendation:* for a final release, decide whether `--pre` stays, since it also admits pre-release versions of the dependencies.
+  - [ ] The *Features* list and its "Not yet on `next`" line match the changelog.
+  - [ ] The specification's status in *Links* matches `spec/README.md`.
+- [ ] `pyproject.toml`:
+  - [ ] The `Development Status` classifier matches the status word: `3 - Alpha` for an alpha. *Recommendation:* `4 - Beta` for a beta or release candidate, and `5 - Production/Stable` only from 1.0.
+  - [ ] `requires-python`, the `Programming Language :: Python :: 3.N` classifiers and the `Framework :: Django :: X.Y` classifiers match [ADR 0012](adr/0012-supported-python-and-django-versions.md) and the CI matrix in `.github/workflows/ci.yml`.
+- [ ] `docs/site/index.md`: the status line.
+- [ ] `CONTRIBUTING.md`: "It is in alpha" in the opening paragraph.
+- [ ] `SECURITY.md`: *Supported versions* describes the released versions.
+- [ ] `spec/README.md`: the specification's status line. It changes only when the specification's own status changes.
+- [ ] Commit, push and open the pull request into `next`, in the milestone. Its title follows [G2](../CONTRIBUTING.md#commits-and-pull-requests). *Recommendation:* `chore: set version <VERSION>`.
+  ```
+  gh pr create --repo "$REPO" --base next --title "chore: set version ${VERSION}" \
+    --body-file "$WORK/version-pr.md" --milestone "${VERSION}"
+  ```
+- [ ] It is reviewed, CI passes, and it is squash-merged ([G5, G7](../CONTRIBUTING.md#commits-and-pull-requests)).
+
+*Recommendation:* from here until the release pull request merges, merge nothing else into `next`. The release pull request's head is `next` itself, so a later merge would join the release unverified. Step 4 guards this with `--match-head-commit`.
+
+## 3. Verify what will be released
+
+Run every check on the tip of `next` after the version pull request merged. If one fails, fix it by a pull request into `next`, and run this section again from the start.
+
+- [ ] Check out that commit in a clean worktree, and record it.
+  ```
+  git fetch origin
+  git worktree add --detach "$WORK/src" origin/next
+  cd "$WORK/src"
+  VERIFIED=$(git rev-parse HEAD); echo "$VERIFIED"
+  grep '^__version__' src/neolith/__init__.py
+  ```
+  Expected: `__version__ = "<VERSION>"`. Keep `VERIFIED` for steps 4 and 5.
+- [ ] The full suite and the spec trace, on both pairs, from the built package as CI installs it.
+  ```
+  for DJANGO in 5.2 6.1; do
+    PY=$PY_FLOOR; [ "$DJANGO" = 6.1 ] && PY=$PY_NEWEST
+    "$PY" -m venv "$WORK/test-$DJANGO"
+    "$WORK/test-$DJANGO/bin/python" -m pip install --upgrade pip
+    "$WORK/test-$DJANGO/bin/python" -m pip install . --group test "Django~=$DJANGO.0"
+    "$WORK/test-$DJANGO/bin/python" -m pytest -p no:cacheprovider --spec-report="$WORK/spec-$DJANGO.json"
+    "$WORK/test-$DJANGO/bin/python" scripts/spec_trace.py --report "$WORK/spec-$DJANGO.json" | tail -1
+  done
+  ```
+  Expected: pytest reports no failures and no errors; two documentation tests are skipped, since the `docs` group is not installed. The trace ends with `0 problems`.
+- [ ] Lint, formatting and types.
+  ```
+  "$PY_NEWEST" -m venv "$WORK/dev"
+  "$WORK/dev/bin/python" -m pip install --upgrade pip
+  "$WORK/dev/bin/python" -m pip install -e . --group dev "Django~=5.2.0"
+  "$WORK/dev/bin/ruff" check . && "$WORK/dev/bin/ruff" format --check .
+  "$WORK/dev/bin/mypy"
+  ```
+  Expected: `All checks passed!`, `... files already formatted`, and `Success: no issues found`.
+- [ ] The documentation site builds and passes its checks as a release build, which it is now that the version has no `.dev`. This needs Python 3.13 or newer ([ADR 0024](adr/0024-user-documentation-is-built-with-sphinx-from-this-repository.md)).
+  ```
+  "$WORK/dev/bin/python" -m pip install -e . --group docs
+  "$WORK/dev/bin/python" scripts/docs.py check
+  ```
+  Expected: `docs: every check passed (check)`.
+- [ ] Build the sdist and the wheel with the tools the release workflow pins, and check their metadata.
+  ```
+  "$PY_FLOOR" -m venv "$WORK/build"
+  "$WORK/build/bin/python" -m pip install -c .github/release-constraints.txt pip build twine
+  PIP_CONSTRAINT="$PWD/.github/release-constraints.txt" \
+    "$WORK/build/bin/python" -m build --outdir "$WORK/dist"
+  "$WORK/build/bin/python" -m twine check --strict "$WORK"/dist/*
+  ```
+  Expected: `Successfully built django_neolith-<VERSION>.tar.gz and django_neolith-<VERSION>-py3-none-any.whl`, then `PASSED` for both files. `twine check` also proves the README renders as the PyPI description.
+- [ ] Read the wheel's metadata.
+  ```
+  python3 - "$WORK"/dist/*.whl <<'PY'
+  import sys
+  import zipfile
+  from email.parser import Parser
+
+  wheel = zipfile.ZipFile(sys.argv[1])
+  names = wheel.namelist()
+  meta = Parser().parsestr(
+      wheel.read(next(n for n in names if n.endswith(".dist-info/METADATA"))).decode()
+  )
+  for key in ("Name", "Version", "Requires-Python", "License-Expression"):
+      print(f"{key}: {meta[key]}")
+  for key in ("Requires-Dist", "Classifier", "Project-URL"):
+      for value in meta.get_all(key, []):
+          print(f"{key}: {value}")
+  print("py.typed:", "neolith/py.typed" in names)
+  PY
+  ```
+  Expected: `Name: django-neolith`, `Version: <VERSION>`, `Requires-Python: >=3.12`, `License-Expression: BSD-3-Clause`, the dependencies and classifiers in `pyproject.toml`, and `py.typed: True`.
+- [ ] Run the release workflow's smoke script against the wheel on both pairs. The script runs only when a tag is pushed, so CI never runs it; a change to start-up has broken it before. These commands take the script from `release.yml` itself, so it is the one the tag will run.
+  ```
+  awk 'index($0, "venv/bin/python - <<") {inside = 1; next} inside && $1 == "EOF" {exit} inside {print}' \
+    .github/workflows/release.yml | sed 's/^ \{10\}//' > "$WORK/smoke.py"
+  for DJANGO in 5.2 6.1; do
+    PY=$PY_FLOOR; [ "$DJANGO" = 6.1 ] && PY=$PY_NEWEST
+    "$PY" -m venv "$WORK/smoke-$DJANGO"
+    "$WORK/smoke-$DJANGO/bin/python" -m pip install "$WORK"/dist/*.whl "Django~=$DJANGO.0"
+    (cd "$WORK" && TAG="v${VERSION}" "$WORK/smoke-$DJANGO/bin/python" - < "$WORK/smoke.py")
+  done
+  ```
+  Expected: `neolith <VERSION> on Django 5.2.<n>` and `neolith <VERSION> on Django 6.1.<n>`. The script is run from `$WORK`, where there is no source tree, so it can only import the installed wheel.
+
+## 4. The release pull request, `next` into `main`
+
+- [ ] Write the description in `$WORK/release-pr.md` ([G4, G8](../CONTRIBUTING.md#commits-and-pull-requests)):
+  - a summary of three or four bullets: the version, what it delivers, and the milestone;
+  - *Changes*: the `git log` list from step 1;
+  - *Decision records*: every record whose status changes, from step 1, or "None";
+  - *How it was verified*: the `VERIFIED` SHA, and the results of section 3 with the Python and Django versions used.
+
+  The merge commit takes this title and description, so they are what `main` records.
+- [ ] Open it. *Recommendation:* the title `chore: release <VERSION>` ([G2](../CONTRIBUTING.md#commits-and-pull-requests)).
+  ```
+  gh pr create --repo "$REPO" --base main --head next --title "chore: release ${VERSION}" \
+    --body-file "$WORK/release-pr.md" --milestone "${VERSION}"
+  ```
+- [ ] The required checks pass, and it has an approving review.
+  ```
+  gh pr checks <number> --repo "$REPO" --required --watch
+  ```
+  Expected: the lint job and the four test jobs pass.
+- [ ] **(maintainer)** Merge it with a merge commit, only if `next` is still the commit section 3 verified. Never squash or rebase, and never delete the branch.
+  ```
+  gh pr merge <number> --repo "$REPO" --merge --match-head-commit "$VERIFIED"
+  ```
+  Expected: the pull request is merged. If `next` moved, the merge is refused: verify the new tip (section 3) and update the description first.
+- [ ] `next` still exists.
+  ```
+  git ls-remote origin refs/heads/next
+  ```
+
+## 5. Tag and publish
+
+- [ ] Find the merge commit and check it.
+  ```
+  git fetch origin
+  MERGE=$(gh pr view <number> --repo "$REPO" --json mergeCommit -q .mergeCommit.oid)
+  git log -1 --format='%H%nparents: %P%nsubject: %s' "$MERGE"
+  git merge-base --is-ancestor "$MERGE" origin/main && echo "on main"
+  git diff --quiet "$VERIFIED" "$MERGE" && echo "same files as verified"
+  git show "${MERGE}:src/neolith/__init__.py" | grep '^__version__'
+  ```
+  Expected: two parents, the release pull request's title as the subject, `on main`, `same files as verified`, and `__version__ = "<VERSION>"`. If the files differ, do not tag: run section 3 on `$MERGE`.
+- [ ] Make an annotated tag on the merge commit, and check it.
+  ```
+  git tag -a "v${VERSION}" -m "django-neolith ${VERSION}" "$MERGE"
+  git cat-file -t "v${VERSION}"
+  git rev-parse "v${VERSION}^{commit}"
+  ```
+  Expected: `tag`, then the merge commit's SHA.
+- [ ] Push the tag by name, and nothing else.
+  ```
+  git push origin "refs/tags/v${VERSION}"
+  ```
+- [ ] Watch the release run.
+  ```
+  RUN=$(gh run list --repo "$REPO" --workflow release.yml --event push -L 1 --json databaseId -q '.[0].databaseId')
+  gh run view "$RUN" --repo "$REPO"
+  ```
+  Expected: the run is for `v<VERSION>`. *Build and check* and both *Smoke test* jobs pass, and *Publish to PyPI* waits for review.
+- [ ] **(maintainer)** Approve the `release` deployment, only once the build and both smoke tests have passed. On the run's page, choose *Review deployments*, tick `release`, then *Approve and deploy*. Or:
+  ```
+  ENV_ID=$(gh api "repos/${REPO}/environments/release" -q .id)
+  gh api -X POST "repos/${REPO}/actions/runs/${RUN}/pending_deployments" \
+    -F "environment_ids[]=${ENV_ID}" -f state=approved -f comment="Release ${VERSION}"
+  ```
+- [ ] The run finishes.
+  ```
+  gh run watch "$RUN" --repo "$REPO" --exit-status
+  ```
+  Expected: every job succeeds, and the publish job notes that it generated and uploaded attestations.
+
+If a job fails before *Publish to PyPI* runs, nothing was published. See [section 9](#9-when-something-goes-wrong).
+
+## 6. After publishing, verify
+
+- [ ] PyPI has the release, with both files.
+  ```
+  curl -s "https://pypi.org/pypi/django-neolith/${VERSION}/json" | python3 -c '
+  import json, sys
+  d = json.load(sys.stdin)
+  print(d["info"]["version"], d["info"]["requires_python"], "yanked" if d["info"]["yanked"] else "not yanked")
+  for f in d["urls"]:
+      print(f["packagetype"], f["filename"])'
+  ```
+  Expected: `<VERSION> >=3.12 not yanked`, then a `bdist_wheel` and an `sdist` line. The page https://pypi.org/project/django-neolith/ shows the README.
+- [ ] Each file has its provenance.
+  ```
+  for f in "django_neolith-${VERSION}-py3-none-any.whl" "django_neolith-${VERSION}.tar.gz"; do
+    curl -s -o /dev/null -w "%{http_code} $f\n" -H 'Accept: application/vnd.pypi.integrity.v1+json' \
+      "https://pypi.org/integrity/django-neolith/${VERSION}/${f}/provenance"
+  done
+  ```
+  Expected: `200` for both.
+- [ ] It installs from PyPI into clean virtual environments on both pairs, and the tag's smoke script and the README's tests pass against it.
+  ```
+  git worktree add --detach "$WORK/tag" "v${VERSION}"
+  git show "v${VERSION}:.github/workflows/release.yml" \
+    | awk 'index($0, "venv/bin/python - <<") {inside = 1; next} inside && $1 == "EOF" {exit} inside {print}' \
+    | sed 's/^ \{10\}//' > "$WORK/smoke-pypi.py"
+  for DJANGO in 5.2 6.1; do
+    PY=$PY_FLOOR; [ "$DJANGO" = 6.1 ] && PY=$PY_NEWEST
+    "$PY" -m venv "$WORK/pypi-$DJANGO"
+    "$WORK/pypi-$DJANGO/bin/python" -m pip install --upgrade pip
+    "$WORK/pypi-$DJANGO/bin/python" -m pip install --no-cache-dir "django-neolith==${VERSION}" "Django~=$DJANGO.0"
+    (cd "$WORK" && TAG="v${VERSION}" "$WORK/pypi-$DJANGO/bin/python" - < "$WORK/smoke-pypi.py")
+    (cd "$WORK/tag" && "$WORK/pypi-$DJANGO/bin/python" -m pip install --group test \
+      && "$WORK/pypi-$DJANGO/bin/python" -m pytest -q -p no:cacheprovider tests/test_readme.py tests/test_package.py)
+  done
+  ```
+  Expected: `neolith <VERSION> on Django ...` for each pair, then the tests pass. `pip install --group test` installs only the test tools, so the tests import the release from PyPI. A new release can take a few minutes to reach every PyPI mirror; if pip cannot find it, wait and try again.
+- [ ] Create the GitHub Release, with the changelog section as its notes. The release workflow does not create one, and the changelog links to it. Relative links in the section are made absolute at the tag.
+  ```
+  cd "$WORK/tag"
+  python3 - "${VERSION}" > "$WORK/notes.md" <<'PY'
+  import pathlib
+  import re
+  import sys
+
+  version = sys.argv[1]
+  text = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8")
+  heading = rf"^## \[{re.escape(version)}\] - \d{{4}}-\d{{2}}-\d{{2}}$"
+  section = re.search(heading + r"\n(.*?)(?=^## |^\[)", text, re.MULTILINE | re.DOTALL)
+  base = f"https://github.com/stack314/django-neolith/blob/v{version}/"
+  links = re.compile(r"\]\((?!https?://|#)([^)]+)\)")
+  print(links.sub(lambda m: f"]({base}{m[1]})", section[1]).strip())
+  PY
+  gh release create "v${VERSION}" --repo "$REPO" --verify-tag --title "${VERSION}" \
+    --notes-file "$WORK/notes.md" --prerelease
+  ```
+  Leave out `--prerelease` for a final release. Expected: the URL of the release.
+- [ ] The changelog's link to the release works.
+  ```
+  curl -s -o /dev/null -w '%{http_code}\n' "https://github.com/stack314/django-neolith/releases/tag/v${VERSION}"
+  ```
+  Expected: `200`.
+- [ ] The README's badges show the release. They read PyPI through shields.io, and both cache for a while, so a badge can lag behind PyPI.
+  ```
+  for b in pypi/v/django-neolith pypi/pyversions/django-neolith pypi/frameworkversions/django/django-neolith; do
+    curl -s "https://img.shields.io/$b" | grep -o '<title>[^<]*'
+  done
+  ```
+  Expected: `pypi: v<VERSION>`, the supported Python versions and the supported Django versions. Until a final release exists, the version badge shows the newest pre-release.
+- [ ] The documentation site at https://docs.stack314.com/neolith/ shows the release. It is built outside this repository, from a copy of its documents, so it changes only when that copy is refreshed.
+  ```
+  curl -sL https://docs.stack314.com/neolith/project/changelog/ | grep -c "${VERSION}"
+  ```
+  Expected: a count of at least 1. If it is 0, ask for the site to be refreshed where it is built.
+
+## 7. The landing page
+
+The page https://stack314.com/neolith/ is updated at every release. Its source is in the website's own repository, which is not public; changes are requested and made there, by that repository's process. Each request gives the current text, the replacement ready to paste, and how to check it. Where a value comes "from the tag", read it with `git show "v${VERSION}:<path>"`.
+
+- [ ] The page's description (meta and structured data) and its status word everywhere it appears (the kicker, the status sheet, the introductions) match the `Development Status` classifier at the tag, with "the API may change" for as long as the version is before 1.0.
+- [ ] The status sheet's *latest release* links to `https://pypi.org/project/django-neolith/<VERSION>/`, and that URL returns 200.
+- [ ] The status sheet's *python* and *django* match `requires_python` on PyPI and the `Framework :: Django :: X.Y` classifiers at the tag.
+- [ ] The status sheet's *specification* matches the status line of `spec/README.md` at the tag.
+- [ ] Every sentence that names a version, a mode or what is built (for example "runs apps attached", "detached is not built yet") matches the changelog section and the README's "Not yet on" line at the tag.
+- [ ] The evidence rows:
+  - [ ] *Specification*: the number of documents still outlines matches the status lines of `spec/0*.md` at the tag.
+  - [ ] *Design decisions*: the counts of Accepted and Proposed records match `docs/adr/README.md` at the tag.
+  - [ ] *Requirement trace*: matches the `enforce` list in `tests/spec_trace.toml` at the tag.
+  - [ ] *CI matrix*: matches `.github/workflows/ci.yml` at the tag.
+  - [ ] Each capability that shipped in this release moves from *Plan* to *Fact*, naming the release; the rest stay *Plan*.
+- [ ] *Not solved yet*: each item is still open, per `docs/open-questions.md` and the roadmap's "Deferred past 0.1" at the tag.
+- [ ] *What's next*: the current roadmap step and what is open in it match the open `roadmap` issues.
+  ```
+  gh issue list --repo "$REPO" --label roadmap --state open
+  ```
+- [ ] *Get started*: the install command is the README's install line at the tag, and resolves to the release.
+  ```
+  python3 -m venv "$WORK/landing" && "$WORK/landing/bin/python" -m pip install --dry-run --pre django-neolith
+  ```
+  Expected: `Would install ... django-neolith-<VERSION> ...`.
+- [ ] *Get started*: the link to the release's README is `https://pypi.org/project/django-neolith/<VERSION>/`.
+- [ ] The code example is identical to the README's example at the tag, and its label names the release. The README's example runs against the release in section 6, so an identical copy runs too.
+- [ ] The notes under the example and the figures ("planned for 0.1", "only in-process is built", "the settings format is not final") are still true.
+- [ ] Every external link on the page answers.
+  ```
+  curl -sL https://stack314.com/neolith/ | grep -oE 'href="https://[^"]+"' | sed 's/^href="//; s/"$//' | sort -u \
+    | while read -r url; do echo "$(curl -s -o /dev/null -w '%{http_code}' -L "$url") $url"; done
+  ```
+  Expected: `200` on every line.
+- [ ] The same facts elsewhere on the website (its home page, about page, FAQ and `llms.txt`) are checked at the same time.
+
+## 8. After the release
+
+- [ ] Start the next development version with a pull request into `next` ([G8](../CONTRIBUTING.md#commits-and-pull-requests)). Run this in your own clone, not in the worktrees under `$WORK`.
+  ```
+  git fetch origin
+  git switch -c "chore/start-${NEXT_DEV}" origin/next
+  sed -i.bak "s/^__version__ = .*/__version__ = \"${NEXT_DEV}\"/" src/neolith/__init__.py && rm src/neolith/__init__.py.bak
+  grep '^__version__' src/neolith/__init__.py
+  grep -n -A1 '^## \[Unreleased\]' CHANGELOG.md
+  ```
+  Expected: `__version__ = "<NEXT_DEV>"`, and an empty `## [Unreleased]` section at the top of the changelog (add one if the version pull request did not). *Recommendation:* the title `chore: start <NEXT_DEV> after releasing <VERSION>`, and `NEXT_DEV` is the version the next release is expected to have, plus `.dev0`. Until this merges, the documentation build treats `next` as a release (`docs/site/conf.py`).
+- [ ] The release's milestone is closed, after the checks in section 6 pass. Open issues left in it move to the next milestone first, each with a one-line comment saying why.
+- [ ] The roadmap issue this release finishes is closed, or its open parts are moved to the next milestone, and its task list is ticked. The project board shows the release's issues and pull requests as done.
+- [ ] `docs/roadmap.md` still describes what is left. It changes only when a step's scope changes.
+- [ ] Announcements: the repository names no place where releases are announced. If one is added, list it here.
+- [ ] Remove the scratch worktrees: `git worktree remove --force "$WORK/src"; git worktree remove --force "$WORK/tag"`.
+
+## 9. When something goes wrong
+
+**Never delete a release from PyPI, and never reuse a version number.** PyPI refuses a file name that was ever uploaded, even after deletion.
+
+**The build or a smoke test fails, before publishing.** Nothing reached PyPI. If the run is still waiting for review, reject the deployment (*Review deployments*, then *Reject*), or cancel the run with `gh run cancel "$RUN" --repo "$REPO"`. Fix the cause by a pull request into `next`, then a new release pull request. *Recommendation:* since the version never reached PyPI, keep it, and move the tag to the new merge commit once that merge is verified:
+```
+git push origin --delete "refs/tags/v${VERSION}"
+git tag -d "v${VERSION}"
+```
+Then repeat section 5. Do not open the `.dev` pull request until the release is published.
+
+**The publish job fails.** Read its log with `gh run view "$RUN" --repo "$REPO" --log-failed`, and check PyPI (section 6). If no file was uploaded, fix the cause (for example the trusted publisher's settings, section 10), then run the job again with `gh run rerun "$RUN" --repo "$REPO" --failed`. If one file was uploaded and the other was not, a rerun fails on the file that exists, because the workflow does not skip existing files. *Recommendation:* yank that version and release the next one.
+
+**A bad release reached PyPI.** Yank it; do not delete it. On https://pypi.org/manage/project/django-neolith/releases/, open the version's *Options*, choose *Yank*, and give the reason. pip then skips it unless it is pinned exactly. Release a fixed version through the whole runbook. *Recommendation:* mark the changelog heading `## [<VERSION>] - <date> [YANKED]` in the fixed release's version pull request, as Keep a Changelog suggests, and add the reason to the top of the GitHub Release's notes.
+
+**The tag is on the wrong commit.** If the release workflow refused it ("is not on main" or "does not match `__version__`"), nothing was published: delete the tag as above and tag the right commit. If the wrong commit was published, the tag stays where it is, since it records what was published; treat it as a bad release.
+
+**A fix must ship while `next` holds work that is not ready.** The repository has no recorded way to do this; `main` changes only through a release pull request from `next` ([G7](../CONTRIBUTING.md#commits-and-pull-requests)). *Recommendation:* land the fix on `next` and release `next` as it stands, since each pull request leaves `next` working. If that is not possible, the maintainer decides an exception in writing, in an issue, before any branch is made. Such a fix would merge into `main` from a branch made from the last tag, and `next` must then take `main`'s merge commit before its next release pull request; `next` accepts only squash merges today, so that step needs the maintainer too.
+
+## 10. One-time setup (already in place)
+
+For reference, and for checking when something in section 5 fails.
+
+- **PyPI trusted publisher** for the project `django-neolith`: owner `stack314`, repository `django-neolith`, workflow `release.yml`, environment `release`. No API token is stored anywhere.
+- **The `release` environment** (Settings, Environments): the maintainer is a required reviewer, and only tags matching `v*` may deploy to it.
+- **Branch rulesets** (Settings, Rules):
+  - `next`: no deletion or force push; changes by pull request only, squash merge only, one approving review, stale approvals dismissed on push; the lint job and the four test jobs required.
+  - `main` (the default branch): the same, but merge commits only. A second ruleset for `main`, which would let only admins update it, exists and is disabled.
+- **Merge settings** (Settings, General): squash merging and merge commits allowed, rebase merging off. Both take the pull request's title and description as the commit's message. Head branches are deleted after merge, but the rulesets keep `next` from being deleted.
+- **CI** (`.github/workflows/ci.yml`) runs on every pull request and on every push to `main` and `next`.
