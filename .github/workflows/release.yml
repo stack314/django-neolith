@@ -65,6 +65,8 @@ jobs:
       # fails here.
       - name: Build the sdist and the wheel
         run: python -m build
+      - name: The sdist carries every tracked file
+        run: python scripts/sdist_check.py dist/*.tar.gz
       - name: Check the metadata
         run: python -m twine check --strict dist/*
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
