@@ -895,9 +895,12 @@ def test_instance_dict_reads_an_instance_as_getattr_static_does() -> None:
     plain.x = 1  # type: ignore[attr-defined]
     assert _naming.instance_dict(plain) is vars(plain)
     assert _naming.instance_dict(_Slotted()) is None
+    # Read exactly where getattr_static reads it, on each Python version.
     for body in _SHADOWS.values():
         shadowed = type("Shadow", (), body)()
-        assert _naming.instance_dict(shadowed) is None
+        object.__setattr__(shadowed, "x", 1)
+        read = inspect.getattr_static(shadowed, "x", None) == 1
+        assert (_naming.instance_dict(shadowed) is not None) is read
 
 
 @pytest.mark.parametrize("body", _SHADOWS.values(), ids=_SHADOWS.keys())

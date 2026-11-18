@@ -222,17 +222,19 @@ def instance_dict(item: object) -> dict[Any, object] | None:
     hold anything there. Here every class in the object's order is read
     through ``type``'s own descriptors, and the dict is read only when each
     ``__dict__`` they hold is the genuine slot of the class that holds it
-    (``getattr_static``'s ``_shadowed_dict``), through that slot.
+    (``getattr_static``'s ``_shadowed_dict``), through that slot. Python 3.15
+    gives every class the one slot ``object``'s, which counts as genuine.
     """
     found: types.GetSetDescriptorType | None = None
     for klass in mro(type(item)):
         slot = entry(namespace(klass), "__dict__", _ABSENT)
         if slot is _ABSENT:
             continue
+        # Python 3.15 shares one slot, whose class is object.
         if not (
             type(slot) is types.GetSetDescriptorType
             and slot.__name__ == "__dict__"
-            and slot.__objclass__ is klass
+            and (slot.__objclass__ is klass or slot.__objclass__ is object)
         ):
             return None
         if found is None:
