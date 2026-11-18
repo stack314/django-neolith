@@ -14,5 +14,4 @@ OVR-5 = "Shown by the example apps running attached and detached, roadmap step 8
 OVR-7 = "Binds app code, which keeps the call context out of request types."
 CON-1 = "Binds contract authors. Breaking-change detection is deferred past 0.1."
 CON-5 = "Binds app authors. The conformance suite checks it for the reference contract, roadmap step 6."
-CON-12 = "Holds by construction in this implementation: a contract's actions are the methods of one class, where a name occurs once. A redefined method replaces the earlier one before neolith sees the class, and linters report it (pyflakes F811)."
 APP-4 = "Binds deployment. A host sees only the apps it holds, so no host can check names across hosts."
