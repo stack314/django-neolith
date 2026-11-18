@@ -19,10 +19,12 @@ import base64
 import binascii
 import hmac
 import json
+import math
 import re
 from collections.abc import Mapping
 from typing import Final, NoReturn, final
 
+from neolith import _naming
 from neolith._portable import SAFE_INTEGER_MAX
 
 __all__ = [
@@ -179,10 +181,9 @@ def secret_problem(value: object) -> str | None:
     The text says what was found and never shows the value.
     """
     if type(value) is not str:
-        kind = "bytes" if type(value) is bytes else "value that is not a str"
         return (
-            f"is a {kind}; a secret is a str of 43 base64url characters, "
-            f"which is 32 bytes ({_GENERATE})"
+            f"is a {_naming.type_name(value)}, not exactly a str; a secret is a "
+            f"str of 43 base64url characters, which is 32 bytes ({_GENERATE})"
         )
     text: str = value
     if text in (_EXAMPLE_HEX, _EXAMPLE_HEX.upper(), _EXAMPLE_B64):
@@ -223,7 +224,13 @@ def secret(value: str, app: str, key_id: str) -> Secret:
 def _strict(data: bytes) -> dict[str, object] | None:
     """An I-JSON object (spec 03, ADR 0019), or ``None``: UTF-8, no member
     name twice, no lone surrogate, no ``NaN`` or infinity, and integers with
-    no fraction or exponent, within ±(2^53 - 1).
+    no fraction or exponent within ±(2^53 - 1); a number with a fraction or
+    an exponent is read as a double, and must be finite.
+
+    A text nested deeper than the json module reads (``RecursionError``) is
+    ``None`` too, as ``read_principal`` treats it. Within the 4096-byte
+    bound of a valid token no first part can be nested that deep, so this
+    changes the outcome of no token that could be valid.
     """
 
     class _Refused(Exception):
@@ -235,7 +242,7 @@ def _strict(data: bytes) -> dict[str, object] | None:
             raise _Refused
         return found
 
-    def refuse(literal: str) -> NoReturn:
+    def constant(literal: str) -> NoReturn:
         raise _Refused
 
     def integer(literal: str) -> int:
@@ -247,13 +254,19 @@ def _strict(data: bytes) -> dict[str, object] | None:
             raise _Refused
         return number
 
+    def double(literal: str) -> float:
+        number = float(literal)
+        if not math.isfinite(number):  # such as 1e400
+            raise _Refused
+        return number
+
     try:
         text = data.decode("utf-8")
         value = json.loads(
             text,
             object_pairs_hook=pairs,
-            parse_float=refuse,
-            parse_constant=refuse,
+            parse_float=double,
+            parse_constant=constant,
             parse_int=integer,
         )
     except (_Refused, ValueError, RecursionError):

@@ -65,7 +65,7 @@ class CredentialRefused(Exception):  # the name ADR 0027 fixes
     def __init__(self, message: str) -> None:
         """Keep ``message``, which is a ``str``."""
         if type(message) is not str:
-            raise TypeError("a refusal's message is a str of fixed text")
+            raise TypeError("a refusal's message is exactly a str of fixed text")
         super().__init__(message)
 
     @property
@@ -144,15 +144,12 @@ class SharedSecretBackend(CallerBackend):
     """
 
     def __init__(self, **options: object) -> None:
-        """Check the options and keep each secret as a private object."""
-        problems: list[str] = []
-        given = options.pop("secrets", _MISSING)
-        problems.extend(
-            f"the option {name!r} is not taken (the one option is 'secrets')"
-            for name in sorted(options)
-        )
-        keys, found = _accepted(given)
-        problems.extend(found)
+        """Check the options and keep each secret as a private object.
+
+        The secrets' text is read and dropped inside ``_options``, so no
+        frame on a refusal's traceback holds it.
+        """
+        keys, problems = _options(options)
         if problems:
             raise ImproperlyConfigured("; ".join(problems))
         self._keys: Mapping[str, Mapping[str, _token.Secret]] = keys
@@ -185,6 +182,21 @@ class SharedSecretBackend(CallerBackend):
 
 
 _MISSING: Final = object()
+
+
+def _options(
+    options: dict[str, object],
+) -> tuple[dict[str, dict[str, _token.Secret]], list[str]]:
+    """The key table and every problem of the backend's options. It takes
+    ``secrets`` out of ``options``, which is the constructor's own dict.
+    """
+    given = options.pop("secrets", _MISSING)
+    problems = [
+        f"the option {name!r} is not taken (the one option is 'secrets')"
+        for name in sorted(options)
+    ]
+    keys, found = _accepted(given)
+    return keys, problems + found
 
 
 def _check(

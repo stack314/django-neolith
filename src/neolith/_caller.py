@@ -277,6 +277,24 @@ def _signing(value: object) -> dict[str, _token.Secret]:
     }
 
 
+def _accepted(backend: SharedSecretBackend) -> list[_token.Secret]:
+    """The secrets a shared-secret backend holds, read from its own
+    attributes only: a subclass that never ran the base constructor holds
+    none.
+    """
+    table = _naming.entry(_naming.instance_dict(backend) or {}, "_keys")
+    if type(table) is not dict:
+        return []
+    held: dict[object, object] = table
+    return [
+        secret
+        for keys in held.values()
+        if type(keys) is dict
+        for secret in keys.values()
+        if type(secret) is _token.Secret
+    ]
+
+
 def key_problems(
     signing: Mapping[str, _token.Secret], shared: SharedSecretBackend | None
 ) -> list[str]:
@@ -285,11 +303,7 @@ def key_problems(
     The same app, key id and secret on the signing and the accepting side
     is admitted.
     """
-    accepted: list[_token.Secret] = (
-        []
-        if shared is None
-        else [s for keys in shared._keys.values() for s in keys.values()]
-    )
+    accepted = [] if shared is None else _accepted(shared)
     problems: list[str] = []
     for mine in signing.values():
         for theirs in accepted:

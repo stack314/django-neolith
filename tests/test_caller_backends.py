@@ -193,6 +193,8 @@ _ROWS: list[tuple[str, str, str, str]] = [
     ),
     ("claims-not-json", signed(raw_body="not json"), _token.MEMBERS, "HTTP-8"),
     ("extra-header", signed(head=header(x5u="u")), _token.MEMBERS, "HTTP-9"),
+    ("double-in-header", signed(head=header(x=1.5)), _token.MEMBERS, "HTTP-9"),
+    ("exponent-in-claims", signed(body=claims(x=1e300)), _token.MEMBERS, "HTTP-9"),
     (
         "no-kid",
         signed(head={"alg": "HS256", "typ": "neolith+jwt"}),
@@ -332,6 +334,17 @@ def test_the_size_bound_counts_the_token_after_the_scheme(
     """4096 characters admitted and 4097 refused, the scheme and the spaces
     after it apart."""
     assert check("Bearer    " + _sized(size), IDENTITY, KEYS, NOW) == expected
+
+
+@pytest.mark.spec("HTTP-7", "HTTP-8")
+def test_a_header_nested_as_deep_as_the_size_bound_allows_is_read() -> None:
+    """The json module reads any nesting a token of 4096 bytes can hold, so
+    the reader's own depth limit decides no token that could be valid."""
+    depth = 3000
+    head = text(header())[:-1] + ',"x":' + "[" * depth + "]" * depth + "}"
+    token = signed(raw_head=head)
+    assert len(token) > _token.LIMIT
+    assert check(bearer(token), IDENTITY, KEYS, NOW) == (None, _token.PARTS)
 
 
 # Recognition: the backend abstains on anything else (HTTP-7, HTTP-11)
@@ -605,6 +618,12 @@ def test_every_hex_secret_is_refused_without_showing_it(
         assert problem.startswith("looks like hexadecimal text")
 
 
+class Text(str):
+    """A str subclass, which is not exactly a str."""
+
+    __slots__ = ()
+
+
 _REFUSED_SECRETS: list[tuple[object, str]] = [
     (EXAMPLE_HEX, "is spec 03's example secret"),
     (EXAMPLE_HEX.upper(), "is spec 03's example secret"),
@@ -618,8 +637,9 @@ _REFUSED_SECRETS: list[tuple[object, str]] = [
         "holds a character outside base64url",
     ),
     (b64(ORDERS)[:-1] + "B", "does not end with zero unused bits"),
-    (ORDERS, "is a bytes"),
-    (None, "is a value that is not a str"),
+    (ORDERS, "is a bytes, not exactly a str"),
+    (None, "is a NoneType, not exactly a str"),
+    (Text(b64(ORDERS)), "is a Text, not exactly a str"),
 ]
 
 
@@ -631,8 +651,8 @@ def test_each_refused_secret_is_named_without_showing_it(
     assert problem is not None
     assert problem.startswith(start)
     assert "secrets.token_urlsafe(32)" in problem
-    if type(value) is str:
-        assert value not in problem
+    if isinstance(value, str):
+        assert str(value) not in problem
 
 
 # The backend's options (ADR 0027 Decision 3; 0023 Decision 10's constructor row)
@@ -1005,6 +1025,7 @@ def test_an_abstaining_backend_leaves_the_call_to_the_next() -> None:
         pytest.param(bearer(signed(body=claims(iat=1, exp=2))), id="expired"),
         pytest.param(bearer(signed(head=header(alg="none"))), id="alg"),
         pytest.param(bearer(signed() + ".x"), id="parts"),
+        pytest.param(bearer(signed(head=header(x=1.5))), id="double-in-header"),
     ],
 )
 def test_a_recognized_invalid_token_fails_with_no_fallback(authorization: str) -> None:
@@ -1409,3 +1430,39 @@ def test_no_deploy_warning_without_the_shared_secret_backend(
     ):
         found = checks.run_checks(tags=[_checks.TAG], include_deployment_checks=True)
     assert not [m for m in found if m.id == "neolith.W006"]
+
+
+class OwnInit(SharedSecretBackend):
+    """A subclass whose constructor never runs the base one."""
+
+    def __init__(self, **options: object) -> None:
+        pass
+
+
+def test_a_subclass_that_holds_no_keys_is_judged_without_reading_them(
+    registered: None,
+) -> None:
+    signing = _signers(orders=("orders-1", ORDERS))
+    assert key_problems(signing, OwnInit()) == []
+    refusal, _ = _set_up(
+        {
+            **host_apps.SERVED,
+            "CALLER_BACKENDS": [entry(f"{HERE}.OwnInit")],
+            "SIGNING_SECRETS": {"stock": {"KEY_ID": "stock-1", "SECRET": _A}},
+        }
+    )
+    assert refusal is None
+    error = _caught(lambda: identify(built(OwnInit()), request(fresh()), IDENTITY))
+    assert type(error) is Failed
+    assert str(error).endswith(
+        "authenticate raised Failure: the shared-secret token could not be checked"
+    )
+
+
+def test_a_refused_constructor_holds_no_secret_in_any_frame() -> None:
+    """A refusal raised while the options hold an admitted secret."""
+    options = {"orders": {"k1": _A, "k2": _O[:-1]}, "billing": {"b": _B}}
+    error = _caught(lambda: SharedSecretBackend(secrets=dict(options)))
+    assert type(error) is ImproperlyConfigured
+    options.clear()
+    assert _leaks(_described(error, request()), []) == []
