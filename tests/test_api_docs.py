@@ -277,14 +277,15 @@ def _live(found: griffe.Object) -> object:
 
 
 def _signed(found: griffe.Object) -> list[object]:
-    """The callables whose signatures the reference shows for an object.
+    """The callables whose defaults the reference shows for an object.
 
-    Not an overloaded function, whose overloads are shown as written. A
-    class shows its own ``__new__`` and ``__init__``; a single-dispatch
-    function also shows each function registered on it.
+    A class shows its own ``__new__`` and ``__init__``; a single-dispatch
+    function also shows each function registered on it. An overloaded
+    function shows its overloads, with the implementation's default in place
+    of each ``...`` (Sphinx's ``_merge_default_value``), so the
+    implementation is read too; an overload's other defaults are shown as
+    written and read by name.
     """
-    if isinstance(found, griffe.Function) and found.overloads:
-        return []
     if not isinstance(found, griffe.Class | griffe.Function):
         return []
     live = _live(found)
@@ -995,6 +996,14 @@ def test_a_sample_in_every_admitted_shape_passes(
             "_Hidden.__doc__) -> T: ...\n\n\ndef make[T](kind",
             "sample.make: its defaults name _Hidden, which sample does not export",
             id="private-name-in-an-overload-default",
+        ),
+        pytest.param(
+            "def make[T](kind: type[T], /, *names: str, strict: bool = False",
+            "@overload\ndef make[T](kind: type[T], /, *, strict: bool = ...) -> T: ..."
+            "\n\n\ndef make[T](kind: type[T], /, *names: str, strict: bool = "
+            "_Hidden()",
+            "sample.make: its default for strict shows as <sample._Hidden object>",
+            id="private-default-behind-an-overload-ellipsis",
         ),
         pytest.param(
             "    name: str\n",
