@@ -619,20 +619,23 @@ def _remote(neolith: object) -> dict[object, object]:
 def _listed(neolith: object) -> dict[str, tuple[int, list[tuple[int, str]]]]:
     """For each key of ``NEOLITH["REMOTE_PROVIDERS"]`` that is a contract
     identity and whose value is a ``list``: the number of entries it lists,
-    and each entry in the admitted form, with its index and ``url``.
+    and each entry in the admitted form, with its index and ``url``. An
+    entry whose ``url`` an earlier entry has is refused, so it is left out.
     """
     found: dict[str, tuple[int, list[tuple[int, str]]]] = {}
     for key, providers in _remote(neolith).items():
         if type(key) is str and _IDENTITY.fullmatch(key) and type(providers) is list:
             listed: list[object] = providers
-            found[key] = (
-                len(listed),
-                [
-                    (index, cast("dict[str, dict[str, str]]", entry)["OPTIONS"][_URL])
-                    for index, entry in enumerate(listed)
-                    if not _entry_problems("", entry)
-                ],
-            )
+            admitted: list[tuple[int, str]] = []
+            seen: set[str] = set()
+            for index, entry in enumerate(listed):
+                url = _url_of(entry)
+                if url is None:
+                    continue
+                if url not in seen and not _entry_problems("", entry):
+                    admitted.append((index, url))
+                seen.add(url)
+            found[key] = (len(listed), admitted)
     return found
 
 

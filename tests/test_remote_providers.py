@@ -840,12 +840,18 @@ def test_w002_is_judged_on_each_entry_it_can_read() -> None:
         "network can read and replay the calling app's token (spec 03)"
     )
     # Each entry in the admitted form, by its index, whatever the list and the
-    # rest of NEOLITH hold: a url listed twice warns twice.
+    # rest of NEOLITH hold; a url listed again is refused, so only its first
+    # entry warns.
     assert _checks.remote_warnings({"REMOTE_PROVIDERS": value, "X": 1}) == [
         f'{REMOTE}["more.v1"][3]: http://more.internal {tail}',
-        f'{REMOTE}["more.v1"][4]: http://more.internal {tail}',
         f'{REMOTE}["stock.v1"][0]: http://inventory.internal {tail}',
     ]
+    twice = {"stock.v1": [entry("http://Inventory.internal")] * 2}
+    twice["stock.v1"].append(entry("http://inventory.internal"))
+    assert _checks.remote_warnings({"REMOTE_PROVIDERS": twice}) == [
+        f'{REMOTE}["stock.v1"][2]: http://inventory.internal {tail}',
+    ]
+    assert _checks.remote_urls({"REMOTE_PROVIDERS": twice}) == {}
     assert _checks.remote_warnings([]) == []
     assert _checks.remote_warnings({"REMOTE_PROVIDERS": []}) == []
 

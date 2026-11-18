@@ -54,7 +54,7 @@ So an error view that calls a contract opens its own scope (ADR 0017 Decision 4)
 
 ## The HTTP transport
 
-A host serves the contracts its apps provide over HTTP, and calls a contract no hosted app provides over HTTP to the provider `NEOLITH["REMOTE_PROVIDERS"]` names. Spec 03 fixes what crosses the wire; these notes say what a deployer configures and what to expect.
+A host serves the contracts its apps provide over HTTP, and calls a contract no hosted app provides over HTTP to the providers `NEOLITH["REMOTE_PROVIDERS"]` lists for it. Spec 03 fixes what crosses the wire; these notes say what a deployer configures and what to expect.
 
 ### Serving: the paths the host owns
 
@@ -92,7 +92,7 @@ Send calls over TLS, which is the job of the server or the proxy in front of the
 
 ### Calling: remote providers
 
-**`NEOLITH["REMOTE_PROVIDERS"]`** maps a contract identity to a list of entries, one per provider: one entry under the `single` routing policy, or two or more under `local-first` (below). Each entry's `BACKEND` is the transport, `"neolith.transports.HTTPTransport"`, and whose `OPTIONS["url"]` is the provider host's origin, written exactly as its origin serializes ([ADR 0014](adr/0014-pluggable-connector-transports.md)):
+**`NEOLITH["REMOTE_PROVIDERS"]`** maps a contract identity to a list of entries, one per provider: one entry under the `single` routing policy, or two or more under `local-first` (below). Each entry's `BACKEND` is the transport, `"neolith.transports.HTTPTransport"`, and its `OPTIONS["url"]` is the provider host's origin, written exactly as its origin serializes ([ADR 0014](adr/0014-pluggable-connector-transports.md)):
 
 ```python
 NEOLITH = {
