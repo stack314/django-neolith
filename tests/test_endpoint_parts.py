@@ -5,6 +5,7 @@ built, and ``neolith run``'s refusal of a repeated body header (spec 03;
 ADR 0011 as amended for step 5; ADR 0027).
 """
 
+import asyncio
 import json
 import logging
 import re
@@ -27,6 +28,7 @@ from hypothesis import strategies as st
 
 from neolith import _boot, _endpoint, _http, _openapi, _server
 from neolith._connector import InProcess
+from neolith.callers import CallerBackend
 from neolith.middleware import RootMiddleware
 from tests.endpoint_site import (
     ENTRY,
@@ -36,8 +38,11 @@ from tests.endpoint_site import (
     TRACE,
     TRACEPARENT,
     Books,
+    Fails,
     Ledger,
+    Refuses,
     Site,
+    built,
     call,
     publish,
     token,
@@ -206,6 +211,49 @@ def test_each_contract_response_is_logged_once_without_the_request(
         "refused at step 3: a contract action is called with POST"
         in lines[2].getMessage()
     )
+
+
+class _OnLoop(logging.Handler):
+    """Notes, for each record, whether it was emitted on an event loop."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.seen: list[bool] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            self.seen.append(False)
+        else:
+            self.seen.append(True)
+
+
+@pytest.mark.parametrize(
+    "backend",
+    [None, Refuses("the badge is revoked"), Fails()],
+    ids=["admitted", "refused", "failed"],
+)
+def test_under_asgi_no_outcome_is_logged_on_the_event_loop(
+    site: Site, caplog: pytest.LogCaptureFixture, backend: CallerBackend | None
+) -> None:
+    """A log handler can block, as Django's mail to ADMINS does, and on the
+    loop it would hold every other request of the worker.
+    """
+    caplog.set_level(logging.INFO, logger="neolith.calls")
+    if backend is not None:
+        site.backends[:] = [built(backend)]
+    noted = _OnLoop()
+    loggers = [logging.getLogger(name) for name in ("neolith.calls", "django.neolith")]
+    for logger in loggers:
+        logger.addHandler(noted)
+    try:
+        call("asgi")
+    finally:
+        for logger in loggers:
+            logger.removeHandler(noted)
+    assert noted.seen
+    assert not any(noted.seen)
 
 
 @pytest.mark.parametrize(
@@ -465,18 +513,70 @@ def _exchange(port: int, head: str, body: bytes = b"") -> tuple[int, bytes, bool
     return status, rest, closed
 
 
-def _head(path: str, *extra: str, length: int = len(ENTRY)) -> str:
+def _head(
+    path: str, *extra: str, length: int = len(ENTRY), authorization: object = True
+) -> str:
     return "\n".join(
         [
             f"POST {path} HTTP/1.1",
             "Host: testserver",
-            f"Authorization: {token()}",
+            *([f"Authorization: {token()}"] if authorization else []),
             "Content-Type: application/json",
             f"Content-Length: {length}",
             *extra,
             "",
         ]
     )
+
+
+def _responses(port: int, *heads: str) -> list[tuple[int, dict[str, str], bytes]]:
+    """Send each request on one connection, in turn; return each response's
+    status, header fields and body, framed by its Content-Length.
+    """
+    found = []
+    with (
+        socket.create_connection(("127.0.0.1", port), timeout=10) as connection,
+        connection.makefile("rb") as reader,
+    ):
+        for head in heads:
+            body = ENTRY if head.startswith("POST") else b""
+            connection.sendall(head.replace("\n", "\r\n").encode() + b"\r\n" + body)
+            status = int(reader.readline().split(b" ", 2)[1])
+            fields: dict[str, str] = {}
+            while (line := reader.readline()) not in (b"\r\n", b""):
+                name, _, value = line.decode("latin-1").partition(":")
+                fields[name.strip().lower()] = value.strip()
+            size = (
+                0
+                if status == 204 or head.startswith("HEAD")
+                else int(fields["content-length"])
+            )
+            found.append((status, fields, reader.read(size)))
+    return found
+
+
+@pytest.mark.parametrize(
+    "heads",
+    [
+        (_head(POST), _head(POST)),
+        (_head(POST, authorization=None), _head(POST)),
+        ("GET /.well-known/neolith/health HTTP/1.1\nHost: testserver\n", _head(POST)),
+        ("HEAD /.well-known/neolith/health HTTP/1.1\nHost: testserver\n", _head(POST)),
+        ("GET /ledger/v1/none HTTP/1.1\nHost: testserver\n", _head(POST)),
+    ],
+    ids=["reply", "refusal", "health", "health-head", "not-found"],
+)
+def test_neolith_run_keeps_the_connection_after_each_answer(
+    live: int, site: Site, heads: tuple[str, str]
+) -> None:
+    """Each response the host writes states its length, so a caller's pool
+    can send the next call on the same connection. A 204 states none (RFC
+    9110, section 8.6), and Django's development server closes the
+    connection after it.
+    """
+    first, second = _responses(live, *heads)
+    assert first[1].get("connection") != "close"
+    assert (second[0], second[2]) == (200, ENTRY)
 
 
 @pytest.mark.parametrize("name", ["Content-Type", "Content-Length", "content-length"])

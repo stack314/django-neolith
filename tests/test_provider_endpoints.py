@@ -84,6 +84,8 @@ def test_a_reply_is_200_with_the_sender_s_text_and_an_empty_one_204(
     assert empty.status == 204
     assert empty.body == b""
     assert empty.header("Content-Type") is None
+    assert empty.header("Content-Length") is None
+    assert served.header("Content-Length") == str(len(served.body))
 
 
 @pytest.mark.spec("HTTP-41", "TRN-36")

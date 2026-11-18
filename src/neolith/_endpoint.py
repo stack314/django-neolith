@@ -30,6 +30,7 @@ Each message names the rule and never a value that arrived.
 """
 
 import contextlib
+import functools
 import json
 import logging
 import re
@@ -290,6 +291,19 @@ def _empty(status: int) -> HttpResponse:
     """A response with no body and no ``Content-Type``."""
     response = HttpResponse(status=status)
     del response["Content-Type"]
+    return _framed(response)
+
+
+def _framed(response: HttpResponse, length: int | None = None) -> HttpResponse:
+    """State the body's length, ``length`` for a ``HEAD`` answer, as
+    Django's ``CommonMiddleware`` does for a response it passes, since no
+    middleware of the deployer runs on an owned path: so a server keeps the
+    connection open for the caller's next call. A 204 states none (RFC 9110,
+    section 8.6).
+    """
+    if response.status_code != 204:
+        size = len(response.content) if length is None else length
+        response["Content-Length"] = str(size)
     return response
 
 
@@ -308,8 +322,7 @@ def _other(request: HttpRequest, path: str, endpoints: Endpoints) -> HttpRespons
         return _empty(200)
     document = endpoints.document
     response = HttpResponse(b"" if method == "HEAD" else document, content_type=_JSON)
-    response["Content-Length"] = str(len(document))
-    return response
+    return _framed(response, len(document))
 
 
 def answer(
@@ -339,8 +352,9 @@ async def aanswer(
     request: HttpRequest, endpoints: Endpoints, backends: Sequence[_caller.Built]
 ) -> HttpResponse:
     """``answer`` in async mode: each backend's ``aauthenticate`` is awaited,
-    and the rest runs through ``sync_to_async`` on the request's own thread,
-    as Django runs a sync view (ADR 0011 Decision 6).
+    and the rest, the response's log line included whatever the outcome,
+    runs through ``sync_to_async`` on the request's own thread, as Django
+    runs a sync view (ADR 0011 Decision 6).
     """
     arrived = _context.now()
     _protect(request)
@@ -349,12 +363,16 @@ async def aanswer(
     if route is None:
         return _other(request, request.path, endpoints)
     call = _Call(request, route, arrived)
+    finish: Callable[[], HttpResponse]
     try:
         caller = await _caller.aidentify(backends, request, route.identity)
     except Exception as error:
-        return call.unidentified(error)
-    admitted: Callable[[str], HttpResponse] = call.admitted
-    return await sync_to_async(admitted, thread_sensitive=True)(caller)
+        finish = functools.partial(call.unidentified, error)
+    else:
+        finish = functools.partial(call.admitted, caller)
+    # Every outcome is logged, and may be mailed, so none is finished on the
+    # event loop, where a slow log handler would hold every other request.
+    return await sync_to_async(finish, thread_sensitive=True)()
 
 
 class _Refused(Exception):
@@ -548,7 +566,7 @@ class _Call:
         # Private to Django, with one meaning in 5.2 and 6.1 (utils/log.py,
         # log_response): a response marked so is not logged again.
         response._has_been_logged = True  # type: ignore[attr-defined]  # Django's own mark
-        return response
+        return _framed(response)
 
 
 def _credential(authorization: str) -> str:
