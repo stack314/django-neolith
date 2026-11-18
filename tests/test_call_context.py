@@ -1877,7 +1877,7 @@ _CLAIMS = st.dictionaries(
 _PRINCIPALS = st.none() | st.builds(Principal, _TEXT, _TEXT, _CLAIMS)
 
 
-@pytest.mark.spec("TRN-2", "TRN-30", "TRN-31", "TRN-36", "TRN-37")
+@pytest.mark.spec("TRN-2", "TRN-27", "TRN-30", "TRN-31", "TRN-36", "TRN-37")
 @_SETTINGS
 @given(
     principal=_PRINCIPALS,
