@@ -237,6 +237,9 @@ class NeolithAppConfig(AppConfig):
 
     A subclass that does not set ``name`` is a base class. It, and any mixin,
     may hold ``default_auto_field``, ``verbose_name`` and ``ready`` only.
+    ``path`` and ``default`` describe one app, its directory and whether
+    Django picks this class from its ``apps`` module, so they are written in
+    the body of the class that sets ``name``.
 
     A declaration outside this form raises ``DeclarationError`` when the class
     is defined, listing every refusal.
