@@ -60,6 +60,11 @@ from scripts.citations import Records
 from scripts.citations import find as _find
 
 ROOT = Path(__file__).resolve().parents[1]
+try:
+    # Only with the docs group, which needs Python 3.13 (ADR 0024).
+    from sphinx.util import inspect as _SPHINX_INSPECT
+except ImportError:
+    _SPHINX_INSPECT = None
 PUBLIC = sorted(set(neolith.__all__) - {"__version__"})
 
 _SECTIONS = {"text", "parameters", "attributes", "returns", "raises"}
@@ -1315,6 +1320,69 @@ def test_an_overloaded_init_that_writes_a_literal_hides_its_default(
     assert _sample(tmp_path, source, records) == []
 
 
+def test_a_dispatcher_outside_functools_hides_its_registrations(
+    tmp_path: Path, records: Records
+) -> None:
+    source = _GOOD.replace(
+        "\n\nclass Bigger(Thing):",
+        "\n\nclass _Dispatch:\n    def __call__(self, kind: object) -> object:\n"
+        "        return kind\n\n\ndef tagged(value: object) -> object:\n"
+        '    """Convert it."""\n    return value\n\n\n'
+        "def _tagged_int(value: int, strict: object = _Hidden()) -> object:\n"
+        "    return value\n\n\ntagged.dispatch = _Dispatch()\n"
+        "tagged.register = lambda function: function\n"
+        "tagged.registry = {object: tagged, int: _tagged_int}\n"
+        '__all__ += ["tagged"]\n\n\nclass Bigger(Thing):',
+    )
+    assert _sample(tmp_path, source, records) == []
+
+
+# A function that carries functools' dispatch, but is not what Sphinx 9.2's
+# is_singledispatch_function admits: each lacks one of its three conditions,
+# or registers its hidden default for object, which Sphinx skips.
+_NOT_SINGLE_DISPATCH = {
+    "not-a-function": (
+        "class _Wrapped:\n    def __call__(self, value: object) -> object:\n"
+        "        return value\n\n\ndef _wrap(function: object) -> object:\n"
+        "    wrapped = _Wrapped()\n    wrapped.dispatch = _REAL.dispatch\n"
+        "    wrapped.register = _REAL.register\n"
+        "    wrapped.registry = {int: _tagged_int}\n    return wrapped\n\n\n"
+        "@_wrap\n"
+    ),
+    "no-register": (
+        "def _mark(function: object) -> object:\n"
+        "    function.dispatch = _REAL.dispatch\n"
+        "    function.registry = {int: _tagged_int}\n    return function\n\n\n"
+        "@_mark\n"
+    ),
+    "hidden-for-object": (
+        "def _mark(function: object) -> object:\n"
+        "    function.dispatch = _REAL.dispatch\n"
+        "    function.register = _REAL.register\n"
+        "    function.registry = {object: _tagged_int}\n    return function\n\n\n"
+        "@_mark\n"
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "decorator", _NOT_SINGLE_DISPATCH.values(), ids=list(_NOT_SINGLE_DISPATCH)
+)
+def test_a_function_sphinx_does_not_dispatch_hides_its_registrations(
+    tmp_path: Path, records: Records, decorator: str
+) -> None:
+    source = _GOOD.replace(
+        "\n\nclass Bigger(Thing):",
+        "\n\n_REAL = functools.singledispatch(lambda value: value)\n\n\n"
+        "def _tagged_int(value: int, strict: object = _Hidden()) -> object:\n"
+        "    return value\n\n\n"
+        f"{decorator}def tagged(value: object) -> object:\n"
+        '    """Convert it."""\n    return value\n\n\n'
+        '__all__ += ["tagged"]\n\n\nclass Bigger(Thing):',
+    )
+    assert _sample(tmp_path, source, records) == []
+
+
 def test_a_static_single_dispatch_method_hides_its_registrations(
     tmp_path: Path, records: Records
 ) -> None:
@@ -1372,25 +1440,50 @@ class _Marked(enum.Enum):
         return "<one>"
 
 
-_SHOWN_SAMPLES: list[object] = [
-    _Names((_Marked.ONE, _Plain.ONE)),
-    _Marked.ONE,
-    None,
-    ("a", 1),
-    [1, (2,)],
-    {"b": 1, "a": (None,)},
-    {2, 1},
-    frozenset({"x"}),
-    _Plain.ONE,
-    object(),
-    "a\nb",
+class _Lines:
+    def __repr__(self) -> str:
+        return "<a\nb>"
+
+
+def _looped_list() -> list[object]:
+    looped: list[object] = [1]
+    looped.append(looped)
+    return looped
+
+
+def _looped_dict() -> dict[str, object]:
+    looped: dict[str, object] = {"a": 1}
+    looped["b"] = looped
+    return looped
+
+
+# Each value, and the text Sphinx 9.2's object_description gives for it.
+_SHOWN_SAMPLES: list[tuple[object, str]] = [
+    (_Names((_Marked.ONE, _Plain.ONE)), "(<one>, _Plain.ONE)"),
+    (_Marked.ONE, "<one>"),
+    (None, "None"),
+    (("a", 1), "('a', 1)"),
+    ([1, (2,)], "[1, (2,)]"),
+    ({"b": 1, "a": (None,)}, "{'a': (None,), 'b': 1}"),
+    ({2, 1}, "{1, 2}"),
+    ({1, "a"}, "{'a', 1}"),
+    (frozenset({"x"}), "frozenset({'x'})"),
+    (_Plain.ONE, "_Plain.ONE"),
+    (object(), "<object object>"),
+    ("a\nb", "'a\\nb'"),
+    (_Lines(), "<a b>"),
+    (_looped_list(), "[1, list(...)]"),
+    (_looped_dict(), "{'a': 1, 'b': dict(...)}"),
 ]
 
 
-def test_shown_is_what_sphinx_shows() -> None:
-    sphinx = pytest.importorskip("sphinx.util.inspect")
-    for value in _SHOWN_SAMPLES:
-        assert _shown(value) == sphinx.object_description(value)
+@pytest.mark.parametrize(("value", "text"), _SHOWN_SAMPLES)
+def test_shown_is_what_sphinx_shows(value: object, text: str) -> None:
+    assert _shown(value) == text
+    # Where the docs group is installed, the text is Sphinx's own.
+    sphinx = _SPHINX_INSPECT
+    if sphinx is not None:
+        assert sphinx.object_description(value) == text
 
 
 def test_the_reference_shows_a_default_by_its_repr() -> None:
