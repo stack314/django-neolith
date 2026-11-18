@@ -105,8 +105,8 @@ class Provided:
 
     Nothing is checked here: the class body runs before the config class
     exists. ``NeolithAppConfig`` checks every entry with the rest of the
-    declaration, and its error names the app. An argument left out is refused
-    there too.
+    declaration, and its error names the app. An argument left out, which the
+    signature shows as ``<missing>``, is refused there too.
 
     Args:
         contract: The contract's class, which carries ``@contract``.
