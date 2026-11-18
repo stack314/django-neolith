@@ -44,12 +44,15 @@ import griffe
 import pytest
 
 import neolith
+from scripts.citations import ADR as _ADR
 from scripts.citations import ID_SHAPED as _ID_SHAPED
 from scripts.citations import JOIN as _JOIN
 from scripts.citations import JOIN_SPELLINGS as _JOIN_SPELLINGS
 from scripts.citations import JOINS as _JOINS
 from scripts.citations import NUMBERS as _NUMBERS
+from scripts.citations import SPEC as _SPEC
 from scripts.citations import Records
+from scripts.citations import find as _find
 
 ROOT = Path(__file__).resolve().parents[1]
 PUBLIC = sorted(set(neolith.__all__) - {"__version__"})
@@ -1184,7 +1187,9 @@ def test_every_citation_rule_and_variant_uses_the_one_set_of_joins() -> None:
             assert re.fullmatch(pattern, spelling), spelling
             assert re.fullmatch(_JOIN, spelling), spelling
     # Both citation rules read the shared pattern.
-    assert _JOIN in _NUMBERS
+    assert "{join}" in _NUMBERS
+    assert _JOIN in _ADR.pattern
+    assert _JOIN in _SPEC.pattern
     assert _JOIN in _ID_SHAPED.pattern
     # Every citation form is tried with every spelling, so that no form is
     # tried with a reduced set.
@@ -1193,6 +1198,34 @@ def test_every_citation_rule_and_variant_uses_the_one_set_of_joins() -> None:
     for form in forms:
         for join in _JOIN_SPELLINGS:
             assert any(f"{form}{join}" in new for new in tried), (form, join)
+
+
+@pytest.mark.parametrize(
+    ("text", "cited"),
+    [
+        # A record cited by its bare number after a requirement or a spec
+        # document, as the records write it, ends the list.
+        ("(TRN-42, 0021 Decision 9)", ["TRN-42"]),
+        ("(TRN-36 and 0027 Decision 1)", ["TRN-36"]),
+        ("(spec 03, 0010 Decision 5)", ["03"]),
+        # So does a date, and a decimal or a version.
+        ("(CON-30, 2026-11-18)", ["CON-30"]),
+        ("Accepted (ADR 0022, 2026-11-10).", ["0022"]),
+        ("TRN-42 and 1.5 seconds", ["TRN-42"]),
+        ("specs 01 and 0.1", ["01"]),
+        # A list of one kind is read whole, a typo in it included, so that the
+        # typo is refused.
+        ("CON-23, 24 and 30", ["CON-23", "CON-24", "CON-30"]),
+        ("CON-30 through CON-033", ["CON-30", "CON-033"]),
+        ("CON-30 and 031", ["CON-30", "CON-031"]),
+        ("specs 01, 02 or 03", ["01", "02", "03"]),
+        ("specs 01 and 3", ["01", "3"]),
+        ("ADRs 0017 and 0019", ["0017", "0019"]),
+        ("ADRs 0017 and 19", ["0017", "19"]),
+    ],
+)
+def test_a_list_ends_at_a_number_of_another_kind(text: str, cited: list[str]) -> None:
+    assert [found.key for found in _find(text)] == cited
 
 
 def test_a_withdrawn_requirement_is_refused(tmp_path: Path) -> None:
