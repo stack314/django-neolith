@@ -1,6 +1,6 @@
 # 05. App declaration and lifecycle
 
-**Status:** outline, except the form of a declaration, Resolve and Validate, the checks before Serve, Configure, Boot and an app's database, which are specified. Serve and Drain become requirements with the host (#11).
+**Status:** outline, except the form of a declaration, Resolve and Validate, the checks before Serve, Configure, Boot, an app's database and a request's principal, which are specified. Serve and Drain become requirements with the host (#11).
 
 ## Declaration
 
@@ -159,6 +159,40 @@ Calling code asks the host for a connector by contract identity ([ADR 0003](../d
 **APP-15.** A connector asked for after Validate has ended, for a contract version the host does not know, MUST be refused as a mistake in the calling code when it is asked for.
 
 Decision records: [0003](../docs/adr/0003-apps-communicate-through-contracts.md), [0021](../docs/adr/0021-an-app-declares-itself-on-its-neolithappconfig.md), [0022](../docs/adr/0022-the-app-host-builds-settings-and-checks-before-it-serves.md).
+
+### A request's principal
+
+A host that serves ordinary requests, such as web pages, opens a request root for each one ([02](02-transports.md), Request roots). The principal of the calls made from that root is the principal of the request: the party on whose behalf the request acts, such as a logged-in user. The host finds it through *principal backends*, which the deployer configures in an order ([ADR 0010](../docs/adr/0010-pluggable-principal-resolution.md) Decision 6, [ADR 0023](../docs/adr/0023-a-request-principal-comes-from-ordered-backends.md)). A backend, given a request, gives a principal, abstains, or fails. Each backend declares the request inputs it reads: request header names, or that it reads something outside the URL and the headers. The host trusts the declaration and does not check it.
+
+Resolving the principal means asking the backends, which is the *search*. A call made from the root before the host has found the code that serves the request has no principal and starts no search (TRN-56).
+
+**APP-51.** A host MUST resolve a request root's principal by asking its configured backends one at a time, in the configured order.
+
+**APP-52.** When a backend gives a principal, that principal MUST be the request root's principal, and no later backend is asked.
+
+**APP-53.** When every backend abstains, or the host has no backend, the request root MUST have no principal.
+
+**APP-54.** When a backend fails, or gives something other than a principal or an abstention, the host MUST record a failure to resolve on the request root, and no later backend is asked.
+
+**APP-55.** A call from a request root on which a failure to resolve is recorded MUST fail with `internal` at the caller's first step ([ADR 0017](../docs/adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md) Decision 9), and is not sent.
+
+**APP-56.** The first search of a request root to complete MUST fix its outcome, a principal, none or a failure, for every call from the root. A search that completes later does not change it.
+
+Two first calls made at once may each run a search, so a backend may be asked more than once for one request, and it gives the same answer each time.
+
+**APP-57.** A host MUST NOT start a search for a request root before the root's first call, except as APP-58 requires.
+
+**APP-58.** When the body of a response is produced inside its request root after the code that handles the request has returned, and no search has fixed the root's outcome, the host MUST search before it returns the response. A failure found then is only recorded: the response is unchanged.
+
+**APP-59.** A first call made from a request root after the host has finished the headers of its response MUST fail as APP-55 says, and starts no search.
+
+**APP-60.** When a search has started for a request root, the host MUST add every request header name that its configured backends declare to the `Vary` header of the response, before the response leaves the host, or make the header `*` when a backend declares that it reads something outside the URL and the headers.
+
+**APP-61.** A host MUST NOT add to the `Vary` header of a response when no search has started for its request root.
+
+The host adds these names whatever the response holds, so a cache that keys on `Vary` keeps the responses of two principals apart. A cache placed inside the host, between the code that handles the request and the point where the host adds the names, stores a response before they are added; the host cannot reach it.
+
+Decision records: [0010](../docs/adr/0010-pluggable-principal-resolution.md), [0017](../docs/adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md), [0023](../docs/adr/0023-a-request-principal-comes-from-ordered-backends.md).
 
 ## Operational settings
 
