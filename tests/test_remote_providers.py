@@ -101,15 +101,15 @@ _URL = f'{REMOTE}["stock.v1"][0]["OPTIONS"]["url"]'
         (
             {"Stock.V1": [entry()]},
             [
-                f"{REMOTE}: key 0: expected a contract identity, such as "
-                "<contract>.v1, got a str, not shown"
+                f"{REMOTE}: key 'Stock.V1': expected a contract identity, such as "
+                "<contract>.v1"
             ],
         ),
         (
             {"stock.v1": [entry()], 1: [entry()]},
             [
-                f"{REMOTE}: key 1: expected a contract identity, such as "
-                "<contract>.v1, got int"
+                f"{REMOTE}: key of type int: expected a contract identity, such as "
+                "<contract>.v1"
             ],
         ),
         (
@@ -146,8 +146,8 @@ _URL = f'{REMOTE}["stock.v1"][0]["OPTIONS"]["url"]'
         (
             {"stock.v1": [{**entry(), "TIMEOUT": 5}]},
             [
-                f'{REMOTE}["stock.v1"][0]: key 2 is not one of its keys, and is not '
-                "shown; the keys are BACKEND, OPTIONS"
+                f"{REMOTE}[\"stock.v1\"][0]: unknown key 'TIMEOUT'; the keys are "
+                "BACKEND, OPTIONS"
             ],
         ),
         (
@@ -157,9 +157,9 @@ _URL = f'{REMOTE}["stock.v1"][0]["OPTIONS"]["url"]'
         (
             {"stock.v1": [{**entry(), "BACKEND": "neolith.transports.HttpTransport"}]},
             [
-                f'{REMOTE}["stock.v1"][0]["BACKEND"]: is not a transport of this '
-                "host, and is not shown; the one remote transport in 0.1 is "
-                f"{TRANSPORT}"
+                f'{REMOTE}["stock.v1"][0]["BACKEND"]: '
+                "'neolith.transports.HttpTransport' is not a transport of this "
+                f"host; the one remote transport in 0.1 is {TRANSPORT}"
             ],
         ),
         (
@@ -177,8 +177,8 @@ _URL = f'{REMOTE}["stock.v1"][0]["OPTIONS"]["url"]'
                 ]
             },
             [
-                f'{REMOTE}["stock.v1"][0]["OPTIONS"]: key 1 is not one of its keys, '
-                "and is not shown; the HTTP transport's options are url"
+                f'{REMOTE}["stock.v1"][0]["OPTIONS"]: unknown key \'timeout\'; the '
+                "HTTP transport's options are url"
             ],
         ),
         (remote(stock_v1=b"http://localhost"), [f"{_URL}: expected a str, got bytes"]),
@@ -212,17 +212,17 @@ def test_every_refusal_reaches_the_diagnostic_whatever_was_refused_first() -> No
     }
     assert sorted(_checks.remote_problems(value)) == sorted(
         [
-            f"{REMOTE}: key 0: expected a contract identity, such as "
-            "<contract>.v1, got a str, not shown",
-            f"{REMOTE}[key 0]: lists 2 providers; with the single routing policy "
+            f"{REMOTE}: key 'Stock': expected a contract identity, such as "
+            "<contract>.v1",
+            f"{REMOTE}['Stock']: lists 2 providers; with the single routing policy "
             "a contract has one provider, and routing between several arrives "
             "with step 6 (ADR 0016)",
-            f'{REMOTE}[key 0][0]["OPTIONS"]["url"]: is not an origin: '
+            f'{REMOTE}[\'Stock\'][0]["OPTIONS"]["url"]: is not an origin: '
             f"{_http_transport.CASE}",
-            f"{REMOTE}[key 0][1]: missing key OPTIONS",
-            f'{REMOTE}[key 0][1]["BACKEND"]: expected a str, got int',
-            f'{REMOTE}["couriers.v3"][0]["OPTIONS"]: key 1 is not one of its keys, '
-            "and is not shown; the HTTP transport's options are url",
+            f"{REMOTE}['Stock'][1]: missing key OPTIONS",
+            f"{REMOTE}['Stock'][1][\"BACKEND\"]: expected a str, got int",
+            f'{REMOTE}["couriers.v3"][0]["OPTIONS"]: unknown key \'x\'; the HTTP '
+            "transport's options are url",
             f'{REMOTE}["couriers.v3"][0]["OPTIONS"]["url"]: expected a str, got int',
         ]
     )
@@ -235,8 +235,9 @@ def test_the_example_of_the_record_is_admitted_by_the_builder() -> None:
     assert configure([WEB], deployer(REMOTE_PROVIDERS=value, SIGNING_SECRETS=SIGNING))
 
 
-# A refusal shows nothing the deployer wrote but an identity (ADR 0014
-# Decision 3): any other text could hold a credential.
+# A refused url is never shown, in whole or in part, on any refusal path
+# (ADR 0014 Decision 3). A refused key or BACKEND is shown, bounded, as the
+# record's table writes it.
 
 _CARRIERS = [
     f"http://user:{CREDENTIAL}@inventory.internal",
@@ -249,44 +250,34 @@ _CARRIERS = [
     f"http://[::1%{CREDENTIAL}]",
     f"http://inventory.internal:{CREDENTIAL}",
 ]
-# Text written like a name or a token, and like the slot's own values.
-_NAMES = [
-    CREDENTIAL,
-    f"ghp_{CREDENTIAL}0123",
-    f"neolith.transports.{CREDENTIAL}",
-    f"{CREDENTIAL}.v1",
-    f"eyJ{CREDENTIAL}.eyJ0.sig",
-]
 
 
 @st.composite
 def _carrying(draw: st.DrawFn) -> object:
-    """A ``REMOTE_PROVIDERS`` value with a text that holds a credential in
-    one of the places a deployer can write text: an identity, an entry's or
-    the options' key, ``BACKEND`` or ``url``.
+    """A ``REMOTE_PROVIDERS`` value whose refused url holds a credential,
+    beside any other refusal of the key: of the identity, the entries, the
+    entry's keys, ``BACKEND`` or the options.
     """
-    text = draw(st.sampled_from([*_CARRIERS, *_NAMES]))
-    place = draw(st.sampled_from(["identity", "entry", "backend", "options", "url"]))
-    item: dict[str, object] = entry()
-    if place == "url":
-        item = entry(text)
-    elif place == "backend":
-        item = {**entry(), "BACKEND": text}
-    elif place == "entry":
-        item = {**entry(), text: "x"}
-    elif place == "options":
-        item = {**entry(), "OPTIONS": {"url": "https://inventory.internal", text: 1}}
-    identity = text if place == "identity" else "stock.v1"
-    providers: object = draw(
-        st.sampled_from([[item], [item, item], [entry(), item], (item,)])
+    url = draw(st.sampled_from(_CARRIERS))
+    item: dict[str, object] = entry(url)
+    others = draw(
+        st.sets(st.sampled_from(["identity", "entry", "backend", "options", "list"]))
     )
-    return {identity: providers, "couriers.v3": [entry()]}
+    if "entry" in others:
+        item["TIMEOUT"] = 5
+    if "backend" in others:
+        item["BACKEND"] = "neolith.transports.HttpTransport"
+    if "options" in others:
+        item["OPTIONS"] = {"url": url, "timeout": 5}
+    identity = "Stock.V1" if "identity" in others else "stock.v1"
+    providers = [item, entry()] if "list" in others else [item]
+    return {identity: providers, "couriers.v3": [entry(url)]}
 
 
 @pytest.mark.spec("APP-16")
 @_HYPOTHESIS
 @given(_carrying())
-def test_no_refusal_shows_a_credential_written_anywhere_in_the_key(
+def test_no_refusal_shows_a_refused_url_whatever_else_is_refused(
     value: object,
 ) -> None:
     problems = _checks.remote_problems(value)
@@ -297,6 +288,22 @@ def test_no_refusal_shows_a_credential_written_anywhere_in_the_key(
         built(value) or "",
     ]
     assert not any(CREDENTIAL in message for message in messages)
+
+
+@pytest.mark.parametrize("key", [1, None, ("stock", "v1"), "x" * 81 + "y", "Stock.V1"])
+def test_a_refused_key_is_shown_bounded_and_nothing_else_runs(key: object) -> None:
+    class Loud:
+        def __repr__(self) -> str:
+            raise AssertionError("an author's repr ran")
+
+        def __hash__(self) -> int:
+            return 1
+
+    for refused in (key, Loud()):
+        (problem, *_) = _checks.remote_problems({refused: [entry()]})
+        assert len(problem) < 200
+        if type(refused) is not str:
+            assert f"{REMOTE}: key of type " in problem
 
 
 @pytest.mark.spec("APP-16")

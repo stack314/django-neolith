@@ -339,9 +339,10 @@ def remote_problems(value: object) -> list[str]:
     spelling. Every container is exactly the type named.
 
     Every problem found is returned, those under a refused key included. A
-    message shows fixed text, positions, type names and the keys that are
-    contract identities, and nothing else the deployer wrote: any other text
-    could hold a credential (ADR 0014 Decision 3).
+    refused ``url`` is never shown, in whole or in part (ADR 0014 Decision
+    3). A refused key or ``BACKEND`` is shown as the record's table writes
+    it: an exact ``str`` by its bounded ``repr``, anything else by its type
+    alone, so no author code runs.
     """
     if type(value) is not dict:
         return [f"{REMOTE}: expected a dict of contract identities, got {_type(value)}"]
@@ -350,16 +351,16 @@ def remote_problems(value: object) -> list[str]:
         return [f"{REMOTE}: is empty; leave the key out"]
     problems: list[str] = []
     # Items are read, never looked up, so no key's own hooks run.
-    for position, (key, providers) in enumerate(entries.items()):
+    for key, providers in entries.items():
         if type(key) is str and _IDENTITY.fullmatch(key):
             where, named = f'{REMOTE}["{key}"]', key
         else:
-            found = "a str, not shown" if type(key) is str else _type(key)
+            shown = _shown_key(key)
             problems.append(
-                f"{REMOTE}: key {position}: expected a contract identity, such as "
-                f"<contract>.v1, got {found}"
+                f"{REMOTE}: key {shown}: expected a contract identity, such as "
+                "<contract>.v1"
             )
-            where, named = f"{REMOTE}[key {position}]", "it"
+            where, named = f"{REMOTE}[{shown}]", "it"
         problems.extend(_providers_problems(where, named, providers))
     return problems
 
@@ -398,8 +399,8 @@ def _entry_problems(where: str, value: object) -> list[str]:
             problems.append(f'{where}["BACKEND"]: expected a str, got {_type(backend)}')
         elif backend != _TRANSPORT:
             problems.append(
-                f'{where}["BACKEND"]: is not a transport of this host, and is not '
-                f"shown; the one remote transport in 0.1 is {_TRANSPORT}"
+                f'{where}["BACKEND"]: {_shown_key(backend)} is not a transport of '
+                f"this host; the one remote transport in 0.1 is {_TRANSPORT}"
             )
     options = _naming.entry(entry, "OPTIONS", MISSING)
     if options is not MISSING:
@@ -429,12 +430,12 @@ def _options_problems(where: str, value: object) -> list[str]:
 def _keys_problems(
     where: str, held: dict[object, object], keys: Sequence[str], advice: str
 ) -> list[str]:
-    """The keys of ``held`` outside ``keys``, by position and never by their
-    text, and each key of ``keys`` it does not hold.
+    """Each key of ``held`` outside ``keys``, and each key of ``keys`` it
+    does not hold.
     """
     problems = [
-        f"{where}: key {position} is not one of its keys, and is not shown; {advice}"
-        for position, key in enumerate(held)
+        f"{where}: unknown key {_shown_key(key)}; {advice}"
+        for key in held
         if type(key) is not str or key not in keys
     ]
     problems.extend(
