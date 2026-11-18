@@ -53,7 +53,9 @@ Body: `{"kind": "<kind>", "message": "<text>", "data": {<typed detail record>}}`
 
 A *contract path* is the path of an action of a contract version the host provides. A response on any other path carries no neolith error body. The provider's host answers every failure on a contract path with a neolith error body and the status of its kind, including a request that fails validation and a failure of the host itself ([ADR 0008](../docs/adr/0008-typed-contract-errors-in-both-modes.md)). A 401 also carries a `Bearer` challenge in `WWW-Authenticate` (RFC 6750, section 3), since RFC 9110, section 15.5.2, requires a challenge with that status.
 
-A connector takes the kind from the body only, never from the status. A non-success response without a neolith error body maps to `unavailable`. Examples are a 404 from a host that does not provide that contract version, which is not a contract path, or an error page from a proxy. A success response whose body is not a valid reply, and a neolith error body that does not validate against the contract, map to `internal`, apart from an error of a kind the caller does not know.
+**HTTP-19.** A connector MUST take an error's kind from a neolith error body only, never from the status. A response whose status is not a success (2xx) and that carries no neolith error body therefore fails the call with `unavailable`. Examples are a 404 from a host that does not provide that contract version, which is not a contract path, a redirect, or an error page from a proxy. A success response is a reply only as 200 with the reply's JSON text, for an action whose reply is not empty, or as 204, for an action whose reply is empty ([ADR 0011](../docs/adr/0011-django-ninja-for-contract-endpoints.md) Decision 4). Any other success response, and one whose body is not a valid reply, fails the call with `internal` (TRN-18), and so does a neolith error body that cannot be read against the contract (CON-49), apart from an error of a kind the caller does not know (CON-28).
+
+A caller reads a reply and a neolith error body as a network receiver reads any text (CON-42), before it reads them against the contract. A body that is not UTF-8, or is nested deeper than the caller's JSON reader admits (RFC 8259, sections 8.1 and 9), is not JSON text to the caller, so it carries no neolith error body. Whether a body carries one is judged on its members as written, so a body with `kind` written twice, once as a string, carries one that cannot be read. A neolith error body has exactly the members `kind`, `message` and, for an error that carries a detail, `data`, whose value is the detail record's JSON text as the provider wrote it. One that is not I-JSON, holds another member, or has no `message` that is a string cannot be read. For a kind the caller does not know, a body without `data` is that error without a detail, and a `data` that is not a JSON object, `null` included, is a detail that breaks CON-30, so the caller receives `internal` (CON-49).
 
 ## Sending a call and reading its response
 
@@ -61,11 +63,13 @@ A caller writes HTTP/1.1. These rules keep every response the caller accepts to 
 
 **HTTP-3.** A caller MUST send a request with a `Content-Length` field that gives its body's length, never chunked, and with `Accept-Encoding: identity`, so that a provider answers in no content coding (RFC 9110, section 12.5.3).
 
-**HTTP-4.** A caller MUST NOT follow a redirect or undo a content coding. A redirect is then a non-success response without a neolith error body, and a reply in a content coding is not a valid reply ([Errors](#errors)).
+**HTTP-4.** A caller MUST NOT follow a redirect or undo a content coding. A redirect is then a non-success response, mapped by HTTP-19 like any other, and a reply in a content coding is not a valid reply ([Errors](#errors)).
 
 **HTTP-5.** A caller MUST read past every interim response (a `1xx` status) other than `101` to the final response, and take the call's outcome from the final response (RFC 9110, section 15.2). A caller can bound how many interim responses it reads; one past its bound, like a `101`, is a response it does not accept (HTTP-6).
 
 **HTTP-6.** A caller MUST fail a call with `unavailable` when the response is not one with a single reading under RFC 9112. That covers a status line other than `HTTP/1.1` or `HTTP/1.0`, a space, three digits and a space; a field line with whitespace before its colon, folded onto the line before, or holding a CR or LF that does not end it; more than one `Content-Length` field, or one that is not all digits; a `Transfer-Encoding` other than `chunked`, or any in an HTTP/1.0 response; `Content-Length` and `Transfer-Encoding` together; a chunk size that is not hexadecimal digits; and a body that ends before its framing says it does. The caller then closes the connection.
+
+**HTTP-17.** A caller MUST read the budget it sends in `Neolith-Timeout` once it has a connection ready to write the request on, so that the time it took to reach the provider is not counted again by the provider's host. A budget under 1 ms then fails the call with `timeout`, unsent (TRN-28).
 
 ## Projection
 
@@ -93,6 +97,8 @@ A host with several backends tries them in a configured order. The first that re
 Base64url-encoded values here use the base64url alphabet only (RFC 4648, section 5), with no padding, no whitespace and zero unused bits. JSON objects here meet the I-JSON rule of [ADR 0019](../docs/adr/0019-wire-encodings-of-the-portable-forms.md), so a duplicate member name or a lone surrogate makes one invalid while a noncharacter such as U+FFFF does not, and integers are JSON numbers with no fraction or exponent, within ±(2^53 − 1).
 
 On a contract path, the provider's host authenticates the calling app before it reads the request body or any call-context header. A call on a contract path whose credential is missing, is recognized by no backend or does not resolve, or that reaches a host with no backend, fails with `unauthenticated`. It runs its other checks, the request body last, in the order of [ADR 0017](../docs/adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md) Decision 9. A request on any other path is answered as the Errors section says. In-process there are no credentials: the calling app is the app the call is made from. A call made from no app fails with `unauthenticated` on every transport.
+
+**HTTP-18.** A caller MUST fail a call with `unauthenticated`, without sending it, when the call has no calling app or its calling app holds no key to sign a shared-secret token with. A call with no calling app so gets the outcome it gets in-process (TRN-42), and no call reaches a provider without a credential.
 
 ### The principal
 
