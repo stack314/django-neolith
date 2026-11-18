@@ -48,6 +48,9 @@ Changelog = "https://github.com/stack314/django-neolith/blob/main/CHANGELOG.md"
 # property test (spec 01, CON-16). Test only.
 # griffe: tests/test_api_docs.py reads the public API's docstrings with it.
 # Test only; pinned so its reading of a docstring cannot drift.
+# trustme: the HTTP client's TLS tests make a test authority at run time, so no
+# key is committed (ADR 0028 Decision 9). Test only; pinned so the
+# certificates it issues cannot drift.
 test = [
     "pytest>=8.4",
     "pytest-django>=4.11",
@@ -60,6 +63,7 @@ test = [
     # this to check "date-time" and otherwise skips it silently.
     "rfc3339-validator>=0.1.4",
     "griffe==2.4.1",
+    "trustme==1.2.1",
 ]
 # sphinx, myst-parser and pydata-sphinx-theme: the documentation site, built
 # by scripts/docs.py (ADR 0024). Sphinx 9.2 needs Python 3.13, so on an older
