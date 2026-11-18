@@ -848,9 +848,11 @@ def implements[T](declaration: type[Any], /) -> Callable[[type[T]], type[T]]:
 
     The class has one instance method per action, taking ``(self, request)``
     annotated with the action's request type and returning its reply type
-    (``None`` for an empty reply). An action that reads the call context takes
-    it after the request, as ``(self, request, ctx: CallContext)``. Any other
-    public method is an error; helpers start with ``_``.
+    (``None`` for an empty reply). It returns the reply, so it is neither an
+    ``async def`` nor a generator function. An action that reads the call
+    context takes it after the request, as ``(self, request, ctx:
+    CallContext)``. Any other public method is an error; helpers start with
+    ``_``.
 
     Args:
         declaration: The class marked with ``@contract``.
@@ -1044,6 +1046,15 @@ def _signature(
     if inspect.iscoroutinefunction(function) or inspect.isasyncgenfunction(function):
         raise ContractDefinitionError(
             f"{where}: actions are synchronous in this version"
+        )
+    # A generator function's call returns a generator and runs none of its
+    # body, so it never returns the reply. That includes one that
+    # types.coroutine made awaitable. Only the function's own code is read: a
+    # wrapper's body decides what its call returns.
+    if inspect.isgeneratorfunction(function):
+        raise ContractDefinitionError(
+            f"{where}: it is a generator function, so a call returns a "
+            "generator, not the reply; return the reply instead of yielding it"
         )
     try:
         signature = inspect.signature(function)
