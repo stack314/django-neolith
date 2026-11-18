@@ -515,9 +515,14 @@ class InProcess(Provider):
             raise refusal
         caller = typing.cast(str, context.caller)
         # The budget is read as the call is dispatched, and the deadline
-        # counted from it, from when the call arrived (spec 03).
+        # counted from it, from when the call arrived (spec 03). On the
+        # caller's own clock, it is never later than the caller's deadline.
         budget = _context.budget(context.deadline, arrived)
-        deadline = None if budget is None else arrived + budget / 1000
+        deadline = (
+            None
+            if budget is None or context.deadline is None
+            else min(arrived + budget / 1000, context.deadline)
+        )
         # Step 3. The principal's form has passed the caller's check, so one
         # that cannot be read is a failure of this host, not of the call.
         problem: Exception | None = None

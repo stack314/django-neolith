@@ -563,13 +563,13 @@ class Scope:
             # so far has exactly its timeout left.
             own = timeout - (current - started)
             if remaining is None or own < remaining:
-                remaining, deadline = own, started + timeout
-        if remaining is None or deadline is None:
+                return (
+                    _milliseconds(own, 0.0),
+                    min(started + timeout, current + BUDGET_CAP / 1000),
+                )
+        if deadline is None:
             return None, None
-        return (
-            _milliseconds(remaining),
-            min(deadline, current + BUDGET_CAP / 1000),
-        )
+        return budget(deadline, current), min(deadline, current + BUDGET_CAP / 1000)
 
 
 def budget(deadline: float | None, at: float) -> int | None:
@@ -580,20 +580,23 @@ def budget(deadline: float | None, at: float) -> int | None:
     It is less than 1 once the deadline has passed, or is about to, which a
     call is not sent with (TRN-28). Every transport reads a call's budget
     with this, when it sends the call (ADR 0028 Decision 2).
+
+    A deadline is a float, such as a start plus a timeout, held to within
+    one unit in its last place. A time left that falls short of a whole
+    millisecond by no more than two such units, which the float cannot tell
+    from that millisecond, counts as the millisecond, so a timeout of
+    exactly 1 ms is not read as 0 for the rounding of its deadline.
     """
-    return None if deadline is None else _milliseconds(deadline - at)
+    if deadline is None:
+        return None
+    return _milliseconds(deadline - at, 2 * math.ulp(deadline))
 
 
-def _milliseconds(remaining: float) -> int:
-    """Seconds left as a budget: whole milliseconds, rounded down, capped.
-
-    The time left is a difference of two readings of a clock with a
-    nanosecond's resolution, so it is taken to the nanosecond before it is
-    rounded down: the float error of the difference, far smaller, then never
-    takes a millisecond off a deadline that is exactly a whole number of
-    milliseconds away.
+def _milliseconds(remaining: float, slack: float) -> int:
+    """Seconds left, with ``slack`` seconds of float error, as a budget:
+    whole milliseconds, rounded down, capped.
     """
-    return min(math.floor(round(remaining * 1000, 6)), BUDGET_CAP)
+    return min(math.floor((remaining + slack) * 1000), BUDGET_CAP)
 
 
 _CURRENT: contextvars.ContextVar[Scope | None] = contextvars.ContextVar(

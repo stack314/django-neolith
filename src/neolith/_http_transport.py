@@ -20,7 +20,7 @@ the kind from the body only, never from the status:
   the json module reads it), has exactly the members ``kind``, ``message``
   and, when it carries a detail, ``data``, and its detail is handed on as
   the text the provider wrote; a body that breaks those rules is
-  ``internal``;
+  ``internal``, and one that is not UTF-8 JSON text carries none;
 - any other status without one is ``unavailable``, and so is every failure
   of the client to carry the call, which is logged once at ``WARNING``.
 
@@ -58,10 +58,10 @@ _WHITESPACE: Final = re.compile(r"[ \t\n\r]*")
 class HTTPTransport:
     """The HTTP transport to one contract version's remote provider.
 
-    It is the name ``NEOLITH["REMOTE_PROVIDERS"]`` admits under
-    ``BACKEND`` (``neolith.transports.HTTPTransport``). Its constructor
-    and methods are private in 0.1: an adopter names it in settings and
-    never builds or subclasses it (ADR 0014 Decision 7).
+    It is the value a remote provider's entry gives under ``BACKEND``
+    (``neolith.transports.HTTPTransport``, ADR 0014 Decision 4). Its
+    constructor and methods are private in 0.1: an adopter names it in
+    settings and never builds or subclasses it (ADR 0014 Decision 7).
     """
 
     __slots__ = ("_callers", "_contract", "_pool", "_targets")
@@ -230,16 +230,21 @@ def _error_body(body: bytes) -> tuple[str, str, bytes | None] | None:
     """The kind, message and detail text of a neolith error body, or ``None``
     when ``body`` carries none.
 
-    A body carries one when it is JSON text, within the nesting a reader
-    admits, whose value is an object with a string ``kind`` (spec 03). Such
-    a body that is not I-JSON (CON-42), or holds a member other than
-    ``kind``, ``message`` and ``data``, or no ``message`` that is a string,
-    raises ``ValueError``: it cannot be read, so the caller gets
-    ``internal``. The detail is the text of ``data`` exactly as the provider
-    wrote it, or ``None`` when ``data`` is absent.
+    A body carries one when it is JSON text, UTF-8 and within the nesting a
+    reader admits, whose value is an object with a member ``kind`` written
+    as a string (spec 03), judged on the members as written, so a name
+    written twice cannot hide one. Such a body that is not I-JSON (CON-42),
+    or holds a member other than ``kind``, ``message`` and ``data``, or no
+    ``message`` that is a string, raises ``ValueError``: it cannot be read,
+    so the caller gets ``internal``. The detail is the text of ``data``
+    exactly as the provider wrote it, or ``None`` when ``data`` is absent.
     """
     value, broken, _ = _interchange(body)
-    if not isinstance(value, dict) or type(value.get("kind")) is not str:
+    if not isinstance(value, dict):
+        return None
+    text = body.decode("utf-8")
+    members = _members(text)
+    if not any(name == "kind" and text[start] == '"' for name, start, _ in members):
         return None
     if broken is not None:
         raise ValueError(f"the neolith error body {broken}")
@@ -248,37 +253,41 @@ def _error_body(body: bytes) -> tuple[str, str, bytes | None] | None:
             "the neolith error body does not have exactly the members kind, "
             "message and, for a detail, data"
         )
-    detail = None
-    if "data" in value:
-        start, end = _member(body.decode("utf-8"), "data")
-        detail = body.decode("utf-8")[start:end].encode("utf-8")
+    detail = next(
+        (
+            text[start:end].encode("utf-8")
+            for name, start, end in members
+            if name == "data"
+        ),
+        None,
+    )
     return value["kind"], value["message"], detail
 
 
-def _member(text: str, name: str) -> tuple[int, int]:
-    """Where the value of the member ``name`` of a JSON object's text starts
-    and ends.
+def _members(text: str) -> list[tuple[str, int, int]]:
+    """Each member of a JSON object's text, in order: its name, and where its
+    value starts and ends.
 
-    The text has been read as I-JSON already, so it is an object, its
-    nesting is bounded and each member name occurs once.
+    The text has been read as JSON already, so it is an object and its
+    nesting is bounded. Numbers are kept as written, so none is converted.
     """
-    decoder = json.JSONDecoder()
+    decoder = json.JSONDecoder(parse_int=str, parse_float=str, parse_constant=str)
 
     def skip(at: int) -> int:
         found = _WHITESPACE.match(text, at)
         return at if found is None else found.end()
 
+    found: list[tuple[str, int, int]] = []
     at = skip(skip(0) + 1)  # past the opening brace
     while text[at] != "}":
-        key, at = decoder.raw_decode(text, at)
+        name, at = decoder.raw_decode(text, at)
         at = skip(skip(at) + 1)  # past the colon
         _, end = decoder.raw_decode(text, at)
-        if key == name:
-            return at, end
+        found.append((name, at, end))
         at = skip(end)
         if text[at] == ",":
             at = skip(at + 1)
-    raise ValueError(f"the object has no member {name!r}")
+    return found
 
 
 # A remote provider's url (ADR 0014 Decision 3, the admitted set), and the

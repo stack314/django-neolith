@@ -39,7 +39,7 @@ from neolith import (
     contract,
     transports,
 )
-from neolith._connector import Connector, InProcess
+from neolith._connector import Connector, Failure, InProcess
 from neolith._context import Sent
 from neolith._contracts import Action
 from neolith._crossing import Receiver
@@ -238,6 +238,9 @@ def test_a_reply_is_checked_against_exact_integer_bounds() -> None:
         _response(500, b'["internal"]'),
         _response(400, b'{"kind":7,"message":"m"}'),
         _response(400, b'{"kind":null,"message":"m"}'),
+        _response(400, b'{"kind":3,"kind":["moved"],"message":"m"}'),
+        _response(400, b'{"kind":"moved","message":"m","data":{"a":"\xff"}}'),
+        _response(400, b'{"message":"m","data":{"kind":"moved"}}'),
         _response(400, b'"not_found"'),
         _response(400, b'\xff{"kind":"not_found","message":"m"}'),
         _response(400, b"[" * 100_000 + b"]" * 100_000),
@@ -335,8 +338,11 @@ def test_an_unknown_kind_without_data_arrives_without_a_detail() -> None:
         b'{"kind":"not_found","message":null}',
         b'{"kind":"not_found","message":"m","detail":"d"}',
         b'{"kind":"not_found","message":"m","trace":"t"}',
-        # Not I-JSON (CON-42).
+        # Not I-JSON (CON-42), whichever occurrence of a name comes last.
         b'{"kind":"not_found","message":"m","message":"n"}',
+        b'{"kind":"moved","kind":3,"message":"m"}',
+        b'{"kind":3,"kind":"moved","message":"m"}',
+        b'{"kind":null,"message":"m","kind":"moved"}',
         b'{"kind":"moved","message":"m","data":{"a":1,"a":2}}',
         b'{"kind":"not_found","message":"m","x":1e400}',
     ],
@@ -758,6 +764,12 @@ class _Other(Protocol):
         (1000.0015, 1000.0, 1),
         (1000.001, 1000.0, 1),
         (1000.0009, 1000.0, 0),
+        # Short of a whole millisecond by less than the deadline's float can
+        # hold, and by more.
+        (1000.0 + 0.001, 1000.0, 1),
+        (1000.0019999996, 1000.0, 1),
+        (1000.0009999996, 1000.0, 0),
+        (1e6 + 0.003, 1e6, 3),
         (1000.0, 1000.0, 0),
         (999.0, 1000.0, -1000),
         (1e9, 0.0, 9_999_999_999),
@@ -767,6 +779,45 @@ def test_one_helper_turns_a_deadline_into_a_budget(
     deadline: float | None, at: float, budget: int | None
 ) -> None:
     assert _context.budget(deadline, at) == budget
+
+
+@pytest.mark.spec("TRN-28")
+@pytest.mark.parametrize("timeout", [0.0009999996, 0.0009999999999])
+def test_a_timeout_just_short_of_1_ms_is_never_sent(timeout: float) -> None:
+    with (
+        _desk() as (connector, provider),
+        _root(),
+        pytest.raises(ContractError) as raised,
+    ):
+        connector.ask(Ask(), timeout=timeout)
+    assert raised.value.kind == "timeout"
+    assert provider.opened == 0
+
+
+@pytest.mark.spec("TRN-36", "TRN-38")
+@pytest.mark.parametrize(
+    "deadline", [1000.0019999996, 1000.001, 1000.0005, 1001.0, 999.5, 1000.0]
+)
+def test_an_in_process_providers_deadline_is_never_later_than_the_callers(
+    monkeypatch: pytest.MonkeyPatch, deadline: float
+) -> None:
+    clock = _Clock()
+    monkeypatch.setattr(_context, "now", clock)
+    seen: list[float | None] = []
+
+    class Seeing:
+        def ask(self, request: Ask, ctx: neolith.CallContext) -> Told:
+            seen.append(ctx.deadline)
+            return Told(n=1)
+
+        def tell(self, request: Ask) -> None:
+            return None
+
+    transport = InProcess(Desk, Seeing(), app="desk", principal_from=("shop",))
+    sent = Sent(None, "1" * 32, "", deadline, "key", "shop")
+    with contextlib.suppress(Failure):
+        transport.call(DESK.actions["ask"], b"{}", sent)
+    assert all(found is not None and found <= deadline for found in seen)
 
 
 # A remote provider's url (ADR 0014 Decision 3), as over_http admits it.
