@@ -36,6 +36,7 @@ from tests.hosting import NEOLITH_KEYS, in_fresh_process
 from tests.test_host import _hosts
 
 REMOTE = 'NEOLITH["REMOTE_PROVIDERS"]'
+ROUTING = 'NEOLITH["ROUTING_POLICIES"]'
 TRANSPORT = "neolith.transports.HTTPTransport"
 ROOT = "neolith.middleware.RootMiddleware"
 PRINCIPAL = "neolith.middleware.PrincipalMiddleware"
@@ -44,6 +45,13 @@ COURIERS = "tests.host_apps.couriers"
 # A secret, for the fresh hosts' signing keys.
 SECRET = secrets.token_urlsafe(32)
 SIGNING = {"web": {"KEY_ID": "web-1", "SECRET": SECRET}}
+# The tail of the refusal of a remote provider for a contract an app of the
+# host provides (ADR 0031, the Resolve rows).
+IN_HOST = (
+    "which answers every call to it; an in-process call never ends with "
+    "unavailable, so a remote provider listed beside it would never be called; "
+    "remove the entry"
+)
 # Text that no fixed message holds, standing for a credential.
 CREDENTIAL = "Zq7hunter2"
 
@@ -118,11 +126,11 @@ _URL = f'{REMOTE}["stock.v1"][0]["OPTIONS"]["url"]'
         ),
         ({"stock.v1": []}, [f'{REMOTE}["stock.v1"]: is empty; leave stock.v1 out']),
         (
-            {"stock.v1": [entry(), entry()]},
+            {"stock.v1": [entry(), entry("https://other.internal")]},
             [
                 f'{REMOTE}["stock.v1"]: lists 2 providers; with the single routing '
-                "policy a contract has one provider, and routing between several "
-                "arrives with step 6 (ADR 0016)"
+                "policy a contract has one provider; to try them in order, name "
+                f"local-first for stock.v1 in {ROUTING}"
             ],
         ),
         (
@@ -235,8 +243,8 @@ def test_every_refusal_reaches_the_diagnostic_whatever_was_refused_first() -> No
             f"{REMOTE}: key 'Stock': expected a contract identity, such as "
             "<contract>.v1",
             f"{REMOTE}['Stock']: lists 2 providers; with the single routing policy "
-            "a contract has one provider, and routing between several arrives "
-            "with step 6 (ADR 0016)",
+            "a contract has one provider; to try them in order, name local-first "
+            f"for it in {ROUTING}",
             f'{REMOTE}[\'Stock\'][0]["OPTIONS"]["url"]: is not an origin: '
             f"{_http_transport.CASE}",
             f"{REMOTE}['Stock'][1]: missing key OPTIONS",
@@ -601,7 +609,7 @@ def test_the_records_refused_examples_are_refused_by_the_builder(url: str) -> No
     assert f"{_URL}: is not an origin:" in refusal
 
 
-# Resolve (TRN-67, APP-8).
+# Resolve (TRN-75, APP-8).
 
 
 @st.composite
@@ -611,7 +619,7 @@ def _with_remote(draw: st.DrawFn) -> tuple[list[Declaration], frozenset[str]]:
     return declarations, frozenset(draw(st.lists(st.sampled_from(pool), unique=True)))
 
 
-@pytest.mark.spec("TRN-67", "APP-8")
+@pytest.mark.spec("TRN-75", "APP-8")
 @_HYPOTHESIS
 @given(_with_remote())
 def test_resolve_with_remote_providers_refuses_exactly_what_the_rules_name(
@@ -632,9 +640,7 @@ def test_resolve_with_remote_providers_refuses_exactly_what_the_rules_name(
         if identity in provider:
             expected.add(
                 f"{REMOTE}: {identity} is provided by app {provider[identity]} in "
-                "this host; a contract provided in the host and remotely at once "
-                "needs a routing policy other than single, which arrives with step "
-                "6 (ADR 0016)"
+                f"this host, {IN_HOST}"
             )
     for declaration in declarations:
         for contract in declaration.requires:
@@ -654,7 +660,7 @@ def test_resolve_with_remote_providers_refuses_exactly_what_the_rules_name(
     assert alone == none
 
 
-@pytest.mark.spec("TRN-67", "APP-8", "APP-12")
+@pytest.mark.spec("TRN-75", "APP-8", "APP-12")
 def test_the_builder_reports_the_resolve_rows_together_and_sorted() -> None:
     value = remote(stock_v1="http://localhost", couriers_v3="http://localhost")
     value["billing.invoices.v1"] = [entry()]
@@ -662,9 +668,7 @@ def test_the_builder_reports_the_resolve_rows_together_and_sorted() -> None:
         configure([COURIERS, WEB], deployer(REMOTE_PROVIDERS=value))
     assert str(raised.value).splitlines() == [
         f"{REMOTE}: billing.invoices.v1 is required by no hosted app; remove it",
-        f"{REMOTE}: couriers.v3 is provided by app couriers in this host; a contract "
-        "provided in the host and remotely at once needs a routing policy other "
-        "than single, which arrives with step 6 (ADR 0016)",
+        f"{REMOTE}: couriers.v3 is provided by app couriers in this host, {IN_HOST}",
     ]
     # Following the advice: each line's fix admits the host.
     del value["billing.invoices.v1"], value["couriers.v3"]
@@ -764,7 +768,7 @@ def _warned(url: str) -> list[str]:
 )
 def test_plain_http_to_a_host_that_is_not_loopback_is_warned(url: str) -> None:
     assert _warned(url) == [
-        f'{REMOTE}["stock.v1"]: {url} is plain HTTP to a host that is not '
+        f'{REMOTE}["stock.v1"][0]: {url} is plain HTTP to a host that is not '
         "loopback; anyone who can watch the network can read and replay the "
         "calling app's token (spec 03)"
     ]
@@ -821,12 +825,26 @@ def test_w002_is_judged_on_each_entry_it_can_read() -> None:
         "stock.v1": [entry("http://inventory.internal")],
         "couriers.v3": [],
         "other.v1": [entry("http://Inventory.internal")],
-        "more.v1": [entry("http://more.internal"), entry("http://more.internal")],
+        "more.v1": [
+            entry("http://Inventory.internal"),
+            {"BACKEND": TRANSPORT},
+            entry("https://more.internal"),
+            entry("http://more.internal"),
+            entry("http://more.internal"),
+        ],
+        "Stock.V1": [entry("http://inventory.internal")],
+        "last.v1": (entry("http://inventory.internal"),),
     }
+    tail = (
+        "is plain HTTP to a host that is not loopback; anyone who can watch the "
+        "network can read and replay the calling app's token (spec 03)"
+    )
+    # Each entry in the admitted form, by its index, whatever the list and the
+    # rest of NEOLITH hold: a url listed twice warns twice.
     assert _checks.remote_warnings({"REMOTE_PROVIDERS": value, "X": 1}) == [
-        f'{REMOTE}["stock.v1"]: http://inventory.internal is plain HTTP to a host '
-        "that is not loopback; anyone who can watch the network can read and "
-        "replay the calling app's token (spec 03)"
+        f'{REMOTE}["more.v1"][3]: http://more.internal {tail}',
+        f'{REMOTE}["more.v1"][4]: http://more.internal {tail}',
+        f'{REMOTE}["stock.v1"][0]: http://inventory.internal {tail}',
     ]
     assert _checks.remote_warnings([]) == []
     assert _checks.remote_warnings({"REMOTE_PROVIDERS": []}) == []
@@ -971,7 +989,7 @@ def test_remote_identities_on_one_origin_share_its_connections() -> None:
     assert json.loads(out.splitlines()[-1]) == [url, True, "mappingproxy"]
 
 
-@pytest.mark.spec("APP-1", "TRN-67")
+@pytest.mark.spec("APP-1", "TRN-75")
 def test_set_up_stops_on_each_remote_row_with_every_refusal_and_no_credential() -> None:
     url = f"http://user:{CREDENTIAL}@localhost"
     out = in_fresh_process(
@@ -1009,9 +1027,7 @@ def test_set_up_stops_on_each_remote_row_with_every_refusal_and_no_credential() 
     )
     refusal, logged = json.loads(out.splitlines()[-1])
     assert refusal.splitlines() == [
-        f"{REMOTE}: couriers.v3 is provided by app couriers in this host; a "
-        "contract provided in the host and remotely at once needs a routing "
-        "policy other than single, which arrives with step 6 (ADR 0016)",
+        f"{REMOTE}: couriers.v3 is provided by app couriers in this host, {IN_HOST}",
         f"{REMOTE}: other.v1 is required by no hosted app; remove it",
     ]
     assert any(refusal in line for line in logged)
@@ -1182,7 +1198,7 @@ def test_set_up_logs_w002_and_an_override_leaves_the_set_up_transport() -> None:
     )
     found, logged, refused, same, origin = json.loads(out.splitlines()[-1])
     warning = (
-        f'{REMOTE}["stock.v1"]: http://inventory.internal is plain HTTP to a '
+        f'{REMOTE}["stock.v1"][0]: http://inventory.internal is plain HTTP to a '
         "host that is not loopback; anyone who can watch the network can read "
         "and replay the calling app's token (spec 03)"
     )
