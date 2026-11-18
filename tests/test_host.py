@@ -1405,7 +1405,7 @@ def test_connect_during_a_later_set_up_is_refused_in_either_phase(
 
 
 @pytest.mark.spec("APP-14")
-def test_a_refused_later_set_up_leaves_no_record_its_table_knew(
+def test_a_record_from_an_app_no_longer_installed_leaves_the_first_apps_admitted(
     write_app: WriteApp,
 ) -> None:
     # Added apps whose modules connect() at import to a contract the refused
@@ -1478,6 +1478,54 @@ def test_a_retried_set_up_reports_an_unknown_identity_again(
         "['nope.v1']",
         "DeclarationError",
         "['nope.v1']",
+    ]
+
+
+@pytest.mark.spec("APP-14")
+@pytest.mark.parametrize("refused_by", ["a changed set of hosted apps", "Resolve"])
+def test_a_refused_set_up_that_knows_an_identity_keeps_its_record(
+    write_app: WriteApp, refused_by: str
+) -> None:
+    # An undeclared app asks for billing.invoices.v1, which the host does not
+    # know. A set-up that adds the app providing it knows the identity but is
+    # refused, so it must not drop the record: the next set-up without the
+    # provider still reports it.
+    asks = write_app(
+        "", models='from neolith import connect\n\nconnect("billing.invoices.v1")\n'
+    )
+    if refused_by == "Resolve":
+        provider = write_app(
+            _apps_module(
+                provides=[("Invoices", "{package}.services.InvoiceService")],
+                requires=["StockV2"],
+            ),
+            services=_INVOICES,
+        )
+    else:
+        provider = _invoices_app(write_app)
+    printed = in_built_host(
+        f"""
+        import django
+        from django.test.utils import override_settings
+
+        django.setup()
+        installed = list(settings.INSTALLED_APPS)
+        for added in ([{asks!r}], [{asks!r}, {provider!r}], [{asks!r}], []):
+            try:
+                with override_settings(INSTALLED_APPS=[*added, *installed]):
+                    print("admitted")
+            except Exception as error:
+                print(type(error).__name__)
+        """,
+        host_apps.HOSTED,
+        {"NEOLITH": host_apps.NEOLITH},
+    )
+    refused = "ImproperlyConfigured" if refused_by != "Resolve" else "DeclarationError"
+    assert printed.splitlines() == [
+        "DeclarationError",
+        refused,
+        "DeclarationError",
+        "admitted",
     ]
 
 

@@ -103,8 +103,11 @@ class Host:
 
 _LOCK: Final = threading.Lock()
 # The identities connect() was asked for before a table existed: each with
-# the places it was asked from, which only the message reads.
-_RECORDED: dict[str, dict[str, None]] = {}
+# the places it was asked from, which only the message reads, and the module
+# that asked from each, which decides which set-up checks it.
+_RECORDED: dict[str, dict[str, str]] = {}
+# The names of the apps installed at any set-up in this process.
+_ONCE_INSTALLED: set[str] = set()
 # The hosted apps of the first set-up that passed: label to config class.
 _first: Mapping[str, type[AppConfig]] | None = None
 # The NEOLITH the first set-up checked, without REQUEST_DEADLINE.
@@ -200,14 +203,11 @@ def set_up(config: AppConfig) -> None:
             for problem in _configure.settings_problems(configs)
         ]
     with _LOCK:
-        for identity, places in sorted(_RECORDED.items()):
+        _ONCE_INSTALLED.update(c.name for c in configs)
+        checked = _checked_by(registry)
+        for identity, places in sorted(checked.items()):
             if identity not in host.known:
                 refusals.extend(_unknown_at(identity, place, host) for place in places)
-        # This set-up has checked every record. Those its table knows are
-        # done with, whatever it decides below; an unknown one stays, so a
-        # later set-up reports it again.
-        for identity in [i for i in _RECORDED if i in host.known]:
-            del _RECORDED[identity]
         if refusals:
             _refuse(DeclarationError("\n".join(sorted(refusals))))
         if _first is not None and _first != hosted:
@@ -228,7 +228,37 @@ def set_up(config: AppConfig) -> None:
             m.msg for m in found if m.level == checks.WARNING and not m.is_silenced()
         )
         published = dataclasses.replace(host, request_deadline=deadline, warned=warned)
+        # Only a set-up that passes is done with the records it checked, all
+        # of which its table knows. A refused one leaves every record, so the
+        # next set-up of the same apps reports an unknown identity again,
+        # whatever a refused set-up with other apps knew (ADR 0029).
+        for identity, places in checked.items():
+            for place in places:
+                del _RECORDED[identity][place]
+            if not _RECORDED[identity]:
+                del _RECORDED[identity]
         setattr(config, _HOST_ATTR, published)
+
+
+def _checked_by(registry: Apps) -> dict[str, list[str]]:
+    """The places of each record that a set-up of ``registry`` checks.
+
+    A record asked for from a module of an installed app, or from a module of
+    no app ever installed in this process, is checked. One asked for from an
+    app that an earlier set-up installed and this one does not is left for a
+    set-up that installs that app again: its module stays imported, but its
+    app is not part of this host (ADR 0029).
+    """
+    checked: dict[str, list[str]] = {}
+    for identity, places in _RECORDED.items():
+        for place, module in places.items():
+            if registry.get_containing_app_config(module) is None and any(
+                module == name or module.startswith(f"{name}.")
+                for name in _ONCE_INSTALLED
+            ):
+                continue
+            checked.setdefault(identity, []).append(place)
+    return checked
 
 
 def _setting_changed(
@@ -656,7 +686,8 @@ def connect(identity: str, /) -> "Connector":
     with _LOCK:
         host, _ = _table()
         if host is None:
-            _RECORDED.setdefault(identity, {})[_place()] = None
+            place, module = _place()
+            _RECORDED.setdefault(identity, {})[place] = module
         elif identity not in host.known:
             raise UsageError(
                 f"connect({_quoted(identity)}): no app of this host provides or "
@@ -665,14 +696,20 @@ def connect(identity: str, /) -> "Connector":
     return Connector._made(identity)
 
 
-def _place() -> str:
-    """The file and line of the ``connect()`` call, for the message only."""
+def _place() -> tuple[str, str]:
+    """The file and line of the ``connect()`` call, for the message only, and
+    the name of the module it is in, or ``""`` if that is not known.
+    """
     frame = inspect.currentframe()
     try:
         caller = None if frame is None or frame.f_back is None else frame.f_back.f_back
         if caller is None:
-            return "an unknown place"
-        return f"{caller.f_code.co_filename}:{caller.f_lineno}"
+            return "an unknown place", ""
+        module = caller.f_globals.get("__name__")
+        return (
+            f"{caller.f_code.co_filename}:{caller.f_lineno}",
+            module if type(module) is str else "",
+        )
     finally:
         del frame
 
