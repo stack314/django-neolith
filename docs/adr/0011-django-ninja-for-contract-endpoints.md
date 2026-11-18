@@ -1,6 +1,7 @@
 # 0011. The host serves contract endpoints itself, from its root middleware, with no web framework
 
-- **Status:** Proposed
+- **Status:** Accepted
+- **Accepted:** 2026-11-18
 - **Date:** 2026-11-03; amended 2026-11-18 for roadmap step 5 (#12)
 
 ## Context

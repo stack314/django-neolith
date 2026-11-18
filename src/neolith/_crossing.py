@@ -15,6 +15,14 @@ text with the validator, so what it hands on shares no object with the
 sender. Nothing set on a record class afterwards, and none of its own
 methods, such as ``model_dump_json``, change what crosses.
 
+What a receiver checks depends on where the text comes from (``Receiver``).
+In-process it reads only text that a sender's check passed, so it runs the
+validator alone. A receiver that reads text from a network (``Codec.receive``)
+first runs the network receive check of ADR 0007 Decision 3: the text is
+I-JSON (spec 01, CON-42), and it passes the description check, with the
+rules that check adds (CON-39, CON-40). It then reads the same text with the
+validator.
+
 pydantic-core reuses, for each record a schema names, the serializer and
 validator Pydantic stored on that record's class, when the class is complete
 (``src/common/prebuilt.rs``, at 2.41.1 and in Pydantic 2.14.3). So a record
@@ -22,13 +30,16 @@ is admitted only when what it would reuse was built from the record's own
 core schema.
 """
 
+import enum
+import json
 import math
+import sys
 import typing
 from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from enum import Enum
-from typing import Any, final
+from typing import Any, NoReturn, final
 
 from pydantic import BaseModel
 from pydantic_core import SchemaSerializer, SchemaValidator, ValidationError
@@ -37,18 +48,44 @@ from neolith import _naming
 from neolith._checker import TIMES, description_checker
 from neolith._forms import FORM_FOR_KIND
 from neolith._naming import shown
+from neolith._portable import text_problem
 
 if typing.TYPE_CHECKING:
     from neolith._contracts import Action, Contract
 
-__all__ = ["Codec", "check_request", "codec"]
+__all__ = ["Codec", "Receiver", "Refusal", "check_request", "codec"]
+
+
+class Receiver(enum.Enum):
+    """Where a receiver reads a value's text from (ADR 0007 Decision 3)."""
+
+    #: Text that a sender's check passed in this process: the validator alone.
+    IN_PROCESS = "in-process"
+    #: Text from a network: the network receive check, then the validator.
+    NETWORK = "network"
+
+
+@final
+class Refusal(Exception):
+    """Text a network receiver refuses (``Codec.receive``).
+
+    Its message names the rule the text breaks and, where there is one, the
+    place in the value, never a value that arrived.
+    """
 
 
 @final
 class Codec[R: BaseModel]:
     """The serializer, validator and description check of one record."""
 
-    __slots__ = ("_checker", "_hides", "_serializer", "_validator", "record")
+    __slots__ = (
+        "_checker",
+        "_defs",
+        "_hides",
+        "_serializer",
+        "_validator",
+        "record",
+    )
 
     def __init__(
         self,
@@ -81,6 +118,7 @@ class Codec[R: BaseModel]:
         self._serializer = serializer
         self._validator = validator
         self._checker = description_checker(defs, _naming.name(record))
+        self._defs = defs
         self._hides = bool(config and config.get("hide_input_in_errors"))
 
     def send(self, value: object, subject: str) -> bytes:
@@ -192,6 +230,110 @@ class Codec[R: BaseModel]:
         """
         return typing.cast(R, self._validator.validate_json(text))
 
+    def receive(self, text: bytes, subject: str) -> R:
+        """Read JSON text that arrived from a network into a new value.
+
+        ``subject`` names the value in a message, such as "the request". The
+        network receive check (ADR 0007 Decision 3) runs first, in this
+        order:
+
+        1. the text is I-JSON (CON-42): UTF-8 JSON text, with no member name
+           twice in one object, no lone surrogate, and no number outside the
+           range of a double, and so no ``NaN`` or ``Infinity``;
+        2. it passes the description check (CON-16, CON-39), with the rules
+           that check adds (CON-40).
+
+        The validator then reads the same text, ignoring unknown fields
+        (TRN-12). A text refused at any of these raises ``Refusal``. Any other
+        exception is one a validator of the record raised.
+        """
+        if type(text) is not bytes:
+            raise TypeError(f"{subject} arrives as bytes, not {_kind(text)}")
+        name = _naming.name(self.record)
+        parsed = _interchange(text, subject)
+        failed: ValidationError | None = None
+        try:
+            self._checker.validate_json(text)
+        except ValidationError as error:
+            failed = error
+        if failed is not None:
+            reason = _reader_limit(failed)
+            if reason is None:
+                first = failed.errors(include_url=False, include_input=False)[0]
+                reason = (
+                    f"does not fit the contract's description of {name}, at "
+                    f"{self._place(parsed, first['loc'])}: {first['msg']}"
+                )
+            del failed
+            raise Refusal(f"{subject} {reason}")
+        try:
+            return typing.cast(R, self._validator.validate_json(text))
+        except ValidationError as error:
+            failed = error
+        first = failed.errors(include_url=False, include_input=False)[0]
+        del failed
+        # A message a validator of the record wrote may show a value, so only
+        # the kind of the error is named.
+        raise Refusal(
+            f"{subject} does not read as a {name}, at "
+            f"{self._place(parsed, first['loc'])} ({first['type']})"
+        )
+
+    def _place(self, value: object, loc: tuple[int | str, ...]) -> str:
+        """Name the place in ``value`` that an error's location leads to.
+
+        A record's field is named, a list's item counted, and a map's entry
+        counted by where it comes in the text, so that no key is shown. A
+        step that leads nowhere in the value ends the place there.
+        """
+        name = _naming.name(self.record)
+        steps = [name]
+        schema: object = {"$ref": f"#/$defs/{name}"}
+        for step in loc:
+            schema = self._resolved(schema)
+            if type(schema) is not dict:
+                break
+            described = typing.cast(dict[str, Any], schema)
+            fields = described.get("properties")
+            if type(value) is dict and type(fields) is dict and step in fields:
+                steps.append(f".{step}")
+                schema = fields[step]
+                value = typing.cast(dict[str, object], value).get(str(step))
+            elif type(value) is dict and "additionalProperties" in described:
+                entries = typing.cast(dict[str, object], value)
+                if step == "[key]":
+                    steps.append(" (its key)")
+                    break
+                if type(step) is not str or step not in entries:
+                    break
+                steps.append(f"[entry {list(entries).index(step)}]")
+                schema, value = described["additionalProperties"], entries[step]
+            elif type(value) is list and type(step) is int:
+                items = typing.cast(list[object], value)
+                if not 0 <= step < len(items):
+                    break
+                steps.append(f"[{step}]")
+                schema, value = described.get("items"), items[step]
+            else:
+                break
+        return "".join(steps)
+
+    def _resolved(self, schema: object) -> object:
+        """A schema with its reference followed and its null branch dropped."""
+        for _ in range(len(self._defs) + 2):
+            if type(schema) is not dict:
+                return None
+            described = typing.cast(dict[str, Any], schema)
+            reference = described.get("$ref")
+            branches = described.get("anyOf")
+            if type(reference) is str:
+                schema = self._defs.get(reference.rsplit("/", 1)[-1])
+            elif type(branches) is list and branches:
+                schema = branches[0]
+            else:
+                return schema
+        return None
+
 
 def codec[R: BaseModel](contract: "Contract", record: type[R]) -> Codec[R]:
     """The codec a contract built for one of its request, reply or detail records."""
@@ -286,6 +428,91 @@ def _converted(dumped: object) -> tuple[object, str | None]:
         elif isinstance(item, day) and kind is not day:
             holder[at] = day.fromordinal(day.toordinal(item))
     return root[0], None
+
+
+# The largest double, as an integer: an integer written in JSON text above it
+# in magnitude is outside the range of a double (CON-42).
+_DOUBLE_MAX = int(sys.float_info.max)
+# More digits than that has.
+_DOUBLE_DIGITS = len(str(_DOUBLE_MAX))
+
+
+def _interchange(text: bytes, subject: str) -> object:
+    """Check that a text is I-JSON as spec 01 asks of a receiver (CON-42),
+    and return the value it holds, or raise ``Refusal``.
+
+    It is UTF-8 JSON text (RFC 8259), with no member name twice in one
+    object, no lone surrogate in any string or member name, and no number
+    outside the range of a double. ``NaN`` and ``Infinity`` are not JSON
+    numbers, and a number written with a fraction or an exponent is outside
+    the range when the double it reads as is not finite, as ``1e400``. A
+    number written as an integer is compared with the largest double exactly.
+    """
+
+    def pairs(items: list[tuple[str, object]]) -> dict[str, object]:
+        found = dict(items)
+        if len(found) != len(items):
+            raise Refusal(f"{subject} holds a member name twice in one object")
+        return found
+
+    def constant(literal: str) -> NoReturn:
+        raise Refusal(f"{subject} holds NaN or Infinity, which are not JSON numbers")
+
+    def outside() -> NoReturn:
+        raise Refusal(f"{subject} holds a number outside the range of a double")
+
+    def fraction(written: str) -> float:
+        number = float(written)
+        if not math.isfinite(number):
+            outside()
+        return number
+
+    def integer(written: str) -> int:
+        # Counted before it is read, so a long one costs nothing to refuse.
+        if len(written.lstrip("-")) > _DOUBLE_DIGITS:
+            outside()
+        number = int(written)
+        if abs(number) > _DOUBLE_MAX:
+            outside()
+        return number
+
+    problem: str | None = None
+    value: object = None
+    try:
+        decoded = text.decode("utf-8")
+    except UnicodeDecodeError:
+        problem = "is not UTF-8 text"
+    else:
+        try:
+            value = json.loads(
+                decoded,
+                object_pairs_hook=pairs,
+                parse_constant=constant,
+                parse_float=fraction,
+                parse_int=integer,
+            )
+        except RecursionError:
+            problem = "is nested too deeply to be read as JSON text"
+        except json.JSONDecodeError:
+            problem = "is not JSON text"
+    if problem is not None:
+        # Raised outside the handlers, so nothing of the reader's error, which
+        # can quote the text, is chained to it.
+        raise Refusal(f"{subject} {problem}")
+    # Without recursion, so a deep value cannot exhaust the stack.
+    pending: list[object] = [value]
+    while pending:
+        item = pending.pop()
+        if type(item) is dict:
+            for key, part in item.items():
+                if text_problem(key) is not None:
+                    raise Refusal(f"{subject} holds a lone surrogate in a member name")
+                pending.append(part)
+        elif type(item) is list:
+            pending.extend(item)
+        elif type(item) is str and text_problem(item) is not None:
+            raise Refusal(f"{subject} holds a lone surrogate in a string")
+    return value
 
 
 def _reader_limit(error: Exception) -> str | None:

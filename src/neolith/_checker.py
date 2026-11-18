@@ -16,7 +16,11 @@ Three rules of ADR 0019 that the description cannot state are added (CON-40):
 an integer is read strictly, so ``1.0`` is not one; a date or timestamp names
 a day that exists; and a timestamp's instant falls in years 0001 to 9999 in
 UTC. A number is read as the double a reader holds, as the declared type's
-validator reads it. A ``-0`` is admitted: only a sender is bound to write
+validator reads it. One written as an integer is also compared with each of
+its bounds exactly, so integer text that rounds onto a bound, such as
+2^60 + 1 against a maximum of 2^60, is refused (CON-39); a sender writes an
+integer only where a double equals it (TRN-11), so its text compares the
+same either way. A ``-0`` is admitted: only a sender is bound to write
 ``0`` (CON-35), and it converts the value before it writes the text.
 """
 
@@ -25,7 +29,13 @@ from collections.abc import Mapping
 from datetime import UTC, date, datetime
 from typing import Any
 
-from pydantic_core import CoreSchema, PydanticCustomError, SchemaValidator, core_schema
+from pydantic_core import (
+    CoreSchema,
+    PydanticCustomError,
+    PydanticKnownError,
+    SchemaValidator,
+    core_schema,
+)
 
 from neolith import _naming
 from neolith._forms import (
@@ -196,13 +206,22 @@ def _typed(rest: dict[str, Any], refs: list[str]) -> CoreSchema:
             multiple_of=multiple,
         )
     if kind == "number":
-        return core_schema.float_schema(
-            strict=True,
-            allow_inf_nan=False,
+        bounds = _Bounds(
             ge=_double(rest, "minimum"),
             le=_double(rest, "maximum"),
             gt=_double(rest, "exclusiveMinimum"),
             lt=_double(rest, "exclusiveMaximum"),
+        )
+        return core_schema.no_info_before_validator_function(
+            bounds.exactly,
+            core_schema.float_schema(
+                strict=True,
+                allow_inf_nan=False,
+                ge=bounds.ge,
+                le=bounds.le,
+                gt=bounds.gt,
+                lt=bounds.lt,
+            ),
         )
     if kind == "boolean":
         return core_schema.bool_schema(strict=True)
@@ -297,6 +316,48 @@ def _double(rest: dict[str, Any], keyword: str) -> float | None:
     if type(value) is int and float(value) == value:
         return float(value)
     raise TypeError(f"{keyword} {value!r} is not a number a double holds")
+
+
+class _Bounds:
+    """The bounds of a number, each a double or ``None``."""
+
+    __slots__ = ("ge", "gt", "le", "lt")
+
+    def __init__(
+        self,
+        *,
+        ge: float | None,
+        le: float | None,
+        gt: float | None,
+        lt: float | None,
+    ) -> None:
+        self.ge, self.le, self.gt, self.lt = ge, le, gt, lt
+
+    def exactly(self, value: object) -> object:
+        """Compare a number written as an integer with each bound exactly.
+
+        The JSON reader hands this an ``int`` for integer text, whatever its
+        size, and Python compares an ``int`` with a ``float`` exactly. Any
+        other value passes on unchanged, to be read as a double.
+        """
+        if type(value) is not int:
+            return value
+        if self.ge is not None and not value >= self.ge:
+            raise PydanticKnownError("greater_than_equal", {"ge": _exact(self.ge)})
+        if self.gt is not None and not value > self.gt:
+            raise PydanticKnownError("greater_than", {"gt": _exact(self.gt)})
+        if self.le is not None and not value <= self.le:
+            raise PydanticKnownError("less_than_equal", {"le": _exact(self.le)})
+        if self.lt is not None and not value < self.lt:
+            raise PydanticKnownError("less_than", {"lt": _exact(self.lt)})
+        return value
+
+
+def _exact(bound: float) -> float | int:
+    """A bound as a message shows it: a whole one as the integer it is, so
+    the digits a double's own form leaves out are not shown as zeros.
+    """
+    return int(bound) if bound.is_integer() else bound
 
 
 def _existing_day(text: str) -> str:

@@ -13,7 +13,7 @@
 | 7 | Boundary check: `neolith check` wrapping import-linter, report-only then enforce per app | — |
 | 8 | Two small example apps under `examples/` showing attached, detached and both-at-once; the 0.1 proof | all |
 
-Libraries named in the steps (django-ninja, httpx, import-linter) are working assumptions. Each needs an Accepted decision record before the step that adds it lands ([K5](../CONTRIBUTING.md)). For django-ninja that record is [ADR 0011](adr/0011-django-ninja-for-contract-endpoints.md), still Proposed.
+Libraries named in the steps (django-ninja, httpx, import-linter) are working assumptions. Each needs an Accepted decision record before the step that adds it lands ([K5](../CONTRIBUTING.md)). For django-ninja that record is [ADR 0011](adr/0011-django-ninja-for-contract-endpoints.md), which, as Accepted, has the host serve contract endpoints itself, with no web framework.
 
 Gate for releasing 0.1: verified on Python 3.15 with Django 6.1 ([ADR 0012](adr/0012-supported-python-and-django-versions.md)).
 
