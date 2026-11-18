@@ -53,6 +53,7 @@ import logging
 import sys
 import threading
 import types
+import weakref
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final, NoReturn, cast, final
@@ -302,7 +303,7 @@ def set_up(config: AppConfig) -> None:
         )
         published = dataclasses.replace(
             host,
-            connectors=_remote(host.connectors, configs, callers),
+            connectors=_remote(config, host.connectors, configs, callers),
             request_deadline=deadline,
             warned=warned,
             principals=principals,
@@ -530,6 +531,7 @@ def _principals(config: AppConfig) -> tuple[_principal.Built, ...]:
 
 
 def _remote(
+    config: AppConfig,
     connectors: Mapping[str, Bound],
     configs: Iterable[AppConfig],
     callers: _caller.Callers,
@@ -539,6 +541,10 @@ def _remote(
     ``single``, a contract's one provider is the app of the host that
     provides it, else its remote provider (ADR 0014 Decision 2). The
     transports share one pool per origin and open nothing until a call.
+
+    The pools belong to the set-up that ``config`` ran, and close when the
+    config is gone, such as when Django drops the registry of an override
+    that set the host up again, or when the process exits.
     """
     urls = _checks.remote_urls(getattr(settings, "NEOLITH", {}))
     if not urls:
@@ -555,6 +561,7 @@ def _remote(
         pool = pools.pool(_http.Origin.parse(url))
         transport = _http_transport.HTTPTransport(declaration, pool, callers)
         chosen.setdefault(identity, Bound(declaration, transport))
+    weakref.finalize(config, pools.close)
     return types.MappingProxyType(chosen)
 
 
@@ -677,8 +684,10 @@ def build(registry: Apps) -> tuple[Host, list[str]]:
     none. Every check runs whatever the others found, so one refusal hides
     none behind it. Resolve reads the remote providers that
     ``settings.NEOLITH`` names; when it refuses, every problem of
-    ``NEOLITH`` comes with its refusals. Set-up adds the remote providers'
-    transports to the table once its checks have passed (``_remote``).
+    ``NEOLITH``, and each app that requires a remote provider's contract
+    with no signing key, comes with its refusals. Set-up adds the remote
+    providers' transports to the table once its checks have passed
+    (``_remote``).
     """
     hosted = [
         (config, found)
@@ -690,8 +699,10 @@ def build(registry: Apps) -> tuple[Host, list[str]]:
     contracts, refusals = resolve(declarations, _checks.remote_identities(neolith))
     if refusals:
         # Resolve reads NEOLITH, so a requirement it finds unmet may come
-        # from a problem there: those are reported with its refusals.
+        # from a problem there: those, and its remote providers' callers
+        # that have no signing key, are reported with its refusals.
         refusals += _checks.neolith_problems(neolith, declarations)
+        refusals += _checks.unsigned_problems(neolith, declarations)
     connectors: dict[str, Bound] = {}
     for config, declaration in hosted:
         for provision in declaration.provides:

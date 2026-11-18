@@ -18,7 +18,8 @@ does not run:
 3. **Resolve.** ADR 0021's function, whose refusals are one
    ``DeclarationError``, with the remote providers that the deployer's
    ``NEOLITH["REMOTE_PROVIDERS"]`` names (ADR 0014). Resolve reads
-   ``NEOLITH``, so its refusals come with every problem found there.
+   ``NEOLITH``, so its refusals come with every problem found there, or
+   with the refusal of settings that are not a ``dict``.
 4. **Configure.** The deployer's mapping, row by row.
 
 ``settings_problems`` is the same Configure, run at the first set-up on the
@@ -110,16 +111,17 @@ def configure(
     declarations = [declaration for _, declaration in pairs]
     from neolith._host import resolve
 
-    neolith = (
-        _naming.entry(deployer, "NEOLITH", _checks.MISSING)
-        if type(deployer) is dict
-        else _checks.MISSING
-    )
+    given = type(deployer) is dict
+    neolith = _naming.entry(deployer, "NEOLITH", _checks.MISSING) if given else None
     _, refusals = resolve(declarations, _checks.remote_identities(neolith))
     if refusals:
         # Resolve reads NEOLITH, so a requirement it finds unmet may come
-        # from a problem there: those are reported with its refusals.
-        refusals += _checks.neolith_problems(neolith, declarations)
+        # from a problem there, or from settings that are not a dict: those
+        # are reported with its refusals.
+        if given:
+            refusals += _checks.neolith_problems(neolith, declarations)
+        else:
+            refusals.append(_not_settings(deployer))
     if refusals:
         raise DeclarationError("\n".join(sorted(refusals)))
     names, problems = _names(deployer)
@@ -226,9 +228,7 @@ def _names(deployer: object) -> tuple[dict[str, Any], list[str]]:
     a ``str``, which Configure reports with its other refusals.
     """
     if type(deployer) is not dict:
-        raise ImproperlyConfigured(
-            f"settings: expected a dict of setting names, got {_type(deployer)}"
-        )
+        raise ImproperlyConfigured(_not_settings(deployer))
     entries: dict[object, object] = deployer
     problems = [
         f"settings: a setting name is a str, got {_type(name)}"
@@ -241,6 +241,10 @@ def _names(deployer: object) -> tuple[dict[str, Any], list[str]]:
         if type(name) is str and name.isupper()
     }
     return names, problems
+
+
+def _not_settings(deployer: object) -> str:
+    return f"settings: expected a dict of setting names, got {_type(deployer)}"
 
 
 def _deployer_problems(

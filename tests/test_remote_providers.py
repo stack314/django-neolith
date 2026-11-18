@@ -693,6 +693,17 @@ def test_resolve_reports_the_problem_of_neolith_its_refusal_may_come_from(
     assert str(raised.value).splitlines() == sorted([*_UNMET, problem])
 
 
+@pytest.mark.spec("APP-12")
+def test_resolve_reports_settings_that_are_not_a_dict_and_nothing_false() -> None:
+    value = remote(stock_v1="http://localhost", couriers_v3="http://localhost")
+    given = OrderedDict(deployer(REMOTE_PROVIDERS=value))
+    with pytest.raises(ImproperlyConfigured) as raised:
+        configure([WEB], given)
+    assert str(raised.value).splitlines() == sorted(
+        [*_UNMET, "settings: expected a dict of setting names, got OrderedDict"]
+    )
+
+
 # W002 and the signing key (ADR 0014 Decision 3, ADR 0027 Decision 9).
 
 
@@ -1032,7 +1043,13 @@ def test_set_up_reports_a_misspelt_key_with_the_requirements_it_leaves_unmet() -
 
 
 @pytest.mark.spec("APP-1")
-def test_set_up_stops_when_an_app_that_calls_a_remote_provider_cannot_sign() -> None:
+@pytest.mark.parametrize("unknown", [False, True])
+def test_set_up_stops_when_an_app_that_calls_a_remote_provider_cannot_sign(
+    unknown: bool,
+) -> None:
+    value = remote(stock_v1="http://localhost", couriers_v3="http://localhost")
+    if unknown:
+        value["other.v1"] = [entry()]
     out = in_fresh_process(
         """
         import django
@@ -1044,38 +1061,53 @@ def test_set_up_stops_when_an_app_that_calls_a_remote_provider_cannot_sign() -> 
             print(json.dumps(str(error)))
         """,
         [WEB, "neolith"],
-        {
-            "NEOLITH": {
-                "REMOTE_PROVIDERS": remote(
-                    stock_v1="http://localhost", couriers_v3="http://localhost"
-                )
-            }
-        },
+        {"NEOLITH": {"REMOTE_PROVIDERS": value}},
         timeout=120,
     )
-    assert json.loads(out.splitlines()[-1]).splitlines() == [
-        "host: the settings are refused before the host serves:",
-        '(neolith.E021) app web has no signing key in NEOLITH["SIGNING_SECRETS"], '
-        "so it cannot call couriers.v3 over HTTP",
-        '(neolith.E021) app web has no signing key in NEOLITH["SIGNING_SECRETS"], '
-        "so it cannot call stock.v1 over HTTP",
+    unsigned = [
+        f'app web has no signing key in NEOLITH["SIGNING_SECRETS"], so it cannot '
+        f"call {identity} over HTTP"
+        for identity in ("couriers.v3", "stock.v1")
     ]
+    refusal = json.loads(out.splitlines()[-1]).splitlines()
+    if unknown:
+        # Resolve refuses, and the missing keys come with its refusal.
+        assert refusal == sorted(
+            [*unsigned, f"{REMOTE}: other.v1 is required by no hosted app; remove it"]
+        )
+    else:
+        assert refusal == [
+            "host: the settings are refused before the host serves:",
+            *(f"(neolith.E021) {line}" for line in unsigned),
+        ]
 
 
-def test_set_up_warns_of_plain_http_and_the_override_keeps_the_entry() -> None:
+def test_set_up_logs_w002_and_an_override_leaves_the_set_up_transport() -> None:
     out = in_fresh_process(
         """
+        import logging
+
         import django
         from django.conf import settings
         from django.core import checks
         from django.core.exceptions import ImproperlyConfigured
         from django.test import override_settings
 
+        class Keep(logging.Handler):
+            lines = []
+
+            def emit(self, record):
+                Keep.lines.append(record.getMessage())
+
+        logging.getLogger("neolith").addHandler(Keep())
         django.setup()
         found = [
             (m.id, m.msg) for m in checks.run_checks(tags=["neolith"])
             if m.id == "neolith.W002"
         ]
+        from neolith._host import _table
+
+        before = _table()[0].connectors["stock.v1"]
         changed = {**settings.NEOLITH["REMOTE_PROVIDERS"]}
         changed["stock.v1"] = [
             {"BACKEND": "neolith.transports.HTTPTransport",
@@ -1088,7 +1120,10 @@ def test_set_up_warns_of_plain_http_and_the_override_keeps_the_entry() -> None:
                 pass
         except ImproperlyConfigured as error:
             refused = str(error)
-        print(json.dumps([found, refused]))
+        after = _table()[0].connectors["stock.v1"]
+        print(json.dumps([
+            found, Keep.lines, refused, after is before, after._transport.origin
+        ]))
         """,
         [WEB, "neolith"],
         {
@@ -1102,13 +1137,89 @@ def test_set_up_warns_of_plain_http_and_the_override_keeps_the_entry() -> None:
         },
         timeout=120,
     )
-    found, refused = json.loads(out.splitlines()[-1])
-    assert found == [
-        [
-            "neolith.W002",
-            f'{REMOTE}["stock.v1"]: http://inventory.internal is plain HTTP to a '
-            "host that is not loopback; anyone who can watch the network can read "
-            "and replay the calling app's token (spec 03)",
-        ]
-    ]
+    found, logged, refused, same, origin = json.loads(out.splitlines()[-1])
+    warning = (
+        f'{REMOTE}["stock.v1"]: http://inventory.internal is plain HTTP to a '
+        "host that is not loopback; anyone who can watch the network can read "
+        "and replay the calling app's token (spec 03)"
+    )
+    assert found == [["neolith.W002", warning]]
+    # Set-up logs it once; manage.py check prints it again.
+    assert [line for line in logged if "W002" in line] == [f"(neolith.W002) {warning}"]
     assert refused == f"{REMOTE}: cannot change after set-up"
+    assert same
+    assert origin == "http://inventory.internal"
+
+
+def test_a_set_up_that_django_drops_closes_its_connections() -> None:
+    out = in_fresh_process(
+        """
+        import gc
+        import socket
+        import sys
+        import threading
+
+        server = socket.create_server(("127.0.0.1", 0))
+        port = server.getsockname()[1]
+        reply = b'HTTP/1.1 200 OK\\r\\nContent-Length: 13\\r\\n\\r\\n{"on_hand":1}'
+
+        def serve(connection):
+            with connection:
+                data = b""
+                while True:
+                    chunk = connection.recv(65536)
+                    if not chunk:
+                        return
+                    data += chunk
+                    while b"\\r\\n\\r\\n" in data:
+                        head, _, data = data.partition(b"\\r\\n\\r\\n")
+                        length = int(
+                            head.lower().split(b"content-length: ")[1].split(b"\\r")[0]
+                        )
+                        while len(data) < length:
+                            data += connection.recv(65536)
+                        data = data[length:]
+                        connection.sendall(reply)
+
+        def accept():
+            while True:
+                connection, _ = server.accept()
+                threading.Thread(target=serve, args=(connection,), daemon=True).start()
+
+        threading.Thread(target=accept, daemon=True).start()
+        url = f"http://127.0.0.1:{port}"
+        settings.NEOLITH["REMOTE_PROVIDERS"] = {
+            identity: [
+                {"BACKEND": "neolith.transports.HTTPTransport", "OPTIONS": {"url": url}}
+            ]
+            for identity in ("stock.v1", "couriers.v3")
+        }
+        unraisable = []
+        sys.unraisablehook = lambda found: unraisable.append(repr(found.exc_value))
+
+        import django
+        from django.test import override_settings
+
+        django.setup()
+        import neolith
+        from tests.declaration_contracts import Sku
+
+        def call():
+            with neolith.command_scope("web", timeout=10):
+                return neolith.connect("stock.v1").level(Sku(sku="a")).on_hand
+
+        replies = [call()]
+        for _ in range(3):
+            with override_settings(INSTALLED_APPS=list(settings.INSTALLED_APPS)):
+                replies.append(call())
+        replies.append(call())
+        gc.collect()
+        print(json.dumps([replies, unraisable]))
+        """,
+        [WEB, "neolith"],
+        {"NEOLITH": {"SIGNING_SECRETS": SIGNING}},
+        timeout=120,
+    )
+    replies, unraisable = json.loads(out.splitlines()[-1])
+    assert replies == [1, 1, 1, 1, 1]
+    assert unraisable == []
