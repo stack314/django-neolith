@@ -292,7 +292,7 @@ def _checked_by(installed: frozenset[str]) -> dict[str, list[str]]:
             if None in loads:
                 del loads[None]
                 loads[installed] = None
-            if any(apps <= installed for apps in loads):
+            if any(apps is not None and apps <= installed for apps in loads):
                 checked.setdefault(identity, []).append(place)
     return checked
 
