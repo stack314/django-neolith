@@ -33,6 +33,7 @@ from pydantic import BaseModel
 
 from neolith._context import CallContext
 from neolith._crossing import Codec
+from neolith._frozen import once
 from neolith._portable import (
     Portable,
     json_value_problem,
@@ -404,6 +405,11 @@ class ContractError(Exception):
             "contract is a ContractError, told apart by its kind"
         )
 
+    def __setstate__(self, state: object) -> NoReturn:
+        # BaseException's would set the fields of a built error; a copy and a
+        # pickle are built by __reduce__ instead, which carries no state.
+        raise TypeError("a ContractError's fields are read-only")
+
     def __reduce__(self) -> tuple[Any, ...]:
         # Kind, message and detail only, and whether a connector raised it: no
         # notes, no other attributes, and the detail is checked again when the
@@ -429,6 +435,7 @@ class ContractError(Exception):
         return f"ContractError({kind!r}, {shown(message, 1000)}{held})"
 
 
+@once
 @dataclass(frozen=True, slots=True)
 class Action:
     """One action of a contract: its name, idempotency, types and error kinds.

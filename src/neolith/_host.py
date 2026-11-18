@@ -74,6 +74,7 @@ from neolith._declaration import (
     _show,
     declaration_of,
 )
+from neolith._frozen import once
 
 __all__ = ["HostConfig", "command_scope", "connect"]
 
@@ -84,6 +85,7 @@ _HOST_ATTR: Final = "_neolith_host"
 
 
 @final
+@once
 @dataclass(frozen=True, slots=True)
 class Host:
     """The table one set-up built: what the host knows and who provides it."""
