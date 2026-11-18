@@ -25,7 +25,7 @@ Questions not yet decided are in [open-questions.md](../open-questions.md).
 | [0008](0008-typed-contract-errors-in-both-modes.md) | Contract errors are typed and identical in both modes | Accepted |
 | [0009](0009-one-database-alias-per-app.md) | One database alias per app | Accepted |
 | [0010](0010-pluggable-principal-resolution.md) | Pluggable principal resolution in core | Accepted |
-| [0011](0011-django-ninja-for-contract-endpoints.md) | The host serves contract endpoints itself, from its root middleware, with no web framework | Accepted |
+| [0011](0011-the-host-serves-contract-endpoints-itself.md) | The host serves contract endpoints itself, from its root middleware, with no web framework | Accepted |
 | [0012](0012-supported-python-and-django-versions.md) | Supported Python and Django versions | Accepted |
 | [0013](0013-license.md) | License: BSD-3-Clause | Accepted |
 | [0014](0014-pluggable-connector-transports.md) | Connector transports are pluggable, and a host names each remote provider by contract in `NEOLITH["REMOTE_PROVIDERS"]` | Accepted |
