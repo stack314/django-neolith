@@ -386,7 +386,8 @@ class Resolution:
     Args:
         backends: The host's built backends, in order.
         vary: Their union of request inputs, which the response phase adds.
-        request: The request the backends are given.
+        request: The request the backends are given, or ``None`` for a
+            root that was never bound, for which no search starts.
         trace_id: The root's trace, which the log names.
     """
 
@@ -406,7 +407,7 @@ class Resolution:
         self,
         backends: tuple[Built, ...],
         vary: tuple[str, ...],
-        request: HttpRequest,
+        request: HttpRequest | None,
         trace_id: str,
     ) -> None:
         self.backends = backends

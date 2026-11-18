@@ -8,6 +8,7 @@ Django's middleware chain are in ``test_request_principal.py``.
 """
 
 import asyncio
+import dataclasses
 import threading
 import time
 import uuid
@@ -531,6 +532,42 @@ def test_a_first_call_after_the_response_phase_fails_and_asks_no_backend() -> No
         asyncio.run(held.aform())
     assert backend.calls == 0
     assert held.request is None
+
+
+@pytest.mark.parametrize("bound", [True, False])
+def test_a_host_with_no_backend_gives_a_root_no_resolution(
+    monkeypatch: pytest.MonkeyPatch, bound: bool
+) -> None:
+    """With no backend the principal middleware does nothing per request,
+    so a late call goes on with no principal (APP-53, APP-59)."""
+    from neolith import _context, _host, middleware
+
+    host = _host._current()
+    assert host is not None
+    bare = dataclasses.replace(host, principals=(), vary=())
+    monkeypatch.setattr(_host, "_current", lambda: bare)
+    with _context.opened(**_context.root_fields()) as scope:
+        token = middleware._REQUEST.set(scope)
+        try:
+            if bound:
+                middleware._attach(RequestFactory().get("/"))
+            assert middleware._resolution(scope) is None
+            assert scope.principal() is None
+        finally:
+            middleware._REQUEST.reset(token)
+
+
+@pytest.mark.spec("APP-59")
+def test_a_root_never_bound_is_marked_by_the_response_phase() -> None:
+    from neolith import _context, middleware
+
+    with _context.opened(**_context.root_fields()) as scope:
+        resolution = middleware._resolution(scope)
+        assert resolution is not None
+        assert resolution.request is None
+        finish(resolution, HttpResponse())
+        with pytest.raises(ValueError, match="could not be resolved"):
+            scope.principal()
 
 
 @pytest.mark.spec("APP-56")

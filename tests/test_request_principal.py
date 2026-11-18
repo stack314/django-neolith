@@ -428,6 +428,21 @@ def test_a_first_call_after_the_response_phase_fails_and_reads_nothing(
     assert "authorization" not in served.vary
 
 
+@pytest.mark.spec("APP-59", "APP-61")
+@pytest.mark.parametrize("mode", MODES)
+def test_a_late_first_call_from_a_root_never_bound_fails_too(
+    site: None, mode: str
+) -> None:
+    """An unresolved URL's root is never bound: its error view's call has no
+    caller, and a call after the response phase fails as on a bound root."""
+    middleware = _middleware(mode, "tests.request_site.LateCaller")
+    with override_settings(MIDDLEWARE=middleware):
+        served = serve(mode, "/no-such-page/")
+    assert served.status == 404
+    assert request_site.WHOM == ["refused internal"]
+    assert served.vary == []
+
+
 @pytest.mark.spec("APP-59")
 @pytest.mark.parametrize("mode", MODES)
 def test_a_late_first_call_leaves_a_session_on_a_fallback_key_as_it_was(

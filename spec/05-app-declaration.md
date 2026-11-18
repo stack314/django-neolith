@@ -184,7 +184,7 @@ Two first calls made at once may each run a search, so a backend may be asked mo
 
 **APP-58.** When the body of a response is produced inside its request root after the code that handles the request has returned, and no search has fixed the root's outcome, the host MUST search before it returns the response. A failure found then is only recorded: the response is unchanged.
 
-**APP-59.** A first call made from a request root after the host has finished the headers of its response MUST fail as APP-55 says, and starts no search.
+**APP-59.** In a host with a backend, a first call made from a request root after the host has finished the headers of its response MUST fail as APP-55 says, and starts no search.
 
 **APP-60.** When a search has started for a request root, the host MUST add every request header name that its configured backends declare to the `Vary` header of the response, before the response leaves the host, or make the header `*` when a backend declares that it reads something outside the URL and the headers.
 

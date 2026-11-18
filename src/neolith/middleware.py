@@ -423,8 +423,8 @@ class PrincipalMiddleware:
         scope = _REQUEST.get()
         respond: _Respond = self._get_response  # type: ignore[assignment]
         response = respond(request)
-        resolution = None if scope is None else scope.resolution
-        if isinstance(resolution, _principal.Resolution):
+        resolution = _resolution(scope)
+        if resolution is not None:
             finish(resolution, response)
         return response
 
@@ -432,8 +432,8 @@ class PrincipalMiddleware:
         scope = _REQUEST.get()
         respond: _ARespond = self._get_response  # type: ignore[assignment]
         response = await respond(request)
-        resolution = None if scope is None else scope.resolution
-        if isinstance(resolution, _principal.Resolution):
+        resolution = _resolution(scope)
+        if resolution is not None:
             await afinish(resolution, response)
         return response
 
@@ -462,6 +462,24 @@ class PrincipalMiddleware:
         view_kwargs: dict[str, Any],
     ) -> None:
         _attach(request)
+
+
+def _resolution(scope: _context.Scope | None) -> _principal.Resolution | None:
+    """The root's resolution for the response phase. A root that was never
+    bound, in a host with a backend, gets one with no request, so a first
+    call made after the response phase fails as it does on a bound root.
+    """
+    if scope is None:
+        return None
+    if scope.resolution is None:
+        host = _host._current()
+        if host is None or not host.principals:
+            return None
+        scope.resolution = _principal.Resolution(
+            host.principals, host.vary, None, scope.held.trace_id
+        )
+    resolution = scope.resolution
+    return resolution if isinstance(resolution, _principal.Resolution) else None
 
 
 def _attach(request: HttpRequest) -> None:
