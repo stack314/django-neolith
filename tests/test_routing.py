@@ -471,7 +471,7 @@ def test_a_reply_after_a_move_is_the_reply() -> None:
         # 30 s and three: 10 s, then 30 s over two, then none.
         (3, 30.0, [10.0, 15.0, None]),
         # 3 s and two: the floor, 2 s, is less than all the time left.
-        (2, 3.0, [SHARE_FLOOR, None]),
+        (2, 3.0, [2.0, None]),
         # 1.5 s and two: the floor is all the time left, so no share.
         (2, 1.5, [None, None]),
         # Exactly 2 s: the share is all of it, and the deadline bounds.
@@ -481,6 +481,7 @@ def test_a_reply_after_a_move_is_the_reply() -> None:
 def test_each_attempt_that_can_move_gets_its_share(
     clock: Clock, entries: int, timeout: float, shares: list[float | None]
 ) -> None:
+    assert SHARE_FLOOR == 2.0
     transports = fakes(*[UNAVAILABLE] * entries, clock=clock)
     started = clock.at
     run(Connector(Desk, *transports), timeout=timeout)
@@ -539,6 +540,49 @@ def test_one_transport_is_one_attempt_and_no_share(
 def test_a_routed_transport_must_take_connect_by() -> None:
     with pytest.raises(TypeError, match="transport 1 takes no connect_by="):
         Connector(Desk, Fake(reply), Alone(reply))
+
+
+class Keywords:
+    """A remote transport whose ``call`` takes any keyword."""
+
+    receiver = Receiver.NETWORK
+    contract = DESK
+    origin = "http://k.test"
+
+    def call(
+        self,
+        action: Action,
+        request: bytes,
+        context: Sent,
+        **options: object,
+    ) -> bytes | None:
+        return reply(action)
+
+
+class Positional:
+    """A remote transport whose ``connect_by`` cannot be passed by name."""
+
+    receiver = Receiver.NETWORK
+    contract = DESK
+
+    def call(
+        self,
+        action: Action,
+        request: bytes,
+        context: Sent,
+        connect_by: float | None = None,
+        /,
+    ) -> bytes | None:
+        return reply(action)
+
+
+def test_a_transport_that_takes_any_keyword_is_routed() -> None:
+    assert run(Connector(Desk, Fake(UNAVAILABLE), Keywords()), timeout=8) == Answer(n=7)
+
+
+def test_a_transport_whose_connect_by_is_positional_only_is_refused() -> None:
+    with pytest.raises(TypeError, match="transport 1 takes no connect_by="):
+        Connector(Desk, Fake(reply), Positional())
 
 
 def test_a_transport_is_listed_once() -> None:

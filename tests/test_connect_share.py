@@ -164,7 +164,11 @@ def test_connect_by_already_passed_opens_nothing() -> None:
     pool = Pool(Origin.parse("http://a.test"), opener=provider.open)
     started = _context.now()
     error = fails(pool, started + 30, started - 1)
-    assert error.kind == "unavailable"
+    assert (error.kind, error.message) == (
+        "unavailable",
+        "the provider at http://a.test could not be reached: no connection "
+        "within 0 seconds",
+    )
     assert provider.opened == 0
     pool.close()
     provider.finish()
