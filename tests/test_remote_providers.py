@@ -571,6 +571,7 @@ def test_a_url_is_admitted_exactly_when_it_is_its_origins_serialisation(
         "http://example.com.",
         "http://[::ffff:127.0.0.1]",
         "http://[::ffff:7f00:1]",
+        "http://münchen.example",
     ],
 )
 def test_the_records_refused_examples_are_refused_by_the_builder(url: str) -> None:
@@ -1244,7 +1245,12 @@ def test_a_set_up_that_django_drops_closes_its_connections() -> None:
 
 @pytest.mark.parametrize(
     "url",
-    ["http://xn--zz", "http://xn--a-ecp.example", "https://xn--bcher-kva.example"],
+    [
+        "http://xn--zz",
+        "http://xn--a-ecp.example",
+        "http://xn--mnchen-3ya.example",
+        "https://xn--zca",
+    ],
 )
 def test_an_a_label_is_an_ordinary_label_taken_as_written(url: str) -> None:
     assert _expected(url)
