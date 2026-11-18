@@ -621,10 +621,10 @@ def test_a_nested_call_carries_its_parents_context_on(clock: Clock) -> None:
     assert len({scope.context.span_id, first.span_id, second.span_id}) == 3
     assert first.deadline is not None
     assert second.deadline is not None
-    # A nested call's deadline, as its caller derives it, is never later than
-    # its parent's (spec 00, TRN-27). On a clock that does not move, each call
-    # is sent all its parent has left, so the provider's deadline (TRN-36) is
-    # the same.
+    # A nested call's deadline, as the calling action derives it, is never
+    # later than the deadline that action runs under (spec 00, TRN-27). On a
+    # clock that does not move, each call is sent all its parent has left, so
+    # the provider's deadline (TRN-36) is the same.
     assert inner_carrying.sent[0].budget == 10_000
     assert second.deadline == first.deadline == scope.context.deadline == 1010.0
     assert inner_carrying.sent[0].caller == "desk"
