@@ -12,7 +12,7 @@ from collections.abc import Callable
 from django.http import HttpRequest, HttpResponse, HttpResponseBase
 from django.utils.deprecation import MiddlewareMixin
 
-from neolith import ContractError, UsageError, connect
+from neolith import CallContext, ContractError, UsageError, _context, connect
 from tests.declaration_contracts import Sku
 from tests.host_apps.couriers import services as courier_services
 
@@ -22,6 +22,15 @@ SEEN: list[str] = []
 HELD: list[contextvars.Context] = []
 
 couriers = connect("couriers.v3")
+
+
+def _seen() -> CallContext:
+    """The context the couriers action last saw for a call made from the
+    scope in force here, matched by its trace, since requests served at
+    once append to the same list."""
+    scope = _context._CURRENT.get()
+    trace = None if scope is None else scope.held.trace_id
+    return [c for c in courier_services.CONTEXTS if c.trace_id == trace][-1]
 
 
 def ask() -> str:
@@ -36,7 +45,7 @@ def ask() -> str:
     except UsageError:
         outcome = "usage error"
     else:
-        outcome = f"as {courier_services.CONTEXTS[-1].caller}"
+        outcome = f"as {_seen().caller}"
     SEEN.append(outcome)
     return outcome
 
@@ -199,7 +208,7 @@ def whom() -> str:
     except UsageError:
         outcome = "usage error"
     else:
-        principal = courier_services.CONTEXTS[-1].principal
+        principal = _seen().principal
         outcome = "nobody" if principal is None else f"user {principal.subject}"
     WHOM.append(outcome)
     return outcome
