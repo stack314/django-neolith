@@ -41,3 +41,4 @@ Questions not yet decided are in [open-questions.md](../open-questions.md).
 | [0024](0024-user-documentation-is-built-with-sphinx-from-this-repository.md) | User documentation is built with Sphinx from this repository | Proposed |
 | [0025](0025-drain-counts-a-request-from-its-request-line.md) | Drain counts a request from its request line | Accepted |
 | [0026](0026-set-up-keeps-an-unknown-recorded-identity.md) | Set-up keeps a recorded identity it does not know, so the next set-up reports it again | Proposed |
+| [0028](0028-the-http-transport-uses-the-standard-library-client.md) | The HTTP transport calls a provider with the standard library's HTTP client, under one deadline for every blocking step, and adds no runtime dependency | Proposed |
