@@ -1,4 +1,5 @@
-"""Serve and Drain under ``neolith run`` (spec 05; ADR 0022 Decisions 9 and 10).
+"""Serve and Drain under ``neolith run`` (spec 05; ADR 0022 Decisions 9 and
+10, as ADR 0025 narrows how requests are counted).
 
 The host serves with subclasses of Django's own development server classes,
 ``ThreadedWSGIServer`` and ``WSGIRequestHandler`` from
