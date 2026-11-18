@@ -34,7 +34,7 @@ Neolith makes the Django app, not the Django project, the unit of deployment. An
 
 ## Features
 
-What works on `next` today. The [changelog](https://github.com/stack314/django-neolith/blob/main/CHANGELOG.md) has the details.
+What this version does. The [changelog](https://github.com/stack314/django-neolith/blob/main/CHANGELOG.md) has the details.
 
 - **Typed contracts.** A contract is a `Protocol` class with `@contract` and `@action`, and an implementation is marked with `@implements`. Request and reply types are Pydantic models in a portable type system, and every check runs when the module is imported.
 - **Typed errors.** `ContractError` carries a `kind`, a message and a detail. An action can declare its own error kinds with their detail records.
@@ -44,7 +44,7 @@ What works on `next` today. The [changelog](https://github.com/stack314/django-n
 - **One database per app.** `neolith.routers.AppRouter` keeps each app's data on a database alias of its own.
 - **Call context.** A principal, a trace, a deadline and the calling app travel with each call. A root is opened for each request by `RootMiddleware`, and for a command or background work by `command_scope`.
 
-Not yet on `next`: `neolith run <app>`, the HTTP transport, the conformance suite and events. See the roadmap below.
+Not yet in this version: `neolith run <app>`, the HTTP transport, the conformance suite and events. See the roadmap below.
 
 ## A short example
 
