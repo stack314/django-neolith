@@ -1446,6 +1446,41 @@ def test_a_refused_later_set_up_leaves_no_record_its_table_knew(
     ]
 
 
+@pytest.mark.spec("APP-14")
+def test_a_retried_set_up_reports_an_unknown_identity_again(
+    write_app: WriteApp,
+) -> None:
+    # The module that asked for nope.v1 is not imported again on a retry, so
+    # set-up keeps the unknown record for the next set-up to report.
+    package = write_app("", models=_UNDECLARED_CONNECTS)
+    printed = in_built_host(
+        f"""
+        import django
+        from django.test.utils import override_settings
+
+        from neolith import _host
+
+        django.setup()
+        installed = [*settings.INSTALLED_APPS, {package!r}]
+        for attempt in range(2):
+            try:
+                with override_settings(INSTALLED_APPS=installed):
+                    print("admitted")
+            except Exception as error:
+                print(type(error).__name__)
+            print(sorted(_host._RECORDED))
+        """,
+        host_apps.HOSTED,
+        {"NEOLITH": host_apps.NEOLITH},
+    )
+    assert printed.splitlines() == [
+        "DeclarationError",
+        "['nope.v1']",
+        "DeclarationError",
+        "['nope.v1']",
+    ]
+
+
 @pytest.mark.spec("APP-15")
 @pytest.mark.parametrize("place", ["__init__", "models"])
 def test_connect_while_an_override_without_neolith_loads_is_refused_at_once(

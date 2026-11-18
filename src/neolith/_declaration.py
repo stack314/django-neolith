@@ -21,6 +21,7 @@ from django.core.exceptions import ImproperlyConfigured
 
 from neolith import _naming
 from neolith._contracts import _SEGMENT, Contract, ContractDefinitionError
+from neolith._frozen import once
 
 _FIELDS: Final = ("provides", "requires", "resources", "batteries")
 _EVENT_FIELDS: Final = ("publishes", "subscribes")
@@ -84,6 +85,7 @@ _MISSING: Final = _Missing.MISSING
 
 
 @final
+@once
 class Provided:
     """One entry of ``provides``: a contract, its implementation, its allow-list.
 
@@ -115,7 +117,8 @@ class Provided:
 
     Raises:
         TypeError: When a subclass is defined; ``Provided`` cannot be
-            subclassed.
+            subclassed. Calling ``__init__`` on an entry already built raises
+            it too.
     """
 
     __slots__ = ("_contract", "_implementation", "_principal_from")
@@ -167,6 +170,7 @@ def _rebuild_provided(
     )
 
 
+@once
 @dataclass(frozen=True, slots=True)
 class Provision:
     """A checked entry of ``provides``."""
@@ -176,6 +180,7 @@ class Provision:
     principal_from: tuple[str, ...]
 
 
+@once
 @dataclass(frozen=True, slots=True)
 class Declaration:
     """The snapshot of a declaring class, taken when its check passed.

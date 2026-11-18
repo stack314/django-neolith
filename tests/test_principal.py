@@ -133,6 +133,41 @@ def test_a_principal_is_frozen_and_cannot_be_subclassed() -> None:
     assert not hasattr(principal, "__dict__")
 
 
+def test_a_principal_is_built_once() -> None:
+    unbuilt = Principal.__new__(Principal)
+    unbuilt.__init__("i", "s", {"a": "b"})
+    assert unbuilt == Principal("i", "s", {"a": "b"})
+    with pytest.raises(TypeError, match="already built"):
+        unbuilt.__init__("other", "t")
+    assert unbuilt == Principal("i", "s", {"a": "b"})
+
+
+def test_a_principal_is_not_built_again_from_its_own_claims() -> None:
+    # The claims are read while the principal is built: a mapping that builds
+    # it from there would have it seen as one value, then written as another.
+    unbuilt = Principal.__new__(Principal)
+    refused: list[str] = []
+
+    class Claims(Mapping[str, str]):
+        def __getitem__(self, name: str) -> str:
+            try:
+                unbuilt.__init__("i", "alice", {"role": "user"})
+            except TypeError as error:
+                refused.append(str(error))
+            return "admin"
+
+        def __iter__(self) -> Iterator[str]:
+            return iter(["role"])
+
+        def __len__(self) -> int:
+            return 1
+
+    unbuilt.__init__("i", "mallory", Claims())
+    assert refused
+    assert "already built" in refused[0]
+    assert unbuilt == Principal("i", "mallory", {"role": "admin"})
+
+
 def test_principals_are_equal_when_their_members_are() -> None:
     one = Principal("i", "s", {"a": "b", "roles": ["x", "y"], "n": 1})
     assert one == Principal("i", "s", {"n": 1, "roles": ("x", "y"), "a": "b"})
@@ -422,3 +457,21 @@ def test_a_principal_has_a_sent_form_exactly_when_it_is_valid(
     written = json.loads(form)
     assert ("claims" in written) == bool(principal.claims)
     assert list(written) == sorted(written)
+
+
+# Invariant: a principal never changes once built (ADR 0010 Decision 2), so
+# whatever holds it, such as a call context or a cache key, sees one value.
+
+
+@_SETTINGS
+@given(_PRINCIPALS, _TEXT, _TEXT, st.dictionaries(_TEXT, _CLAIM, max_size=4))
+def test_a_built_principal_cannot_be_built_again(
+    principal: Principal, issuer: str, subject: str, claims: dict[str, Any]
+) -> None:
+    before = (repr(principal), hash(principal), principal.claims)
+    twin = copy.deepcopy(principal)
+    with pytest.raises(TypeError, match="already built"):
+        principal.__init__(issuer, subject, claims)
+    assert (repr(principal), hash(principal), principal.claims) == before
+    assert principal.claims is before[2]
+    assert principal == twin

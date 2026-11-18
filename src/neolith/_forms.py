@@ -33,6 +33,7 @@ from pydantic.json_schema import JsonSchemaValue
 from pydantic_core import CoreSchema, core_schema
 
 from neolith import _naming
+from neolith._frozen import once
 
 # Each pattern is ASCII-only and anchored with ^...$, and matches the same
 # strings under ECMA-262, Rust regex and Python's re.fullmatch (spec 01).
@@ -182,6 +183,7 @@ _KINDS: dict[type[Any], str] = {
 _BARE_KEYS = frozenset({"type", "ref", "metadata", "microseconds_precision"})
 
 
+@once
 @dataclass(frozen=True, eq=False)
 class _Form:
     """The marker of one form: its type, reader, writer and description."""
