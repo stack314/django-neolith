@@ -1072,7 +1072,7 @@ _BUILT_DATABASES = {"default": {}, "ledger": _LEDGER}
         ([("default", {})], "it is a list, the host builds a dict"),
         (
             {"default": {}, "ledger": {**_LEDGER, "NAME": b"/l"}},
-            "['ledger']['NAME'] is not the value the host builds",
+            "['ledger']['NAME'] is a bytes, the host builds a str",
         ),
         (
             {"default": {}, "ledger": {**_LEDGER, "PASSWORD": _MARKER}},
@@ -1090,7 +1090,7 @@ _BUILT_DATABASES = {"default": {}, "ledger": _LEDGER}
                     "TEST": {"DEPENDENCIES": [], "MIRROR": "default"},
                 },
             },
-            "['ledger']['TEST']['MIRROR'] is not the value the host builds",
+            "['ledger']['TEST']['MIRROR'] is a str, the host builds a NoneType",
         ),
         (
             {"default": {}, "ledger": {**_LEDGER, "SHARDS": 2}},
@@ -1353,6 +1353,25 @@ def test_an_error_raised_while_defaults_are_filled_in_is_named_by_its_class() ->
     assert databases_difference(found, _BUILT_DATABASES) == (
         "it cannot be read as Django reads it: ValueError"
     )
+
+
+@pytest.mark.spec("APP-29")
+@pytest.mark.parametrize(
+    ("found", "expected", "difference"),
+    [
+        ({"PORT": "5432"}, {"PORT": 5432}, "['PORT'] is a str, the host builds a int"),
+        ({"X": [True]}, {"X": [1]}, "['X'][0] is a bool, the host builds a int"),
+    ],
+)
+def test_a_value_that_differs_only_in_type_names_the_two_types(
+    found: object, expected: object, difference: str
+) -> None:
+    """PORT "5432" against 5432: the message names the types, never a value (K9)."""
+    from neolith._configure import _difference
+
+    message = _difference(found, expected, whole=True)
+    assert message == difference
+    assert "5432" not in str(message)
 
 
 @pytest.mark.parametrize(

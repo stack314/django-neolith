@@ -423,7 +423,7 @@ def _difference(
         for index, (have, want) in enumerate(zip(items, expected, strict=False)):
             if type(have) is not type(want) or have != want:
                 if where:
-                    return f"{where}[{index}] is not the value the host builds"
+                    return _inside(f"{where}[{index}]", have, want)
                 return f"entry {index} is {_repr(have)}, the host builds {want!r}"
         if len(items) != len(expected):
             return (
@@ -436,5 +436,16 @@ def _difference(
     except Exception:
         same = False
     if not same:
-        return f"{where or 'it'} is not the value the host builds"
+        if where:
+            return _inside(where, found, expected)
+        return "it is not the value the host builds"
     return None
+
+
+def _inside(where: str, found: object, expected: object) -> str:
+    """A difference at ``where``, inside a mapping the host builds. A value
+    that differs only in type names the two types, never the values.
+    """
+    if type(found) is not type(expected):
+        return f"{where} is a {_type(found)}, the host builds a {_type(expected)}"
+    return f"{where} is not the value the host builds"
