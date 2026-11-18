@@ -1843,7 +1843,14 @@ def test_an_installed_apps_list_changed_after_a_load_names_its_own_apps(
 @pytest.mark.spec("APP-14")
 @pytest.mark.parametrize("spelling", ["module", "config class", "re-exported class"])
 @pytest.mark.parametrize(
-    "position", ["its package", "beside its apps module", "its parent", "no app"]
+    "position",
+    [
+        "its package",
+        "beside its apps module",
+        "its parent",
+        "no app",
+        "above a nested app",
+    ],
 )
 def test_a_module_an_entry_imports_belongs_to_the_app_it_lies_in(
     write_app: WriteApp, tmp_path: Path, position: str, spelling: str
@@ -1863,7 +1870,7 @@ def test_a_module_an_entry_imports_belongs_to_the_app_it_lies_in(
     }.get(position, "")
     config = imports + _PLAIN_CONFIG.replace("{name}", "{package}")
     reexport = "from .apps import Config\n" if spelling == "re-exported class" else ""
-    own = asks if position == "its package" else ""
+    own = asks if position in ("its package", "above a nested app") else ""
     package = write_app(config, __init__=own + reexport, contracts=asks)
     if position == "its parent":
         outer = write_app("", __init__=asks)
@@ -1894,6 +1901,13 @@ def test_a_module_an_entry_imports_belongs_to_the_app_it_lies_in(
         ], first
     if position == "its parent":
         assert _walk([[entry], [outer]]) == ["DeclarationError"] * 2
+    if position == "above a nested app":
+        # Python imports the package above an app it imports.
+        nested = tmp_path / package / "inner"
+        nested.mkdir()
+        (nested / "__init__.py").write_text("", encoding="utf-8")
+        for first in ([entry], [entry, "no_such_app"]):
+            assert _walk([first, [f"{package}.inner"]])[1] == "DeclarationError"
 
 
 @pytest.mark.spec("APP-14")

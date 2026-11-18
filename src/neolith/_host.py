@@ -286,7 +286,13 @@ def set_up(config: AppConfig) -> None:
         for identity, places in checked.items():
             for place in places:
                 loads = _RECORDED[identity][place]
-                for app in [a for a in loads if a is None or a in installed]:
+                # Its tie to the apps below its module goes with it: this
+                # set-up checked the request that tie stands for.
+                for app in [
+                    a
+                    for a in loads
+                    if _tied(a, installed) or (a is not None and a.startswith("\1"))
+                ]:
                     del loads[app]
                 if not loads:
                     del _RECORDED[identity][place]
@@ -308,7 +314,7 @@ def _checked_by(installed: frozenset[str]) -> dict[str, list[str]]:
     checked: dict[str, list[str]] = {}
     for identity, places in _RECORDED.items():
         for place, loads in places.items():
-            if any(app is None or app in installed for app in loads):
+            if any(_tied(app, installed) for app in loads):
                 checked.setdefault(identity, []).append(place)
     return checked
 
@@ -349,12 +355,32 @@ def _ties(module: str, at_import: bool) -> set[str | None]:
                 tuple(entries),
                 global_apps.app_configs,
             )
-            return {key}
+            return {key, *_below(module, at_import)}
         else:
             return {None}
     if at_import:
         ties |= _module_ties(module, list(global_apps.app_configs.values()))
-    return ties
+    return ties | _below(module, at_import)
+
+
+def _below(module: str, at_import: bool) -> set[str | None]:
+    """A tie to every app at or below ``module`` when a request was made as
+    the module was imported: Python imports every package above a module it
+    imports, so such an app's loading imports this module again in a fresh
+    process.
+    """
+    return {f"\1{module}"} if at_import and module else set()
+
+
+def _tied(tie: str | None, installed: frozenset[str]) -> bool:
+    """Whether a set-up that installs ``installed``, its apps' names and
+    config class paths, checks ``tie``.
+    """
+    if tie is None:
+        return True
+    if tie.startswith("\1"):
+        return any(_within(key, tie[1:]) for key in installed)
+    return tie in installed
 
 
 def _module_ties(module: str, *loads: Sequence[AppConfig]) -> set[str | None]:
