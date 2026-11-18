@@ -21,6 +21,7 @@ the plain types, naming the type to use.
 """
 
 import base64
+import binascii
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -52,13 +53,38 @@ _MICROSECOND = timedelta(microseconds=1)
 _DECIMAL_DIGITS = 34
 
 
-def _fullmatch(pattern: str, text: str) -> bool:
+# Python's re holds state for each repetition of BYTES_PATTERN's group, about
+# 60 times the decoded size (#45). So bytes are checked against the same rules
+# in two parts, neither holding any: every character but the last four is in
+# the alphabet, and the last four end the text as the pattern's tail allows.
+_BASE64URL = re.compile(r"[A-Za-z0-9_\-]*")
+_BASE64URL_END = re.compile(
+    r"[A-Za-z0-9_\-]{4}|[A-Za-z0-9_\-][AQgw]==|[A-Za-z0-9_\-]{2}[AEIMQUYcgkosw048]="
+)
+_FROM_BASE64URL = str.maketrans("-_", "+/")
+
+
+def _is_base64url(text: str) -> bool:
+    """True if BYTES_PATTERN matches the whole of ``text``."""
+    size = len(text)
+    if size % 4:
+        return False
+    return size == 0 or (
+        _BASE64URL.fullmatch(text, 0, size - 4) is not None
+        and _BASE64URL_END.fullmatch(text, size - 4) is not None
+    )
+
+
+def fullmatch(pattern: str, text: str) -> bool:
+    """True if ``pattern``, one of the forms' patterns, matches all of ``text``."""
+    if pattern == BYTES_PATTERN:
+        return _is_base64url(text)
     return re.fullmatch(pattern, text) is not None
 
 
 def _read_duration(value: object) -> timedelta:
     if type(value) is str:
-        if not _fullmatch(DURATION_PATTERN, value):
+        if not fullmatch(DURATION_PATTERN, value):
             raise ValueError(
                 "a duration is written as seconds with an 's' suffix and 0, 3 or "
                 "6 fractional digits, as few as it needs, such as '1.500s'"
@@ -109,7 +135,7 @@ def _decimal_text(value: Decimal) -> str | None:
             return None
         value = Decimal((sign, (*digits, *(0,) * exponent), 0))
     text = format(value, "f")
-    if _fullmatch(DECIMAL_PATTERN, text) and _fullmatch(DECIMAL_DIGITS_PATTERN, text):
+    if fullmatch(DECIMAL_PATTERN, text) and fullmatch(DECIMAL_DIGITS_PATTERN, text):
         return text
     return None
 
@@ -117,8 +143,8 @@ def _decimal_text(value: Decimal) -> str | None:
 def _read_decimal(value: object) -> Decimal:
     if type(value) is str:
         if not (
-            _fullmatch(DECIMAL_PATTERN, value)
-            and _fullmatch(DECIMAL_DIGITS_PATTERN, value)
+            fullmatch(DECIMAL_PATTERN, value)
+            and fullmatch(DECIMAL_DIGITS_PATTERN, value)
         ):
             raise ValueError(
                 "a decimal is written as text of at most 34 digits with an "
@@ -154,11 +180,13 @@ def _read_binary(value: object, info: core_schema.ValidationInfo) -> bytes:
                 "text; to read base64url from JSON, validate the JSON text "
                 "itself (model_validate_json), not a value parsed from it"
             )
-        if not _fullmatch(BYTES_PATTERN, value):
+        if not _is_base64url(value):
             raise ValueError(
                 "bytes are written in base64url with padding and zero unused bits"
             )
-        return base64.urlsafe_b64decode(value)
+        # urlsafe_b64decode would copy the text twice, as ASCII bytes and
+        # then translated; a2b_base64 reads the translated str in place.
+        return binascii.a2b_base64(value.translate(_FROM_BASE64URL))
     if type(value) is not bytes:
         raise ValueError("binary data is bytes, or base64url text")
     return value

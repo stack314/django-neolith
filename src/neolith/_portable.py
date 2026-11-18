@@ -38,7 +38,7 @@ from pydantic_core import (
     core_schema,
 )
 
-from neolith._forms import FORM_FOR_KIND, form_in, form_of
+from neolith._forms import FORM_FOR_KIND, form_in, form_of, fullmatch
 
 # A record or enum name, as other languages' generated code will use it
 # (CON-20).
@@ -1131,7 +1131,7 @@ def encoding_problem(
             patterns = [schema.get("pattern")]
             patterns += [part.get("pattern") for part in schema.get("allOf", [])]
             for pattern in patterns:
-                if pattern is not None and not re.fullmatch(pattern, item):
+                if pattern is not None and not fullmatch(pattern, item):
                     return f"{shown(item)} does not match {pattern}"
             if schema.get("format") == "date-time":
                 try:

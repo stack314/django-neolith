@@ -10,8 +10,12 @@ is refused when the contract is declared. Sending and receiving are checked by
 the transports (#10).
 """
 
+import base64
+import contextlib
+import gc
 import json
 import re
+import tracemalloc
 import types
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta, timezone
@@ -52,8 +56,9 @@ from neolith._forms import (
     DECIMAL_DIGITS_PATTERN,
     DECIMAL_PATTERN,
     DURATION_PATTERN,
+    fullmatch,
 )
-from neolith._portable import DATE_PATTERN, TIMESTAMP_PATTERN
+from neolith._portable import DATE_PATTERN, TIMESTAMP_PATTERN, encoding_problem
 from tests.strategies import admitted_by
 
 SPEC = Path(__file__).resolve().parent.parent / "spec" / "01-contracts.md"
@@ -1022,3 +1027,113 @@ def test_an_alias_of_a_neolith_form_is_admitted(
 ) -> None:
     # Pydantic adds a reference to an alias's node, which any node may carry.
     assert _field(wrap(alias)) == shape(described)
+
+
+# Bytes are read in memory in proportion to their size (#45). Matching the
+# pattern with Python's re held state for each 4-character group, about 60
+# times the decoded size; the read now checks the same strings without it.
+
+_BASE64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+# Characters next to the alphabet: the other alphabet, padding, space, a final
+# newline, NUL, and letters and digits outside ASCII that \w would admit.
+_NEAR_BASE64URL = "+/= \n\x00" + "".join(map(chr, [0xE9, 0x661, 0xFF21]))
+
+
+@st.composite
+def _near_bytes_text(draw: st.DrawFn) -> str:
+    """Base64url text, or text one edit away from it, or nearby text."""
+    text = draw(st.from_regex(BYTES_PATTERN, fullmatch=True))
+    edit = draw(st.sampled_from(["none", "replace", "insert", "delete", "any"]))
+    if edit == "any":
+        return draw(st.text(alphabet=_BASE64URL + _NEAR_BASE64URL, max_size=12))
+    if edit == "none" or not text:
+        return text
+    at = draw(st.integers(0, len(text) - 1))
+    char = draw(st.sampled_from(_BASE64URL + _NEAR_BASE64URL))
+    if edit == "replace":
+        return text[:at] + char + text[at + 1 :]
+    if edit == "insert":
+        return text[:at] + char + text[at:]
+    return text[:at] + text[at + 1 :]
+
+
+@pytest.mark.spec("CON-39")
+@_HYPOTHESIS
+@given(_near_bytes_text())
+def test_binary_reads_exactly_the_text_its_pattern_matches(text: str) -> None:
+    # Binary checks base64url without the regular expression, on receive and
+    # when a written value is checked; both admit the strings the pattern
+    # matches over the whole string, and no others.
+    matched = re.fullmatch(BYTES_PATTERN, text) is not None
+    assert fullmatch(BYTES_PATTERN, text) is matched
+    assert (encoding_problem(BYTES, {}, text) is None) is matched
+    try:
+        read = _read(Binary, text)
+    except ValidationError:
+        assert not matched, text
+    else:
+        assert matched, text
+        assert read == base64.urlsafe_b64decode(text)
+
+
+_SIZE = 1 << 20
+
+
+def _base64url(size: int) -> str:
+    return base64.urlsafe_b64encode(bytes(range(256)) * (size // 256)).decode()
+
+
+def _peak(work: Callable[[], object]) -> int:
+    """The peak memory Python allocates while ``work`` runs."""
+    gc.collect()
+    tracemalloc.start()
+    try:
+        with contextlib.suppress(ValidationError):
+            work()
+        return tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+
+# Each form's reader, given about 1 MiB: bytes whole and in parts, and text
+# each form refuses only at its end, or at once.
+_LARGE_VALUES = [
+    pytest.param(Binary, "", lambda: _base64url(_SIZE), id="bytes"),
+    pytest.param(
+        list[Binary],
+        [],
+        lambda: [_base64url(_SIZE // 4) for _ in range(4)],
+        id="bytes in parts",
+    ),
+    pytest.param(
+        Binary, "", lambda: _base64url(_SIZE)[:-1] + "+", id="bytes refused at the end"
+    ),
+    pytest.param(
+        Decimal128, "0", lambda: "0." + "0" * _SIZE + "1", id="decimal refused"
+    ),
+    pytest.param(Duration, "0s", lambda: "1" * _SIZE + "s", id="duration refused"),
+]
+
+
+@pytest.mark.parametrize(("annotation", "small", "large"), _LARGE_VALUES)
+def test_reading_a_form_takes_memory_in_proportion_to_its_size(
+    annotation: object, small: object, large: Callable[[], object]
+) -> None:
+    # Bytes take about 3.7 times their size: the JSON text 4/3, a translated
+    # copy of it 4/3, and the result. Text a form refuses takes about 2 times:
+    # Pydantic's str and its copy for the error. The pattern took about 60
+    # times; the bound leaves room for allocator and version noise.
+    record = _record(annotation)
+    record.model_validate_json(json.dumps({"v": small}))
+    body = json.dumps({"v": large()}).encode()
+    peak = _peak(lambda: record.model_validate_json(body))
+    assert peak < 8 * _SIZE, f"{peak / _SIZE:.1f} times the size"
+
+
+def test_checking_written_bytes_copies_nothing() -> None:
+    # A written value is checked against its form's pattern (encoding_problem);
+    # for bytes that held the same state as reading did.
+    text = _base64url(_SIZE)
+    encoding_problem(BYTES, {}, "")
+    peak = _peak(lambda: encoding_problem(BYTES, {}, text))
+    assert peak < _SIZE // 8, f"{peak / _SIZE:.2f} times the size"
