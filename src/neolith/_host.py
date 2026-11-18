@@ -55,7 +55,7 @@ import threading
 import types
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Final, NoReturn, final
+from typing import Any, Final, NoReturn, cast, final
 
 from django.apps import AppConfig
 from django.apps import apps as global_apps
@@ -357,17 +357,18 @@ def _ties(module: str, at_import: bool) -> set[str | None]:
         return {None}
     elif global_apps.apps_ready:
         found = loading.get("app_config")
-        ties = {found.name if isinstance(found, AppConfig) else None}
+        ties = {cast(AppConfig, found).name if _naming.is_a(found, AppConfig) else None}
     else:
         entry = loading.get("entry")
         entries = loading.get("installed_apps")
-        if isinstance(entry, AppConfig):
-            ties = {entry.name}
-        elif type(entry) is str and isinstance(entries, (list, tuple)):
+        if _naming.is_a(entry, AppConfig):
+            ties = {cast(AppConfig, entry).name}
+        # Django loads an entry of a str subclass as its text.
+        elif _naming.is_a(entry, str) and isinstance(entries, (list, tuple)):
             key = f"\0{next(_PENDING_KEYS)}"
             _PENDING[key] = (
                 module if at_import else None,
-                entry,
+                cast(str, entry),
                 tuple(entries),
                 global_apps.app_configs,
             )
@@ -456,11 +457,14 @@ def _name_pending(configs: Sequence[AppConfig]) -> None:
     named: dict[str, set[str | None]] = {}
     for key, (module, entry, entries, made) in _PENDING.items():
         loaded = list(made.values())
-        at = entries.index(entry) if entry in entries else len(loaded)
+        # By identity: an entry's own __eq__ never runs (#100), and the copy
+        # of the entries holds the same objects.
+        at = next((i for i, e in enumerate(entries) if e is entry), len(loaded))
         config = loaded[at] if at < len(loaded) else None
         own: str | None = None if config is None else _config_key(config)
         ties: set[str | None] = {own}
-        home = entry if entry in sys.modules else entry.rpartition(".")[0]
+        text = str.__str__(entry)
+        home = text if text in sys.modules else text.rpartition(".")[0]
         if module is not None and (own is None or not _within(module, home)):
             ties |= _module_ties(module, loaded, configs)
         named[key] = ties

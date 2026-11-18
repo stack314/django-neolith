@@ -2016,6 +2016,66 @@ def test_a_helper_another_app_imports_first_is_checked_for_its_own_app(
 
 
 @pytest.mark.spec("APP-14")
+def test_an_entry_never_runs_its_own_comparison(write_app: WriteApp) -> None:
+    # INSTALLED_APPS holds an AppConfig whose __eq__ raises, and a str
+    # subclass whose __eq__ and __hash__ raise, which Django loads as its
+    # text; both decide as their plain spellings do (#100).
+    good = write_app("")
+    asks = write_app(
+        _PLAIN_CONFIG.replace("{name}", "{package}"), __init__=_UNDECLARED_CONNECTS
+    )
+    other = write_app("")
+    printed = in_built_host(
+        f"""
+        import importlib
+
+        import django
+        from django.apps import AppConfig
+        from django.test.utils import override_settings
+
+
+        class Hostile(AppConfig):
+            def __eq__(self, other):
+                raise RuntimeError("own __eq__")
+
+            __hash__ = object.__hash__
+
+
+        class Spelt(str):
+            def __eq__(self, other):
+                raise RuntimeError("own __eq__")
+
+            def __hash__(self):
+                raise RuntimeError("own __hash__")
+
+
+        django.setup()
+        installed = list(settings.INSTALLED_APPS)
+        instance = Hostile({good!r}, importlib.import_module({good!r}))
+        for added in (
+            [instance, {asks!r}],
+            [Spelt({asks!r})],
+            [{other!r}],
+            [],
+        ):
+            try:
+                with override_settings(INSTALLED_APPS=[*installed, *added]):
+                    print("admitted")
+            except Exception as error:
+                print(type(error).__name__)
+        """,
+        host_apps.HOSTED,
+        {"NEOLITH": host_apps.NEOLITH},
+    )
+    assert printed.splitlines() == [
+        "DeclarationError",
+        "DeclarationError",
+        "admitted",
+        "admitted",
+    ]
+
+
+@pytest.mark.spec("APP-14")
 def test_a_place_two_apps_ask_from_belongs_to_both(write_app: WriteApp) -> None:
     # One helper line asks for nope.v1 on behalf of two apps, each added by
     # its own override: each override is refused every time it is entered.
