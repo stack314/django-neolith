@@ -17,10 +17,11 @@ from tests import host_apps
 SECRET_KEY = secrets.token_urlsafe(50)
 
 DEBUG = False
-# The root middleware comes first, once (ADR 0022 Decision 6).
-MIDDLEWARE = ["neolith.middleware.RootMiddleware"]
+# The root middleware first, once (ADR 0022 Decision 6), and the principal
+# middleware after the two the Django-user backend reads (ADR 0023).
+MIDDLEWARE = list(host_apps.MIDDLEWARE)
 ROOT_URLCONF = "tests.request_urls"
-NEOLITH = copy.deepcopy(host_apps.NEOLITH)
+NEOLITH = copy.deepcopy(host_apps.SERVED)
 USE_TZ = True
 
 globals().update(

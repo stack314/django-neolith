@@ -45,18 +45,19 @@ from tests.test_host import write_app as write_app
 pytestmark = pytest.mark.spec("APP-16")
 
 ROOT = "neolith.middleware.RootMiddleware"
+PRINCIPAL = "neolith.middleware.PrincipalMiddleware"
 SQLITE = "django.db.backends.sqlite3"
 HOSTED = list(host_apps.HOSTED)
 LEDGER = "tests.app_db.ledger"
 BILLING = "tests.app_db.billing"
-KEYS = "the keys are DATABASES, REQUEST_DEADLINE, UNDECLARED_APPS"
+KEYS = "the keys are DATABASES, PRINCIPAL_BACKENDS, REQUEST_DEADLINE, UNDECLARED_APPS"
 UNDECLARED = 'NEOLITH["UNDECLARED_APPS"]'
 DBS = 'NEOLITH["DATABASES"]'
 
 
 def deployer(**changed: object) -> dict[str, Any]:
     """The smallest deployer's mapping the builder admits, changed."""
-    base: dict[str, Any] = {"MIDDLEWARE": [ROOT], "NEOLITH": {}}
+    base: dict[str, Any] = {"MIDDLEWARE": [ROOT, PRINCIPAL], "NEOLITH": {}}
     base.update(changed)
     return base
 
@@ -273,7 +274,8 @@ def test_a_setting_the_host_builds_is_refused_in_the_deployer_s_input(
         ({"OTHER": 1}, f"NEOLITH: unknown key 'OTHER'; {KEYS}"),
         (
             {"PRINCIPAL_BACKENDS": ["x"]},
-            f"NEOLITH: unknown key 'PRINCIPAL_BACKENDS'; {KEYS}",
+            'NEOLITH["PRINCIPAL_BACKENDS"][0]: expected a dict with exactly the '
+            "keys BACKEND and OPTIONS, got str",
         ),
         ({"DATABASES": {}}, f"{DBS}: is empty; leave the key out"),
         ({"UNDECLARED_APPS": []}, f"{UNDECLARED}: is empty; leave the key out"),
@@ -333,8 +335,8 @@ def test_an_undeclared_app_that_a_hosted_app_names_as_a_battery_is_refused(
     [
         (None, f"MIDDLEWARE: is required; its first entry is {ROOT}"),
         ((ROOT,), "MIDDLEWARE: expected a list, got tuple"),
-        (["x.Y", ROOT], f"MIDDLEWARE: {ROOT} must be the first entry"),
-        ([ROOT, ROOT], f"MIDDLEWARE: {ROOT} is listed 2 times"),
+        (["x.Y", ROOT, PRINCIPAL], f"MIDDLEWARE: {ROOT} must be the first entry"),
+        ([ROOT, ROOT, PRINCIPAL], f"MIDDLEWARE: {ROOT} is listed 2 times"),
     ],
 )
 def test_middleware_has_the_root_first_once_in_the_builder(
@@ -349,8 +351,9 @@ def test_middleware_has_the_root_first_once_in_the_builder(
 def test_the_builder_imports_no_middleware() -> None:
     """Before settings exist, an alias of the root middleware is not
     imported; set-up judges by class (``neolith.E006``)."""
-    built = configure(HOSTED, deployer(MIDDLEWARE=[ROOT, "tests.request_site.Alias"]))
-    assert built["MIDDLEWARE"] == [ROOT, "tests.request_site.Alias"]
+    given = [ROOT, PRINCIPAL, "tests.request_site.Alias"]
+    built = configure(HOSTED, deployer(MIDDLEWARE=given))
+    assert built["MIDDLEWARE"] == given
     assert _checks.middleware_problems(built["MIDDLEWARE"]) == [
         f"MIDDLEWARE: {ROOT} is listed 2 times"
     ]
@@ -608,7 +611,8 @@ def test_every_row_of_one_phase_reaches_the_diagnostic() -> None:
             "SILENCED_SYSTEM_CHECKS": ["neolith.E006"],
         },
     ).splitlines()
-    assert len(found) == 5
+    # MIDDLEWARE has neither middleware class: two rows of one rule.
+    assert len(found) == 6
     assert found == sorted(found)
 
 
@@ -1317,7 +1321,7 @@ def test_a_changed_key_of_an_alias_is_refused_at_set_up(tmp_path: Path) -> None:
 
 @pytest.fixture
 def neolith() -> dict[str, Any]:
-    return copy.deepcopy(host_apps.NEOLITH)
+    return copy.deepcopy(host_apps.SERVED)
 
 
 @pytest.mark.spec("APP-29")
@@ -1363,7 +1367,7 @@ def test_an_override_of_neolith_after_set_up_is_refused_by_key(
     ):
         pytest.fail("the override was admitted")
     assert str(raised.value) == message
-    assert settings.NEOLITH == host_apps.NEOLITH
+    assert settings.NEOLITH == host_apps.SERVED
     assert _host._current() is before
 
 
@@ -1419,7 +1423,10 @@ def project(tmp_path: Path) -> Callable[..., Path]:
             from neolith.host import build_settings
 
             SECRET_KEY = "a key for one test process only"
-            MIDDLEWARE = ["neolith.middleware.RootMiddleware"]
+            MIDDLEWARE = [
+                "neolith.middleware.RootMiddleware",
+                "neolith.middleware.PrincipalMiddleware",
+            ]
             NEOLITH = {}
             ROOT_URLCONF = "tests.request_urls"
             ALLOWED_HOSTS = ["*"]
@@ -1535,7 +1542,13 @@ from neolith.host import build_settings
 try:
     built = build_settings(
         json.loads(sys.argv[1]),
-        {"MIDDLEWARE": ["neolith.middleware.RootMiddleware"], "NEOLITH": {}},
+        {
+            "MIDDLEWARE": [
+                "neolith.middleware.RootMiddleware",
+                "neolith.middleware.PrincipalMiddleware",
+            ],
+            "NEOLITH": {},
+        },
     )
 except ImproperlyConfigured as error:
     print(str(error).splitlines()[0])

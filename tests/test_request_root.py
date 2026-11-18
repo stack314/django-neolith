@@ -40,6 +40,7 @@ from tests.host_apps.couriers import services as courier_services
 from tests.hosting import in_fresh_process
 
 ROOT = "neolith.middleware.RootMiddleware"
+PRINCIPAL = "neolith.middleware.PrincipalMiddleware"
 CALLING = "tests.request_site.Calling"
 SYNC_ONLY = "tests.request_site.sync_only"
 MODES = ("wsgi", "asgi")
@@ -68,7 +69,7 @@ def _site(*middleware: str, **more: object) -> Any:  # noqa: ANN401
     return override_settings(
         INSTALLED_APPS=[*host_apps.INSTALLED[:-1], "tests.plain_app", "neolith"],
         ROOT_URLCONF="tests.request_urls",
-        MIDDLEWARE=[ROOT, *middleware],
+        MIDDLEWARE=[*host_apps.MIDDLEWARE, *middleware],
         **more,
     )
 
@@ -344,7 +345,7 @@ def test_a_request_root_has_the_host_s_request_deadline(
     ``NEOLITH``, and Django loads the apps of an override before it applies
     the override's settings, so ``NEOLITH`` is overridden first."""
     request_site.SEEN.clear()
-    with override_settings(NEOLITH={**host_apps.NEOLITH, **neolith}), _site():
+    with override_settings(NEOLITH={**host_apps.SERVED, **neolith}), _site():
         assert serve(mode, "/page/").body == b"as web"
     assert courier_services.CONTEXTS[-1].deadline == deadline
     request_site.HELD.clear()
@@ -568,10 +569,10 @@ def test_a_signal_to_stop_from_the_chain_closes_the_root_and_goes_on(
     ("middleware", "message"),
     [
         (
-            ["tests.request_site.Calling", ROOT],
+            ["tests.request_site.Calling", ROOT, PRINCIPAL],
             f"MIDDLEWARE: {ROOT} must be the first entry",
         ),
-        ([ROOT, ROOT], f"MIDDLEWARE: {ROOT} is listed 2 times"),
+        ([ROOT, ROOT, PRINCIPAL], f"MIDDLEWARE: {ROOT} is listed 2 times"),
         ((ROOT,), "MIDDLEWARE: expected a list, got tuple"),
     ],
 )
@@ -591,7 +592,7 @@ def test_a_handler_is_not_built_with_the_root_out_of_place(
 @pytest.mark.spec("APP-16")
 def test_a_handler_is_not_built_where_the_host_is_not_set_up() -> None:
     with (
-        override_settings(INSTALLED_APPS=[], MIDDLEWARE=[ROOT]),
+        override_settings(INSTALLED_APPS=[], MIDDLEWARE=[ROOT, PRINCIPAL]),
         pytest.raises(ImproperlyConfigured, match="the host is not set up"),
     ):
         WSGIHandler()
@@ -953,7 +954,7 @@ def test_a_handler_is_not_built_with_the_root_under_a_second_path(
     site: None,
 ) -> None:
     with (
-        override_settings(MIDDLEWARE=[ROOT, "tests.request_site.Alias"]),
+        override_settings(MIDDLEWARE=[ROOT, PRINCIPAL, "tests.request_site.Alias"]),
         pytest.raises(ImproperlyConfigured) as raised,
     ):
         WSGIHandler()
@@ -1186,8 +1187,8 @@ def _predicted(owner: str, form: str, target: str) -> str | None:
 def contrib_site() -> Iterator[None]:
     """The test host with Django's contrib apps a wrapper or a view can come
     from installed beside it."""
+    # django.contrib.auth is installed on the test host already.
     contrib = [
-        "django.contrib.auth",
         "django.contrib.sites",
         "django.contrib.flatpages",
     ]

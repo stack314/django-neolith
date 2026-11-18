@@ -20,7 +20,10 @@ from django.conf import settings
 settings.configure(
     **{
         "INSTALLED_APPS": json.loads(sys.argv[1]),
-        "MIDDLEWARE": ["neolith.middleware.RootMiddleware"],
+        "MIDDLEWARE": [
+            "neolith.middleware.RootMiddleware",
+            "neolith.middleware.PrincipalMiddleware",
+        ],
         "NEOLITH": {},
         "DATABASES": {"default": {}},
         "DATABASE_ROUTERS": ["neolith.routers.AppRouter"],
@@ -42,7 +45,10 @@ settings.configure(
     **build_settings(
         json.loads(sys.argv[1]),
         {
-            "MIDDLEWARE": ["neolith.middleware.RootMiddleware"],
+            "MIDDLEWARE": [
+            "neolith.middleware.RootMiddleware",
+            "neolith.middleware.PrincipalMiddleware",
+        ],
             "USE_TZ": True,
             **json.loads(sys.argv[2]),
         },

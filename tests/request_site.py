@@ -179,3 +179,38 @@ def copies_attributes(view: _View) -> _View:
         return view(request)
 
     return wrapper
+
+
+# What each call made through whom() came to, in order.
+WHOM: list[str] = []
+
+
+def whom() -> str:
+    """Call the stock contract once from where it runs; return, and record,
+    ``user <subject>`` for the principal couriers saw, ``nobody``,
+    ``refused <kind>`` or ``usage error``. The web app may assert a
+    principal on stock, which asks couriers on the same principal; the
+    connector is asked for here, since a process that imports this module
+    may host no app that requires stock."""
+    try:
+        connect("stock.v1").level(Sku(sku="ab"))
+    except ContractError as error:
+        outcome = f"refused {error.kind}"
+    except UsageError:
+        outcome = "usage error"
+    else:
+        principal = courier_services.CONTEXTS[-1].principal
+        outcome = "nobody" if principal is None else f"user {principal.subject}"
+    WHOM.append(outcome)
+    return outcome
+
+
+class LateCaller(MiddlewareMixin):
+    """Calls in its response phase, which runs after the principal
+    middleware's when it is listed before it."""
+
+    def process_response(
+        self, request: HttpRequest, response: HttpResponseBase
+    ) -> HttpResponseBase:
+        whom()
+        return response
