@@ -135,10 +135,10 @@ def test_a_principal_is_frozen_and_cannot_be_subclassed() -> None:
 
 def test_a_principal_is_built_once() -> None:
     unbuilt = Principal.__new__(Principal)
-    unbuilt.__init__("i", "s", {"a": "b"})  # type: ignore[misc]
+    unbuilt.__init__("i", "s", {"a": "b"})
     assert unbuilt == Principal("i", "s", {"a": "b"})
     with pytest.raises(TypeError, match="already built"):
-        unbuilt.__init__("other", "t")  # type: ignore[misc]
+        unbuilt.__init__("other", "t")
     assert unbuilt == Principal("i", "s", {"a": "b"})
 
 
@@ -151,7 +151,7 @@ def test_a_principal_is_not_built_again_from_its_own_claims() -> None:
     class Claims(Mapping[str, str]):
         def __getitem__(self, name: str) -> str:
             try:
-                unbuilt.__init__("i", "alice", {"role": "user"})  # type: ignore[misc]
+                unbuilt.__init__("i", "alice", {"role": "user"})
             except TypeError as error:
                 refused.append(str(error))
             return "admin"
@@ -162,7 +162,7 @@ def test_a_principal_is_not_built_again_from_its_own_claims() -> None:
         def __len__(self) -> int:
             return 1
 
-    unbuilt.__init__("i", "mallory", Claims())  # type: ignore[misc]
+    unbuilt.__init__("i", "mallory", Claims())
     assert refused
     assert "already built" in refused[0]
     assert unbuilt == Principal("i", "mallory", {"role": "admin"})
@@ -471,7 +471,7 @@ def test_a_built_principal_cannot_be_built_again(
     before = (repr(principal), hash(principal), principal.claims)
     twin = copy.deepcopy(principal)
     with pytest.raises(TypeError, match="already built"):
-        principal.__init__(issuer, subject, claims)  # type: ignore[misc]
+        principal.__init__(issuer, subject, claims)
     assert (repr(principal), hash(principal), principal.claims) == before
     assert principal.claims is before[2]
     assert principal == twin

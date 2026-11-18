@@ -34,6 +34,7 @@ from neolith._declaration import Declaration, Provision
 from neolith._forms import _Form
 from neolith._frozen import once
 from neolith._host import Connector, Host
+from neolith._server import _Request
 
 
 class Ask(BaseModel):
@@ -112,11 +113,23 @@ _CASES: dict[type, Case] = {
     ),
     _FrozenMap: Case(lambda: _FrozenMap({"a": 1}), (({"b": 2},), {})),
     _FrozenList: Case(lambda: _FrozenList([1]), (([2],), {})),
+    _Request: Case(
+        lambda: _Request("GET / HTTP/1.1", 1.0),
+        (("POST /x HTTP/1.1", 2.0), {}),
+        state=["POST /x HTTP/1.1", 2.0],
+    ),
 }
+
+
+# Importing it raises, by design: the command line points Django at it while
+# settings do not exist yet.
+_RAISES = frozenset({"neolith._unset"})
 
 
 def _found() -> Iterator[type]:
     for module in pkgutil.iter_modules(neolith.__path__, "neolith."):
+        if module.name in _RAISES:
+            continue
         for value in vars(importlib.import_module(module.name)).values():
             if not isinstance(value, type) or value.__module__ != module.name:
                 continue
@@ -191,9 +204,10 @@ _RESTORED = [
 def test_a_value_is_not_restored_again_from_its_own_state(klass: type) -> None:
     # The state is read while the value is restored: a state that restores the
     # value from there would have it seen as one value, then written as another.
-    state = _CASES[klass].state
-    assert isinstance(state, list)
-    unbuilt = klass.__new__(klass)
+    held = _CASES[klass].state
+    assert isinstance(held, list)
+    state: list[object] = held
+    unbuilt: Any = object.__new__(klass)
     refused: list[str] = []
 
     class State:
@@ -202,7 +216,7 @@ def test_a_value_is_not_restored_again_from_its_own_state(klass: type) -> None:
                 unbuilt.__setstate__(state)
             except TypeError as error:
                 refused.append(str(error))
-            return iter(state)
+            yield from state
 
     unbuilt.__setstate__(State())
     assert refused
@@ -215,6 +229,7 @@ class _Hooked:
     """A value that runs a hook before it writes its field, as Principal does."""
 
     __slots__ = ("name",)
+    name: str
 
     def __init__(self, name: str, hook: Callable[[], object] = lambda: None) -> None:
         hook()
@@ -243,11 +258,12 @@ def test_copies_of_a_frozen_value_are_built_and_leave_it_as_it_was(
     value = _CASES[klass].make()
     before = _state(value)
     made: list[object] = []
-    for route in (
+    routes: tuple[Callable[[object], object], ...] = (
         copy.copy,
         copy.deepcopy,
         lambda value: pickle.loads(pickle.dumps(value)),  # noqa: S301
-    ):
+    )
+    for route in routes:
         try:
             made.append(route(value))
         except TypeError:
