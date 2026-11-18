@@ -99,13 +99,14 @@ These rules apply to documentation, docstrings, error messages, commit messages 
 
 ## Commits and pull requests
 
-- **G1.** Work on a branch named `<type>/<short-name>`, for example `fix/connector-timeout`. Never push to `main`.
+- **G1.** Work on a branch named `<type>/<short-name>`, for example `fix/connector-timeout`, and open the pull request against `next`. Never push to `main` or `next`.
 - **G2.** Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/). Types: `feat`, `fix`, `docs`, `spec`, `test`, `refactor`, `perf`, `build`, `ci`, `chore`. The subject is imperative, starts in lower case after the type, and is at most 72 characters. The body says why.
 - **G3.** One logical change per pull request. Unrelated clean-up goes in its own pull request.
 - **G4.** The pull request description opens with a summary of three or four bullets. It then says what changed and why, links the issue or decision record, names every specification document and decision record it touches, and says how the change was verified.
-- **G5.** Pull requests are squash-merged. The pull request title becomes the commit subject, so it follows **G2**.
+- **G5.** Pull requests into `next` are squash-merged. The pull request title becomes the commit subject, so it follows **G2**. A release pull request from `next` into `main` is merged with a merge commit, so `main` keeps one commit per change.
 - **G6.** A breaking change uses `!` after the type, for example `feat!:`, and has a *Breaking changes* section in the description. Before 1.0, breaking changes are allowed but never silent.
-- **G7.** Merging needs the maintainer's approval, and every review comment answered or resolved.
+- **G7.** A pull request merges into `next` once it has an approving review, passing checks, and every review comment answered or resolved. `main` changes only through a release pull request, which the maintainer merges.
+- **G8.** A release pull request sets the version, dates the changelog section, and lists the changes it carries and every decision record whose status it changes.
 
 ## How review works
 
