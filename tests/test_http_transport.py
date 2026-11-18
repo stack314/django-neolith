@@ -22,6 +22,8 @@ from collections.abc import Callable, Iterator
 from typing import Any, Protocol
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 from pydantic import BaseModel
 
 import neolith
@@ -770,6 +772,8 @@ class _Other(Protocol):
         (1000.0019999996, 1000.0, 1),
         (1000.0009999996, 1000.0, 0),
         (1e6 + 0.003, 1e6, 3),
+        (1e8 + 0.00099998, 1e8, 0),
+        (1e9 + 0.002, 1e9, 2),
         (1000.0, 1000.0, 0),
         (999.0, 1000.0, -1000),
         (1e9, 0.0, 9_999_999_999),
@@ -779,6 +783,69 @@ def test_one_helper_turns_a_deadline_into_a_budget(
     deadline: float | None, at: float, budget: int | None
 ) -> None:
     assert _context.budget(deadline, at) == budget
+
+
+@pytest.mark.spec("TRN-28", "TRN-29")
+@settings(max_examples=500, deadline=None, derandomize=True)
+@given(
+    at=st.floats(0, 1e10, allow_nan=False),
+    left=st.floats(-10, 1e7, allow_nan=False),
+)
+def test_a_budget_is_the_most_milliseconds_that_do_not_pass_the_deadline(
+    at: float, left: float
+) -> None:
+    deadline = at + left
+    found = _context.budget(deadline, at)
+    assert found is not None
+    if found < _context.BUDGET_CAP:
+        assert at + found / 1000 <= deadline < at + (found + 1) / 1000
+    else:
+        assert at + found / 1000 <= deadline
+
+
+@pytest.mark.spec("TRN-28")
+@pytest.mark.parametrize("clock_at", [1000.0, 1e6, 1e8, 1e9])
+@pytest.mark.parametrize("by", ["own", "scope"])
+def test_both_ways_of_giving_a_deadline_agree_on_the_last_millisecond(
+    monkeypatch: pytest.MonkeyPatch, clock_at: float, by: str
+) -> None:
+    clock = _Clock()
+    clock.time = clock_at
+    monkeypatch.setattr(_context, "now", clock)
+    monkeypatch.setattr(_http, "_now", clock)
+    for timeout, sent in ((0.00099998, False), (0.001, True), (0.0015, True)):
+        root = timeout if by == "scope" else None
+        own = timeout if by == "own" else None
+        provider = Recorded(_response(200, b'{"n":1}'))
+        outcome: object = None
+        with _desk(provider.script) as (connector, _), _root(timeout=root):
+            try:
+                outcome = connector.ask(Ask(), timeout=own)
+            except ContractError as error:
+                outcome = error.kind
+        assert outcome == (Told(n=1) if sent else "timeout"), timeout
+        assert bool(provider.requests) is sent, timeout
+
+
+def test_a_deep_principal_is_refused_without_recursion_on_a_small_stack() -> None:
+    # Issue #125: the provider reads Neolith-Principal from the network.
+    found: list[str] = []
+
+    def run() -> None:
+        for form in (b"[" * 9000 + b"]" * 9000, b'{"claims":' + b"[" * 9000):
+            try:
+                _context.read_principal(form)
+            except ValueError as error:
+                found.append(str(error))
+
+    old = threading.stack_size(1 << 20)
+    try:
+        thread = threading.Thread(target=run)
+        thread.start()
+        thread.join(30)
+    finally:
+        threading.stack_size(old)
+    assert found == ["the principal is not a principal object"] * 2
 
 
 @pytest.mark.spec("TRN-28")

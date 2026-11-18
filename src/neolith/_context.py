@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 from typing import Any, NoReturn, final
 
 from neolith import _naming
+from neolith._crossing import _DEPTH, _deeper_than
 from neolith._frozen import once
 from neolith._jcs import canonical, canonical_text
 from neolith._portable import SAFE_INTEGER_MAX, text_problem
@@ -240,6 +241,10 @@ def read_principal(form: bytes) -> Principal:
         text = form.decode("utf-8")
     except UnicodeDecodeError:
         raise ValueError("the principal is not UTF-8 text") from None
+    # Judged before the json module reads it, which recurses on the C stack,
+    # so no thread's stack decides the outcome (#125).
+    if _deeper_than(form, _DEPTH):
+        raise ValueError("the principal is not a principal object")
     try:
         value = json.loads(
             text, object_pairs_hook=pairs, parse_float=refuse, parse_constant=refuse
@@ -557,46 +562,39 @@ class Scope:
         """
         current = now()
         deadline = self.held.deadline
-        remaining = None if deadline is None else deadline - current
         if timeout is not None:
-            # Taken from the timeout itself, so that a call that took no time
-            # so far has exactly its timeout left.
-            own = timeout - (current - started)
-            if remaining is None or own < remaining:
-                return (
-                    _milliseconds(own, 0.0),
-                    min(started + timeout, current + BUDGET_CAP / 1000),
-                )
+            own = started + timeout
+            if deadline is None or own < deadline:
+                deadline = own
         if deadline is None:
             return None, None
-        return budget(deadline, current), min(deadline, current + BUDGET_CAP / 1000)
+        deadline = min(deadline, current + BUDGET_CAP / 1000)
+        return budget(deadline, current), deadline
 
 
 def budget(deadline: float | None, at: float) -> int | None:
     """The budget of a call with ``deadline`` sent at ``at``, on this host's
-    clock: the time left in whole milliseconds, rounded down and capped at
-    ``BUDGET_CAP``, or ``None`` for a call with no deadline.
+    clock: the most whole milliseconds that, counted from ``at``, do not pass
+    the deadline, capped at ``BUDGET_CAP``, or ``None`` for a call with no
+    deadline.
 
-    It is less than 1 once the deadline has passed, or is about to, which a
-    call is not sent with (TRN-28). Every transport reads a call's budget
-    with this, when it sends the call (ADR 0028 Decision 2).
-
-    A deadline is a float, such as a start plus a timeout, held to within
-    one unit in its last place. A time left that falls short of a whole
-    millisecond by no more than two such units, which the float cannot tell
-    from that millisecond, counts as the millisecond, so a timeout of
-    exactly 1 ms is not read as 0 for the rounding of its deadline.
+    It is less than 1 once the deadline has passed, or is less than 1 ms
+    away, which a call is not sent with (TRN-28). Every transport reads a
+    call's budget with this, when it sends the call (ADR 0028 Decision 2).
+    It is judged in the deadline's own arithmetic, ``at + budget / 1000``
+    against the deadline, so a call asked for with a timeout of exactly
+    1 ms has 1 ms when no time has passed, and a deadline counted from the
+    budget where the call arrives is never later than the caller's.
     """
     if deadline is None:
         return None
-    return _milliseconds(deadline - at, 2 * math.ulp(deadline))
-
-
-def _milliseconds(remaining: float, slack: float) -> int:
-    """Seconds left, with ``slack`` seconds of float error, as a budget:
-    whole milliseconds, rounded down, capped.
-    """
-    return min(math.floor((remaining + slack) * 1000), BUDGET_CAP)
+    found = math.floor((deadline - at) * 1000)
+    # The product above can be one off either way at a whole millisecond.
+    while at + (found + 1) / 1000 <= deadline:
+        found += 1
+    while at + found / 1000 > deadline:
+        found -= 1
+    return min(found, BUDGET_CAP)
 
 
 _CURRENT: contextvars.ContextVar[Scope | None] = contextvars.ContextVar(
