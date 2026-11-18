@@ -301,9 +301,11 @@ def _empty(status: int) -> HttpResponse:
 def _framed(response: HttpResponse, length: int | None = None) -> HttpResponse:
     """State the body's length, ``length`` for a ``HEAD`` answer, as
     Django's ``CommonMiddleware`` does for a response it passes, since no
-    middleware of the deployer runs on an owned path: so a server keeps the
-    connection open for the caller's next call. A 204 states none (RFC 9110,
-    section 8.6).
+    middleware of the deployer runs on an owned path: so a server can keep
+    the connection open for the caller's next call. A 204 states none (RFC
+    9110, section 8.6), and Django's development servers, ``neolith run``
+    included, close the connection after one. On ``HEAD``, Django's WSGI
+    servers drop a ``Content-Length`` of 0.
     """
     if response.status_code != 204:
         size = len(response.content) if length is None else length

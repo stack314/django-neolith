@@ -1033,11 +1033,9 @@ def test_the_document_is_served_with_get_and_its_headers_with_head(
     head = call(mode, method="HEAD", path=_endpoint.OPENAPI, authorization=None)
     assert (head.status, head.body) == (200, b"")
     assert head.header("Content-Type") == got.header("Content-Type")
-    assert (
-        head.header("Content-Length")
-        == got.header("Content-Length")
-        == str(len(document))
-    )
+    assert got.header("Content-Length") == str(len(document))
+    # A server may leave Content-Length out of a HEAD answer (RFC 9110, 9.3.2).
+    assert head.header("Content-Length") in (None, str(len(document)))
 
 
 @pytest.mark.spec("HTTP-31", "HTTP-47")

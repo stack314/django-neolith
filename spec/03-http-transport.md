@@ -95,7 +95,7 @@ A provider's host *owns* every path that starts with `/<name>/v<N>/`, for a cont
 
 **HTTP-30.** A provider's host MUST answer a request on a path it owns that is neither a contract path nor a well-known path with status 404 and an empty body, whatever its method. A connector maps it to `unavailable` ([Errors](#errors)).
 
-**HTTP-31.** A provider's host MUST answer `GET` and `HEAD` on a well-known path, and `HEAD` with the status and header fields that `GET` gets and no body (RFC 9110, section 9.3.2).
+**HTTP-31.** A provider's host MUST answer `GET` and `HEAD` on a well-known path, and `HEAD` with the status and header fields that `GET` gets and no body, except that a `HEAD` answer can leave out `Content-Length`, as RFC 9110, section 9.3.2, allows a server to.
 
 **HTTP-32.** A provider's host MUST answer any other method on a well-known path with status 405, `Allow: GET, HEAD` and an empty body.
 
@@ -105,9 +105,9 @@ On a contract path, a provider's host checks a call in the order of [ADR 0017](.
 
 - **HTTP-34.** when its method is not `POST`, with `Allow: POST`;
 - **HTTP-35.** when its request target has a query;
-- **HTTP-36.** when its `Content-Type` is not `application/json`, optionally followed by OWS `;` OWS `charset=` and either the token `utf-8` or the quoted-string `"utf-8"`, with the type, the subtype, the parameter's name and its value compared ignoring ASCII case, with `Accept-Post: application/json`;
+- **HTTP-36.** when the value of `Content-Type` it receives is not `application/json`, optionally followed by OWS `;` OWS `charset=` and either the token `utf-8` or the quoted-string `"utf-8"`, with the type, the subtype, the parameter's name and its value compared ignoring ASCII case, with `Accept-Post: application/json`;
 - **HTTP-37.** when it has a `Content-Encoding` field, with `Accept-Encoding: identity`;
-- **HTTP-38.** when it has no `Content-Length` field, or one whose value is not 1 to 19 ASCII digits, which several fields joined with `,` are not;
+- **HTTP-38.** when it has no `Content-Length` field, or one whose value, as the host receives it, is not 1 to 19 ASCII digits, which several fields joined with `,` are not;
 - **HTTP-39.** when its body, as received, is not as long as its `Content-Length` says.
 
 **HTTP-40.** A provider's host MAY fail a call whose `Content-Length` is above a limit of its own with `invalid_argument`, before it reads the body.

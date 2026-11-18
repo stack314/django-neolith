@@ -744,6 +744,24 @@ def test_neolith_run_refuses_a_header_line_it_cannot_read(live: int, line: str) 
     assert closed
 
 
+@pytest.mark.spec("HTTP-31")
+@pytest.mark.parametrize("path", [_endpoint.HEALTH, _endpoint.OPENAPI])
+def test_neolith_run_answers_head_with_get_s_fields_but_maybe_its_length(
+    live: int, path: str
+) -> None:
+    got, head = _responses(
+        live,
+        f"GET {path} HTTP/1.1\nHost: testserver\n",
+        f"HEAD {path} HTTP/1.1\nHost: testserver\n",
+    )
+    assert (head[0], head[2]) == (got[0], b"")
+    others = {"date", "content-length"}
+    assert {k: v for k, v in head[1].items() if k not in others} == {
+        k: v for k, v in got[1].items() if k not in others
+    }
+    assert head[1].get("content-length") in (None, got[1]["content-length"])
+
+
 def test_neolith_run_serves_a_call_and_reads_the_path_decoded(
     live: int, site: Site
 ) -> None:
