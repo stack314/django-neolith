@@ -59,6 +59,19 @@ A connector takes the kind from the body only, never from the status. A non-succ
 
 **HTTP-2.** A provider MUST serve an OpenAPI 3.1 document describing every contract version it provides, derived from the contracts. The document is the HTTP transport's publication of the contract ([01](01-contracts.md)). Its location is `GET /.well-known/neolith/openapi.json`.
 
+**HTTP-20.** The document MUST have the structure given in the list below, built from the description of each contract version the provider provides ([01](01-contracts.md#publication)) and from nothing else.
+
+Every provider of the same contract versions therefore serves the same document. Its structure:
+
+- **Top level.** `openapi` is `3.1.2`. `jsonSchemaDialect` is the description's dialect, JSON Schema 2020-12, so every schema in the document is read as plain JSON Schema. `info` has the title `neolith contracts` and, as its version, the version of this specification that the provider conforms to. There is no `servers` member, so paths are relative to the origin's root.
+- **Paths.** Contract versions are ordered by identity, compared code point by code point, and each version's actions keep their declaration order. Each action has the path `/<name>/v<N>/<action>`, which holds one `post` operation with:
+  - `operationId` set to `<name>.v<N>.<action>`, and `tags` holding only `<name>.v<N>`;
+  - `x-neolith-idempotent`, the action's idempotency as the description states it, `true` or `false`;
+  - optional header parameters for the call context: `Neolith-Principal` (base64url characters, at most 4096), `Neolith-Timeout` (its pattern above), `Idempotency-Key` (a String of 1 to 255 characters after unescaping, with no parameters), and `traceparent` and `tracestate` as strings;
+  - a required request body of media type `application/json`, referencing the request record;
+  - responses: `200` with the reply record, or `204` with no content when the reply is empty; for each standard kind, the status [Errors](#errors) gives it, with an error body of that kind; and `422`, only when the action declares kinds, whose error body is a `oneOf` with one member per declared kind: `kind` that kind's name as a constant, `message` a string, and `data` referencing the kind's detail record.
+- **Components.** Every record and enum of each version's description is a schema keyed `<name>.v<N>.<Record>`, unchanged apart from each reference `#/$defs/<Record>`, which points to that key instead. One HTTP security scheme, `bearer`, is required by every operation.
+
 ## Calling app and principal
 
 Two identities cross with a call ([ADR 0010](../docs/adr/0010-pluggable-principal-resolution.md)): the calling app, which the provider's host authenticates, and an optional principal on whose behalf the calling app calls, which the calling app asserts. A *backend* is the part of the provider's host that resolves a call's credentials into the calling app and checks the principal. Other backends, such as one built on mutual TLS or OIDC, can carry both differently. This section fixes the carriage of the shared-secret backend, which every implementation supports.
