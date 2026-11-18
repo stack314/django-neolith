@@ -28,7 +28,7 @@ Questions not yet decided are in [open-questions.md](../open-questions.md).
 | [0011](0011-django-ninja-for-contract-endpoints.md) | django-ninja for contract endpoints | Proposed |
 | [0012](0012-supported-python-and-django-versions.md) | Supported Python and Django versions | Accepted |
 | [0013](0013-license.md) | License: BSD-3-Clause | Accepted |
-| [0014](0014-pluggable-connector-transports.md) | Connector transports are pluggable | Proposed |
+| [0014](0014-pluggable-connector-transports.md) | Connector transports are pluggable, and a host names each remote provider by contract in `NEOLITH["REMOTE_PROVIDERS"]` | Proposed |
 | [0015](0015-specification-first-django-reference-implementation.md) | Specification first; django-neolith is the reference implementation | Accepted |
 | [0016](0016-an-app-may-run-attached-and-detached-at-once.md) | An app may run attached and detached at the same time | Proposed |
 | [0017](0017-call-context-explicit-at-the-action-ambient-for-propagation.md) | The call context is explicit at the action and ambient for propagation | Accepted |
