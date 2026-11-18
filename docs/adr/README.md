@@ -42,4 +42,5 @@ Questions not yet decided are in [open-questions.md](../open-questions.md).
 | [0025](0025-drain-counts-a-request-from-its-request-line.md) | Drain counts a request from its request line | Accepted |
 | [0026](0026-set-up-keeps-an-unknown-recorded-identity.md) | Set-up keeps a recorded identity it does not know, so the next set-up reports it again | Accepted |
 | [0027](0027-a-caller-backend-names-the-calling-app-over-http.md) | On an HTTP call, a caller backend names the calling app from a shared-secret token, and the principal header is read only after the allow-list admits that app | Proposed |
-| [0028](0028-the-http-transport-uses-the-standard-library-only.md) | The HTTP transport calls a provider over the standard library's sockets and TLS, with a strict HTTP/1.1 reader of its own, under one deadline for every blocking step, and adds no runtime dependency | Proposed |
+| [0028](0028-the-http-transport-uses-the-standard-library-only.md) | The HTTP transport calls a provider over the standard library's sockets and TLS, with a strict HTTP/1.1 reader of its own, under one deadline for every blocking step, and adds no runtime dependency | Accepted |
+| [0029](0029-a-record-belongs-to-the-app-whose-loading-asked-for-it.md) | A record belongs to the app whose loading step asked for it, and only a set-up that passes drops it | Accepted |
