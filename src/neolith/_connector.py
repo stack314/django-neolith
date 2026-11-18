@@ -19,7 +19,8 @@ reads the request text with the declared request type, so the action gets a new
 value, and writes the reply with the declared reply type; the connector reads
 that text back, so caller and provider never share an object (ADR 0007).
 
-The deadline crosses as a budget and is counted from when the call arrives. It
+The deadline crosses as a budget, which each transport reads from the call's
+deadline when it sends the call, and is counted from when the call arrives. It
 is checked before the request is read and again when the action's outcome is
 ready to return; an outcome that is late is discarded, and the call fails with
 ``timeout``. The action is never interrupted (ADR 0008 Decision 2). The
@@ -37,7 +38,9 @@ end it, however it re-raises it, gets ``internal`` too.
 
 The connector reads an error the way it reads a reply: a declared kind's
 detail with its record, an unknown kind's detail as an untyped map, and
-anything it cannot read as ``internal``.
+anything it cannot read as ``internal``. Text that a transport received from
+a network gets the network receive check first (ADR 0007 Decision 3), as the
+transport's ``receiver`` says.
 """
 
 import contextlib
@@ -64,7 +67,7 @@ from neolith._contracts import (
     mark_received,
     untyped_problem,
 )
-from neolith._crossing import Receiver, Refusal, check_request, codec
+from neolith._crossing import Receiver, Refusal, _interchange, check_request, codec
 
 __all__ = ["Connector", "Failure", "InProcess", "Provider", "Transport"]
 
@@ -93,6 +96,16 @@ class Failure(Exception):
         self.detail = detail
 
 
+def no_calling_app(identity: str) -> str:
+    """The refusal of a call to ``identity`` that has no calling app, the
+    same over every transport (TRN-42, ADR 0027 Decision 9).
+    """
+    return (
+        f"a call to {identity} has no calling app; a call is made from a "
+        "scope that belongs to an app"
+    )
+
+
 def internal_message(trace_id: str) -> str:
     """The message of an ``internal`` error that stands for another failure.
 
@@ -112,12 +125,18 @@ class Transport(Protocol):
     and returns the reply's JSON text, or ``None`` for an action whose reply
     is empty. Every outcome of the call that is not a reply is a ``Failure``;
     an action of another contract is a ``TypeError``, a mistake in the code
-    that called it.
+    that called it. ``receiver`` says where the text it returns comes from,
+    which decides how the connector reads it.
     """
 
     @property
     def contract(self) -> Contract:
         """The contract version whose calls this transport carries."""
+        ...
+
+    @property
+    def receiver(self) -> Receiver:
+        """Where the reply's and an error's text come from."""
         ...
 
     def call(self, action: Action, request: bytes, context: Sent) -> bytes | None:
@@ -135,22 +154,17 @@ class _Ended(enum.Enum):
 def _untyped(detail: bytes) -> dict[str, Any]:
     """Read an unknown kind's detail as an untyped map (spec 01, CON-30).
 
-    UTF-8 only, a member name at most once in each map, and no number JSON
-    cannot hold; the bounds are checked by ``untyped_problem``.
+    The text is read as a network receiver reads it (CON-42), its nesting
+    judged before the json module reads it: UTF-8 only, a member name at most
+    once in each object, no lone surrogate and no number outside the range of
+    a double. It is a JSON object, within the bounds ``untyped_problem``
+    checks.
     """
-
-    def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
-        found = dict(items)
-        if len(found) != len(items):
-            raise ValueError("a member name occurs twice in one map")
-        return found
-
-    def refuse(constant: str) -> NoReturn:
-        raise ValueError(f"{constant} is not a JSON number")
-
-    value = json.loads(
-        detail.decode("utf-8"), object_pairs_hook=pairs, parse_constant=refuse
-    )
+    value, broken, _ = _interchange(detail)
+    if broken is not None:
+        raise ValueError(f"the detail {broken}")
+    if type(value) is not dict:
+        raise ValueError("the detail is not a JSON object")
     problem = untyped_problem(value)
     if problem is not None:
         raise ValueError(f"the detail is not an untyped map: {problem}")
@@ -264,11 +278,7 @@ class Provider:
         """
         identity = self._contract.identity
         if caller is None:
-            return Failure(
-                "unauthenticated",
-                f"a call to {identity} has no calling app; a call is made from a "
-                "scope that belongs to an app",
-            )
+            return Failure("unauthenticated", no_calling_app(identity))
         if asserts and caller not in self._allowed:
             return Failure(
                 "permission_denied",
@@ -479,6 +489,9 @@ class InProcess(Provider):
 
     __slots__ = ()
 
+    #: The reply's text was written by a sender's check in this process.
+    receiver = Receiver.IN_PROCESS
+
     def call(self, action: Action, request: bytes, context: Sent) -> bytes | None:
         """Run the action in the caller's thread and return the reply's text.
 
@@ -501,8 +514,10 @@ class InProcess(Provider):
         if refusal is not None:
             raise refusal
         caller = typing.cast(str, context.caller)
-        # The budget is counted from when the call arrived (spec 03).
-        deadline = None if context.budget is None else arrived + context.budget / 1000
+        # The budget is read as the call is dispatched, and the deadline
+        # counted from it, from when the call arrived (spec 03).
+        budget = _context.budget(context.deadline, arrived)
+        deadline = None if budget is None else arrived + budget / 1000
         # Step 3. The principal's form has passed the caller's check, so one
         # that cannot be read is a failure of this host, not of the call.
         problem: Exception | None = None
@@ -549,7 +564,7 @@ class Connector:
     connector, so nothing else of the transport's crosses.
     """
 
-    __slots__ = ("_contract", "_parameters", "_transport")
+    __slots__ = ("_contract", "_network", "_parameters", "_transport")
 
     def __init__(self, declaration: type[Any], transport: Transport) -> None:
         contract = Contract.of(declaration)
@@ -558,8 +573,14 @@ class Connector:
                 f"the transport carries calls of {transport.contract.identity}, "
                 f"not of {contract.identity}"
             )
+        receiver = transport.receiver
+        if type(receiver) is not Receiver:
+            kind = _naming.type_name(receiver)
+            raise TypeError(f"a transport's receiver is a Receiver, not {kind}")
         self._contract = contract
         self._transport = transport
+        # Text from a network gets the network receive check (ADR 0007).
+        self._network = receiver is Receiver.NETWORK
         # The name each action's declaration gives its request, which a call
         # may pass it by, as it could to the declared method.
         self._parameters = types.MappingProxyType(
@@ -687,7 +708,7 @@ class Connector:
             principal=principal,
             trace_id=trace_id,
             tracestate=scope.held.tracestate,
-            budget=budget,
+            deadline=deadline,
             idempotency_key=key,
             caller=caller,
         )
@@ -767,7 +788,7 @@ class Connector:
             if detail is None:
                 raise ValueError(f"a {kind!r} error arrived without its detail")
             return ContractError(
-                kind, message, codec(self._contract, record).read(detail)
+                kind, message, self._received(record, detail, "the error's detail")
             )
         # A kind this version of the contract does not declare for the action
         # (CON-28): a later version may have added it, even if another action
@@ -783,4 +804,14 @@ class Connector:
             return None
         if type(reply) is not bytes:
             raise TypeError(f"the reply is {_naming.type_name(reply)}, not text")
-        return codec(self._contract, action.reply).read(reply)
+        return self._received(action.reply, reply, "the reply")
+
+    def _received[R: BaseModel](self, record: type[R], text: bytes, subject: str) -> R:
+        """Read text that arrived with ``record``: from a network, after the
+        network receive check, whose ``Refusal`` the caller gets as
+        ``internal``; in-process, with the validator alone.
+        """
+        reading = codec(self._contract, record)
+        if self._network:
+            return reading.receive(text, subject)
+        return reading.read(text)

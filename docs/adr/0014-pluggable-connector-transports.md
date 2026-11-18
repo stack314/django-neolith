@@ -1,6 +1,7 @@
 # 0014. Connector transports are pluggable, and a host names each remote provider by contract in `NEOLITH["REMOTE_PROVIDERS"]`
 
-- **Status:** Proposed
+- **Status:** Accepted
+- **Accepted:** 2026-11-18
 - **Date:** 2026-11-07; amended 2026-11-18 for roadmap step 5 (#12)
 
 ## Context

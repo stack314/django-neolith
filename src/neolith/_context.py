@@ -391,15 +391,17 @@ class Sent:
     """A call's context as a transport carries it.
 
     These are the fields spec 03 puts in headers. ``principal`` is the sent
-    form, ``budget`` the remaining whole milliseconds, at least 1, or ``None``
+    form, ``deadline`` the call's deadline on this host's clock, or ``None``
     for a call with no deadline, and ``caller`` the calling app, which a
-    network transport authenticates and the in-process one is told.
+    network transport authenticates and the in-process one is told. Each
+    transport turns the deadline into the budget it carries with ``budget``,
+    at the moment it sends the call (ADR 0028 Decision 2).
     """
 
     principal: bytes | None
     trace_id: str
     tracestate: str
-    budget: int | None
+    deadline: float | None
     idempotency_key: str
     caller: str | None
 
@@ -565,9 +567,33 @@ class Scope:
         if remaining is None or deadline is None:
             return None, None
         return (
-            min(math.floor(remaining * 1000), BUDGET_CAP),
+            _milliseconds(remaining),
             min(deadline, current + BUDGET_CAP / 1000),
         )
+
+
+def budget(deadline: float | None, at: float) -> int | None:
+    """The budget of a call with ``deadline`` sent at ``at``, on this host's
+    clock: the time left in whole milliseconds, rounded down and capped at
+    ``BUDGET_CAP``, or ``None`` for a call with no deadline.
+
+    It is less than 1 once the deadline has passed, or is about to, which a
+    call is not sent with (TRN-28). Every transport reads a call's budget
+    with this, when it sends the call (ADR 0028 Decision 2).
+    """
+    return None if deadline is None else _milliseconds(deadline - at)
+
+
+def _milliseconds(remaining: float) -> int:
+    """Seconds left as a budget: whole milliseconds, rounded down, capped.
+
+    The time left is a difference of two readings of a clock with a
+    nanosecond's resolution, so it is taken to the nanosecond before it is
+    rounded down: the float error of the difference, far smaller, then never
+    takes a millisecond off a deadline that is exactly a whole number of
+    milliseconds away.
+    """
+    return min(math.floor(round(remaining * 1000, 6)), BUDGET_CAP)
 
 
 _CURRENT: contextvars.ContextVar[Scope | None] = contextvars.ContextVar(
