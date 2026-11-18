@@ -27,6 +27,8 @@ import neolith
 from neolith import (
     ContractDefinitionError,
     ContractError,
+    DeclarationError,
+    NeolithAppConfig,
     Principal,
     _boot,
     _checks,
@@ -117,6 +119,29 @@ def _function() -> None: ...
 
 _function.__qualname__ = Trap("_function")
 
+
+class EqRaises(type):
+    """A metaclass whose == raises: ``in`` on a tuple of classes runs it."""
+
+    __eq__ = __ne__ = _boom
+    __hash__ = type.__hash__
+
+
+class HashRaises(type):
+    """A metaclass whose hash raises: ``in`` on a set of classes runs it,
+    and so does ``issubclass`` against an ABC."""
+
+    __hash__ = _boom
+
+
+class Equated(metaclass=EqRaises):
+    pass
+
+
+class Hashed(metaclass=HashRaises):
+    pass
+
+
 HOSTILE: dict[str, object] = {
     "hostile instance": Hostile(),
     "hostile class": Hostile,
@@ -127,6 +152,8 @@ HOSTILE: dict[str, object] = {
     "trap repr": TrapRepr(),
     "raising repr": RaisingRepr(),
     "renamed function": _function,
+    "eq-raising class's instance": Equated(),
+    "hash-raising class's instance": Hashed(),
 }
 
 
@@ -550,6 +577,35 @@ def test_a_lazy_mapping_is_still_judged_by_what_it_wraps() -> None:
     assert not _naming.is_a(Hostile(), dict)
 
 
+@_HOSTILE
+def test_more_checks_given_hostile_values_refuse_them(key: str) -> None:
+    value = HOSTILE[key]
+    with pytest.raises(TypeError, match="timeout= takes a number"):
+        command_scope("app", timeout=cast(float, value))
+    assert _checks._deadline_problems(value)
+    with pytest.raises(DeclarationError, match="provides: got"):
+        type(
+            "HostileConfig",
+            (NeolithAppConfig,),
+            {"__module__": __name__, "provides": value},
+        )
+
+
+@_HOSTILE
+def test_a_default_holding_a_hostile_value_is_refused(key: str) -> None:
+    value = HOSTILE[key]
+    for default in (value, [value], {"a": value}):
+        made = create_model("Made", n=(int, Field(default_factory=lambda d=default: d)))
+        with pytest.raises(ContractDefinitionError):
+            declare_with_field(made)
+        try:
+            record = create_model("Defaulted", n=(int, Field(default=default)))
+        except RuntimeError:  # Pydantic's own reads refuse it first
+            continue
+        with pytest.raises(ContractDefinitionError):
+            declare_with_field(record)
+
+
 # Every name read goes through neolith._naming.
 
 # Name reads on neolith's own objects, which no author can replace.
@@ -575,3 +631,63 @@ def test_every_name_read_in_the_package_goes_through_naming() -> None:
             ):
                 found.add((path.name, ast.get_source_segment(source, node)))
     assert found == _OWN_NAMES
+
+
+def _is_type_call(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "type"
+        and len(node.args) == 1
+    )
+
+
+def test_no_class_of_a_value_is_compared_by_equality_or_hash() -> None:
+    # In each function, a type(...) call, or a name assigned from one, is
+    # never the left of ==, !=, in or not in, nor a key looked up: each of
+    # those runs the class's metaclass __eq__ or __hash__.
+    found = set()
+    for path in sorted(_SOURCE.glob("*.py")):
+        source = path.read_text()
+        for function in ast.walk(ast.parse(source)):
+            if not isinstance(function, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            kinds = {
+                target.id
+                for node in ast.walk(function)
+                if isinstance(node, ast.Assign) and _is_type_call(node.value)
+                for target in node.targets
+                if isinstance(target, ast.Name)
+            }
+
+            def is_kind(node: ast.AST, kinds: set[str] = kinds) -> bool:
+                return _is_type_call(node) or (
+                    isinstance(node, ast.Name) and node.id in kinds
+                )
+
+            for node in ast.walk(function):
+                compared = isinstance(node, ast.Compare) and (
+                    (
+                        is_kind(node.left)
+                        and any(
+                            isinstance(op, ast.Eq | ast.NotEq | ast.In | ast.NotIn)
+                            for op in node.ops
+                        )
+                    )
+                    or (
+                        any(isinstance(op, ast.Eq | ast.NotEq) for op in node.ops)
+                        and any(is_kind(other) for other in node.comparators)
+                    )
+                )
+                looked_up = (
+                    isinstance(node, ast.Subscript) and is_kind(node.slice)
+                ) or (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in ("get", "setdefault", "pop")
+                    and bool(node.args)
+                    and is_kind(node.args[0])
+                )
+                if compared or looked_up:
+                    found.add(f"{path.name}:{ast.get_source_segment(source, node)}")
+    assert found == set()

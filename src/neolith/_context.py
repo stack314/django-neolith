@@ -142,12 +142,12 @@ class Principal:
                 raise TypeError(
                     f"a claim's name is a str, not {_naming.type_name(name)}"
                 )
-            if type(value) in (str, int, bool):
+            if _naming.one_of(type(value), (str, int, bool)):
                 held[name] = typing.cast("str | int | bool", value)
                 continue
             items = (
                 tuple(typing.cast("Sequence[object]", value))
-                if type(value) in (list, tuple)
+                if _naming.one_of(type(value), (list, tuple))
                 else None
             )
             if items is None or any(type(item) is not str for item in items):
@@ -692,7 +692,7 @@ def timeout_option(timeout: object) -> float | None:
     """
     if timeout is None:
         return None
-    if type(timeout) not in (int, float):
+    if not _naming.one_of(type(timeout), (int, float)):
         raise TypeError(
             f"timeout= takes a number of seconds, not {_naming.type_name(timeout)}"
         )

@@ -408,7 +408,7 @@ def _same(mine: object, theirs: object) -> bool:
     if theirs is None or isinstance(theirs, Enum):
         return mine is theirs
     if kind is float:
-        return type(mine) in (float, int) and mine == theirs
+        return _naming.one_of(type(mine), (float, int)) and mine == theirs
     if kind is timestamp:
         if type(mine) is not timestamp:
             return False
@@ -419,7 +419,7 @@ def _same(mine: object, theirs: object) -> bool:
     if kind is Decimal:
         digits = typing.cast(Decimal, theirs).as_tuple()
         return type(mine) is Decimal and _AS_WRITTEN(mine).as_tuple() == digits
-    return kind in _EXACT and type(mine) is kind and mine == theirs
+    return _naming.one_of(kind, _EXACT) and type(mine) is kind and mine == theirs
 
 
 def _reshaped(mine: object, theirs: object, trail: object) -> str:

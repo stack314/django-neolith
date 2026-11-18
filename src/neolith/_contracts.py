@@ -214,7 +214,7 @@ def _private_copy(value: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
             if size > _UNTYPED_SIZE:
                 return top, f"it holds more than {_UNTYPED_SIZE} values"
             kind = type(item)
-            if kind not in containers:
+            if not _naming.one_of(kind, containers):
                 continue
             copied = dict.copy(item) if issubclass(kind, dict) else list.copy(item)
             container[slot] = copied
@@ -371,7 +371,7 @@ class ContractError(Exception):
                     f"values, but {problem}"
                 )
             data = typing.cast(_FrozenMap, _freeze(copied))
-        elif issubclass(type(data), BaseModel):
+        elif _naming.derives(type(data), BaseModel):
             # Held as given. Whether its value travels within CON-30 (CON-31)
             # depends on the value, so the provider's host checks it as it
             # sends the error (step 3); a valid record never fails here.

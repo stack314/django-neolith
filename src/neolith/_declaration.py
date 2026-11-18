@@ -466,7 +466,7 @@ def _read(value: object) -> tuple[str, tuple[Any, ...] | None]:
         return "tuple", value  # type: ignore[return-value]  # judged by type()
     if kind is str or issubclass(kind, type) or kind is Provided:
         return "entry", (value,)
-    if kind in _BUILTIN_CONTAINERS:
+    if _naming.one_of(kind, _BUILTIN_CONTAINERS):
         return "other", tuple(value)  # type: ignore[arg-type]  # as above
     return "other", None
 

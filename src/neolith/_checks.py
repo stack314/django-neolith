@@ -160,7 +160,7 @@ def _is_root(entry: object) -> bool:
 def _deadline_problems(value: object) -> list[str]:
     if value is None:
         return []
-    if type(value) not in (int, float):
+    if not _naming.one_of(type(value), (int, float)):
         return [
             f"{_DEADLINE}: expected a number of seconds or None, got {_type(value)}"
         ]

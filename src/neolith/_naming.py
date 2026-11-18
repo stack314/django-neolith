@@ -1,4 +1,5 @@
-"""Name an object in a message without running the object's own code.
+"""Name and judge an object in a check without letting its own code replace
+the refusal.
 
 A check that refuses something names it: a value by its class, a class by its
 name, an error by its class and message. Each of those reads can run code the
@@ -13,20 +14,28 @@ So every helper here reads a class's names through ``type``'s own
 descriptors, which return what the class was built with; copies text to an
 exact ``str`` before it is measured or formatted; bounds it; and never
 raises. Each falls back to a fixed description when there is nothing it can
-read. ``is_a`` judges a value's class for such a check the way
-``isinstance`` does, which reads the value's own ``__class__``, and answers
-False where that read raises.
+read.
+
+A check that judges a value's class runs code the author wrote too:
+``isinstance`` reads the value's own ``__class__``; ``in`` on a tuple of
+classes runs the class's metaclass ``__eq__``, and on a set its
+``__hash__``; ``issubclass`` against an ABC, such as ``BaseModel``, hashes
+the class. ``is_a`` keeps what ``isinstance`` raises from replacing the
+refusal; ``one_of`` and ``derives`` compare classes by identity alone.
 """
 
 import types
+from collections.abc import Iterable
 from typing import Final
 
 __all__ = [
     "cause",
+    "derives",
     "full_name",
     "is_a",
     "module",
     "name",
+    "one_of",
     "qualname",
     "shown",
     "text",
@@ -38,6 +47,7 @@ _QUALNAME: Final = type.__dict__["__qualname__"]
 _NAME: Final = type.__dict__["__name__"]
 _MODULE: Final = type.__dict__["__module__"]
 _FUNCTION_QUALNAME: Final = types.FunctionType.__dict__["__qualname__"]
+_MRO: Final = type.__dict__["__mro__"]
 
 
 def _exact(found: object, limit: int | None) -> str | None:
@@ -133,6 +143,26 @@ def is_a(value: object, kind: type) -> bool:
         return isinstance(value, kind)
     except Exception:  # the value's own __class__ may raise anything
         return False
+
+
+def one_of(kind: object, kinds: Iterable[object]) -> bool:
+    """Whether ``kind`` is one of ``kinds``, compared by identity.
+
+    ``kind in kinds`` would run the metaclass ``__eq__`` (a tuple) or
+    ``__hash__`` (a set) of ``kind``.
+    """
+    return any(kind is each for each in kinds)
+
+
+def derives(kind: type, base: type) -> bool:
+    """Whether ``base`` is in the method resolution order of the class
+    ``kind``, compared by identity.
+
+    ``issubclass(kind, base)`` against an ABC hashes ``kind``, which runs its
+    metaclass ``__hash__``; a virtual subclass registered with the ABC is not
+    counted.
+    """
+    return any(each is base for each in _MRO.__get__(kind))
 
 
 def type_name(value: object, limit: int | None = LIMIT) -> str:

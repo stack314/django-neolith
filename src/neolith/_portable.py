@@ -45,8 +45,6 @@ from neolith._naming import shown
 # A record or enum name, as other languages' generated code will use it
 # (CON-20).
 _TYPE_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_]*")
-# A class's method resolution order, read without asking its metaclass.
-_MRO = type.__dict__["__mro__"]
 
 # The wire encodings of spec 01 (ADR 0019) that Pydantic's own types write.
 # Integers are those every JSON reader holds exactly; numbers are finite
@@ -251,8 +249,8 @@ class Portable:
         """Admit a request, reply or detail type; return it and its reference."""
         # Judged by type() and the class's own method resolution order, so
         # that no code of the annotation, or of its metaclass, runs.
-        if issubclass(type(annotation), type) and any(
-            klass is BaseModel for klass in _MRO.__get__(annotation)
+        if issubclass(type(annotation), type) and _naming.derives(
+            cast(type, annotation), BaseModel
         ):
             model: type[BaseModel] = annotation  # type: ignore[assignment]  # as above
             record_name = _naming.name(model, None)
@@ -319,12 +317,14 @@ class Portable:
         pending = [schema]
         while pending:
             node = pending.pop()
-            if isinstance(node, dict):
+            # Judged by type(): the schema holds each field's default, and
+            # isinstance would read a default's own __class__.
+            if type(node) is dict:
                 if node.get("type") == "definitions":
                     for definition in node.get("definitions", []):
                         self.definitions[definition["ref"]] = definition
                 pending.extend(node.values())
-            elif isinstance(node, list):
+            elif type(node) is list:
                 pending.extend(node)
 
     def resolve(self, node: Mapping[str, Any], path: str) -> Mapping[str, Any]:
@@ -1062,7 +1062,7 @@ def json_value_problem(value: object, max_depth: int | None = None) -> str | Non
             open_containers.discard(id(item))
             continue
         kind = type(item)
-        if kind in _JSON_SCALARS:
+        if _naming.one_of(kind, _JSON_SCALARS):
             if kind is str:
                 problem = text_problem(cast(str, item))
                 if problem is not None:
@@ -1238,24 +1238,24 @@ def _default_problem(default: object) -> str | None:
     while pending:
         item = pending.pop()
         kind = type(item)
-        if kind in _IMMUTABLE or issubclass(kind, enum.Enum):
+        if _naming.one_of(kind, _IMMUTABLE) or issubclass(kind, enum.Enum):
             continue
         if id(item) in seen:
             continue
         seen.add(id(item))
-        if issubclass(kind, BaseModel):
+        if _naming.derives(kind, BaseModel):
             hook = _class_hook(kind)
             if hook is not None:
                 return f"a {_naming.qualname(kind)}, which {hook}"
             fields = instance_dict.__get__(item)
-            extra = set(fields) - set(kind.__pydantic_fields__)
+            extra = set(fields) - set(cast("type[BaseModel]", kind).__pydantic_fields__)
             if extra:
                 return (
                     f"a {_naming.qualname(kind)} with values outside its fields: "
                     f"{', '.join(sorted(map(shown, extra)))}"
                 )
             pending.extend(fields.values())
-        elif kind in (list, tuple, set, frozenset):
+        elif _naming.one_of(kind, (list, tuple, set, frozenset)):
             pending.extend(cast("list[object]", item))
         elif kind is dict:
             pending.extend(cast("dict[object, object]", item).items())
@@ -1272,9 +1272,9 @@ def _unchanging(value: object) -> bool:
     while pending:
         item = pending.pop()
         kind = type(item)
-        if kind in _IMMUTABLE or issubclass(kind, enum.Enum):
+        if _naming.one_of(kind, _IMMUTABLE) or issubclass(kind, enum.Enum):
             continue
-        if kind in (tuple, frozenset):
+        if _naming.one_of(kind, (tuple, frozenset)):
             pending.extend(cast("tuple[object, ...]", item))
         else:
             return False
@@ -1300,20 +1300,24 @@ def _changeable_parts(value: object) -> Iterator[object]:
     while pending:
         item = pending.pop()
         kind = type(item)
-        if kind in _IMMUTABLE or issubclass(kind, enum.Enum) or id(item) in seen:
+        if (
+            _naming.one_of(kind, _IMMUTABLE)
+            or issubclass(kind, enum.Enum)
+            or id(item) in seen
+        ):
             continue
         seen.add(id(item))
-        if kind in (tuple, frozenset):
+        if _naming.one_of(kind, (tuple, frozenset)):
             pending.extend(cast("tuple[object, ...]", item))
             continue
         yield item
-        if issubclass(kind, BaseModel):
+        if _naming.derives(kind, BaseModel):
             pending.extend(fields.__get__(item).values())
             pending.append(given.__get__(item))
             held = private.__get__(item)
             if held is not None:
                 pending.append(held)
-        elif kind in (list, set):
+        elif _naming.one_of(kind, (list, set)):
             pending.extend(cast("list[object]", item))
         elif kind is dict:
             pending.extend(cast("dict[object, object]", item).values())
@@ -1464,7 +1468,7 @@ def _bounds(node: Mapping[str, Any], keywords: Mapping[str, str]) -> dict[str, A
         value = node[key]
         # An int is always finite and JSON Schema states it exactly, however
         # large; math.isfinite would raise OverflowError past the float range.
-        if type(value) not in (int, float) or (
+        if not _naming.one_of(type(value), (int, float)) or (
             type(value) is float and not math.isfinite(value)
         ):
             raise _Unstatable(key, value)
