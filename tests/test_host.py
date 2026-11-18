@@ -1962,12 +1962,14 @@ def test_a_request_made_while_a_package_imports_belongs_to_apps_below_it(
 
 @pytest.mark.spec("APP-14")
 @pytest.mark.parametrize("module", ["models", "apps"])
-def test_a_helper_of_an_app_another_app_imports_does_not_refuse_its_own_app(
+def test_a_helper_of_an_app_another_app_imports_refuses_its_own_app(
     write_app: WriteApp, module: str
 ) -> None:
     # One app's models or apps module imports a helper of another app, which
-    # asks for nope.v1. The other app alone never imports the helper, so it
-    # is admitted, after a refused set-up and after a load that stopped.
+    # asks for nope.v1. The other app alone never imports the helper, but the
+    # host cannot see that, so it errs towards refusing (ADR 0029, the first
+    # exception); a load that stopped before its models were imported left
+    # no request from them.
     owner = write_app("", helpers=_UNDECLARED_CONNECTS)
     importer = write_app(
         f"import {owner}.helpers\n" + _PLAIN_CONFIG.replace("{name}", "{package}")
@@ -1975,14 +1977,41 @@ def test_a_helper_of_an_app_another_app_imports_does_not_refuse_its_own_app(
         else "",
         models=f"import {owner}.helpers\n" if module == "models" else "",
     )
-    assert _walk([[importer, owner], [owner], [importer]]) == [
-        "DeclarationError",
-        "admitted",
-        "DeclarationError",
-    ]
+    assert _walk([[importer, owner], [owner], [importer]]) == ["DeclarationError"] * 3
     assert _walk([[importer, "no_such_app"], [owner]]) == [
         "ModuleNotFoundError",
+        "admitted" if module == "models" else "DeclarationError",
+    ]
+
+
+@pytest.mark.spec("APP-14")
+@pytest.mark.parametrize("owner_imports", ["apps", "models"])
+@pytest.mark.parametrize("other_imports", ["__init__", "apps", "models"])
+def test_a_helper_another_app_imports_first_is_checked_for_its_own_app(
+    write_app: WriteApp, owner_imports: str, other_imports: str
+) -> None:
+    # An app's own loading imports its helper, which asks for nope.v1, but
+    # another app listed first imports it before: a later set-up that installs
+    # the helper's app alone is refused, as in a fresh process (#94).
+    imports = "from . import helpers\n"
+    owner = write_app(
+        (imports if owner_imports == "apps" else "")
+        + _PLAIN_CONFIG.replace("{name}", "{package}"),
+        helpers=_UNDECLARED_CONNECTS,
+        models=imports if owner_imports == "models" else "",
+    )
+    other_import = f"import {owner}.helpers\n"
+    other = write_app(
+        (other_import if other_imports == "apps" else "")
+        + _PLAIN_CONFIG.replace("{name}", "{package}"),
+        __init__=other_import if other_imports == "__init__" else "",
+        models=other_import if other_imports == "models" else "",
+    )
+    assert _walk([[other, owner], [owner], [], [owner]]) == [
+        "DeclarationError",
+        "DeclarationError",
         "admitted",
+        "DeclarationError",
     ]
 
 
