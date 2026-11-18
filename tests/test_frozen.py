@@ -91,7 +91,7 @@ _CASES: dict[type, Case] = {
         state=[None, "f" * 32, "e" * 16, "x=1", None, None, None, "s2"],
     ),
     Sent: Case(
-        lambda: Sent(None, "a" * 32, "", 1000, "k", "shop"),
+        lambda: Sent(None, "a" * 32, "", 1000.0, "k", "shop"),
         ((b"p", "f" * 32, "x=1", None, "other", "admin"), {}),
         state=[b"p", "f" * 32, "x=1", None, "other", "admin"],
     ),

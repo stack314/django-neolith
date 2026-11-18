@@ -631,13 +631,7 @@ def _principal(raw: object) -> Principal | None:
     form = b"" if not text else _token.decode(text)
     if form is None:
         raise _Refused("invalid_argument", _PRINCIPAL_FORM)
-    # Bounded before the json module reads it, whose scanner can exhaust a
-    # small thread stack before it raises RecursionError (#125).
-    if _crossing._deeper_than(form, _crossing._DEPTH):
-        raise _Refused(
-            "invalid_argument",
-            "Neolith-Principal: the principal is not a principal object",
-        )
+    # read_principal bounds the nesting before the json module reads it (#125).
     try:
         return _context.read_principal(form)
     except ValueError as error:

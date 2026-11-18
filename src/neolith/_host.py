@@ -75,6 +75,7 @@ from neolith import (
     _configure,
     _context,
     _endpoint,
+    _http_transport,
     _naming,
     _principal,
 )
@@ -1101,7 +1102,8 @@ def _connector(identity: str) -> Bound:
             "registry while an override or set_available_apps leaves it out; "
             "calls resume when that ends"
         )
-    found = host.connectors.get(identity)
+    # A test that entered over_http sends this identity's calls over HTTP.
+    found = _http_transport.seamed(identity) or host.connectors.get(identity)
     if found is None:
         # Known identities all have a provider once set-up passed; this is a
         # connector recorded in a process whose host knows other contracts.
