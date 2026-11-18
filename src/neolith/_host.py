@@ -22,11 +22,10 @@ that set-up: a later set-up in the same process builds its own, and when an
 State the host owns (CONTRIBUTING K6), all of it guarded by one lock:
 
 - the identities that ``connect()`` was asked for before a table existed,
-  with the file and line of each ``connect()``, each tied to the installed
-  apps of every set-up whose loading asked from it; a set-up checks those
-  tied to apps it all installs, and only a set-up that passes drops them, so
-  an unknown one stays and the next set-up of those apps reports it again
-  (ADR 0029);
+  with the file and line of each ``connect()``, each tied to the apps whose
+  loading step asked from it; a set-up checks those tied to an app it
+  installs, and only a set-up that passes drops them, so an unknown one stays
+  and the next set-up that installs its app reports it again (ADR 0029);
 - the hosted apps of the first set-up that passed, since a process hosts one
   set of apps (ADR 0022 Decision 5);
 - the ``NEOLITH`` that first set-up checked, without ``REQUEST_DEADLINE``,
@@ -85,6 +84,8 @@ _log = logging.getLogger("neolith.host")
 _LABEL: Final = "neolith"
 _HOST_ATTR: Final = "_neolith_host"
 _LOADER_ATTR: Final = "_neolith_loader"
+# The code of Django's Apps.populate, whose frame names the app loading.
+_POPULATE: Final = Apps.populate.__code__
 
 
 @final
@@ -107,9 +108,12 @@ class Host:
 _LOCK: Final = threading.Lock()
 # The identities connect() was asked for before a table existed: each with
 # the places it was asked from, which only the message reads, and for each
-# place the installed apps of each set-up whose loading asked from it, with
-# None for a request no set-up has seen yet.
-_RECORDED: dict[str, dict[str, dict[frozenset[str] | None, None]]] = {}
+# place the apps whose loading step asked from it: an app's name, or the
+# entry of INSTALLED_APPS being imported, with None for a request made
+# outside any app's loading step.
+_RECORDED: dict[str, dict[str, dict[str | None, None]]] = {}
+# The app whose implementation Validate imports and builds now, if any.
+_VALIDATING: Final = contextvars.ContextVar[str | None]("_VALIDATING", default=None)
 # The hosted apps of the first set-up that passed: label to config class.
 _first: Mapping[str, type[AppConfig]] | None = None
 # The NEOLITH the first set-up checked, without REQUEST_DEADLINE.
@@ -232,7 +236,9 @@ def set_up(config: AppConfig) -> None:
             for problem in _configure.settings_problems(configs)
         ]
     with _LOCK:
-        installed = frozenset(c.name for c in configs)
+        installed = frozenset(c.name for c in configs) | {
+            f"{type(c).__module__}.{type(c).__qualname__}" for c in configs
+        }
         checked = _checked_by(installed)
         for identity, places in sorted(checked.items()):
             if identity not in host.known:
@@ -264,8 +270,8 @@ def set_up(config: AppConfig) -> None:
         for identity, places in checked.items():
             for place in places:
                 loads = _RECORDED[identity][place]
-                for apps in [a for a in loads if a is not None and a <= installed]:
-                    del loads[apps]
+                for app in [a for a in loads if a is None or a in installed]:
+                    del loads[app]
                 if not loads:
                     del _RECORDED[identity][place]
             if not _RECORDED[identity]:
@@ -275,26 +281,49 @@ def set_up(config: AppConfig) -> None:
 
 def _checked_by(installed: frozenset[str]) -> dict[str, list[str]]:
     """The places of each record that a set-up installing ``installed``
-    checks, after tying each place no set-up has seen to ``installed``.
+    checks: ``installed`` holds each app's name and its config class's path.
 
-    A record is made only by the thread that loads a set-up, or before the
-    first one, so the first set-up to see a request from a place is the one
-    whose loading asked for it. A place asked from by several set-ups belongs
-    to each of them. A
-    later set-up checks the place if it installs every app that set-up did.
-    One that installs fewer, such as the first apps restored after an
-    override that added an app, leaves it for a set-up that installs them
-    all again (ADR 0029).
+    A place is checked when an app this set-up installs asked from it during
+    its loading step, or when it was asked from outside any app's loading
+    step. A place only other apps asked from, such as one an override added
+    and the first apps restored after it do not install, is left for a
+    set-up that installs one of them (ADR 0029).
     """
     checked: dict[str, list[str]] = {}
     for identity, places in _RECORDED.items():
         for place, loads in places.items():
-            if None in loads:
-                del loads[None]
-                loads[installed] = None
-            if any(apps is not None and apps <= installed for apps in loads):
+            if any(app is None or app in installed for app in loads):
                 checked.setdefault(identity, []).append(place)
     return checked
+
+
+def _loading_app() -> str | None:
+    """The app whose loading step runs now in this thread, or ``None``.
+
+    Validate names the app whose implementation it imports and builds.
+    Otherwise the frame of ``Apps.populate`` for Django's global registry
+    names it: once app modules are imported, its ``app_config`` is the app
+    whose models are imported or whose ``ready()`` runs; before, its
+    ``entry`` is the entry of ``INSTALLED_APPS`` being imported. The same at
+    Django 5.2 and 6.1.
+    """
+    validating = _VALIDATING.get()
+    if validating is not None:
+        return validating
+    frame = inspect.currentframe()
+    try:
+        while frame is not None:
+            if frame.f_code is _POPULATE and frame.f_locals.get("self") is global_apps:
+                found = frame.f_locals.get(
+                    "app_config" if global_apps.apps_ready else "entry"
+                )
+                if isinstance(found, AppConfig):
+                    return found.name
+                return found if type(found) is str else None
+            frame = frame.f_back
+        return None
+    finally:
+        del frame
 
 
 def _setting_changed(
@@ -426,7 +455,11 @@ def build(registry: Apps) -> tuple[Host, list[str]]:
     for config, declaration in hosted:
         for provision in declaration.provides:
             try:
-                instance = validate(registry, config, provision, refusals)
+                validating = _VALIDATING.set(config.name)
+                try:
+                    instance = validate(registry, config, provision, refusals)
+                finally:
+                    _VALIDATING.reset(validating)
             except Exception as error:  # a read validate() did not foresee
                 refusals.append(
                     f"app {config.label}: provides: {provision.contract.identity}: "
@@ -724,9 +757,8 @@ def connect(identity: str, /) -> "Connector":
         if host is None:
             host = _restored_elsewhere()
         if host is None:
-            # A request from a place asked from before belongs to the set-up
-            # loading now as well.
-            _RECORDED.setdefault(identity, {}).setdefault(_place(), {})[None] = None
+            place = _RECORDED.setdefault(identity, {}).setdefault(_place(), {})
+            place[_loading_app()] = None
         elif identity not in host.known:
             raise UsageError(
                 f"connect({_quoted(identity)}): no app of this host provides or "

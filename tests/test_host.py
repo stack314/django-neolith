@@ -1574,6 +1574,63 @@ def test_a_record_belongs_to_the_set_up_whose_loading_asked_for_it(
     ]
 
 
+def _every_pair(n: int) -> list[int]:
+    """A walk over ``range(n)`` in which every ordered pair, a symbol after
+    itself included, follows once: a de Bruijn sequence of order 2.
+    """
+    a = [0] * (2 * n)
+    walk: list[int] = []
+
+    def extend(t: int, p: int) -> None:
+        if t > 2:
+            if 2 % p == 0:
+                walk.extend(a[1 : p + 1])
+            return
+        a[t] = a[t - p]
+        extend(t + 1, p)
+        for j in range(a[t - p] + 1, n):
+            a[t] = j
+            extend(t + 1, t)
+
+    extend(1, 1)
+    return [*walk, walk[0]]
+
+
+@pytest.mark.spec("APP-14")
+def test_each_set_up_after_any_override_decides_as_in_a_fresh_process(
+    write_app: WriteApp,
+) -> None:
+    # Overrides that add a superset of the app that asks for nope.v1, that
+    # app alone, a set without it, a load that stops before set-up, and none:
+    # walked so that each follows each, every set-up decides the unknown
+    # identity as a fresh process with the same apps would.
+    asks = write_app("", models=_UNDECLARED_CONNECTS)
+    other = write_app("")
+    broken = write_app("", models='raise RuntimeError("broken")\n')
+    overrides = [[asks, other], [asks], [other], [asks, broken], []]
+    fresh = ["DeclarationError", "DeclarationError", "admitted", "RuntimeError"]
+    walk = _every_pair(len(overrides))
+    assert len({*itertools.pairwise(walk)}) == len(overrides) ** 2
+    printed = in_built_host(
+        f"""
+        import django
+        from django.test.utils import override_settings
+
+        django.setup()
+        installed = list(settings.INSTALLED_APPS)
+        for added in {[overrides[i] for i in walk]!r}:
+            try:
+                with override_settings(INSTALLED_APPS=[*added, *installed]):
+                    print("admitted")
+            except Exception as error:
+                print(type(error).__name__)
+        """,
+        host_apps.HOSTED,
+        {"NEOLITH": host_apps.NEOLITH},
+    )
+    assert printed.splitlines() == [[*fresh, "admitted"][i] for i in walk]
+
+
 @pytest.mark.spec("APP-14")
 def test_a_place_two_set_ups_ask_from_belongs_to_both(write_app: WriteApp) -> None:
     # One helper line asks for nope.v1 on behalf of two apps, each added by

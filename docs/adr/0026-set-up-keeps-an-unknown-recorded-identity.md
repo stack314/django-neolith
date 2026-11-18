@@ -1,7 +1,7 @@
 # 0026. Set-up keeps a recorded identity it does not know, so the next set-up reports it again
 
 - **Status:** Accepted
-- Narrowed by [0029](0029-a-record-belongs-to-the-set-up-that-asked-for-it.md) (Decision 1)
+- Narrowed by [0029](0029-a-record-belongs-to-the-app-whose-loading-asked-for-it.md) (Decision 1)
 - **Accepted:** 2026-11-18
 - **Date:** 2026-11-18
 
