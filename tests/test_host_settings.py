@@ -105,7 +105,7 @@ def _declared(write_app: WriteApp, **fields: str) -> str:
     [
         (tuple(HOSTED), "host: apps: expected a list, got tuple"),
         ([], "host: no apps named"),
-        ([*HOSTED, 1], "host: apps: entry 3: expected a str, got int"),
+        ([*HOSTED, 1], f"host: apps: entry {len(HOSTED)}: expected a str, got int"),
         (
             [*HOSTED, "tests.host_apps.web"],
             "host: app tests.host_apps.web named twice",
@@ -124,7 +124,7 @@ def _declared(write_app: WriteApp, **fields: str) -> str:
 def test_the_list_of_apps_has_one_form(apps: object, message: str) -> None:
     assert refusal(apps, deployer()) == message
     # The nearest admitted list.
-    assert configure(HOSTED, deployer())["INSTALLED_APPS"][:3] == HOSTED
+    assert configure(HOSTED, deployer())["INSTALLED_APPS"][: len(HOSTED)] == HOSTED
 
 
 def test_every_refusal_found_by_reading_the_apps_is_reported_together() -> None:
@@ -717,7 +717,10 @@ _MUTATIONS: dict[str, tuple[Callable[[dict[str, Any]], None], str]] = {
 
 @st.composite
 def _admitted(draw: st.DrawFn) -> tuple[list[str], dict[str, Any]]:
-    apps = [*HOSTED, *draw(st.lists(st.sampled_from(_POOL[3:]), unique=True))]
+    apps = [
+        *HOSTED,
+        *draw(st.lists(st.sampled_from(_POOL[len(HOSTED) :]), unique=True)),
+    ]
     neolith: dict[str, Any] = {}
     databases: dict[str, Any] = {
         label: sqlite(draw(st.sampled_from([":memory:", f"/{label}.sqlite3"])))
@@ -1750,8 +1753,8 @@ def test_a_read_at_import_is_refused_by_django_where_no_settings_exist(
     [
         (
             'INSTALLED_APPS = INSTALLED_APPS + ["django.contrib.humanize"]\n',
-            "INSTALLED_APPS differs from what the host builds: it has 5 entries, the "
-            "host builds 4",
+            "INSTALLED_APPS differs from what the host builds: it has "
+            f"{len(HOSTED) + 2} entries, the host builds {len(HOSTED) + 1}",
         ),
         (
             'DATABASES["default"] = {"ENGINE": "django.db.backends.sqlite3", '

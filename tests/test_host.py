@@ -25,7 +25,7 @@ from django.apps import apps as global_apps
 from django.apps.registry import Apps
 from django.conf import settings
 from django.test.utils import isolate_apps, override_settings
-from hypothesis import given
+from hypothesis import example, given
 from hypothesis import strategies as st
 
 import neolith
@@ -794,16 +794,22 @@ def test_connect_after_set_up_refuses_an_identity_the_host_does_not_know() -> No
 
         @_HYPOTHESIS
         @given(st.from_regex(_IDENTITY, fullmatch=True))
+        @example("a" * 157 + ".v1")
+        @example("a" * 158 + ".v1")
         def check(identity: str) -> None:
-            if identity in {"stock.v1", "couriers.v3"}:
+            if identity in {"stock.v1", "couriers.v3", "reference.v1"}:
                 assert repr(connect(identity)) == f"<connector to {identity}>"
                 return
             with pytest.raises(UsageError) as raised:
                 connect(identity)
+            # The message shows the first 160 characters of a longer identity.
+            shown, quoted = identity, repr(identity)
+            if len(identity) > 160:
+                shown, quoted = identity[:160] + "...", repr(identity[:160]) + "..."
             assert str(raised.value) == (
-                f"connect({identity!r}): no app of this host provides or requires "
-                f"{identity}; it knows the contracts its apps provide or require, "
-                "which are couriers.v3, stock.v1"
+                f"connect({quoted}): no app of this host provides or requires "
+                f"{shown}; it knows the contracts its apps provide or require, "
+                "which are couriers.v3, reference.v1, stock.v1"
             )
             assert ContractError not in type(raised.value).__mro__
 
@@ -1392,7 +1398,7 @@ def test_connect_during_a_later_set_up_is_refused_in_either_phase(
     where = tmp_path / package / f"{place}.py"
     knows = (
         "it knows the contracts its apps provide or require, which are "
-        "couriers.v3, stock.v1"
+        "couriers.v3, reference.v1, stock.v1"
     )
     if place == "__init__" and before_neolith:
         # Imported before neolith's app is created in this load: checked at
