@@ -254,7 +254,8 @@ def _principals(config: AppConfig) -> tuple[_principal.Built, ...]:
     built: tuple[_principal.Built, ...] = ()
     neolith = getattr(settings, "NEOLITH", None)
     if type(neolith) is dict:
-        value = neolith.get(_principal.KEY)
+        # Looked up among exact str keys only: a key's own __eq__ never runs.
+        value: Any = _naming.entry(neolith, _principal.KEY)
         if value is not None and not _principal.shape_problems(value):
             built, refusals = _principal.build(value)
     setattr(config, _checks.PRINCIPAL_REFUSALS, tuple(refusals))

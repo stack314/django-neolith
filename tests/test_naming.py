@@ -11,6 +11,7 @@ each kind of hostile object to every check that names what it refuses, and
 keep every name read in ``src/neolith`` going through ``neolith._naming``.
 """
 
+import abc
 import ast
 import contextlib
 import importlib.util
@@ -43,6 +44,7 @@ from neolith import (
     _host,
     _migrate,
     _naming,
+    _principal,
     action,
     command_scope,
     connect,
@@ -52,6 +54,7 @@ from neolith import (
 from neolith._contracts import Contract
 from neolith._crossing import check_request, codec
 from neolith._jcs import canonical, canonical_text
+from neolith.principals import PrincipalBackend
 from tests.test_contracts import declare_with_field
 from tests.test_crossing import INVENTORY, RESERVE, OutOfStock, Reserve, Reserved
 
@@ -951,6 +954,80 @@ def test_a_lazily_loaded_module_is_read_with_its_names(tmp_path: Path) -> None:
     assert names["NAME"] == 1
     assert _naming.module_dict(types.ModuleType("plain")) is not None
     assert _naming.module_dict(Hostile()) is None
+
+
+# The principal backends' set-up judges each backend class, its
+# constructor's error and its request_inputs, and the NEOLITH keys.
+
+
+class _Backend(PrincipalBackend):
+    request_inputs: tuple[str, ...] = ()
+
+    def resolve(self, request: object) -> None:
+        return None
+
+
+class _ReadRaises(abc.ABCMeta):
+    """A metaclass that raises when set-up would read the class through it."""
+
+    def __getattribute__(cls, name: str) -> object:
+        if name in ("__abstractmethods__", "resolve", "aresolve", "__flags__"):
+            raise RuntimeError(f"hostile metaclass read {name}")
+        return super().__getattribute__(name)
+
+
+class _ReadRaisingBackend(_Backend, metaclass=_ReadRaises):
+    pass
+
+
+class _ClassRaises(Exception):
+    def __getattribute__(self, name: str) -> object:
+        if name == "__class__":
+            raise RuntimeError("hostile error read __class__")
+        return super().__getattribute__(name)
+
+
+class _RaisingBackend(_Backend):
+    def __init__(self) -> None:
+        raise _ClassRaises
+
+
+class _TrapInputs(_Backend):
+    request_inputs = (Trap("*"),)
+
+
+def _built(name: str) -> tuple[int, list[str]]:
+    path = f"{__name__}.{name}"
+    built, problems = _principal.build([{"BACKEND": path, "OPTIONS": {}}])
+    return len(built), [problem.replace(path, "<path>") for problem in problems]
+
+
+def test_principal_backends_that_run_code_are_judged_without_it() -> None:
+    assert _built("_ReadRaisingBackend") == _built("_Backend") == (1, [])
+    assert _built("Hashed") == (
+        0,
+        [
+            f"{_principal.SETTING}[0] (<path>): is not a subclass of "
+            "neolith.principals.PrincipalBackend; a backend subclasses it"
+        ],
+    )
+    count, problems = _built("_RaisingBackend")
+    assert count == 0
+    assert "the constructor raised, with the options none: _ClassRaises" in problems[0]
+    count, problems = _built("_TrapInputs")
+    assert count == 0
+    assert "request_inputs holds a Trap, which is not a header name" in problems[0]
+
+
+def test_a_neolith_key_that_runs_code_is_not_read_as_the_backends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # As set-up reads it, before the checks that refuse the key (E001).
+    config = types.SimpleNamespace()
+    deployed = types.SimpleNamespace(NEOLITH={Trap(_principal.KEY): []})
+    monkeypatch.setattr(_host, "settings", deployed)
+    assert _host._principals(cast(Any, config)) == ()
+    assert getattr(config, _checks.PRINCIPAL_REFUSALS) == ()
 
 
 # Every name read goes through neolith._naming.
