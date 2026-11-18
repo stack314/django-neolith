@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Mapping
+import os
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 
 import jsonschema
@@ -966,15 +967,22 @@ def test_without_the_heading_nothing_binds_others(suite: Suite) -> None:
          '"Requirements that bind others"'),
         ("| CON-3 |  |", 'CON-3 under "Requirements that bind others" does not say '
          "whom it binds"),
+        ("| `CON-3 | x |", '"`CON-3" under "Requirements that bind others" is not '
+         "a requirement ID"),
+        ("| `` | x |", '"``" under "Requirements that bind others" is not '
+         "a requirement ID"),
     ],
 )  # fmt: skip
 def test_a_row_that_binds_others_must_name_a_live_must(
     suite: Suite, rows: str, problem: str
 ) -> None:
     root = suite(spec__06_conformance_md="**CNF-1.** It MUST agree.\n\n" + BINDS + rows)
-    (only,) = spec_trace.check(root).problems
+    trace = spec_trace.check(root)
+    (only,) = trace.problems
     assert only.split(": ", 1)[1] == problem
     assert only.startswith("06-conformance.md:")
+    # A refused row binds no one; a repeated one is counted once.
+    assert trace.binds_others == ({"CON-3"} if "twice" in problem else set())
 
 
 @pytest.mark.parametrize(
@@ -984,6 +992,10 @@ def test_a_row_that_binds_others_must_name_a_live_must(
          "|---|---|\n| CON-3 | x |\n",
          'no table under "Requirements that bind others"'),
         ("## Requirements that bind others\n\n| Requirement | Binds |\n|---|---|\n"
+         "| CON-3 | x |\n",
+         'the table under "Requirements that bind others" needs the columns ID '
+         "and Binds"),
+        ("## Requirements that bind others\n\n| ID | Whom |\n|---|---|\n"
          "| CON-3 | x |\n",
          'the table under "Requirements that bind others" needs the columns ID '
          "and Binds"),
@@ -1693,3 +1705,122 @@ def test_no_input_makes_the_checker_raise(
         report.write_text(json.dumps(_report(tests={"t::a": value})))
     trace = spec_trace.check(root, report=report, conformance=True)
     assert all(isinstance(problem, str) for problem in trace.problems)
+    spec_trace.render(trace).encode("utf-8", "backslashreplace")
+
+
+# What the red-team pass found: a refused input takes no effect, and the
+# suite's hash neither crashes nor misses a file
+
+
+def test_a_report_with_an_unreadable_entry_counts_no_test(suite: Suite) -> None:
+    # The unreadable entry may be the failure that keeps the run from
+    # conforming, so nothing is counted and no run is made.
+    root = suite()
+    path = root / "spec-report.json"
+    tests = {
+        "t::1": {"ids": ["CON-1", "CNF-1"], "outcome": "passed"},
+        "t::2": {"ids": ["CON-1"], "outcome": "failed", "transport_outcomes": {}},
+    }
+    path.write_text(json.dumps(_report(tests=tests)))
+    trace = spec_trace.check(root, report=path, conformance=True)
+    assert trace.problems == ["report spec-report.json: malformed entry for t::2"]
+    assert not trace.measured
+    assert trace.citations == []
+    assert trace.run is None
+
+
+@pytest.mark.parametrize(
+    ("settings", "rid", "status"),
+    [
+        ('[not-implemented]\nCON-1 = "x"\n', "CON-1", "uncovered"),
+        ('[not-tested]\nCON-2 = "x"\n', "CON-2", "uncovered"),
+        ('[not-tested]\nCON-3 = "x"\n', "CON-3", "not-applicable"),
+    ],
+)
+def test_a_refused_settings_entry_gives_no_status(
+    suite: Suite, settings: str, rid: str, status: str
+) -> None:
+    root = suite(tests__spec_trace_toml=settings)
+    trace = run_of(root, {})
+    assert trace.run is not None
+    assert trace.run["requirements"][rid]["status"] == status
+    assert "reason" not in trace.run["requirements"][rid]
+
+
+def test_the_suite_hash_reads_files_in_path_order(
+    suite: Suite, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Whatever order the file system lists them in.
+    root = suite(**{"tests/b.py": "b", "tests/a/z.py": "z", "tests/a.py": "a"})
+    (root / "tests/test_a.py").unlink()
+    expected = hashlib.sha256()
+    for name in ["tests/a.py", "tests/a/z.py", "tests/b.py"]:
+        data = (root / name).read_bytes()
+        expected.update(name.encode() + b"\0" + str(len(data)).encode() + b"\0" + data)
+    walk = os.walk
+
+    def reversed_walk(
+        top: str, followlinks: bool = False
+    ) -> Iterator[tuple[str, list[str], list[str]]]:
+        for directory, subdirectories, names in walk(top, followlinks=followlinks):
+            subdirectories.reverse()
+            yield directory, subdirectories, names[::-1]
+
+    assert spec_trace.suite(root)["tests"] == expected.hexdigest()
+    monkeypatch.setattr(os, "walk", reversed_walk)
+    assert spec_trace.suite(root)["tests"] == expected.hexdigest()
+
+
+def test_the_suite_hash_follows_links_to_directories(suite: Suite) -> None:
+    root = suite()
+    shared = root / "shared"
+    shared.mkdir()
+    (shared / "data.json").write_text("{}")
+    (root / "tests/shared").symlink_to(shared, target_is_directory=True)
+    (shared / "loop").symlink_to(shared, target_is_directory=True)
+    before = spec_trace.suite(root)["tests"]
+    (shared / "data.json").write_text("[]")
+    assert spec_trace.suite(root)["tests"] != before
+
+
+def test_a_file_name_that_is_not_utf8_is_hashed(suite: Suite) -> None:
+    root = suite()
+    name = os.fsdecode(b"bad\xff.py")
+    (root / "tests" / name).write_text("x")
+    (root / "spec/conformance/cases").mkdir(parents=True)
+    (root / "spec/conformance/cases" / os.fsdecode(b"x\xff.json")).write_text("[]")
+    found: list[str] = []
+    hashes = spec_trace.suite(root, found)
+    assert found == []
+    assert hashes["tests"] is not None
+    assert hashes["cases"] is not None
+    (only,) = problems(root)
+    assert only.endswith(NAMING)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file")
+def test_a_file_the_hash_cannot_read_is_a_problem(suite: Suite) -> None:
+    root = suite()
+    secret = root / "tests/secret.py"
+    secret.write_text("x")
+    secret.chmod(0)
+    try:
+        trace = run_of(root, {})
+    finally:
+        secret.chmod(0o600)
+    assert trace.problems == [
+        "tests/secret.py: cannot be read for the suite's hash: Permission denied"
+    ]
+    assert trace.run is not None
+    assert trace.run["suite"]["tests"] is None
+
+
+def test_a_test_id_that_is_not_text_is_printed_escaped(
+    suite: Suite, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = suite()
+    path = root / "spec-report.json"
+    tests = {"t::\ud800": {"ids": [], "outcome": "passed", "case": "nope"}}
+    path.write_text(json.dumps(_report(tests=tests)))
+    assert spec_trace.main(["--root", str(root), "--report", str(path)]) == 1
+    assert "problem: t::\\ud800: case nope is not listed" in capsys.readouterr().out

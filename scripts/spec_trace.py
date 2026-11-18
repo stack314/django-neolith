@@ -70,7 +70,11 @@ the settings, plus ``--enforce``), every must-level requirement (MUST, MUST
 NOT, REQUIRED) needs a passing test that cites it, or a ``[not-tested]``
 entry. Enforcing without ``--report`` is a problem, so the gate cannot be
 skipped by leaving the report out. The report must be format 2, as the plugin
-writes it; any other member or value is a problem.
+writes it; any other member or value is a problem, and a report with an entry
+the checker cannot read counts no test at all, since that test may have
+failed. Whatever the checker refuses takes no effect: a refused
+``[not-tested]`` or ``[not-implemented]`` entry gives no status, and a refused
+row of spec 06's table binds no one.
 
 The conformance run
 -------------------
@@ -85,10 +89,12 @@ With ``--report`` and ``--conformance PATH``, it writes the conformance run
   ``reference`` is the hash of ``spec/conformance/reference.v1.openapi.json``,
   or ``null`` while it does not exist. ``cases`` is over every file under
   ``spec/conformance/cases/``, and ``tests`` over every file under ``tests/``
-  apart from ``__pycache__`` directories: for each file, in the order of its
-  path from the repository root, written with ``/``, the hash takes the path
-  in UTF-8, a NUL byte, its size in bytes in decimal, a NUL byte and its
-  bytes;
+  apart from ``__pycache__`` directories, following links to directories:
+  for each file, in the byte order of its path from the repository root,
+  written with ``/``, the hash takes the path's bytes as the file system
+  gives them (UTF-8 for a name that is UTF-8), a NUL byte, its size in bytes
+  in decimal, a NUL byte and its bytes. A hash that cannot be computed, as
+  when a file cannot be read, is ``null`` and a problem;
 - ``implementation``: ``{"name": "django-neolith", "version"}``, and
   ``environment``, both from the report;
 - ``requirements``: for each live requirement ID of every level, in the
@@ -685,6 +691,7 @@ def _read_binds_others(name: str, text: str, trace: Trace) -> None:
             trace.problems.append(
                 f"{name}:{row_line}: {rid} {where} does not say whom it binds"
             )
+            continue
         trace.rows.append(_Row(name, row_line, rid))
 
 
@@ -921,13 +928,19 @@ def read_report(path: Path, trace: Trace) -> None:
     ):
         trace.problems.append(f"{where}: not a format {REPORT_FORMAT} spec report")
         return
-    trace.environment = environment
+    read: dict[str, Ran] = {}
     for test, entry in tests.items():
         ran = _ran(entry)
         if ran is None:
             trace.problems.append(f"{where}: malformed entry for {test}")
-            continue
-        trace.tests[test] = ran
+        else:
+            read[test] = ran
+    if len(read) < len(tests):
+        # A test the checker cannot read may have failed: nothing is counted.
+        return
+    trace.environment = environment
+    trace.tests = read
+    for test, ran in read.items():
         trace.citations.extend(Citation(rid, test, ran.outcome) for rid in ran.ids)
     trace.measured = True
 
@@ -982,6 +995,7 @@ def check(
             trace.problems.append(
                 f"{citation.test}: cites withdrawn requirement {citation.rid}"
             )
+    refused: list[str] = []
     for rid in trace.not_tested:
         requirement = trace.requirements.get(rid)
         if requirement is None or requirement.withdrawn:
@@ -993,6 +1007,7 @@ def check(
         else:
             continue
         trace.problems.append(f"{SETTINGS}: [not-tested] {rid} {reason}")
+        refused.append(rid)
     for rid in trace.not_implemented:
         requirement = trace.requirements.get(rid)
         if requirement is None or requirement.withdrawn:
@@ -1006,6 +1021,11 @@ def check(
         else:
             continue
         trace.problems.append(f"{SETTINGS}: [not-implemented] {rid}: {reason}")
+        refused.append(rid)
+    # A refused entry gives no status in the run.
+    for rid in refused:
+        trace.not_tested.pop(rid, None)
+        trace.not_implemented.pop(rid, None)
     if not trace.measured:
         return trace
     for requirement in trace.requirements.values():
@@ -1052,21 +1072,43 @@ def _check_markers(trace: Trace) -> None:
 # The conformance run
 
 
-def _digest(root: Path, files: Iterable[Path]) -> str:
-    """SHA-256 over each file's path from ``root``, its size and its bytes."""
+def _digest(root: Path, files: Iterable[Path], problems: list[str]) -> str | None:
+    """SHA-256 over each file's path from ``root``, its size and its bytes.
+
+    None, with a problem, if a file cannot be read.
+    """
     digest = hashlib.sha256()
-    named = sorted((path.relative_to(root).as_posix(), path) for path in files)
+    named = sorted(
+        (os.fsencode(path.relative_to(root).as_posix()), path) for path in files
+    )
     for name, path in named:
-        data = path.read_bytes()
-        digest.update(name.encode("utf-8") + b"\0" + str(len(data)).encode() + b"\0")
+        try:
+            data = path.read_bytes()
+        except OSError as error:
+            shown = name.decode("utf-8", "backslashreplace")
+            problems.append(
+                f"{shown}: cannot be read for the suite's hash: "
+                f"{error.strerror or error}"
+            )
+            return None
+        digest.update(name + b"\0" + str(len(data)).encode() + b"\0")
         digest.update(data)
     return digest.hexdigest()
 
 
 def _files(folder: Path) -> list[Path]:
-    """Every file under ``folder``, apart from ``__pycache__`` directories."""
+    """Every file under ``folder``, apart from ``__pycache__`` directories.
+
+    Links to directories are followed, each real directory once.
+    """
     found: list[Path] = []
-    for directory, subdirectories, names in os.walk(folder):
+    seen: set[str] = set()
+    for directory, subdirectories, names in os.walk(folder, followlinks=True):
+        real = os.path.realpath(directory)
+        if real in seen:
+            subdirectories[:] = []
+            continue
+        seen.add(real)
         subdirectories[:] = [d for d in subdirectories if d != "__pycache__"]
         found.extend(
             Path(directory, name)
@@ -1076,17 +1118,26 @@ def _files(folder: Path) -> list[Path]:
     return found
 
 
-def suite(root: Path) -> dict[str, str | None]:
-    """The hashes that name the suite a run passed."""
-    reference = root / "spec" / REFERENCE
+def suite(root: Path, problems: list[str] | None = None) -> dict[str, str | None]:
+    """The hashes that name the suite a run passed.
+
+    A hash that cannot be computed is None, with a problem.
+    """
+    problems = [] if problems is None else problems
+    path = root / "spec" / REFERENCE
+    reference: str | None = None
+    if path.is_file():
+        try:
+            reference = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError as error:
+            problems.append(
+                f"spec/{REFERENCE}: cannot be read for the suite's hash: "
+                f"{error.strerror or error}"
+            )
     return {
-        "cases": _digest(root, _files(root / "spec" / CASES)),
-        "reference": (
-            hashlib.sha256(reference.read_bytes()).hexdigest()
-            if reference.is_file()
-            else None
-        ),
-        "tests": _digest(root, _files(root / "tests")),
+        "cases": _digest(root, _files(root / "spec" / CASES), problems),
+        "reference": reference,
+        "tests": _digest(root, _files(root / "tests"), problems),
     }
 
 
@@ -1183,7 +1234,7 @@ def conformance_run(root: Path, trace: Trace) -> dict[str, Any]:
     return {
         "format": RUN_FORMAT,
         "spec": version,
-        "suite": suite(root),
+        "suite": suite(root, trace.problems),
         "implementation": {
             "name": "django-neolith",
             "version": environment.get("packages", {}).get("django-neolith"),
@@ -1266,7 +1317,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             parser.error(
                 f"--conformance cannot write {run_path}: {error.strerror or error}"
             )
-    print(render(trace))
+    # Test ids and file names come from outside; a lone surrogate in one is
+    # printed escaped.
+    print(render(trace).encode("utf-8", "backslashreplace").decode("utf-8"))
     return 1 if trace.problems else 0
 
 
