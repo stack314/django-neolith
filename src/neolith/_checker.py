@@ -57,6 +57,7 @@ _NULL = {"type": "null"}
 
 def _real(named: type) -> type:
     """The class of the datetime module that a name for it leads to."""
+    # safe read: one of neolith's own names for a datetime class.
     return next(kind for kind in named.__mro__ if kind.__module__ == "datetime")
 
 

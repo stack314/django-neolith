@@ -478,10 +478,10 @@ def _check_reused(node: Mapping[str, Any]) -> None:
     if not issubclass(type(cls), type):
         return
     name = _naming.name(typing.cast(type, cls))
-    own = vars(typing.cast(type, cls))
-    if own.get("__pydantic_complete__") is not True:
+    own = _naming.namespace(cls)
+    if _naming.entry(own, "__pydantic_complete__") is not True:
         return
-    schema = own.get("__pydantic_core_schema__")
+    schema = _naming.entry(own, "__pydantic_core_schema__")
     # What pydantic-core reuses was built from the class's own schema, so the
     # class's model node there must be the node the description was written
     # from, apart from its reference name, which an alias changes.

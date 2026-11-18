@@ -25,6 +25,7 @@ refusal; ``one_of`` and ``derives`` compare classes by identity alone.
 """
 
 import types
+import typing
 from collections.abc import Iterable, Mapping
 from typing import Any, Final
 
@@ -32,6 +33,7 @@ __all__ = [
     "cause",
     "derives",
     "entry",
+    "find",
     "full_name",
     "is_a",
     "module",
@@ -177,6 +179,20 @@ def entry(held: Mapping[Any, object], name: str) -> object:
     for key, value in held.items():
         if type(key) is str and key == name:
             return value
+    return None
+
+
+def find(cls: object, name: str) -> object:
+    """``name`` as the class ``cls`` holds it, its own or inherited, or None.
+
+    Like ``inspect.getattr_static`` on a class, but each class is read
+    through ``type``'s own descriptors: ``getattr_static`` reads each
+    class's ``__dict__`` through its metaclass.
+    """
+    for klass in mro(typing.cast(type, cls)):
+        found = entry(namespace(klass), name)
+        if found is not None:
+            return found
     return None
 
 

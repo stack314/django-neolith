@@ -14,6 +14,7 @@ keep every name read in ``src/neolith`` going through ``neolith._naming``.
 import ast
 import re
 import sys
+import types
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Annotated, Any, NoReturn, Protocol, cast
@@ -731,6 +732,57 @@ def test_settings_keys_that_run_code_at_any_depth_are_refused() -> None:
         )
 
 
+class DictRaises(type):
+    """A metaclass that raises when its class's body or order is read."""
+
+    def __getattribute__(cls, name: str) -> object:
+        if name in ("__dict__", "__mro__"):
+            raise RuntimeError(f"hostile metaclass read {name}")
+        return super().__getattribute__(name)
+
+
+def test_an_implementation_whose_metaclass_runs_code_has_its_own_problems() -> None:
+    def reserve(self: object, request: object) -> Reserved:
+        raise NotImplementedError
+
+    del reserve.__annotations__["request"]
+
+    def helper(self: object) -> None: ...
+
+    body = {"reserve": reserve, "helper": helper}
+    plain = type("Impl", (), body)
+    hostile = DictRaises("Impl", (), body)
+    problems = INVENTORY._implementation_problems(plain)
+    assert problems == INVENTORY._implementation_problems(hostile)
+    assert any("annotate its request type" in problem for problem in problems)
+    assert any("public method 'helper'" in problem for problem in problems)
+
+
+def test_a_config_whose_metaclass_runs_code_is_checked_as_it_is_loaded() -> None:
+    body = {"__module__": __name__, "name": "shop.stock", "label": "stock"}
+    package = types.ModuleType("shop.other")
+    package.__path__ = ["/nowhere"]
+    said = []
+    for metaclass in (type, DictRaises):
+        config = metaclass("StockConfig", (NeolithAppConfig,), dict(body))
+        loaded = config("shop.other", package)
+        with pytest.raises(DeclarationError) as refused:
+            loaded.import_models()
+        said.append(str(refused.value))
+    assert said[0] == said[1]
+    assert "name: the app config has 'shop.other'" in said[0]
+
+
+def test_a_config_module_given_as_a_str_subclass_is_read_as_its_text() -> None:
+    class Config:
+        name = "shopz"
+
+    Config.__module__ = Trap("shopz.apps")
+    refusals: list[str] = []
+    assert _host._declared_with(cast(Any, Config()), "shopz.apps", "here", refusals)
+    assert refusals[0].startswith("here: the class is in shopz.apps, which is")
+
+
 # Every name read goes through neolith._naming.
 
 # Name reads on neolith's own objects, which no author can replace.
@@ -757,6 +809,47 @@ def test_every_name_read_in_the_package_goes_through_naming() -> None:
             ):
                 found.add((path.name, ast.get_source_segment(source, node)))
     assert found == _OWN_NAMES
+
+
+def test_every_class_body_and_order_is_read_through_naming() -> None:
+    # vars(), .__dict__, .__mro__ and inspect.getattr_static each read a
+    # class through its metaclass. Outside neolith._naming each is allowed
+    # only on type itself, or where a "safe read:" comment, on its line or
+    # the line before, says why the operand is never an author's class.
+    found = set()
+    for path in sorted(_SOURCE.glob("*.py")):
+        if path.name == "_naming.py":
+            continue
+        source = path.read_text()
+        lines = source.splitlines()
+        for node in ast.walk(ast.parse(source)):
+            read = (
+                isinstance(node, ast.Call)
+                and (
+                    (isinstance(node.func, ast.Name) and node.func.id == "vars")
+                    or (
+                        isinstance(node.func, ast.Attribute)
+                        and node.func.attr == "getattr_static"
+                    )
+                )
+            ) or (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.ctx, ast.Load)
+                and node.attr in ("__dict__", "__mro__")
+                and not (isinstance(node.value, ast.Name) and node.value.id == "type")
+            )
+            if not read:
+                continue
+            line = cast(ast.expr, node).lineno
+            # The node's line and the comment lines just above it.
+            at = line - 1
+            near = [lines[at]]
+            while at > 0 and lines[at - 1].lstrip().startswith("#"):
+                at -= 1
+                near.append(lines[at])
+            if not any("# safe read:" in line for line in near):
+                found.add(f"{path.name}:{line}")
+    assert found == set()
 
 
 def _is_type_call(node: ast.AST) -> bool:

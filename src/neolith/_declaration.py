@@ -10,7 +10,6 @@ author wrote, so a lazy object in a class body is never evaluated.
 """
 
 import enum
-import inspect
 import re
 from dataclasses import dataclass
 from typing import Any, ClassVar, Final, final
@@ -314,8 +313,15 @@ class NeolithAppConfig(AppConfig):
                 "name and label in its own body"
             )
         refusals: list[str] = []
+        # As getattr_static finds them, the instance first, but each class is
+        # read through type's own descriptors, never through its metaclass.
+        held = [object.__getattribute__(self, "__dict__")]
+        held += [_naming.namespace(klass) for klass in _naming.mro(config)]
         for attribute, declared in (("name", snapshot.name), ("label", snapshot.label)):
-            found = inspect.getattr_static(self, attribute, _MISSING)
+            found = next(
+                (v for h in held if (v := _naming.entry(h, attribute)) is not None),
+                _MISSING,
+            )
             if type(found) is not str or found != declared:
                 refusals.append(
                     f"app {snapshot.label}: {attribute}: the app config has "

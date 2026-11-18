@@ -233,9 +233,7 @@ class InProcess:
         # instance, or a __getattr__, never stands in for an action.
         self._functions: Mapping[str, Callable[..., object]] = types.MappingProxyType(
             {
-                name: typing.cast(
-                    "Callable[..., object]", inspect.getattr_static(cls, name)
-                )
+                name: typing.cast("Callable[..., object]", _naming.find(cls, name))
                 for name in contract.actions
             }
         )
@@ -469,7 +467,7 @@ class Connector:
                     inspect.signature(
                         typing.cast(
                             Callable[..., object],
-                            inspect.getattr_static(declaration, name),
+                            _naming.find(declaration, name),
                         )
                     ).parameters
                 )[1]

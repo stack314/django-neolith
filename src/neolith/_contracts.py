@@ -572,10 +572,11 @@ class Contract:
         try:
             own = [
                 klass
-                for klass in impl.__mro__
-                if klass is not object and _CONTRACT_ATTR not in vars(klass)
+                for klass in _naming.mro(impl)
+                if klass is not object
+                and _naming.entry(_naming.namespace(klass), _CONTRACT_ATTR) is None
             ]
-        except Exception as error:  # an __mro__ or __dict__ it cannot read
+        except Exception as error:  # an __mro__ it cannot read
             problems.append(
                 f"{where}: its classes cannot be read ({_naming.cause(error, None)})"
             )
@@ -606,10 +607,10 @@ class Contract:
         return problems
 
     def _marks(self, where: str, klass: type, problems: list[str]) -> None:
-        for attr, value in vars(klass).items():
+        for attr, value in _naming.namespace(klass).items():
             if _carries_mark(value):
                 problems.append(
-                    f"{where}: {attr!r} is marked with @action; the contract "
+                    f"{where}: {shown(attr)} is marked with @action; the contract "
                     "declares each action, its idempotency and its error "
                     "kinds, so implementation methods are not marked"
                 )
@@ -623,7 +624,7 @@ class Contract:
         problems: list[str],
     ) -> None:
         """Add the problems of one action; may raise, keeping what it added."""
-        member = inspect.getattr_static(impl, name, None)
+        member = _naming.find(impl, name)
         # A declaration's own method, inherited from this contract or another
         # one, is a stub, not an implementation.
         if member is None or _carries_mark(member):
@@ -661,8 +662,10 @@ class Contract:
             )
 
     def _public_methods(self, where: str, klass: type, problems: list[str]) -> None:
-        for attr, value in vars(klass).items():
-            if attr.startswith("_") or attr in self._actions:
+        for attr, value in _naming.namespace(klass).items():
+            # A name that is not exactly a str is read by no lookup, so it
+            # is no method of the instance's.
+            if type(attr) is not str or attr.startswith("_") or attr in self._actions:
                 continue
             if _is_method(value):
                 problems.append(
@@ -737,6 +740,7 @@ def contract[T](identity: str, /) -> Callable[[type[T]], type[T]]:
 
         for attr, value in namespace.items():
             marked = (
+                # safe read: an exact function's own dict.
                 _naming.entry(vars(value), _ACTION_ATTR)
                 if type(value) is types.FunctionType
                 else None
@@ -865,7 +869,7 @@ def action(
             raise ContractDefinitionError(
                 f"@action marks a function defined in a contract, not {_name(method)}"
             )
-        own = vars(method)
+        own = vars(method)  # safe read: an exact function's own dict
         # Before any name is looked up, so that no key's own __eq__ runs.
         if any(type(key) is not str for key in own):
             raise ContractDefinitionError(
@@ -993,7 +997,8 @@ def _carries_mark(value: object) -> bool:
         seen.add(id(item))
         kind = type(item)
         if kind is types.FunctionType:
-            if _ACTION_ATTR in vars(item):
+            # safe read: a function's own dict, through FunctionType's slot.
+            if _naming.entry(vars(item), _ACTION_ATTR) is not None:
                 return True
         elif issubclass(kind, staticmethod | classmethod):
             pending.append(typing.cast(Any, item).__func__)
@@ -1007,7 +1012,12 @@ def _carries_mark(value: object) -> bool:
             | functools.cached_property,
         ):
             pending.append(typing.cast(Any, item).func)
-        wrapped = inspect.getattr_static(item, "__wrapped__", None)
+        try:
+            # safe read: an object in a class body, not a class; what its
+            # class's metaclass raises only ends the walk.
+            wrapped = inspect.getattr_static(item, "__wrapped__", None)
+        except Exception:
+            wrapped = None
         if wrapped is not None:
             pending.append(wrapped)
     return False

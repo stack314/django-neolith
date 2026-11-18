@@ -305,7 +305,7 @@ def _built(name: str, apps: list[str]) -> dict[str, Any]:
             "imported; it holds the deployer's names, which are read before "
             "settings exist"
         )
-    return host._build(apps, vars(module), closed=True)
+    return host._build(apps, vars(module), closed=True)  # safe read: a module
 
 
 def _migrate(arguments: argparse.Namespace) -> int:

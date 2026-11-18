@@ -170,7 +170,7 @@ def _table() -> tuple[Host | None, bool]:
 def _host_of(config: object) -> Host | None:
     if type(config) is not HostConfig:
         return None
-    host = vars(config).get(_HOST_ATTR)
+    host = vars(config).get(_HOST_ATTR)  # safe read: a HostConfig of neolith's
     return host if type(host) is Host else None
 
 
@@ -490,7 +490,7 @@ def validate(
         # Nothing of the implementation can be read.
         return None
     try:
-        found = vars(module).get(attribute, _NOTHING)
+        found = vars(module).get(attribute, _NOTHING)  # safe read: a module
     except Exception as error:  # what the import left has no names to read
         refusals.append(
             f"{where} does not import: {_long(module_name)} is not a module "
@@ -511,7 +511,7 @@ def validate(
     cls: type[Any] = found
     problem = False
     # Read statically: a metaclass cannot answer for the class.
-    own_module = vars(cls).get("__module__")
+    own_module = _naming.module(cls)
     own_name = _naming.qualname(cls, None)
     # Only a class proven to be the app's own is built.
     foreign = True
@@ -579,7 +579,7 @@ def _declared_with(
     config: AppConfig, module: str, where: str, refusals: list[str]
 ) -> bool:
     """Refuse a class in a module that is read with the declaration."""
-    declared_in = vars(type(config)).get("__module__")
+    declared_in = _naming.module(type(config))
     if module not in (config.name, declared_in):
         return False
     refusals.append(

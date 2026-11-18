@@ -42,11 +42,12 @@ def _probe(cls: type) -> Callable[[object], bool]:
     if dataclasses.is_dataclass(cls):
         name = next((field.name for field in dataclasses.fields(cls)), None)
     else:
+        # safe read: once() decorates only neolith's own classes.
         slots = vars(cls).get("__slots__", ())
         name = slots if isinstance(slots, str) else next(iter(slots), None)
     if name is None:
         raise TypeError(f"{cls.__name__} has no fields for once() to guard")
-    slot = vars(cls).get(name)
+    slot = vars(cls).get(name)  # safe read: neolith's own class
     if isinstance(slot, types.MemberDescriptorType):
         read = slot.__get__
 
@@ -58,11 +59,11 @@ def _probe(cls: type) -> Callable[[object], bool]:
             return True
 
         return in_slot
-    if "__slots__" in vars(cls):
+    if "__slots__" in vars(cls):  # safe read: neolith's own class
         raise TypeError(f"{cls.__name__}.{name} is not a slot once() can read")
 
     def in_dict(value: object) -> bool:
-        return name in vars(value)
+        return name in vars(value)  # safe read: a value of neolith's own class
 
     return in_dict
 
@@ -97,6 +98,7 @@ def once[C: type](cls: C) -> C:
     its first field is bound, which every ``__init__`` of it does.
     """
     built = _probe(cls)
+    # safe read: neolith's own class.
     setattr(cls, "__init__", _guarded(cls, vars(cls)["__init__"], built))  # noqa: B010
     setstate = getattr(cls, "__setstate__", None)
     if setstate is not None:
