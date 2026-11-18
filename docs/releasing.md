@@ -48,26 +48,26 @@ If `PY_FLOOR` or `PY_NEWEST` is not installed, use the closest Python you have, 
   Expected: no pull requests, and no issues except the ones that track the release itself. Move anything that will not ship to the next milestone, with a one-line comment saying why.
 - [ ] CI passed on the tip of `next`.
   ```
-  git rev-parse origin/next
-  gh run list --repo "$REPO" --workflow ci.yml --branch next --event push -L 1 \
-    --json headSha,conclusion -q '.[0] | "\(.headSha) \(.conclusion)"'
+  gh run list --repo "$REPO" --workflow ci.yml --commit "$(git rev-parse origin/next)" \
+    --json status,conclusion -q '.[] | "\(.status) \(.conclusion)"'
   ```
-  Expected: the same SHA twice, and `success`.
+  Expected: `completed success`. No output means no run exists yet for that commit.
 - [ ] You know what is on `next` since the last release.
   ```
   git log --first-parent --format='- %s' "v${PREVIOUS}..origin/next"
   ```
-  Expected: every change a user can notice has an entry under `## [Unreleased]` in `CHANGELOG.md`. Keep this list for the release pull request.
+  Compare it with `## [Unreleased]` in `CHANGELOG.md` by reading both: every change a user can notice needs an entry. Keep this list for the release pull request.
 - [ ] You know which decision records change status.
   ```
   git switch --detach origin/next
+  git rev-parse -q --verify "v${PREVIOUS}^{commit}" >/dev/null || echo "MISSING TAG v${PREVIOUS}"
   for f in docs/adr/[0-9]*.md; do
     old=$(git show "v${PREVIOUS}:${f}" 2>/dev/null | grep -m1 '^- \*\*Status' || echo "(new)")
     new=$(grep -m1 '^- \*\*Status' "$f")
     [ "$old" != "$new" ] && echo "$f: $old -> $new"
   done
   ```
-  Expected: one line per record that is new or changed status. Keep the output for the release pull request.
+  Expected: one line per record that is new or changed status, and no `MISSING TAG` line. Keep the output for the release pull request.
 - [ ] Every specification document whose roadmap step is complete in this release is enforced by the spec trace ([T5](../CONTRIBUTING.md#tests)).
   ```
   grep '^enforce' tests/spec_trace.toml
@@ -97,16 +97,16 @@ If `PY_FLOOR` or `PY_NEWEST` is not installed, use the closest Python you have, 
 - [ ] Find every line that carries the version or a status.
   ```
   git grep -nwiE "alpha|beta|${PREVIOUS}|--pre|no release yet|Development Status|draft 0\.1" \
-    -- ':!CHANGELOG.md' ':!tests' ':!docs/adr' ':!spec/0*'
+    -- ':!CHANGELOG.md' ':!tests' ':!docs/adr' ':!spec/0*' ':!docs/releasing.md'
   ```
-  Expected: the lines below, and no others. If another line appears, add it to this list in the same pull request.
+  Expected: lines only in the files listed below (`README.md`, `pyproject.toml`, `docs/site/index.md`, `CONTRIBUTING.md`, `SECURITY.md` and `spec/README.md`). If a line appears in another file, add that file to this list in the same pull request.
 - [ ] `src/neolith/__init__.py`: `__version__ = "<VERSION>"`. This is the only place the version is set; the build reads it, and the release workflow checks the tag against it.
 - [ ] `CHANGELOG.md` ([Keep a Changelog](https://keepachangelog.com/en/1.1.0/)):
   - [ ] `## [Unreleased]` becomes `## [<VERSION>] - <YYYY-MM-DD>`, dated the day you expect to tag.
   - [ ] A new, empty `## [Unreleased]` sits above it. *Recommendation*, following Keep a Changelog.
-  - [ ] The links at the bottom: `[Unreleased]` compares from the new tag, and the new version links to its release page.
+  - [ ] The links at the bottom: `[Unreleased]` compares the new tag with `next`, where unreleased work is, and the new version links to its release page.
     ```
-    [Unreleased]: https://github.com/stack314/django-neolith/compare/v<VERSION>...HEAD
+    [Unreleased]: https://github.com/stack314/django-neolith/compare/v<VERSION>...next
     [<VERSION>]: https://github.com/stack314/django-neolith/releases/tag/v<VERSION>
     ```
   - [ ] Every breaking change is listed under *Changed* or *Removed* ([G6](../CONTRIBUTING.md#commits-and-pull-requests)). These commands list the pull requests that declared one:
@@ -149,9 +149,9 @@ Run every check on the tip of `next` after the version pull request merged. If o
   git worktree add --detach "$WORK/src" origin/next
   cd "$WORK/src"
   VERIFIED=$(git rev-parse HEAD); echo "$VERIFIED"
-  grep '^__version__' src/neolith/__init__.py
+  grep -qx "__version__ = \"${VERSION}\"" src/neolith/__init__.py && echo "version ${VERSION}" || echo "WRONG VERSION"
   ```
-  Expected: `__version__ = "<VERSION>"`. Keep `VERIFIED` for steps 4 and 5.
+  Expected: a SHA, then `version <VERSION>`. Keep `VERIFIED` for steps 4 and 5.
 - [ ] The full suite and the spec trace, on both pairs, from the built package as CI installs it.
   ```
   for DJANGO in 5.2 6.1; do
@@ -187,11 +187,20 @@ Run every check on the tip of `next` after the version pull request merged. If o
     "$WORK/build/bin/python" -m build --outdir "$WORK/dist"
   "$WORK/build/bin/python" -m twine check --strict "$WORK"/dist/*
   ```
-  Expected: `Successfully built django_neolith-<VERSION>.tar.gz and django_neolith-<VERSION>-py3-none-any.whl`, then `PASSED` for both files. `twine check` also proves the README renders as the PyPI description.
+  Expected: `Successfully built django_neolith-<VERSION>.tar.gz and django_neolith-<VERSION>-py3-none-any.whl`, then `PASSED` for both files. For a Markdown README, `twine check` only confirms a description is present; it does not render it.
+- [ ] Render the README as PyPI will, and read it. It cannot be changed on PyPI after upload.
+  ```
+  "$WORK/build/bin/python" -m pip install -c .github/release-constraints.txt "readme-renderer[md]"
+  "$WORK/build/bin/python" -m readme_renderer README.md -o "$WORK/readme.html"
+  grep -o '<strong>Status:[^<]*' "$WORK/readme.html"
+  ```
+  Expected: `<strong>Status: alpha (<VERSION>). ...`. Then open `$WORK/readme.html` in a browser and read it through. Without the `[md]` extra, the renderer warns and writes no file.
 - [ ] Read the wheel's metadata.
   ```
-  python3 - "$WORK"/dist/*.whl <<'PY'
+  "$PY_FLOOR" - "$WORK"/dist/*.whl "${VERSION}" <<'PY'
+  import pathlib
   import sys
+  import tomllib
   import zipfile
   from email.parser import Parser
 
@@ -206,13 +215,29 @@ Run every check on the tip of `next` after the version pull request merged. If o
       for value in meta.get_all(key, []):
           print(f"{key}: {value}")
   print("py.typed:", "neolith/py.typed" in names)
+
+  project = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))["project"]
+  problems = [
+      f"{key}: {got!r}, expected {want!r}"
+      for key, got, want in (
+          ("Name", meta["Name"], project["name"]),
+          ("Version", meta["Version"], sys.argv[2]),
+          ("Requires-Python", meta["Requires-Python"], project["requires-python"]),
+          ("License-Expression", meta["License-Expression"], project["license"]),
+          ("Classifier", meta.get_all("Classifier"), project["classifiers"]),
+          ("py.typed", "neolith/py.typed" in names, True),
+      )
+      if got != want
+  ]
+  print("\n".join(problems) or "metadata matches pyproject.toml")
   PY
   ```
-  Expected: `Name: django-neolith`, `Version: <VERSION>`, `Requires-Python: >=3.12`, `License-Expression: BSD-3-Clause`, the dependencies and classifiers in `pyproject.toml`, and `py.typed: True`.
+  Expected: the metadata, then `metadata matches pyproject.toml`. Read the `Requires-Dist` lines against `dependencies` in `pyproject.toml`.
 - [ ] Run the release workflow's smoke script against the wheel on both pairs. The script runs only when a tag is pushed, so CI never runs it; a change to start-up has broken it before. These commands take the script from `release.yml` itself, so it is the one the tag will run.
   ```
   awk 'index($0, "venv/bin/python - <<") {inside = 1; next} inside && $1 == "EOF" {exit} inside {print}' \
     .github/workflows/release.yml | sed 's/^ \{10\}//' > "$WORK/smoke.py"
+  grep -q '^import neolith$' "$WORK/smoke.py" || echo "NO SMOKE SCRIPT FOUND in release.yml"
   for DJANGO in 5.2 6.1; do
     PY=$PY_FLOOR; [ "$DJANGO" = 6.1 ] && PY=$PY_NEWEST
     "$PY" -m venv "$WORK/smoke-$DJANGO"
@@ -220,7 +245,7 @@ Run every check on the tip of `next` after the version pull request merged. If o
     (cd "$WORK" && TAG="v${VERSION}" "$WORK/smoke-$DJANGO/bin/python" - < "$WORK/smoke.py")
   done
   ```
-  Expected: `neolith <VERSION> on Django 5.2.<n>` and `neolith <VERSION> on Django 6.1.<n>`. The script is run from `$WORK`, where there is no source tree, so it can only import the installed wheel.
+  Expected: no `NO SMOKE SCRIPT` line, then `neolith <VERSION> on Django 5.2.<n>` and `neolith <VERSION> on Django 6.1.<n>`. A wrong version fails with an `AssertionError`. The script is run from `$WORK`, where there is no source tree, so it can only import the installed wheel.
 
 ## 4. The release pull request, `next` into `main`
 
@@ -258,11 +283,12 @@ Run every check on the tip of `next` after the version pull request merged. If o
   git fetch origin
   MERGE=$(gh pr view <number> --repo "$REPO" --json mergeCommit -q .mergeCommit.oid)
   git log -1 --format='%H%nparents: %P%nsubject: %s' "$MERGE"
-  git merge-base --is-ancestor "$MERGE" origin/main && echo "on main"
-  git diff --quiet "$VERIFIED" "$MERGE" && echo "same files as verified"
-  git show "${MERGE}:src/neolith/__init__.py" | grep '^__version__'
+  git merge-base --is-ancestor "$MERGE" origin/main && echo "on main" || echo "NOT ON MAIN"
+  git diff --quiet "$VERIFIED" "$MERGE" && echo "same files as verified" || echo "FILES DIFFER FROM VERIFIED"
+  git show "${MERGE}:src/neolith/__init__.py" | grep -qx "__version__ = \"${VERSION}\"" \
+    && echo "version ${VERSION}" || echo "WRONG VERSION"
   ```
-  Expected: two parents, the release pull request's title as the subject, `on main`, `same files as verified`, and `__version__ = "<VERSION>"`. If the files differ, do not tag: run section 3 on `$MERGE`.
+  Expected: two SHAs after `parents:`, the release pull request's title as the subject, `on main`, `same files as verified`, and `version <VERSION>`. If the files differ, do not tag: run section 3 on `$MERGE`.
 - [ ] Make an annotated tag on the merge commit, and check it.
   ```
   git tag -a "v${VERSION}" -m "django-neolith ${VERSION}" "$MERGE"
@@ -276,10 +302,11 @@ Run every check on the tip of `next` after the version pull request merged. If o
   ```
 - [ ] Watch the release run.
   ```
-  RUN=$(gh run list --repo "$REPO" --workflow release.yml --event push -L 1 --json databaseId -q '.[0].databaseId')
+  until RUN=$(gh run list --repo "$REPO" --workflow release.yml --branch "v${VERSION}" -L 1 \
+      --json databaseId -q '.[0].databaseId') && [ -n "$RUN" ]; do sleep 5; done
   gh run view "$RUN" --repo "$REPO"
   ```
-  Expected: the run is for `v<VERSION>`. *Build and check* and both *Smoke test* jobs pass, and *Publish to PyPI* waits for review.
+  The run is found by its tag, so an earlier release's run is never picked; the loop waits until GitHub has created it. Expected: the run is for `v<VERSION>`. *Build and check* and both *Smoke test* jobs pass, and *Publish to PyPI* waits for review.
 - [ ] **(maintainer)** Approve the `release` deployment, only once the build and both smoke tests have passed. On the run's page, choose *Review deployments*, tick `release`, then *Approve and deploy*. Or:
   ```
   ENV_ID=$(gh api "repos/${REPO}/environments/release" -q .id)
@@ -288,9 +315,9 @@ Run every check on the tip of `next` after the version pull request merged. If o
   ```
 - [ ] The run finishes.
   ```
-  gh run watch "$RUN" --repo "$REPO" --exit-status
+  gh run watch "$RUN" --repo "$REPO" --exit-status && echo "run succeeded" || echo "RUN FAILED"
   ```
-  Expected: every job succeeds, and the publish job notes that it generated and uploaded attestations.
+  Expected: `run succeeded`: every job succeeded, and the publish job notes that it generated and uploaded attestations.
 
 If a job fails before *Publish to PyPI* runs, nothing was published. See [section 9](#9-when-something-goes-wrong).
 
@@ -301,11 +328,15 @@ If a job fails before *Publish to PyPI* runs, nothing was published. See [sectio
   curl -s "https://pypi.org/pypi/django-neolith/${VERSION}/json" | python3 -c '
   import json, sys
   d = json.load(sys.stdin)
-  print(d["info"]["version"], d["info"]["requires_python"], "yanked" if d["info"]["yanked"] else "not yanked")
+  if "info" not in d:
+      sys.exit("NOT ON PYPI")
+  print(d["info"]["version"], d["info"]["requires_python"], "YANKED" if d["info"]["yanked"] else "not yanked")
+  kinds = sorted(f["packagetype"] for f in d["urls"])
   for f in d["urls"]:
-      print(f["packagetype"], f["filename"])'
+      print(f["packagetype"], f["filename"])
+  print("both files" if kinds == ["bdist_wheel", "sdist"] else f"FILES: {kinds}")'
   ```
-  Expected: `<VERSION> >=3.12 not yanked`, then a `bdist_wheel` and an `sdist` line. The page https://pypi.org/project/django-neolith/ shows the README.
+  Expected: `<VERSION> >=3.12 not yanked`, a `bdist_wheel` and an `sdist` line, then `both files`. The page https://pypi.org/project/django-neolith/ shows the README.
 - [ ] Each file has its provenance.
   ```
   for f in "django_neolith-${VERSION}-py3-none-any.whl" "django_neolith-${VERSION}.tar.gz"; do
@@ -343,14 +374,17 @@ If a job fails before *Publish to PyPI* runs, nothing was published. See [sectio
   text = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8")
   heading = rf"^## \[{re.escape(version)}\] - \d{{4}}-\d{{2}}-\d{{2}}$"
   section = re.search(heading + r"\n(.*?)(?=^## |^\[)", text, re.MULTILINE | re.DOTALL)
+  if section is None:
+      sys.exit(f"NO SECTION [{version}] in CHANGELOG.md")
   base = f"https://github.com/stack314/django-neolith/blob/v{version}/"
   links = re.compile(r"\]\((?!https?://|#)([^)]+)\)")
   print(links.sub(lambda m: f"]({base}{m[1]})", section[1]).strip())
   PY
   gh release create "v${VERSION}" --repo "$REPO" --verify-tag --title "${VERSION}" \
     --notes-file "$WORK/notes.md" --prerelease
+  gh release view "v${VERSION}" --repo "$REPO" | head -8
   ```
-  Leave out `--prerelease` for a final release. Expected: the URL of the release.
+  Leave out `--prerelease` for a final release. Expected: the URL of the release, then `title: <VERSION>`, `tag: v<VERSION>`, `draft: false`, and `prerelease: true` for a pre-release. A release that does not exist prints `release not found`. If it was already created, `gh release create` refuses; check it with `gh release view`.
 - [ ] The changelog's link to the release works.
   ```
   curl -s -o /dev/null -w '%{http_code}\n' "https://github.com/stack314/django-neolith/releases/tag/v${VERSION}"
@@ -365,7 +399,7 @@ If a job fails before *Publish to PyPI* runs, nothing was published. See [sectio
   Expected: `pypi: v<VERSION>`, the supported Python versions and the supported Django versions. Until a final release exists, the version badge shows the newest pre-release.
 - [ ] The documentation site at https://docs.stack314.com/neolith/ shows the release. It is built outside this repository, from a copy of its documents, so it changes only when that copy is refreshed.
   ```
-  curl -sL https://docs.stack314.com/neolith/project/changelog/ | grep -c "${VERSION}"
+  curl -sL https://docs.stack314.com/neolith/project/changelog/ | grep -cF "[${VERSION}]"
   ```
   Expected: a count of at least 1. If it is 0, ask for the site to be refreshed where it is built.
 
@@ -416,10 +450,11 @@ Go through the items below on the live page. Where a value comes "from the tag",
   git fetch origin
   git switch -c "chore/start-${NEXT_DEV}" origin/next
   sed -i.bak "s/^__version__ = .*/__version__ = \"${NEXT_DEV}\"/" src/neolith/__init__.py && rm src/neolith/__init__.py.bak
-  grep '^__version__' src/neolith/__init__.py
-  grep -n -A1 '^## \[Unreleased\]' CHANGELOG.md
+  grep -qx "__version__ = \"${NEXT_DEV}\"" src/neolith/__init__.py && echo "version ${NEXT_DEV}" || echo "WRONG VERSION"
+  awk '/^## \[Unreleased\]/ {found = 1; next} found && /^## \[/ {exit} found && NF {print "UNRELEASED NOT EMPTY: " $0; bad = 1; exit}
+    END {if (!found) print "NO UNRELEASED SECTION"; else if (!bad) print "Unreleased is empty"}' CHANGELOG.md
   ```
-  Expected: `__version__ = "<NEXT_DEV>"`, and an empty `## [Unreleased]` section at the top of the changelog (add one if the version pull request did not). *Recommendation:* the title `chore: start <NEXT_DEV> after releasing <VERSION>`, and `NEXT_DEV` is the version the next release is expected to have, plus `.dev0`. Until this merges, the documentation build treats `next` as a release (`docs/site/conf.py`).
+  Expected: `version <NEXT_DEV>`, then `Unreleased is empty`. If there is no `## [Unreleased]` section, add an empty one at the top of the changelog. *Recommendation:* the title `chore: start <NEXT_DEV> after releasing <VERSION>`, and `NEXT_DEV` is the version the next release is expected to have, plus `.dev0`. Until this merges, the documentation build treats `next` as a release (`docs/site/conf.py`).
 - [ ] Close the issues the release carries. A `Closes #N` line does not close an issue when its pull request merges into `next` ([G1](../CONTRIBUTING.md#commits-and-pull-requests)), so list them from the release's commits and close any still open.
   ```
   for n in $(git log --format=%B "v${PREVIOUS}..v${VERSION}" \
@@ -433,9 +468,10 @@ Go through the items below on the live page. Where a value comes "from the tag",
   ```
   gh issue list --repo "$REPO" --milestone "${VERSION}" --state open
   MILESTONE=$(gh api "repos/${REPO}/milestones" -q ".[] | select(.title == \"${VERSION}\") | .number")
+  echo "milestone ${MILESTONE:-NOT FOUND}"
   gh api -X PATCH "repos/${REPO}/milestones/${MILESTONE}" -f state=closed -q '.title + " " + .state'
   ```
-  Expected: no open issues, then `<VERSION> closed`.
+  Expected: no open issues, `milestone <n>`, then `<VERSION> closed`.
 - [ ] The next release's milestone is now the current one: the `.dev` pull request and every later pull request into `next` go in it.
 - [ ] The roadmap issue this release finishes is closed, or its open parts are moved to the next milestone, and its task list is ticked. The project board shows the release's issues and pull requests as done.
 - [ ] `docs/roadmap.md` still describes what is left. It changes only when a step's scope changes.
