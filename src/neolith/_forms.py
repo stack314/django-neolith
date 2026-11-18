@@ -21,11 +21,12 @@ the plain types, naming the type to use.
 """
 
 import base64
+import binascii
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import timedelta
-from decimal import Decimal
+from decimal import MAX_EMAX, MIN_EMIN, Context, Decimal, Rounded
 from typing import Annotated, Any
 
 from pydantic import GetCoreSchemaHandler, GetJsonSchemaHandler
@@ -36,10 +37,13 @@ from neolith._frozen import once
 
 # Each pattern is ASCII-only and anchored with ^...$, and matches the same
 # strings under ECMA-262, Rust regex and Python's re.fullmatch (spec 01).
-BYTES_PATTERN = (
-    r"^([A-Za-z0-9_\-]{4})*"
-    r"([A-Za-z0-9_\-][AQgw]==|[A-Za-z0-9_\-]{2}[AEIMQUYcgkosw048]=)?$"
+# Bytes are built from two parts, which the reader also checks one by one: a
+# base64url character, and the last 4 characters when they hold padding.
+_BASE64URL_CHAR = r"[A-Za-z0-9_\-]"
+_BASE64URL_PADDED = (
+    rf"{_BASE64URL_CHAR}[AQgw]==|{_BASE64URL_CHAR}{{2}}[AEIMQUYcgkosw048]="
 )
+BYTES_PATTERN = rf"^({_BASE64URL_CHAR}{{4}})*({_BASE64URL_PADDED})?$"
 DECIMAL_PATTERN = r"^(0(\.[0-9]+)?|-?[1-9][0-9]*(\.[0-9]+)?|-?0\.0*[1-9][0-9]*)$"
 DECIMAL_DIGITS_PATTERN = r"^-?[0-9](\.?[0-9]){0,33}$"
 DURATION_PATTERN = (
@@ -52,15 +56,42 @@ _DURATION_LIMIT = timedelta(seconds=10**11)
 _MICROSECOND = timedelta(microseconds=1)
 # A decimal has at most 34 digits, which its second pattern states.
 _DECIMAL_DIGITS = 34
+# Rounding to 34 digits, which flags Rounded when a value has more (#45).
+_DECIMAL_ROUNDING = Context(
+    prec=_DECIMAL_DIGITS, Emax=MAX_EMAX, Emin=MIN_EMIN, traps=[], flags=[]
+)
 
 
-def _fullmatch(pattern: str, text: str) -> bool:
+# Python's re holds state for each repetition of BYTES_PATTERN's group, about
+# 60 times the decoded size (#45). So bytes are checked against the same rules
+# in two parts, neither holding any: every character but the last four is in
+# the alphabet, and the last four end the text as the pattern's tail allows.
+_BASE64URL = re.compile(f"{_BASE64URL_CHAR}*")
+_BASE64URL_END = re.compile(f"{_BASE64URL_CHAR}{{4}}|{_BASE64URL_PADDED}")
+_FROM_BASE64URL = str.maketrans("-_", "+/")
+
+
+def _is_base64url(text: str) -> bool:
+    """True if BYTES_PATTERN matches the whole of ``text``."""
+    size = len(text)
+    if size % 4:
+        return False
+    return size == 0 or (
+        _BASE64URL.fullmatch(text, 0, size - 4) is not None
+        and _BASE64URL_END.fullmatch(text, size - 4) is not None
+    )
+
+
+def fullmatch(pattern: str, text: str) -> bool:
+    """True if ``pattern``, one of the forms' patterns, matches all of ``text``."""
+    if pattern == BYTES_PATTERN:
+        return _is_base64url(text)
     return re.fullmatch(pattern, text) is not None
 
 
 def _read_duration(value: object) -> timedelta:
     if type(value) is str:
-        if not _fullmatch(DURATION_PATTERN, value):
+        if not fullmatch(DURATION_PATTERN, value):
             raise ValueError(
                 "a duration is written as seconds with an 's' suffix and 0, 3 or "
                 "6 fractional digits, as few as it needs, such as '1.500s'"
@@ -91,6 +122,13 @@ def _write_duration(value: timedelta) -> str:
     return f"{sign}{seconds}.{fraction:06d}s"
 
 
+def _has_more_digits(value: Decimal) -> bool:
+    """True if a nonzero decimal's coefficient has more than 34 digits."""
+    context = _DECIMAL_ROUNDING.copy()
+    context.plus(value)
+    return bool(context.flags[Rounded])
+
+
 def _decimal_text(value: Decimal) -> str | None:
     """The decimal's form, or None if it has none.
 
@@ -99,8 +137,16 @@ def _decimal_text(value: Decimal) -> str | None:
     checked before it is written out, so a huge exponent of either sign cannot
     make a huge string.
     """
+    # as_tuple holds each digit as an entry, about 24 times the value's own
+    # size, so a value with no form is refused before it when that can be
+    # told otherwise: a NaN, whose payload is digits too, or a coefficient of
+    # more than 34 digits, as the text would hold them all.
+    if not value.is_finite():
+        return None
+    if not value.is_zero() and _has_more_digits(value):
+        return None
     sign, digits, exponent = value.as_tuple()
-    if not isinstance(exponent, int):  # infinity or NaN
+    if not isinstance(exponent, int):  # unreachable: the value is finite
         return None
     if -exponent > _DECIMAL_DIGITS:
         return None
@@ -111,7 +157,7 @@ def _decimal_text(value: Decimal) -> str | None:
             return None
         value = Decimal((sign, (*digits, *(0,) * exponent), 0))
     text = format(value, "f")
-    if _fullmatch(DECIMAL_PATTERN, text) and _fullmatch(DECIMAL_DIGITS_PATTERN, text):
+    if fullmatch(DECIMAL_PATTERN, text) and fullmatch(DECIMAL_DIGITS_PATTERN, text):
         return text
     return None
 
@@ -119,8 +165,8 @@ def _decimal_text(value: Decimal) -> str | None:
 def _read_decimal(value: object) -> Decimal:
     if type(value) is str:
         if not (
-            _fullmatch(DECIMAL_PATTERN, value)
-            and _fullmatch(DECIMAL_DIGITS_PATTERN, value)
+            fullmatch(DECIMAL_PATTERN, value)
+            and fullmatch(DECIMAL_DIGITS_PATTERN, value)
         ):
             raise ValueError(
                 "a decimal is written as text of at most 34 digits with an "
@@ -156,11 +202,13 @@ def _read_binary(value: object, info: core_schema.ValidationInfo) -> bytes:
                 "text; to read base64url from JSON, validate the JSON text "
                 "itself (model_validate_json), not a value parsed from it"
             )
-        if not _fullmatch(BYTES_PATTERN, value):
+        if not _is_base64url(value):
             raise ValueError(
                 "bytes are written in base64url with padding and zero unused bits"
             )
-        return base64.urlsafe_b64decode(value)
+        # urlsafe_b64decode would copy the text twice, as ASCII bytes and
+        # then translated; a2b_base64 reads the translated str in place.
+        return binascii.a2b_base64(value.translate(_FROM_BASE64URL))
     if type(value) is not bytes:
         raise ValueError("binary data is bytes, or base64url text")
     return value
