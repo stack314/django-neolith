@@ -26,7 +26,7 @@ The [vision](VISION.md), the [guiding principles](docs/principles.md) and the Ac
 
 Neolith is defined by a specification under `spec/`, written independently of Django and Python. django-neolith is its reference implementation ([ADR 0015](docs/adr/0015-specification-first-django-reference-implementation.md)).
 
-- **P1.** A change to behaviour the specification defines updates the specification in the same pull request. On `main`, the code and the specification never disagree.
+- **P1.** A change to behaviour the specification defines updates the specification in the same pull request. On `main` and `next`, the code and the specification never disagree.
 - **P2.** Specification text names no Django or Python construct. Framework-specific detail belongs in the implementation's documentation.
 - **P3.** The normative words MUST, MUST NOT, REQUIRED, SHOULD and MAY are used in capitals, with their RFC 2119 meaning, only in `spec/`.
 - **P4.** A change to the specification changes the conformance tests to match, in the same pull request.
@@ -99,14 +99,14 @@ These rules apply to documentation, docstrings, error messages, commit messages 
 
 ## Commits and pull requests
 
-- **G1.** Work on a branch named `<type>/<short-name>`, for example `fix/connector-timeout`, and open the pull request against `next`. Never push to `main` or `next`.
+- **G1.** Work on a branch named `<type>/<short-name>`, for example `fix/connector-timeout`, and open the pull request against `next`. Never push to `main` or `next`. GitHub proposes `main` as the base; change it to `next`. A `Closes #N` line does not close the issue when the pull request merges into `next`.
 - **G2.** Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/). Types: `feat`, `fix`, `docs`, `spec`, `test`, `refactor`, `perf`, `build`, `ci`, `chore`. The subject is imperative, starts in lower case after the type, and is at most 72 characters. The body says why.
 - **G3.** One logical change per pull request. Unrelated clean-up goes in its own pull request.
 - **G4.** The pull request description opens with a summary of three or four bullets. It then says what changed and why, links the issue or decision record, names every specification document and decision record it touches, and says how the change was verified.
 - **G5.** Pull requests into `next` are squash-merged. The pull request title becomes the commit subject, so it follows **G2**. A release pull request from `next` into `main` is merged with a merge commit, so `main` keeps one commit per change.
 - **G6.** A breaking change uses `!` after the type, for example `feat!:`, and has a *Breaking changes* section in the description. Before 1.0, breaking changes are allowed but never silent.
 - **G7.** A pull request merges into `next` once it has an approving review, passing checks, and every review comment answered or resolved. `main` changes only through a release pull request, which the maintainer merges.
-- **G8.** A release pull request sets the version, dates the changelog section, and lists the changes it carries and every decision record whose status it changes.
+- **G8.** A release starts with a pull request into `next` that sets the version and dates the changelog section. The release pull request from `next` into `main` then lists the changes it carries and every decision record whose status it changes. After it merges, a pull request into `next` starts the next `.dev` version.
 
 ## How review works
 

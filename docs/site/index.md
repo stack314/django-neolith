@@ -2,11 +2,11 @@
 
 Deploy Django apps, not Django projects.
 
-**Status: alpha, before 0.1. The API may change in any release.** These pages are built from the main branch, which may be ahead of the latest release.
+**Status: alpha, before 0.1. The API may change in any release.** These pages are built from the `next` branch, which may be ahead of the latest release.
 
 Neolith lets a Django app run inside a shared process or as its own service without changing its code. Apps talk to each other only through typed contracts, so the same code and the same tests hold in both arrangements. Neolith is defined by a specification written independently of Django and Python, and django-neolith is its reference implementation (ADR 0015).
 
-## What the main branch does
+## What the `next` branch does
 
 - **Contracts** (spec 01). A contract and its actions are declared on a `Protocol` class and checked when the module is imported, with typed errors and the portable forms of ADR 0019.
 - **The call context** (ADR 0017). An implementation's action can read the principal, the trace, the deadline and the idempotency key of the call it serves.
