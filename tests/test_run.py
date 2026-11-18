@@ -50,6 +50,26 @@ NEOLITH = {neolith!r}
 """
 
 
+# The command line, with the deployer's module imported through importlib's
+# LazyLoader, so that its code runs when it is first read, not imported.
+_LAZY = """\
+import importlib.abc, importlib.machinery, importlib.util, sys
+
+class Lazy(importlib.abc.MetaPathFinder):
+    def find_spec(self, name, path, target=None):
+        if name != "deployer":
+            return None
+        spec = importlib.machinery.PathFinder.find_spec(name, path)
+        if spec is not None and spec.loader is not None:
+            spec.loader = importlib.util.LazyLoader(spec.loader)
+        return spec
+
+sys.meta_path.insert(0, Lazy())
+from neolith._cli import main
+sys.exit(main(sys.argv[1:]))
+"""
+
+
 class Site:
     """A directory with the deployer's settings module ``deployer``, a
     SQLite file per app, and the pipes the desk app's views wait on."""
@@ -84,10 +104,11 @@ class Site:
         }
 
     def neolith(
-        self, *arguments: str, env: dict[str, str] | None = None
+        self, *arguments: str, env: dict[str, str] | None = None, lazy: bool = False
     ) -> subprocess.CompletedProcess[str]:
+        entry = ["-c", _LAZY] if lazy else ["-m", "neolith"]
         return subprocess.run(  # noqa: S603
-            [sys.executable, "-W", "error", "-m", "neolith", *arguments],
+            [sys.executable, "-W", "error", *entry, *arguments],
             capture_output=True,
             text=True,
             check=False,
@@ -538,11 +559,12 @@ def test_the_package_installs_one_console_script() -> None:
     ],
     ids=["calls the builder", "reads a setting", "configures", "raises"],
 )
+@pytest.mark.parametrize("lazy", [False, True], ids=["imported", "lazily imported"])
 def test_a_settings_module_of_the_wrong_kind_is_refused(
-    site: Site, command: str, below: str, message: str
+    site: Site, command: str, below: str, message: str, lazy: bool
 ) -> None:
     site.deployer(below=below)
-    ran = site.neolith(command, DESK, "--settings", "deployer")
+    ran = site.neolith(command, DESK, "--settings", "deployer", lazy=lazy)
     assert ran.returncode == 1, ran.stderr
     assert message in ran.stderr.splitlines()[0] + ran.stderr, ran.stderr
     assert not site.database("desk").exists()

@@ -284,6 +284,9 @@ def _built(name: str, apps: list[str]) -> dict[str, Any]:
     with host._deployer_import(name):
         try:
             module = importlib.import_module(name)
+            # A lazily imported module runs its code as it is read, so it is
+            # read here, where every guard of the import holds.
+            names = _naming.module_dict(module)
         except _configure.EarlyRead as error:
             raise ImproperlyConfigured(
                 f"settings: {_shown(name)} reads Django settings at import; it "
@@ -305,12 +308,6 @@ def _built(name: str, apps: list[str]) -> dict[str, Any]:
             "imported; it holds the deployer's names, which are read before "
             "settings exist"
         )
-    try:
-        names = _naming.module_dict(module)
-    except Exception as error:  # a lazy module loads as it is read
-        raise ImproperlyConfigured(
-            f"settings: {_shown(name)} cannot be read: {_cause(error)}"
-        ) from error
     if names is None:
         raise ImproperlyConfigured(
             f"settings: {_shown(name)} is a {_naming.type_name(module)}, not a module"

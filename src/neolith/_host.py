@@ -484,22 +484,21 @@ def validate(
         return None
     try:
         module = importlib.import_module(module_name)
+        # A lazily imported module runs its code as it is read, so it is
+        # read here, as the import is.
+        held = _naming.module_dict(module)
     except Exception as error:
         refusals.append(f"{where} does not import: {_cause(error)}")
         _log_cause(where, error)
         # Nothing of the implementation can be read.
         return None
-    try:
-        held = _naming.module_dict(module)
-        if held is None:
-            raise TypeError(f"it is a {_naming.type_name(module)}")
-        found: Any = _naming.entry(held, attribute, _NOTHING)
-    except Exception as error:  # what the import left has no names to read
+    if held is None:
         refusals.append(
             f"{where} does not import: {_long(module_name)} is not a module "
-            f"whose names can be read ({_cause(error)})"
+            f"whose names can be read (it is a {_naming.type_name(module)})"
         )
         return None
+    found: Any = _naming.entry(held, attribute, _NOTHING)
     if found is _NOTHING:
         refusals.append(
             f"{where} does not import: {_long(module_name)} defines no "

@@ -379,7 +379,7 @@ def _validate_case(write_app: WriteApp, case: str) -> tuple[str, str]:
         )
         tail = (
             " does not import: {package}.services is not a module whose names can "
-            "be read (TypeError: "
+            "be read (it is a _Slots)"
         )
     elif case == "module raises":
         services = "raise RuntimeError('broken at import')\n"
