@@ -38,21 +38,29 @@ JOIN_SPELLINGS = tuple(
 # A word shaped like a requirement ID: capital letters, a hyphen, digits; and
 # the numbers joined to it, as in "CON-30 and 31", "CON-30-33" or
 # "CON-30 through CON-33". A number of another area starts a word of its own.
+# A bare joined number continues the list only if a requirement can have it:
+# requirement numbers have no leading zero (scripts/spec_trace.py), so in
+# "TRN-42, 0021 Decision 9" the list ends before the record's number.
 ID_SHAPED = re.compile(
     r"(?<![\w-])(?P<area>[A-Z]+)-(?P<number>\d+)"
-    rf"(?P<ends>(?:{JOIN}(?:(?P=area)-)?\d+(?!\w))*)(?!\w)"
+    rf"(?P<ends>(?:{JOIN}(?:(?P=area)-\d+|[1-9]\d*)(?!\w))*)(?!\w)"
 )
 # Words of that shape that are names of other things, not requirement IDs:
 # an encoding, a standard, a licence ("BSD-3-Clause") and a hash.
 NOT_IDS = frozenset({"UTF-8", "ECMA-262", "BSD-3", "SHA-256"})
 # The numbers after a citing word, joined as above: "0017", "0017 and 0019",
 # "01, 02 or 03", "0017 through 0019", "0017\u20130019". A number followed by
-# a point and a digit is a version, such as "spec 0.1", and ends the list.
-NUMBERS = rf"(?P<rest>(?:\s+\d+(?!\.\d)(?:{JOIN}\d+(?!\.\d))*)?)"
+# a point and a digit is a version, such as "spec 0.1", and ends the list. A
+# joined number continues the list only in its kind's width, four digits for
+# a record and two for a spec document, so that "spec 03, 0010 Decision 5"
+# cites one spec document.
+NUMBERS = r"(?P<rest>(?:\s+\d+(?!\.\d)(?:{join}\d{{{width}}}(?!\d|\.\d))*)?)"
 # "ADR", "ADRs", "decision record", "Decision records"; "spec", "Spec",
 # "specs", "specification", "Specifications".
-ADR = re.compile(r"\b(?:ADRs?|[Dd]ecision records?)\b" + NUMBERS)
-SPEC = re.compile(r"\b[Ss]pec(?:ification)?s?\b" + NUMBERS)
+ADR = re.compile(
+    r"\b(?:ADRs?|[Dd]ecision records?)\b" + NUMBERS.format(join=JOIN, width=4)
+)
+SPEC = re.compile(r"\b[Ss]pec(?:ification)?s?\b" + NUMBERS.format(join=JOIN, width=2))
 
 _END = re.compile(r"(?:[A-Z]+-)?(\d+)")
 _DIGITS = re.compile(r"\d+")
