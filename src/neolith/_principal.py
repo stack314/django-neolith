@@ -163,24 +163,38 @@ class Built:
         return f"{SETTING}[{self.position}] ({self.path})"
 
 
-def _inputs_problem(value: object) -> str | None:
-    """Why a backend's ``request_inputs`` is refused, or ``None``."""
+def _inputs_problems(value: object) -> list[str]:
+    """Why a backend's ``request_inputs`` is refused: one line for each
+    name that is not a header name, and one for the names given more than
+    once, so no refusal hides another. Empty when it is admitted.
+    """
     if type(value) is not tuple:
-        return f"request_inputs is a {_type(value)}, not a tuple of header names"
+        return [f"request_inputs is a {_type(value)}, not a tuple of header names"]
     names: tuple[object, ...] = value
     if names == _ANY and type(names[0]) is str:
-        return None
+        return []
+    problems: list[str] = []
     for name in names:
         if type(name) is not str or not _HEADER.fullmatch(name):
             extra = " ('*' stands alone)" if name == "*" else ""
-            return (
+            problem = (
                 f"request_inputs holds {_shown(name)}, which is not a header name "
                 f"in lower case{extra}; the form is ('authorization', 'cookie'), "
                 "() or ('*',)"
             )
-    if len(set(names)) != len(names):
-        return f"request_inputs names a header twice: {_shown(str(names))}"
-    return None
+            if problem not in problems:
+                problems.append(problem)
+    seen: set[str] = set()
+    twice: list[str] = []
+    for name in names:
+        if type(name) is str:
+            if name in seen and name not in twice:
+                twice.append(name)
+            seen.add(name)
+    if twice:
+        shown = ", ".join(_shown(name) for name in twice)
+        problems.append(f"request_inputs names a header twice: {shown}")
+    return problems
 
 
 def build(value: list[dict[str, Any]]) -> tuple[tuple[Built, ...], list[str]]:
@@ -243,9 +257,9 @@ def build(value: list[dict[str, Any]]) -> tuple[tuple[Built, ...], list[str]]:
         except Exception as error:
             problems.append(f"{where}: request_inputs raised: {_cause(error)}")
             continue
-        problem = _inputs_problem(inputs)
-        if problem is not None:
-            problems.append(f"{where}: {problem}")
+        refused = _inputs_problems(inputs)
+        if refused:
+            problems += [f"{where}: {problem}" for problem in refused]
             continue
         built.append(Built(position, path, backend, tuple(str(n) for n in inputs)))
     return tuple(built), problems

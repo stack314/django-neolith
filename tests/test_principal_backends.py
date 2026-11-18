@@ -298,7 +298,6 @@ _BUILD_REFUSALS = [
         entry(f"{HERE}.Fixed", inputs=("cookie", "*")),
         "holds '*', which is not a header name in lower case ('*' stands alone)",
     ),
-    (entry(f"{HERE}.Fixed", inputs=("*", "*")), "('*' stands alone)"),
     (entry(f"{HERE}.Fixed", inputs=(b"cookie",)), "holds a bytes"),
     (entry(f"{HERE}.Fixed", inputs=("cookie", "cookie")), "names a header twice"),
     (
@@ -320,6 +319,51 @@ def test_a_backend_set_up_cannot_build_is_refused_naming_its_entry(
     assert len(problems) == 1
     assert problems[0].startswith(f"{SETTING}[0] ({given['BACKEND']}): ")
     assert message in problems[0]
+
+
+@pytest.mark.spec("APP-16")
+@pytest.mark.parametrize(
+    ("inputs", "named"),
+    [
+        (("Bad Name", "cookie", "cookie"), ["holds 'Bad Name'", "twice: 'cookie'"]),
+        (("*", "*"), ["holds '*'", "twice: '*'"]),
+        (
+            ("A", b"b", "a", "a", "c", "c"),
+            ["holds 'A'", "holds a bytes", "twice: 'a', 'c'"],
+        ),
+        (("X", "X"), ["holds 'X'", "twice: 'X'"]),
+    ],
+)
+def test_every_refusal_of_request_inputs_is_named(
+    inputs: tuple[object, ...], named: list[str]
+) -> None:
+    """A refused name hides neither another one nor a repeat."""
+    found, problems = build([entry(f"{HERE}.Fixed", inputs=inputs)])
+    assert found == ()
+    assert len(problems) == len(named)
+    for problem, part in zip(problems, named, strict=True):
+        assert problem.startswith(f"{SETTING}[0] ({HERE}.Fixed): ")
+        assert part in problem
+
+
+@pytest.mark.spec("APP-16")
+@given(
+    st.lists(_HEADER_NAMES, unique=True, min_size=2, max_size=5),
+    st.sampled_from(["Cookie", "x_user", "", "-x", "*", "cookie "]),
+    st.data(),
+)
+def test_a_refused_name_and_a_repeat_are_named_together(
+    names: list[str], bad: str, data: st.DataObject
+) -> None:
+    where = data.draw(st.integers(0, len(names) - 1))
+    again = data.draw(st.integers(0, len(names) - 1).filter(lambda i: i != where))
+    inputs = [*names]
+    inputs[where] = bad
+    inputs.insert(data.draw(st.integers(0, len(inputs))), names[again])
+    problems = build([entry(f"{HERE}.Fixed", inputs=tuple(inputs))])[1]
+    assert len(problems) == 2
+    assert f"holds {bad!r}" in problems[0]
+    assert problems[1].endswith(f"names a header twice: {names[again]!r}")
 
 
 @pytest.mark.parametrize(
