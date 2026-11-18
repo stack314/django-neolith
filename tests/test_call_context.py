@@ -1884,7 +1884,7 @@ _PRINCIPALS = st.none() | st.builds(Principal, _TEXT, _TEXT, _CLAIMS)
     app=_NAMES,
     provider_app=_NAMES,
     root=st.none() | st.integers(1, 100),
-    own=st.none() | st.integers(1, 100),
+    owns=st.lists(st.none() | st.integers(1, 100), min_size=3, max_size=3),
     depth=st.integers(1, 3),
 )
 def test_the_context_an_action_receives_equals_the_one_its_caller_derived(
@@ -1892,10 +1892,11 @@ def test_the_context_an_action_receives_equals_the_one_its_caller_derived(
     app: str,
     provider_app: str,
     root: int | None,
-    own: int | None,
+    owns: list[int | None],
     depth: int,
 ) -> None:
-    # A chain of calls: each action calls the next connector, at a depth.
+    # A chain of calls: each action calls the next connector, at a depth,
+    # each call with its own timeout or none.
     providers: list[Seeing] = []
     carried: list[Carrying] = []
     connectors: list[Any] = []
@@ -1908,7 +1909,7 @@ def test_the_context_an_action_receives_equals_the_one_its_caller_derived(
             entered.append(_context.now())
             if level + 1 < depth:
                 asked.append(_context.now())
-                connectors[level + 1].ask(Ask(n=level + 1))
+                connectors[level + 1].ask(Ask(n=level + 1), timeout=owns[level + 1])
 
         connector, provider, carrying = _desk(
             then, app=provider_app, principal_from=(app, provider_app)
@@ -1918,7 +1919,7 @@ def test_the_context_an_action_receives_equals_the_one_its_caller_derived(
         carried.append(carrying)
     with _root(app, principal=principal, timeout=root) as scope:
         asked.append(_context.now())
-        connectors[0].ask(Ask(), timeout=own)
+        connectors[0].ask(Ask(), timeout=owns[0])
     deadlines = [scope.context.deadline]
     for level in range(depth):
         (ctx,) = providers[level].seen
@@ -1941,14 +1942,25 @@ def test_the_context_an_action_receives_equals_the_one_its_caller_derived(
         assert ctx.principal == principal
         assert ctx.trace_id == scope.context.trace_id
         assert ctx.caller == (app if level == 0 else provider_app)
-        assert (ctx.deadline is None) == (root is None and own is None)
+        own = owns[level]
+        assert (ctx.deadline is None) == (deadlines[-1] is None and own is None)
         if ctx.deadline is not None:
             assert sent.budget is not None
-            # The call's deadline is never later than its parent's (TRN-27):
-            # the budget sent is at most what the parent had left when the
-            # call was asked for. Exact, since the budget is rounded down.
+            # The call's deadline is the earlier of its parent's and its own
+            # timeout (TRN-27). So the budget sent is at most what the parent
+            # had left when the call was asked for, and at most the timeout,
+            # counted from no earlier than that. Exact, since it is rounded
+            # down.
+            earliest = []
             if deadlines[-1] is not None:
                 assert sent.budget <= (deadlines[-1] - asked[level]) * 1000
+                earliest.append(deadlines[-1])
+            if own is not None:
+                assert sent.budget <= own * 1000
+                earliest.append(asked[level] + own)
+            # And it is at least what the earlier of the two had left when
+            # the action ran, after it was sent, less the rounding down.
+            assert sent.budget > (min(earliest) - entered[level]) * 1000 - 1
             # The provider counts the budget from when the call arrived
             # (TRN-36), between the ask and the action, on this host's clock.
             # So its deadline can be later than the parent's by the time the
