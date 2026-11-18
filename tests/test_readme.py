@@ -3,7 +3,7 @@
 Each Python block in README.md opens with ``# <path>`` lines that name the
 file the code below belongs to. The test writes those files as they are,
 adds only what Django needs and the README leaves to the project (a secret
-key, a database and a URLconf), and runs them in a fresh process, since a
+key and a URLconf, above the builder call), and runs them in a fresh process, since a
 process hosts one set of apps (ADR 0022 Decision 5). So the example and the
 host's checks before it serves cannot drift apart.
 
@@ -29,7 +29,6 @@ _ABSOLUTE = re.compile(r"^https://")
 # What the README leaves to the project; nothing here is a neolith setting.
 _PROJECT = """
 SECRET_KEY = "readme-test-only"
-DATABASES = {"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}}
 ROOT_URLCONF = "urls"
 ALLOWED_HOSTS = ["testserver"]
 """
@@ -108,7 +107,8 @@ def test_the_readme_states_no_project_setting_the_test_adds() -> None:
 
 def test_the_readme_example_runs_under_its_settings(tmp_path: Path) -> None:
     files = readme_files()
-    files["settings.py"] += _PROJECT
+    # Above the builder call, which reads the module's names when it runs.
+    files["settings.py"] = _PROJECT + files["settings.py"]
     files["shop/views.py"] = _VIEW
     files["urls.py"] = _URLS
     for path, text in files.items():

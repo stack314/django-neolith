@@ -142,13 +142,16 @@ def place_order(sku: str, qty: int) -> int:
     return reply.reserved
 ```
 
-The settings neolith checks before the host serves, beside the project's usual ones such as `DATABASES`:
+The settings, beside the project's usual ones such as `SECRET_KEY`. They end with the host's builder, which builds `INSTALLED_APPS`, `DATABASES` and `DATABASE_ROUTERS` from the apps' declarations and `NEOLITH`, and checks the rest before the host serves:
 
 ```python
 # settings.py
-INSTALLED_APPS = ["inventory", "shop", "neolith"]
+from neolith.host import build_settings
+
 MIDDLEWARE = ["neolith.middleware.RootMiddleware"]  # first, and listed once
 NEOLITH = {}
+
+globals().update(build_settings(["inventory", "shop"], globals()))
 ```
 
 With these, a view in the shop app can call `place_order` directly; a command opens its root first, with `neolith.command_scope("shop")`. A test runs every Python block on this page under these settings.
