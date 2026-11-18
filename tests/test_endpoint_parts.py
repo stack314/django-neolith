@@ -762,6 +762,35 @@ def test_neolith_run_answers_head_with_get_s_fields_but_maybe_its_length(
     assert head[1].get("content-length") in (None, got[1]["content-length"])
 
 
+@pytest.mark.parametrize(
+    "media",
+    [
+        "multipart/form-data; boundary=xyz",
+        "multipart/form-data",
+        "application/x-www-form-urlencoded",
+        "text/plain",
+    ],
+)
+def test_neolith_run_hands_an_ordinary_post_to_django(live: int, media: str) -> None:
+    """The parser records defects for valid requests too, such as for the
+    empty body of a multipart upload, and those still reach Django.
+    """
+    body = b"--xyz--\r\n" if media.startswith("multipart") else b"a=1"
+    head = "\n".join(
+        [
+            "POST /nowhere/ HTTP/1.1",
+            "Host: testserver",
+            f"Content-Type: {media}",
+            f"Content-Length: {len(body)}",
+            "",
+        ]
+    )
+    status, content, _ = _exchange(live, head, body)
+    # Django's own 404 for a path no pattern matches, not the server's 400.
+    assert status == 404
+    assert b"Error response" not in content
+
+
 def test_neolith_run_serves_a_call_and_reads_the_path_decoded(
     live: int, site: Site
 ) -> None:

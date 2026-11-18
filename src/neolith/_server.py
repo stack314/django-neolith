@@ -12,7 +12,8 @@ development, tests and the 0.1 proof, not for production.
 connection closed, before Django sees it, as gunicorn answers it (ADR 0011,
 the admitted set): Django's server keeps only the first of each. So is a
 request with a header line that is not a field, after which the standard
-library's parser reads no more fields.
+library's parser reads no more fields; that is the only defect the parser
+records that is refused.
 
 **Which requests are in flight.** One lock holds the state of each open
 connection: idle, or busy with a request. A request is in flight from the
@@ -46,6 +47,7 @@ server ``neolith run`` starts.
 """
 
 import contextlib
+import email.errors
 import os
 import select
 import signal
@@ -211,10 +213,16 @@ class _Handler(WSGIRequestHandler):
             self.close_connection = True
             return False
         found: bool = super().parse_request()
-        if found and self.headers.defects:
+        if found and any(
+            isinstance(defect, email.errors.MissingHeaderBodySeparatorDefect)
+            for defect in self.headers.defects
+        ):
             # A line that is not a field ends the header section where the
             # parser stops, so every field after it, a second Content-Length
-            # or an Authorization among them, would go unread.
+            # or an Authorization among them, would go unread. The parser
+            # records other defects for valid requests, such as one for the
+            # empty body of every multipart/form-data upload, so only this
+            # one is refused.
             self.send_error(400, explain="a header field line cannot be read")
             return False
         if found and any(
