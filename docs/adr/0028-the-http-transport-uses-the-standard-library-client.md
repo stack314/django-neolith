@@ -292,7 +292,7 @@ Follows principles 5 (*same semantics over same mechanics*), 6 (*visible failure
 
 ## Consequences
 
-- No new runtime dependency. The roadmap's step 5 row reads "connector over the standard library's HTTP client" and its note on httpx is removed, in the pull request that brings the transport and accepts this record.
+- No new runtime dependency. The roadmap's step 5 row reads "connector over the standard library's HTTP client" and its note on httpx is removed once this record is Accepted, in the pull request that closes step 5.
 - neolith maintains a pool, a socket wrapper, strict response checks and threaded resolution, with tests that play the provider byte by byte. A bug there is neolith's to fix, not a library's. The response checks rely on one private method of `http.client`, pinned by tests on every supported Python.
 - The caller stops waiting at its deadline in every phase, and `Neolith-Timeout` carries what remains when the request leaves. The private `Sent` carries the deadline in place of the budget, and one helper turns it into a budget for the connector and for each transport.
 - A call with no deadline to a provider that is alive but never answers waits indefinitely: keepalive finds only a host or path that has gone. Commands and background roots have no deadline unless given a timeout (TRN-48), so the guide advises that background work which calls a remote provider opens its root with a timeout, and that deployers keep a request deadline set.
