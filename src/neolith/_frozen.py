@@ -8,18 +8,28 @@ writes with ``object.__setattr__``. Both are in ``dataclasses`` itself
 (``_field_assign`` and ``_dataclass_setstate``, Python 3.12 to 3.14).
 
 ``once`` closes both doors on a class: each refuses a value any of whose
-fields is already bound, and runs as before on one that is not, so building,
-copying, pickling and ``copy.replace`` work as they did, since each makes a
-new value. Going around on purpose, with ``object.__setattr__``, is not
-refused, as with any frozen dataclass.
+fields is already bound, or that is being built right now, and runs as
+before on one that is neither, so building, copying, pickling and
+``copy.replace`` work as they did, since each makes a new value. "Being
+built" covers code the build itself runs, such as a ``claims`` mapping's
+``__getitem__`` or a state's ``__iter__``: called back from there, either
+door would build the value first and the outer build would then write it
+again. Going around on purpose, with ``object.__setattr__`` or the wrapped
+method's ``__wrapped__``, is not refused, as with any frozen dataclass.
 """
 
 import dataclasses
 import functools
+import threading
 import types
 from collections.abc import Callable
 
 __all__ = ["once"]
+
+# The ids of the values being built now. A value is alive while it is built,
+# so its id is not reused in that time.
+_BUILDING: set[int] = set()
+_LOCK = threading.Lock()
 
 
 def _bound(value: object, name: str) -> bool:
@@ -49,12 +59,19 @@ def _guarded(
 ) -> Callable[..., None]:
     @functools.wraps(method)
     def guarded(self: object, /, *args: object, **kwargs: object) -> None:
-        if any(_bound(self, name) for name in names):
-            raise TypeError(
-                f"this {cls.__name__} is already built, and a frozen value is "
-                "never built again"
-            )
-        method(self, *args, **kwargs)
+        key = id(self)
+        with _LOCK:
+            if key in _BUILDING or any(_bound(self, name) for name in names):
+                raise TypeError(
+                    f"this {cls.__name__} is already built, and a frozen value "
+                    "is never built again"
+                )
+            _BUILDING.add(key)
+        try:
+            method(self, *args, **kwargs)
+        finally:
+            with _LOCK:
+                _BUILDING.discard(key)
 
     return guarded
 

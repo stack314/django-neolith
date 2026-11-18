@@ -32,6 +32,7 @@ from neolith._context import Sent
 from neolith._contracts import _FrozenList, _FrozenMap
 from neolith._declaration import Declaration, Provision
 from neolith._forms import _Form
+from neolith._frozen import once
 from neolith._host import Connector, Host
 
 
@@ -179,6 +180,60 @@ def test_a_built_value_is_never_built_again(klass: type) -> None:
         with pytest.raises(TypeError):
             value.__setstate__(case.state)
         _same(value, before)
+
+
+_RESTORED = [
+    klass for klass in _CASES if hasattr(vars(klass).get("__setstate__"), "__wrapped__")
+]
+
+
+@pytest.mark.parametrize("klass", _RESTORED, ids=lambda klass: klass.__name__)
+def test_a_value_is_not_restored_again_from_its_own_state(klass: type) -> None:
+    # The state is read while the value is restored: a state that restores the
+    # value from there would have it seen as one value, then written as another.
+    state = _CASES[klass].state
+    assert isinstance(state, list)
+    unbuilt = klass.__new__(klass)
+    refused: list[str] = []
+
+    class State:
+        def __iter__(self) -> Iterator[object]:
+            try:
+                unbuilt.__setstate__(state)
+            except TypeError as error:
+                refused.append(str(error))
+            return iter(state)
+
+    unbuilt.__setstate__(State())
+    assert refused
+    assert "already built" in refused[0]
+    assert _state(unbuilt)[0].keys() == _state(_CASES[klass].make())[0].keys()
+
+
+@once
+class _Hooked:
+    """A value that runs a hook before it writes its field, as Principal does."""
+
+    __slots__ = ("name",)
+
+    def __init__(self, name: str, hook: Callable[[], object] = lambda: None) -> None:
+        hook()
+        object.__setattr__(self, "name", name)
+
+
+def test_once_refuses_a_build_started_from_inside_the_build() -> None:
+    unbuilt = _Hooked.__new__(_Hooked)
+    with pytest.raises(TypeError, match="already built"):
+        _Hooked.__init__(unbuilt, "first", lambda: unbuilt.__init__("second"))  # type: ignore[misc]
+    # The refusal ended that build, so the value can be built once more.
+    unbuilt.__init__("third")  # type: ignore[misc]
+    assert unbuilt.name == "third"
+    with pytest.raises(TypeError, match="already built"):
+        unbuilt.__init__("fourth")  # type: ignore[misc]
+    # Another value of the class can still be built from inside a build.
+    inner = _Hooked.__new__(_Hooked)
+    outer = _Hooked("outer", lambda: inner.__init__("inner"))  # type: ignore[misc]
+    assert (outer.name, inner.name) == ("outer", "inner")
 
 
 @pytest.mark.parametrize("klass", list(_CASES), ids=lambda klass: klass.__name__)
