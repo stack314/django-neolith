@@ -46,7 +46,9 @@ import contextvars
 import dataclasses
 import importlib
 import inspect
+import itertools
 import logging
+import sys
 import threading
 import types
 from collections.abc import Callable, Mapping, Sequence
@@ -108,15 +110,20 @@ class Host:
 _LOCK: Final = threading.Lock()
 # The identities connect() was asked for before a table existed: each with
 # the places it was asked from, which only the message reads, and for each
-# place the apps whose loading step asked from it: an app's name, or the
-# entry of INSTALLED_APPS being imported, with None for a request made
-# outside any app's loading step.
+# place what it is tied to: an app's name or config class path, a key of
+# _PENDING until the next set-up names it, or None for no app, which every
+# set-up checks.
 _RECORDED: dict[str, dict[str, dict[str | None, None]]] = {}
-# The loads of Django's global registry that recorded a place while
-# importing an entry of INSTALLED_APPS: each load's entries and the dict of
-# app configs it fills, one per entry in order, which outlives the load even
-# when it stops before its set-up.
-_LOADS: list[tuple[tuple[object, ...], dict[str, AppConfig]]] = []
+# The requests made while Django imported an entry of INSTALLED_APPS, before
+# that entry's config existed, which the next set-up ties (_name_pending):
+# for each, the module that asked if it asked as it was imported, the entry,
+# a copy of the load's entries, and the dict of app configs the load fills,
+# one per entry in order, which outlives the load even when it stops before
+# its set-up.
+_PENDING: dict[
+    str, tuple[str | None, str, tuple[object, ...], dict[str, AppConfig]]
+] = {}
+_PENDING_KEYS: Final = itertools.count()
 # The names of the apps installed at any set-up of this process.
 _ONCE_INSTALLED: set[str] = set()
 # The app whose implementation Validate imports and builds now, if any.
@@ -243,8 +250,8 @@ def set_up(config: AppConfig) -> None:
             for problem in _configure.settings_problems(configs)
         ]
     with _LOCK:
+        _name_pending(configs)
         _ONCE_INSTALLED.update(c.name for c in configs)
-        _name_entries()
         installed = frozenset(c.name for c in configs) | {
             f"{type(c).__module__}.{type(c).__qualname__}" for c in configs
         }
@@ -306,103 +313,127 @@ def _checked_by(installed: frozenset[str]) -> dict[str, list[str]]:
     return checked
 
 
-def _loading_app() -> str | None:
-    """The app whose loading step runs now in this thread, or ``None``.
+def _ties(module: str, at_import: bool) -> set[str | None]:
+    """What a request from a ``connect()`` in ``module`` is tied to, made now
+    in this thread; ``at_import`` when it runs at the module's top level, as
+    the module is imported.
 
-    Validate names the app whose implementation it imports and builds.
-    Otherwise the frame of ``Apps.populate`` for Django's global registry
-    names it: once app modules are imported, its ``app_config`` is the app
-    whose models are imported or whose ``ready()`` runs; before, its
-    ``entry`` is the entry of ``INSTALLED_APPS`` being imported, which
-    ``_name_entries`` turns into the app's name at that load's set-up. The
+    The request belongs to the app whose loading step runs: the app whose
+    implementation Validate imports and builds, or else the app the frame of
+    Django's ``Apps.populate`` is at, which is the app whose models are
+    imported or whose ``ready()`` runs, or the entry of ``INSTALLED_APPS``
+    being imported, which ``_name_pending`` ties at the next set-up. Python
+    imports a module once, so a request made as a module is imported also
+    belongs to the module's own app, or to no app (``_module_ties``). The
     same at Django 5.2 and 6.1.
     """
     validating = _VALIDATING.get()
+    loading = None if validating is not None else _populating()
     if validating is not None:
-        return validating
-    loading = _populating()
-    if loading is None:
-        return None
-    found = loading.get("app_config" if global_apps.apps_ready else "entry")
-    if isinstance(found, AppConfig):
-        return found.name
-    if type(found) is not str:
-        return None
-    entries = loading.get("installed_apps")
-    # One dict of app configs per load; a copy of its entries, since the list
-    # given can change after the load.
-    if isinstance(entries, (list, tuple)) and not any(
-        made is global_apps.app_configs for _, made in _LOADS
-    ):
-        _LOADS.append((tuple(entries), global_apps.app_configs))
-    return found
+        ties: set[str | None] = {validating}
+    elif loading is None:
+        return {None}
+    elif global_apps.apps_ready:
+        found = loading.get("app_config")
+        ties = {found.name if isinstance(found, AppConfig) else None}
+    else:
+        entry = loading.get("entry")
+        entries = loading.get("installed_apps")
+        if isinstance(entry, AppConfig):
+            ties = {entry.name}
+        elif type(entry) is str and isinstance(entries, (list, tuple)):
+            key = f"\0{next(_PENDING_KEYS)}"
+            _PENDING[key] = (
+                module if at_import else None,
+                entry,
+                tuple(entries),
+                global_apps.app_configs,
+            )
+            return {key}
+        else:
+            return {None}
+    if at_import:
+        ties |= _module_ties(module, list(global_apps.app_configs.values()))
+    return ties
 
 
-def _import_ties(module: str) -> set[str | None]:
-    """What a ``connect()`` at the top level of ``module``, run as it is
-    imported, is tied to besides the app whose loading imported it.
-
-    Python imports a module once, so every later set-up that would import
-    it in a fresh process must still check the call. A module of an app this
-    load installs is tied to that app too; a module of no app installed in
-    any load of the process is tied to no app, so every set-up checks it.
-    A module of an app installed earlier but not now is left to its loading
-    app alone (ADR 0029).
+def _module_ties(module: str, *loads: Sequence[AppConfig]) -> set[str | None]:
+    """What a request made as ``module`` was imported belongs to besides the
+    app whose loading imported it: the app Django's own rule finds for the
+    module among the configs of ``loads``, in turn; nothing more when the
+    module lies in an app installed at an earlier set-up but not found here;
+    else no app, so that every set-up checks it (ADR 0029).
     """
     if not module:
         return {None}
-    if global_apps.apps_ready:
-        found = global_apps.get_containing_app_config(module)
+    for configs in loads:
+        found = _containing(module, configs)
         if found is not None:
             return {found.name}
-    else:
-        # Importing an INSTALLED_APPS entry: its own package is the entry's.
-        loading = _populating()
-        entry = None if loading is None else loading.get("entry")
-        if type(entry) is str and (
-            entry == module
-            or entry.startswith(f"{module}.")
-            or module.startswith(f"{entry}.")
-        ):
-            return set()
-    apps = _ONCE_INSTALLED | {c.name for c in global_apps.app_configs.values()}
-    if any(module == app or module.startswith(f"{app}.") for app in apps):
+    if any(_within(module, app) for app in _ONCE_INSTALLED):
         return set()
     return {None}
 
 
-def _name_entries() -> None:
-    """Tie each call site tied to an entry of ``INSTALLED_APPS`` to the
-    config the entry made, so that a set-up of that config matches it however
-    the entry spelt it: a module, a config class, a class re-exported or
-    aliased, or a config whose ``name`` differs from its package.
-
-    Phase 1 of ``Apps.populate`` adds one config per entry, in order, to the
-    dict of its load, which ``_LOADS`` keeps; a load that stopped before its
-    set-up keeps the configs it made, and an entry whose config was never
-    made stays as it is.
+def _containing(module: str, configs: Sequence[AppConfig]) -> AppConfig | None:
+    """The config whose ``name`` is the longest that ``module`` lies in, as
+    Django's ``Apps.get_containing_app_config`` finds it.
     """
-    names: dict[str, str] = {}
-    for entries, made in _LOADS:
-        for entry, config in zip(entries, list(made.values()), strict=False):
-            if type(entry) is str:
-                # The config class, which every spelling of the entry makes;
-                # an app's name would also match the app a config with
-                # another name points at, installed alone. Django's own
-                # AppConfig is shared by many apps, so its apps go by name.
-                kind = type(config)
-                names[entry] = (
-                    config.name
-                    if kind is AppConfig
-                    else f"{kind.__module__}.{kind.__qualname__}"
-                )
-    _LOADS.clear()
+    found = [c for c in configs if _within(module, c.name)]
+    return max(found, key=lambda c: len(c.name), default=None)
+
+
+def _within(module: str, package: str) -> bool:
+    return module == package or module.startswith(f"{package}.")
+
+
+def _config_key(config: AppConfig) -> str:
+    """How a tie names a config made from an entry: its class, which every
+    spelling of the entry makes, since an app's name would also match the app
+    a config with another name points at, installed alone. Django's own
+    ``AppConfig`` is shared by many apps, so its apps go by name.
+    """
+    kind = type(config)
+    if kind is AppConfig:
+        return config.name
+    return f"{kind.__module__}.{kind.__qualname__}"
+
+
+def _name_pending(configs: Sequence[AppConfig]) -> None:
+    """Tie each request made while an entry of ``INSTALLED_APPS`` was
+    imported, now that its load has made the configs it could; ``configs``
+    are this set-up's.
+
+    A request belongs to the config its entry made, or to no app when the
+    load stopped at that entry. A request made as a module was imported also
+    belongs to that config when the module is the entry's own (the entry, or
+    the module that defines the entry's class) or lies below it, which keeps
+    a config whose ``name`` points elsewhere; otherwise to what
+    ``_module_ties`` finds among that load's configs, then this set-up's.
+    """
+    named: dict[str, set[str | None]] = {}
+    for key, (module, entry, entries, made) in _PENDING.items():
+        loaded = list(made.values())
+        at = entries.index(entry) if entry in entries else len(loaded)
+        config = loaded[at] if at < len(loaded) else None
+        own: str | None = None if config is None else _config_key(config)
+        ties: set[str | None] = {own}
+        home = entry if entry in sys.modules else entry.rpartition(".")[0]
+        if module is not None and (own is None or not _within(module, home)):
+            ties |= _module_ties(module, loaded, configs)
+        named[key] = ties
+    _PENDING.clear()
     for places in _RECORDED.values():
-        for place, loads in places.items():
-            if any(app in names for app in loads):
-                places[place] = {
-                    app if app is None else names.get(app, app): None for app in loads
-                }
+        for place, ties in places.items():
+            if any(tie in named for tie in ties if tie is not None):
+                tied: dict[str | None, None] = {}
+                for tie in ties:
+                    tied.update(
+                        dict.fromkeys(
+                            named[tie] if tie is not None and tie in named else {tie}
+                        )
+                    )
+                places[place] = tied
 
 
 def _populating() -> Mapping[str, object] | None:
@@ -852,11 +883,8 @@ def connect(identity: str, /) -> "Connector":
             host = _restored_elsewhere()
         if host is None:
             where, module, at_import = _place()
-            ties = {_loading_app()}
-            if at_import:
-                ties |= _import_ties(module)
             place = _RECORDED.setdefault(identity, {}).setdefault(where, {})
-            place.update(dict.fromkeys(ties))
+            place.update(dict.fromkeys(_ties(module, at_import)))
         elif identity not in host.known:
             raise UsageError(
                 f"connect({_quoted(identity)}): no app of this host provides or "

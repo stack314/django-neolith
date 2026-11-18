@@ -1841,6 +1841,62 @@ def test_an_installed_apps_list_changed_after_a_load_names_its_own_apps(
 
 
 @pytest.mark.spec("APP-14")
+@pytest.mark.parametrize("spelling", ["module", "config class", "re-exported class"])
+@pytest.mark.parametrize(
+    "position", ["its package", "beside its apps module", "its parent", "no app"]
+)
+def test_a_module_an_entry_imports_belongs_to_the_app_it_lies_in(
+    write_app: WriteApp, tmp_path: Path, position: str, spelling: str
+) -> None:
+    # A module that asks for nope.v1 as Django imports an entry, in each
+    # position against the app the entry makes, after a refused override and
+    # after one whose load stopped: the first apps restored decide as a fresh
+    # process does, except that a module of no app stops every later set-up
+    # (ADR 0029), and every spelling of the app is refused again.
+    asks = _UNDECLARED_CONNECTS
+    lib = tmp_path / f"{write_app('')}_lib"
+    lib.mkdir()
+    (lib / "__init__.py").write_text(asks, encoding="utf-8")
+    imports = {
+        "beside its apps module": "from . import contracts\n",
+        "no app": f"import {lib.name}\n",
+    }.get(position, "")
+    config = imports + _PLAIN_CONFIG.replace("{name}", "{package}")
+    reexport = "from .apps import Config\n" if spelling == "re-exported class" else ""
+    own = asks if position == "its package" else ""
+    package = write_app(config, __init__=own + reexport, contracts=asks)
+    if position == "its parent":
+        outer = write_app("", __init__=asks)
+        inner = tmp_path / outer / "inner"
+        inner.mkdir()
+        (inner / "apps.py").write_text(
+            _PLAIN_CONFIG.replace("{name}", f"{outer}.inner"), encoding="utf-8"
+        )
+        (inner / "__init__.py").write_text(reexport, encoding="utf-8")
+        package = f"{outer}.inner"
+    spelt = {
+        "module": package,
+        "config class": f"{package}.apps.Config",
+        "re-exported class": f"{package}.Config",
+    }
+    entry = spelt[spelling]
+    respelt = spelt["config class" if spelling == "module" else "module"]
+    restored = (
+        "DeclarationError" if position in ("its parent", "no app") else "admitted"
+    )
+    for first in ([entry], [entry, "no_such_app"]):
+        stopped = "DeclarationError" if len(first) == 1 else "ModuleNotFoundError"
+        assert _walk([first, [], [respelt], [entry]]) == [
+            stopped,
+            restored,
+            "DeclarationError",
+            "DeclarationError",
+        ], first
+    if position == "its parent":
+        assert _walk([[entry], [outer]]) == ["DeclarationError"] * 2
+
+
+@pytest.mark.spec("APP-14")
 def test_a_place_two_apps_ask_from_belongs_to_both(write_app: WriteApp) -> None:
     # One helper line asks for nope.v1 on behalf of two apps, each added by
     # its own override: each override is refused every time it is entered.
