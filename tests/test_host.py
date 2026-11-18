@@ -1575,6 +1575,90 @@ def test_a_record_belongs_to_the_set_up_whose_loading_asked_for_it(
 
 
 @pytest.mark.spec("APP-14")
+def test_a_place_two_set_ups_ask_from_belongs_to_both(write_app: WriteApp) -> None:
+    # One helper line asks for nope.v1 on behalf of two apps, each added by
+    # its own override: each override is refused every time it is entered.
+    helper = write_app(
+        "",
+        helpers="from neolith import connect\n\n\ndef ask(identity):\n"
+        "    return connect(identity)\n",
+    )
+    asks = f'from {helper}.helpers import ask\n\nask("nope.v1")\n'
+    first, second = write_app("", models=asks), write_app("", models=asks)
+    printed = in_built_host(
+        f"""
+        import django
+        from django.test.utils import override_settings
+
+        django.setup()
+        installed = list(settings.INSTALLED_APPS)
+        for added in ([{first!r}], [{second!r}], [{first!r}], [{second!r}], []):
+            try:
+                with override_settings(INSTALLED_APPS=[*added, *installed]):
+                    print("admitted")
+            except Exception as error:
+                print(type(error).__name__)
+        """,
+        host_apps.HOSTED,
+        {"NEOLITH": host_apps.NEOLITH},
+    )
+    assert printed.splitlines() == [*["DeclarationError"] * 4, "admitted"]
+
+
+@pytest.mark.spec("APP-14", "APP-15")
+def test_connect_from_another_thread_while_a_set_up_loads_is_checked_at_once(
+    write_app: WriteApp,
+) -> None:
+    # An app of the first set-up holds a module that asks for nope.v1 when it
+    # is first imported. Another thread imports it while an override loads:
+    # it is checked against the table that thread's calls run on, so it is
+    # refused there, and neither that override nor the first apps restored
+    # inherit it.
+    late = write_app("", lazy='from neolith import connect\n\nconnect("nope.v1")\n')
+    loading = write_app(
+        "",
+        models=f"""
+            import threading
+
+
+            def other():
+                try:
+                    import {late}.lazy
+                    print("the other thread was admitted")
+                except Exception as error:
+                    print("the other thread:", type(error).__name__)
+
+
+            thread = threading.Thread(target=other)
+            thread.start()
+            thread.join()
+            """,
+    )
+    printed = in_built_host(
+        f"""
+        import django
+        from django.test.utils import override_settings
+
+        django.setup()
+        installed = list(settings.INSTALLED_APPS)
+        for added in ([{late!r}, {loading!r}], [{late!r}]):
+            try:
+                with override_settings(INSTALLED_APPS=[*added, *installed]):
+                    print("admitted")
+            except Exception as error:
+                print(type(error).__name__)
+        """,
+        host_apps.HOSTED,
+        {"NEOLITH": host_apps.NEOLITH},
+    )
+    assert printed.splitlines() == [
+        "the other thread: UsageError",
+        "admitted",
+        "admitted",
+    ]
+
+
+@pytest.mark.spec("APP-14")
 def test_a_nested_app_added_and_refused_leaves_its_outer_app_admitted(
     write_app: WriteApp, tmp_path: Path
 ) -> None:

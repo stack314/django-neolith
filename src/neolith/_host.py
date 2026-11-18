@@ -23,9 +23,10 @@ State the host owns (CONTRIBUTING K6), all of it guarded by one lock:
 
 - the identities that ``connect()`` was asked for before a table existed,
   with the file and line of each ``connect()``, each tied to the installed
-  apps of the set-up that first saw it; a set-up checks those tied to apps it
-  all installs, and only a set-up that passes drops them, so an unknown one
-  stays and the next set-up of those apps reports it again (ADR 0026);
+  apps of every set-up whose loading asked from it; a set-up checks those
+  tied to apps it all installs, and only a set-up that passes drops them, so
+  an unknown one stays and the next set-up of those apps reports it again
+  (ADR 0029);
 - the hosted apps of the first set-up that passed, since a process hosts one
   set of apps (ADR 0022 Decision 5);
 - the ``NEOLITH`` that first set-up checked, without ``REQUEST_DEADLINE``,
@@ -83,6 +84,7 @@ _log = logging.getLogger("neolith.host")
 
 _LABEL: Final = "neolith"
 _HOST_ATTR: Final = "_neolith_host"
+_LOADER_ATTR: Final = "_neolith_loader"
 
 
 @final
@@ -105,9 +107,9 @@ class Host:
 _LOCK: Final = threading.Lock()
 # The identities connect() was asked for before a table existed: each with
 # the places it was asked from, which only the message reads, and for each
-# place the names of the apps installed at the set-up that first saw it, or
-# None until a set-up has.
-_RECORDED: dict[str, dict[str, frozenset[str] | None]] = {}
+# place the installed apps of each set-up whose loading asked from it, with
+# None for a request no set-up has seen yet.
+_RECORDED: dict[str, dict[str, dict[frozenset[str] | None, None]]] = {}
 # The hosted apps of the first set-up that passed: label to config class.
 _first: Mapping[str, type[AppConfig]] | None = None
 # The NEOLITH the first set-up checked, without REQUEST_DEADLINE.
@@ -125,6 +127,11 @@ class HostConfig(AppConfig):
     label = _LABEL
     default = True
     verbose_name = "neolith"
+
+    def __init__(self, app_name: str, app_module: types.ModuleType | None) -> None:
+        super().__init__(app_name, app_module)
+        # Django creates the config in the thread that loads the registry.
+        setattr(self, _LOADER_ATTR, threading.get_ident())
 
     def ready(self) -> None:
         _checks.register()
@@ -155,7 +162,9 @@ def _table() -> tuple[Host | None, bool]:
       calls wait for; with none, no set-up has passed, and ``connect()``
       records. A later set-up's own load reaches this case for a module
       imported before neolith's app is created, so that ``connect()`` is
-      checked against the table the set-up would restore.
+      checked against the table the set-up would restore. ``connect()``
+      from a thread other than the one loading a later set-up is checked
+      against that table too (``_restored_elsewhere``).
     """
     config = global_apps.app_configs.get(_LABEL)
     host = _host_of(config)
@@ -168,6 +177,26 @@ def _table() -> tuple[Host | None, bool]:
         if config is not None:
             return _host_of(config), False
     return None, False
+
+
+def _restored_elsewhere() -> Host | None:
+    """While another thread loads a later set-up: the table Django restores
+    when that set-up ends, if any.
+
+    A ``connect()`` from this thread then is not caused by that set-up's
+    loading, so it is checked at once against the table this thread's calls
+    run on, as it is outside any loading, instead of being recorded.
+    """
+    config = global_apps.app_configs.get(_LABEL)
+    if type(config) is not HostConfig:
+        return None
+    if vars(config).get(_LOADER_ATTR) == threading.get_ident():
+        return None
+    for stored in reversed(global_apps.stored_app_configs):
+        found = stored.get(_LABEL)
+        if found is not None:
+            return _host_of(found)
+    return None
 
 
 def _host_of(config: object) -> Host | None:
@@ -203,7 +232,8 @@ def set_up(config: AppConfig) -> None:
             for problem in _configure.settings_problems(configs)
         ]
     with _LOCK:
-        checked = _checked_by(frozenset(c.name for c in configs))
+        installed = frozenset(c.name for c in configs)
+        checked = _checked_by(installed)
         for identity, places in sorted(checked.items()):
             if identity not in host.known:
                 refusals.extend(_unknown_at(identity, place, host) for place in places)
@@ -230,10 +260,14 @@ def set_up(config: AppConfig) -> None:
         # Only a set-up that passes is done with the places it checked, all
         # of which its table knows. A refused one drops none, whatever its
         # table knew, so the next set-up of the same apps reports an unknown
-        # identity again (ADR 0026).
+        # identity again (ADR 0029).
         for identity, places in checked.items():
             for place in places:
-                del _RECORDED[identity][place]
+                loads = _RECORDED[identity][place]
+                for apps in [a for a in loads if a is not None and a <= installed]:
+                    del loads[apps]
+                if not loads:
+                    del _RECORDED[identity][place]
             if not _RECORDED[identity]:
                 del _RECORDED[identity]
         setattr(config, _HOST_ATTR, published)
@@ -243,20 +277,22 @@ def _checked_by(installed: frozenset[str]) -> dict[str, list[str]]:
     """The places of each record that a set-up installing ``installed``
     checks, after tying each place no set-up has seen to ``installed``.
 
-    A record is made only while a set-up loads, or before the first one, and
-    a place asked again is untied, so the first set-up to see a place is the
-    one whose loading asked for it. A
+    A record is made only by the thread that loads a set-up, or before the
+    first one, so the first set-up to see a request from a place is the one
+    whose loading asked for it. A place asked from by several set-ups belongs
+    to each of them. A
     later set-up checks the place if it installs every app that set-up did.
     One that installs fewer, such as the first apps restored after an
     override that added an app, leaves it for a set-up that installs them
-    all again (ADR 0026).
+    all again (ADR 0029).
     """
     checked: dict[str, list[str]] = {}
     for identity, places in _RECORDED.items():
-        for place, apps in places.items():
-            if apps is None:
-                places[place] = apps = installed
-            if apps <= installed:
+        for place, loads in places.items():
+            if None in loads:
+                del loads[None]
+                loads[installed] = None
+            if any(apps <= installed for apps in loads):
                 checked.setdefault(identity, []).append(place)
     return checked
 
@@ -686,8 +722,11 @@ def connect(identity: str, /) -> "Connector":
     with _LOCK:
         host, _ = _table()
         if host is None:
-            # A place asked again belongs to the set-up loading now.
-            _RECORDED.setdefault(identity, {})[_place()] = None
+            host = _restored_elsewhere()
+        if host is None:
+            # A request from a place asked from before belongs to the set-up
+            # loading now as well.
+            _RECORDED.setdefault(identity, {}).setdefault(_place(), {})[None] = None
         elif identity not in host.known:
             raise UsageError(
                 f"connect({_quoted(identity)}): no app of this host provides or "
