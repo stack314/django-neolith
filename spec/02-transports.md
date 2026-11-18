@@ -80,7 +80,11 @@ A host learns of a provider in two ways: from its own apps, one of which may pro
 
 **TRN-66.** Under the `single` policy, a host MUST choose each contract version's one provider before it serves: the app of the host that provides it, when there is one, and otherwise the remote provider its configuration names for it.
 
-**TRN-67.** A host MUST stop before it serves when its configuration names a remote provider for a contract version that none of its apps requires, or, under the `single` policy, for one that one of its apps provides.
+~~**TRN-67.** A host MUST stop before it serves when its configuration names a remote provider for a contract version that none of its apps requires, or, under the `single` policy, for one that one of its apps provides.~~ Withdrawn in spec 0.1: restated for every routing policy as TRN-75.
+
+**TRN-75.** A host MUST stop before it serves when its configuration names a remote provider for a contract version that none of its apps requires, or that one of its apps provides.
+
+An app of the host answers every call to the contract versions it provides, and an in-process call never ends with `unavailable`, so a remote provider listed beside it would never be called.
 
 ~~**TRN-7.** Fallback after a failed call MUST happen only for idempotent actions and only on `unavailable` or `timeout`.~~ Withdrawn in spec 0.1: `timeout` leaves the outcome unknown, so it is no longer grounds for fallback (ADR 0017).
 
