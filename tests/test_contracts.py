@@ -764,12 +764,9 @@ _BEFORE_VALIDATORS: list[Callable[..., object]] = [
 def test_before_validator_is_refused_when_pydantic_hands_it_validation_info(
     validator: Callable[..., object], place: str
 ) -> None:
-    checked: object = Annotated[int, BeforeValidator(validator)]
-    record = create_model(
-        "Later",
-        items=(list[int], ...),
-        y=(checked if place == "field" else list[checked], ...),  # type: ignore[valid-type]
-    )
+    checked: Any = Annotated[int, BeforeValidator(validator)]
+    annotation: Any = checked if place == "field" else cast("Any", list)[checked]
+    record = create_model("Later", items=(list[int], ...), y=(annotation, ...))
     # What the installed Pydantic hands the validator when it reads a value.
     _VALIDATOR_INFO.clear()
     record.model_validate({"items": [1], "y": 2 if place == "field" else [2]})

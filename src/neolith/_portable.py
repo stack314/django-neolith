@@ -1497,7 +1497,7 @@ def _private_attribute_problem(cls: type[Any]) -> str | None:
                 is not False
             )
             try:
-                parameters = _signature(factory).parameters.values()
+                parameters = list(_signature(factory).parameters.values())
             except (ValueError, TypeError):
                 # Pydantic cannot read it either, so calls it with none.
                 parameters = []
