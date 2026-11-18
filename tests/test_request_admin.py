@@ -299,6 +299,7 @@ def ran(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
                 "django.contrib.sessions.middleware.SessionMiddleware",
                 "django.contrib.auth.middleware.AuthenticationMiddleware",
                 "django.contrib.messages.middleware.MessageMiddleware",
+                "neolith.middleware.PrincipalMiddleware",
             ],
             "ROOT_URLCONF": "tests.request_admin.urls",
             "SECRET_KEY": "a key for one test process only",

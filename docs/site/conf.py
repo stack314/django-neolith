@@ -46,7 +46,9 @@ autodoc_typehints = "signature"
 autodoc_class_signature = "separated"
 autodoc_typehints_format = "short"
 autodoc_member_order = "bysource"
-autodoc_preserve_defaults = True
+# A default is shown by its repr, as help() shows it: a marker such as
+# "<missing>" or "<factory>" is shown as the marker, not by a private name.
+autodoc_preserve_defaults = False
 python_use_unqualified_type_names = True
 napoleon_google_docstring = True
 napoleon_numpy_docstring = False

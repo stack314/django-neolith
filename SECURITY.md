@@ -8,7 +8,7 @@ Report it privately through the repository's Security tab ("Report a vulnerabili
 
 ## Supported versions
 
-Neolith has no release yet. Once releases exist, only the latest 0.x release receives security fixes.
+Only the latest 0.x release receives security fixes.
 
 | Version | Supported |
 |---|---|

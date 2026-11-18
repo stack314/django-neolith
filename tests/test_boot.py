@@ -23,6 +23,7 @@ from typing import Any
 import pytest
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
+from django.db import connections
 from django.db.migrations.loader import MigrationLoader
 from django.db.utils import ConnectionHandler
 from django.test import override_settings
@@ -644,8 +645,9 @@ def test_the_test_session_booted_without_reading_a_schema() -> None:
     assert kept is not None
     assert kept.tests
     assert kept.refusal is None
-    # The suite's default is in memory, which Boot's read would refuse.
-    assert settings.DATABASES["default"]["NAME"] == ":memory:"
+    # The suite's default is in memory, which Boot's read would refuse; once
+    # a test asks for the database, pytest-django names its test database.
+    assert connections["default"].is_in_memory_db()  # type: ignore[attr-defined]
 
 
 # No refusal hides another.

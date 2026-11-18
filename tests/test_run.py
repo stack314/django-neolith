@@ -32,6 +32,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from neolith import _checks, _cli, _server
+from tests.hosting import NEOLITH_KEYS
 
 DESK = "tests.run_apps.desk"
 SQLITE = "django.db.backends.sqlite3"
@@ -43,7 +44,10 @@ _WAIT = 60
 _DEPLOYER = """\
 SECRET_KEY = "a key for one test process only"
 ALLOWED_HOSTS = ["127.0.0.1", "[::1]", "localhost"]
-MIDDLEWARE = ["neolith.middleware.RootMiddleware"]
+MIDDLEWARE = [
+    "neolith.middleware.RootMiddleware",
+    "neolith.middleware.PrincipalMiddleware",
+]
 ROOT_URLCONF = "tests.run_apps.desk.urls"
 USE_TZ = True
 NEOLITH = {neolith!r}
@@ -589,8 +593,7 @@ def test_a_default_database_is_refused_with_the_other_settings_refusals(
     assert ran.returncode == 1, ran.stderr
     refusals = [line for line in ran.stderr.splitlines() if line.startswith("neolith:")]
     assert refusals == [
-        "neolith: NEOLITH: unknown key 'OTHER'; the keys are DATABASES, "
-        "REQUEST_DEADLINE, UNDECLARED_APPS",
+        f"neolith: NEOLITH: unknown key 'OTHER'; {NEOLITH_KEYS}",
         "neolith: database default: neolith run hosts declared apps only in 0.1",
     ]
 
