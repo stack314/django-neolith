@@ -25,6 +25,7 @@ import select
 import socket
 import ssl
 import threading
+import traceback
 import weakref
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -77,8 +78,13 @@ _FIELDS: Final = {
     "traceparent": re.compile(
         r"00-(?!0{32})[0-9a-f]{32}-(?!0{16})[0-9a-f]{16}-[0-9a-f]{2}"
     ),
+    # W3C Trace Context 3.3.1.1: list = list-member 0*31( OWS "," OWS
+    # list-member ), list-member = (key "=" value) / OWS, so a member can be
+    # empty or blank. The blanks are written once on each side of a comma, so
+    # no run of them can be split two ways.
     "tracestate": re.compile(
-        rf"(?=.{{1,512}}\Z){_TS_MEMBER}(?:[ \t]*,[ \t]*{_TS_MEMBER}){{0,31}}"
+        rf"(?=.{{1,512}}\Z)(?:{_TS_MEMBER})?"
+        rf"(?:[ \t]*,(?:[ \t]*{_TS_MEMBER})?){{0,31}}[ \t]*"
     ),
 }
 _KEY_LIMIT = _context.KEY_LIMIT
@@ -204,6 +210,10 @@ class _Outside(Exception):
     """A response outside ADR 0028's response table."""
 
 
+class _Refused(ValueError):
+    """A target or field outside its grammar; ``exchange`` raises it afresh."""
+
+
 class _Unsent(Exception):
     """A first ``send`` on a reused connection that took no byte."""
 
@@ -254,10 +264,11 @@ def _readable(sock: socket.socket) -> bool:
 class _Lookup:
     """One resolution of an origin's name in flight, which callers share."""
 
-    __slots__ = ("done", "error", "result")
+    __slots__ = ("done", "error", "result", "waiting")
 
     def __init__(self) -> None:
         self.done = threading.Event()
+        self.waiting = 0
         self.result: list[tuple[int, int, int, tuple[object, ...]]] = []
         self.error: BaseException | None = None
 
@@ -355,7 +366,13 @@ class Pool:
             connection.close()
 
     def _resolve(self, until: float, stop: Callable[[], NoReturn]) -> _Lookup:
-        """Resolve the origin's name in a thread, waiting at most ``until``."""
+        """Resolve the origin's name in a thread, waiting at most ``until``.
+
+        The last caller to stop waiting on a resolution that has not ended
+        forgets it, so the next call starts its own rather than wait on one
+        that may never end, as Go's ``ForgetUnshared`` does. The forgotten
+        thread ends on its own; its result is not used.
+        """
         with self._lock:
             lookup = self._lookup
             if lookup is None:
@@ -372,8 +389,20 @@ class Pool:
                     if isinstance(error, RuntimeError):
                         raise _Unreachable("its name did not resolve", error) from None
                     raise
+            lookup.waiting += 1
         left = until - _now()
-        if left <= 0 or not lookup.done.wait(left):
+        try:
+            ended = left > 0 and lookup.done.wait(left)
+        finally:
+            with self._lock:
+                lookup.waiting -= 1
+                if (
+                    not lookup.done.is_set()
+                    and not lookup.waiting
+                    and self._lookup is lookup
+                ):
+                    self._lookup = None
+        if not ended:
             stop()
         return lookup
 
@@ -578,8 +607,31 @@ def exchange(
     try:
         return _exchange(pool, target, fields, body, deadline)
     except _Stop as stop:
-        error = stop.error
+        error: Exception = stop.error
+    except _Refused as refused:
+        error = ValueError(refused.args[0])
+    except BaseException as unexpected:
+        _forget(unexpected)
+        raise
     raise error
+
+
+def _forget(error: BaseException) -> None:
+    """Clear the locals of every finished frame an exception holds.
+
+    The frames below ``exchange`` hold the request's header bytes, the token
+    among them, and a logger or error reporter that records frame locals
+    would keep them. ``exchange``'s own frame, still running, holds none.
+    """
+    seen: set[int] = set()
+    pending: list[BaseException | None] = [error]
+    while pending:
+        found = pending.pop()
+        if found is None or id(found) in seen:
+            continue
+        seen.add(id(found))
+        traceback.clear_frames(found.__traceback__)
+        pending.extend((found.__cause__, found.__context__))
 
 
 def _exchange(
@@ -590,7 +642,7 @@ def _exchange(
     deadline: float | None,
 ) -> Response:
     if not _TARGET.fullmatch(target):
-        raise ValueError("the target is not a contract action's path")
+        raise _Refused("the target is not a contract action's path")
     origin = pool.origin
     connection = pool.take()
     first = connection is not None
@@ -702,16 +754,16 @@ def _head(
     at = 0
     for name, value in given:
         if name not in _FIELDS or order.index(name) < at:
-            raise ValueError(f"the field {name!r} is not in the admitted order")
+            raise _Refused(f"the field {name!r} is not in the admitted order")
         at = order.index(name) + 1
         if not _FIELDS[name].fullmatch(value) or (
             name == "Idempotency-Key" and len(_unescaped(value)) > _KEY_LIMIT
         ):
-            raise ValueError(f"the {name} field does not match its grammar")
+            raise _Refused(f"the {name} field does not match its grammar")
         lines.append(f"{name}: {value}")
     missing = _REQUIRED.difference(name for name, _ in given)
     if missing:
-        raise ValueError(f"the field {sorted(missing)[0]} is missing")
+        raise _Refused(f"the field {sorted(missing)[0]} is missing")
     return ("\r\n".join(lines) + "\r\n\r\n").encode("ascii")
 
 

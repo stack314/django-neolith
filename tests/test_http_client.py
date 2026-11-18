@@ -122,9 +122,15 @@ REFUSED_FIELDS = {
         *FIELDS,
         ("tracestate", "a=" + "b" * 255 + ",c=" + "d" * 253),
     ],
-    "a tracestate member with a space at its end": [*FIELDS, ("tracestate", "a=b ")],
+    "a tracestate of 33 members": [*FIELDS, ("tracestate", ",".join(["a=1"] * 33))],
+    "a tracestate of 33 empty members": [*FIELDS, ("tracestate", "," * 32)],
+    "a tracestate key in uppercase": [*FIELDS, ("tracestate", "A=1")],
+    "a tracestate member with no value": [*FIELDS, ("tracestate", "a=")],
+    "a tracestate with a control character": [*FIELDS, ("tracestate", "a=1\x01")],
     "a token of 4097": _with("Authorization", "Bearer a.b." + "c" * 4093),
     "a principal with padding": [FIELDS[0], ("Neolith-Principal", "eyJ9=")],
+    "a principal of 4097": [FIELDS[0], ("Neolith-Principal", "e" * 4097), *FIELDS[1:]],
+    "an empty principal": [FIELDS[0], ("Neolith-Principal", ""), *FIELDS[1:]],
 }
 ADMITTED_FIELDS = {
     "a key of 255 characters with escapes": _with(
@@ -135,8 +141,16 @@ ADMITTED_FIELDS = {
         ("tracestate", "a=" + "b" * 255 + ",c=" + "d" * 252),
     ],
     "a multi-tenant tracestate key": [*FIELDS, ("tracestate", "t0@sys=v, b=w")],
+    "a tracestate with an empty member": [*FIELDS, ("tracestate", "a=1,,b=2")],
+    "a tracestate with a blank member": [*FIELDS, ("tracestate", "a=1, ,b=2")],
+    "a tracestate ending in a comma": [*FIELDS, ("tracestate", "a=1,")],
+    "a tracestate starting with a comma": [*FIELDS, ("tracestate", ",a=1")],
+    "a tracestate with blanks at its end": [*FIELDS, ("tracestate", "a=1 \t")],
+    "a tracestate of 32 members": [*FIELDS, ("tracestate", ",".join(["a=1"] * 32))],
+    "a tracestate of 32 empty members": [*FIELDS, ("tracestate", "," * 31)],
     "a token of 4096": _with("Authorization", "Bearer a.b." + "c" * 4092),
     "a principal": [FIELDS[0], ("Neolith-Principal", "eyJ9"), *FIELDS[1:]],
+    "a principal of 4096": [FIELDS[0], ("Neolith-Principal", "e" * 4096), *FIELDS[1:]],
     "only the fields every call carries": [FIELDS[0], FIELDS[2], FIELDS[3]],
 }
 
@@ -237,7 +251,9 @@ REFUSED = {
     "chunk size ' 5 '": b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n 5 \r\n",
     "chunk size -0": b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n-0\r\n\r\n",
     "chunk size of 17 digits": (
-        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" + b"0" * 16 + b"2\r\n"
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+        + b"0" * 16
+        + b"2\r\n{}\r\n0\r\n\r\n"
     ),
     "a chunk extension with a bare CR": (
         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
@@ -534,7 +550,7 @@ def test_the_deadline_bounds_name_resolution(held_resolver: list[str]) -> None:
         _NOT_SENT,
         "before writing",
     )
-    assert now() - started < 2
+    assert now() - started < 1
     assert held_resolver == ["inventory.test"]
 
 
@@ -576,8 +592,10 @@ def unaccepting() -> Iterator[tuple[str, int]]:
 @pytest.mark.spec("TRN-64")
 def test_the_deadline_bounds_connecting(unaccepting: tuple[str, int]) -> None:
     pool = Pool(Origin.parse(f"http://127.0.0.1:{unaccepting[1]}"))
-    error = fails(pool, deadline=now() + 0.3)
+    started = now()
+    error = fails(pool, deadline=started + 0.3)
     assert (error.kind, error.message) == ("timeout", _NOT_SENT)
+    assert now() - started < 1
 
 
 @pytest.mark.spec("TRN-64")
@@ -592,7 +610,7 @@ def test_the_deadline_bounds_the_tls_handshake(
         _NOT_SENT,
         "before writing",
     )
-    assert now() - started < 2
+    assert now() - started < 1
 
 
 @pytest.mark.spec("TRN-64")
@@ -603,7 +621,7 @@ def test_the_deadline_bounds_writing(
     started = now()
     error = fails(pool, deadline=started + 0.3, body=b"[" + b"0," * 2_000_000 + b"0]")
     assert (error.kind, error.message, error.phase) == ("timeout", _LATE, "writing")
-    assert now() - started < 2
+    assert now() - started < 1
 
 
 def drip(head: bytes, drops: bytes) -> Script:
@@ -638,7 +656,7 @@ def test_the_deadline_cuts_a_drip(
     started = now()
     error = fails(pool, deadline=started + 0.3)
     assert (error.kind, error.message, error.phase) == ("timeout", _LATE, "reading")
-    assert now() - started < 1.5
+    assert now() - started < 1
 
 
 class Clock:
@@ -806,6 +824,7 @@ def test_an_early_refusal_while_writing_is_read(
 
     pool, provider = provide(script, answer(OK))
     assert call(pool, body=b"[" + b"0," * 2_000_000 + b"0]") == Response(401, b"{}")
+    assert pool._idle == []
     assert call(pool) == Response(200, b"{}")
     assert provider.opened == 2
 
@@ -876,7 +895,9 @@ def test_at_most_ten_idle_connections_are_kept_newest_first() -> None:
     connections = [_http._Connection(a) for a, _ in pairs]
     for connection in connections:
         pool.give(connection)
+    assert [held for held, _ in pool._idle] == connections[1:]
     assert connections[0].sock.fileno() == -1
+    assert all(connection.sock.fileno() != -1 for connection in connections[1:])
     assert pool.take() is connections[-1]
     pool.close()
     assert all(connection.sock.fileno() == -1 for connection in connections[1:-1])
@@ -1489,3 +1510,109 @@ def test_any_failure_to_start_the_resolution_thread_is_forgotten(
     second = fails(pool, deadline=now() + 5)
     assert second.message.endswith("could not be reached: its name did not resolve")
     assert second.cause.startswith("gaierror")
+
+
+# No frame below exchange keeps the token, however the call ends
+
+
+def _admitted_then_refused() -> list[tuple[str, str]]:
+    return [*FIELDS, ("tracestate", "A=1")]
+
+
+def _frames_below_exchange(error: BaseException) -> list[dict[str, object]]:
+    seen: list[dict[str, object]] = []
+    pending: list[BaseException | None] = [error]
+    while pending:
+        found = pending.pop()
+        if found is None:
+            continue
+        tb: TracebackType | None = found.__traceback__
+        below = found is not error
+        while tb is not None:
+            if below:
+                seen.append(dict(tb.tb_frame.f_locals))
+            below = below or tb.tb_frame.f_code is exchange.__code__
+            tb = tb.tb_next
+        pending.extend((found.__cause__, found.__context__))
+    return seen
+
+
+def _holds_token(frames: list[dict[str, object]]) -> bool:
+    secret = TOKEN.split()[1]
+    return any(secret in repr(value) for frame in frames for value in frame.values())
+
+
+class Unexpected(Exception):
+    """A failure no rule of the client names."""
+
+
+@pytest.mark.parametrize("ending", ["refused field", "unexpected", "interrupt"])
+def test_no_frame_below_exchange_keeps_the_token(
+    provide: Callable[..., tuple[Pool, Provider]],
+    monkeypatch: pytest.MonkeyPatch,
+    ending: str,
+) -> None:
+    pool, _ = provide(answer(OK))
+    fields: Callable[[], Sequence[tuple[str, str]]] = lambda: FIELDS  # noqa: E731
+    if ending == "refused field":
+        fields = _admitted_then_refused
+        expected: type[BaseException] = ValueError
+    else:
+        expected = Unexpected if ending == "unexpected" else KeyboardInterrupt
+
+        def send(*args: object, **kwargs: object) -> None:
+            raise expected
+
+        monkeypatch.setattr(_http, "_send", send)
+    with pytest.raises(expected) as raised:
+        exchange(pool, TARGET, fields, BODY, None)
+    assert raised.value.__traceback__ is not None
+    frames = _frames_below_exchange(raised.value)
+    assert not _holds_token(frames)
+    if ending == "refused field":
+        assert raised.value.__context__ is None
+        assert raised.value.__cause__ is None
+        assert str(raised.value) == "the tracestate field does not match its grammar"
+
+
+def test_a_client_error_leaves_no_frame_below_exchange(
+    provide: Callable[..., tuple[Pool, Provider]],
+) -> None:
+    pool, _ = provide(lambda sock: sock.recv(65536) and None)
+    with pytest.raises(ClientError) as raised:
+        exchange(pool, TARGET, lambda: FIELDS, b"[" + b"0," * 200_000 + b"0]", None)
+    assert _frames_below_exchange(raised.value) == []
+
+
+# A resolution that outlives its callers
+
+
+@pytest.mark.spec("TRN-64")
+def test_a_resolution_every_caller_gave_up_on_is_forgotten(
+    monkeypatch: pytest.MonkeyPatch,
+    server: Callable[[str], tuple[socket.socket, list[bytes]]],
+) -> None:
+    listener, seen = server("127.0.0.1")
+    address = listener.getsockname()
+    stuck = threading.Event()
+    asked: list[int] = []
+
+    def resolve(host: str, *args: object) -> list[object]:
+        asked.append(1)
+        if len(asked) == 1:
+            stuck.wait(10)
+            raise socket.gaierror("released")
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", address)]
+
+    monkeypatch.setattr(_http, "_getaddrinfo", resolve)
+    pool = Pool(Origin.parse("http://inventory.test"))
+    try:
+        error = fails(pool, deadline=now() + 0.2)
+        assert (error.kind, error.message) == ("timeout", _NOT_SENT)
+        assert pool._lookup is None
+        assert call(pool, deadline=now() + 5) == Response(200, b"{}")
+        assert asked == [1, 1]
+        assert len(seen) == 1
+    finally:
+        stuck.set()
+        pool.close()
