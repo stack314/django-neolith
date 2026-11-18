@@ -64,7 +64,7 @@ from django.db.migrations.loader import MigrationLoader
 from django.db.migrations.recorder import MigrationRecorder
 from django.db.utils import load_backend
 
-from neolith import _checks, _compat, _databases
+from neolith import _checks, _compat, _databases, _naming
 from neolith._context import UsageError
 from neolith._declaration import declaration_of
 
@@ -110,13 +110,7 @@ _kept: _Kept | None = None
 
 
 def _cause(error: BaseException) -> str:
-    try:
-        text = str(error)
-    except Exception:
-        text = "<the message cannot be read>"
-    if len(text) > _SHOWN:
-        text = f"{text[:_SHOWN]}..."
-    return f"{type(error).__qualname__}: {text}"
+    return _naming.cause(error, _SHOWN + 3)
 
 
 def boot() -> None:
@@ -219,7 +213,7 @@ def _urlconf_problems() -> list[str]:
         ]
     if type(value) is not str:
         return [
-            f"settings: ROOT_URLCONF: expected a str, got {type(value).__qualname__}"
+            f"settings: ROOT_URLCONF: expected a str, got {_naming.type_name(value)}"
         ]
     shown = value if len(value) <= _SHOWN else f"{value[:_SHOWN]}..."
     try:
@@ -674,7 +668,8 @@ def _state(
     if not path or not os.path.isfile(path) or os.path.getsize(path) == 0:
         messages.append(
             checks.Error(
-                f"database {alias}: no database at {path or repr(name)}; {_NO_FILE}",
+                f"database {alias}: no database at "
+                f"{path or _naming.shown(name)}; {_NO_FILE}",
                 id="neolith.E018",
             )
         )

@@ -45,6 +45,7 @@ from neolith import (
     ContractDefinitionError,
     Decimal128,
     Duration,
+    _crossing,
     action,
     contract,
 )
@@ -1255,14 +1256,28 @@ class Nameless(str, metaclass=_Unnamed):
 
 
 @pytest.mark.spec("TRN-11")
-def test_a_comparison_that_fails_refuses_the_value() -> None:
+def test_a_comparison_that_fails_refuses_the_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # Whatever goes wrong while the copy is compared with what was read
     # refuses the value, as every failure of a send does (ValueError).
+    def fails(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("the comparison failed")
+
+    monkeypatch.setattr(_crossing, "_difference", fails)
     with pytest.raises(ValueError, match="cannot be compared with what it reads") as (
         refused
     ):
-        _send(_built("name", Nameless("ab")))
+        _send(_built("name", "ab"))
     assert type(refused.value.__cause__) is RuntimeError
+
+
+@pytest.mark.spec("TRN-11")
+def test_a_value_whose_class_hides_its_name_is_refused_by_that_name() -> None:
+    # The class's name is read as it was built, never by asking its
+    # metaclass (#44), so the value is refused for what it is.
+    with pytest.raises(ValueError, match=r"a value of type Nameless at Leaves\.name"):
+        _send(_built("name", Nameless("ab")))
 
 
 # A decimal's digits.

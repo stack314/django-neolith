@@ -36,6 +36,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, NoReturn, final
 
+from neolith import _naming
 from neolith._frozen import once
 from neolith._jcs import canonical, canonical_text
 from neolith._portable import SAFE_INTEGER_MAX, text_problem
@@ -131,9 +132,9 @@ class Principal:
     ) -> None:
         if type(issuer) is not str or type(subject) is not str:
             raise TypeError("a principal's issuer and subject are each a str")
-        if claims is not None and not isinstance(claims, Mapping):
+        if claims is not None and not _naming.is_a(claims, Mapping):
             raise TypeError(
-                f"a principal's claims are a mapping, not {type(claims).__qualname__}"
+                f"a principal's claims are a mapping, not {_naming.type_name(claims)}"
             )
         held: dict[str, _Claim] = {}
         # Each container is copied once and the copy is checked, so a change
@@ -142,20 +143,20 @@ class Principal:
         for name, value in given.items():
             if type(name) is not str:
                 raise TypeError(
-                    f"a claim's name is a str, not {type(name).__qualname__}"
+                    f"a claim's name is a str, not {_naming.type_name(name)}"
                 )
-            if type(value) in (str, int, bool):
+            if _naming.one_of(type(value), (str, int, bool)):
                 held[name] = typing.cast("str | int | bool", value)
                 continue
             items = (
                 tuple(typing.cast("Sequence[object]", value))
-                if type(value) in (list, tuple)
+                if _naming.one_of(type(value), (list, tuple))
                 else None
             )
             if items is None or any(type(item) is not str for item in items):
                 raise TypeError(
                     "a claim's value is a str, an int, a bool or a list of str, "
-                    f"not {type(value).__qualname__}"
+                    f"not {_naming.type_name(value)}"
                 )
             held[name] = typing.cast("tuple[str, ...]", items)
         object.__setattr__(self, "_issuer", issuer)
@@ -677,7 +678,7 @@ def opened(
 
 def _app(app: object) -> str | None:
     if app is not None and type(app) is not str:
-        raise TypeError(f"an app is named by a str, not {type(app).__qualname__}")
+        raise TypeError(f"an app is named by a str, not {_naming.type_name(app)}")
     return app
 
 
@@ -688,11 +689,11 @@ def names(value: object, what: str) -> tuple[str, ...]:
     names are in the message.
     """
     if type(value) is not tuple:
-        raise TypeError(f"takes a tuple of {what}, not {type(value).__qualname__}")
+        raise TypeError(f"takes a tuple of {what}, not {_naming.type_name(value)}")
     for item in typing.cast("tuple[object, ...]", value):
         if type(item) is not str:
             raise TypeError(
-                f"takes a tuple of {what}, each a str, not {type(item).__qualname__}"
+                f"takes a tuple of {what}, each a str, not {_naming.type_name(item)}"
             )
     return typing.cast("tuple[str, ...]", value)
 
@@ -717,9 +718,9 @@ def timeout_option(timeout: object) -> float | None:
     """
     if timeout is None:
         return None
-    if type(timeout) not in (int, float):
+    if not _naming.one_of(type(timeout), (int, float)):
         raise TypeError(
-            f"timeout= takes a number of seconds, not {type(timeout).__qualname__}"
+            f"timeout= takes a number of seconds, not {_naming.type_name(timeout)}"
         )
     seconds = typing.cast("int | float", timeout)
     if type(seconds) is float and not math.isfinite(seconds):
@@ -746,7 +747,7 @@ def root_fields(
     """
     if principal is not None and type(principal) is not Principal:
         raise TypeError(
-            f"principal= takes a Principal, not {type(principal).__qualname__}"
+            f"principal= takes a Principal, not {_naming.type_name(principal)}"
         )
     seconds = timeout_option(timeout)
     return {
@@ -813,7 +814,7 @@ def parent(context: object) -> Scope:
     if context is not None:
         if type(context) is not CallContext:
             raise TypeError(
-                f"context= takes a CallContext, not {type(context).__qualname__}"
+                f"context= takes a CallContext, not {_naming.type_name(context)}"
             )
         scope_id = context.scope_id
         with _OPEN_LOCK:

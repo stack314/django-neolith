@@ -66,16 +66,16 @@ from django.core.exceptions import ImproperlyConfigured
 from django.core.signals import setting_changed
 from pydantic import BaseModel
 
-from neolith import _checks, _configure, _context, _principal
+from neolith import _checks, _configure, _context, _naming, _principal
 from neolith._connector import Connector as Bound
 from neolith._connector import InProcess
 from neolith._context import Principal, UsageError
 from neolith._contracts import _IDENTITY, Contract
+from neolith._declaration import _SHOWN as _CLIPPED
 from neolith._declaration import (
     Declaration,
     DeclarationError,
     Provision,
-    _clip,
     _show,
     declaration_of,
 )
@@ -226,7 +226,7 @@ def _restored_elsewhere() -> Host | None:
 def _host_of(config: object) -> Host | None:
     if type(config) is not HostConfig:
         return None
-    host = vars(config).get(_HOST_ATTR)
+    host = vars(config).get(_HOST_ATTR)  # safe read: a HostConfig of neolith's
     return host if type(host) is Host else None
 
 
@@ -500,7 +500,8 @@ def _principals(config: AppConfig) -> tuple[_principal.Built, ...]:
     built: tuple[_principal.Built, ...] = ()
     neolith = getattr(settings, "NEOLITH", None)
     if type(neolith) is dict:
-        value = neolith.get(_principal.KEY)
+        # Looked up among exact str keys only: a key's own __eq__ never runs.
+        value: Any = _naming.entry(neolith, _principal.KEY)
         if value is not None and not _principal.shape_problems(value):
             built, refusals = _principal.build(value)
     setattr(config, _checks.PRINCIPAL_REFUSALS, tuple(refusals))
@@ -726,7 +727,7 @@ def resolve(
 
 def _class(contract: Contract) -> str:
     declaration = contract.declaration
-    return f"{declaration.__module__}.{declaration.__qualname__}"
+    return _naming.full_name(declaration, None)
 
 
 def validate(
@@ -764,19 +765,21 @@ def validate(
         return None
     try:
         module = importlib.import_module(module_name)
+        # A lazily imported module runs its code as it is read, so it is
+        # read here, as the import is.
+        held = _naming.module_dict(module)
     except Exception as error:
         refusals.append(f"{where} does not import: {_cause(error)}")
         _log_cause(where, error)
         # Nothing of the implementation can be read.
         return None
-    try:
-        found = vars(module).get(attribute, _NOTHING)
-    except Exception as error:  # what the import left has no names to read
+    if held is None:
         refusals.append(
             f"{where} does not import: {_long(module_name)} is not a module "
-            f"whose names can be read ({_cause(error)})"
+            f"whose names can be read (it is a {_naming.type_name(module)})"
         )
         return None
+    found: Any = _naming.entry(held, attribute, _NOTHING)
     if found is _NOTHING:
         refusals.append(
             f"{where} does not import: {_long(module_name)} defines no "
@@ -791,8 +794,8 @@ def validate(
     cls: type[Any] = found
     problem = False
     # Read statically: a metaclass cannot answer for the class.
-    own_module = vars(cls).get("__module__")
-    own_name: str = type.__dict__["__qualname__"].__get__(cls)
+    own_module = _naming.module(cls)
+    own_name = _naming.qualname(cls, None)
     # Only a class proven to be the app's own is built.
     foreign = True
     if type(own_module) is not str:
@@ -859,7 +862,7 @@ def _declared_with(
     config: AppConfig, module: str, where: str, refusals: list[str]
 ) -> bool:
     """Refuse a class in a module that is read with the declaration."""
-    declared_in = vars(type(config)).get("__module__")
+    declared_in = _naming.module(type(config))
     if module not in (config.name, declared_in):
         return False
     refusals.append(
@@ -884,11 +887,7 @@ def _quoted(text: str) -> str:
 
 def _cause(error: Exception) -> str:
     """An error's class and message, bounded, never raising."""
-    try:
-        text = str(error)
-    except Exception:
-        text = "<the message cannot be read>"
-    return f"{type(error).__qualname__}: {_clip(text)}"
+    return _naming.cause(error, _CLIPPED + 3)
 
 
 def _log_cause(where: str, error: Exception) -> None:
@@ -926,7 +925,7 @@ def connect(identity: str, /) -> "Connector":
     if type(identity) is not str:
         raise TypeError(
             f"connect() takes a contract identity as a str, not "
-            f"{type(identity).__qualname__}"
+            f"{_naming.type_name(identity)}"
         )
     if not _IDENTITY.fullmatch(identity):
         raise ValueError(
@@ -1139,11 +1138,11 @@ def command_scope(
     if type(app) is not str:
         raise TypeError(
             "command_scope() takes an app's label as a str, not "
-            f"{type(app).__qualname__}"
+            f"{_naming.type_name(app)}"
         )
     if principal is not None and type(principal) is not Principal:
         raise TypeError(
-            f"principal= takes a Principal, not {type(principal).__qualname__}"
+            f"principal= takes a Principal, not {_naming.type_name(principal)}"
         )
     return _CommandScope._made(app, principal, _context.timeout_option(timeout))
 

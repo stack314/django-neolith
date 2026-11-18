@@ -34,7 +34,7 @@ from django.core import checks
 from django.db.backends.utils import strip_quotes
 from django.utils.module_loading import import_string
 
-from neolith import _databases, _principal
+from neolith import _databases, _naming, _principal
 from neolith._declaration import Declaration, declaration_of
 from neolith._serving import admin_code
 
@@ -98,7 +98,7 @@ _SHOWN: Final = 80
 
 
 def _type(value: object) -> str:
-    return type(value).__qualname__
+    return _naming.type_name(value)
 
 
 def _shown_key(key: object) -> str:
@@ -188,7 +188,7 @@ def _is(entry: object, path: str) -> bool:
 def _deadline_problems(value: object) -> list[str]:
     if value is None:
         return []
-    if type(value) not in (int, float):
+    if not _naming.one_of(type(value), (int, float)):
         return [
             f"{_DEADLINE}: expected a number of seconds or None, got {_type(value)}"
         ]
@@ -356,6 +356,7 @@ def principal_check(**kwargs: object) -> list[checks.CheckMessage]:
     config = global_apps.get_app_config(TAG)
     found: list[checks.CheckMessage] = [
         checks.Error(problem, id="neolith.E019")
+        # safe read: neolith's own app config.
         for problem in vars(config).get(PRINCIPAL_REFUSALS, ())
     ]
     neolith = _checked_neolith()
@@ -438,7 +439,7 @@ def installed_problems(
     for config in configs:
         cls = type(config)
         if declaration_of(cls) is not None:
-            entries = {config.name, f"{cls.__module__}.{cls.__qualname__}"}
+            entries = {config.name, _naming.full_name(cls, None)}
             if entries & undeclared:
                 declared.append(
                     f"app {config.label}: has a declaration and is listed in "
@@ -557,8 +558,9 @@ def admin_check(**kwargs: object) -> list[checks.CheckMessage]:
     if sites is None:
         return []
     found: set[str] = set()
-    for site in list(vars(sites).get("all_sites", ())):
-        registry = vars(site).get("_registry")
+    held = _naming.module_dict(sites) or {}
+    for site in list(_naming.entry(held, "all_sites", ())):  # type: ignore[call-overload]
+        registry = _naming.entry(_naming.instance_dict(site) or {}, "_registry")
         if type(registry) is not dict:
             continue
         for admin in list(registry.values()):
@@ -636,7 +638,7 @@ def table_name_problems(configs: Iterable[AppConfig]) -> list[str]:
                     or not through._meta.auto_created
                 ):
                     continue
-                if vars(field).get("db_table"):
+                if _naming.entry(_naming.instance_dict(field) or {}, "db_table"):
                     continue
                 whole = f"{strip_quotes(options.db_table)}_{field.name}"
                 if through._meta.db_table != whole:

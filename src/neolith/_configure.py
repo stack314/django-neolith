@@ -25,14 +25,14 @@ settings Django holds (``neolith.E005``).
 """
 
 from collections.abc import Iterable, Sequence
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from django.apps import AppConfig
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.db.utils import ConnectionHandler
 
-from neolith import _checks, _databases
+from neolith import _checks, _databases, _naming
 from neolith._declaration import Declaration, DeclarationError, declaration_of
 
 __all__ = [
@@ -68,7 +68,7 @@ class EarlyRead(ImproperlyConfigured):
 
 
 def _type(value: object) -> str:
-    return type(value).__qualname__
+    return _naming.type_name(value)
 
 
 def _shown(text: str) -> str:
@@ -76,11 +76,7 @@ def _shown(text: str) -> str:
 
 
 def _cause(error: BaseException) -> str:
-    try:
-        text = str(error)
-    except Exception:
-        text = "<the message cannot be read>"
-    return f"{type(error).__qualname__}: {_shown(text)}"
+    return _naming.cause(error, _SHOWN + 3)
 
 
 def _refuse(problems: list[str]) -> None:
@@ -172,7 +168,7 @@ def _read(path: str) -> Declaration | str:
     if declaration is None:
         return f"{where}: has no declaration"
     if declaration.name != path:
-        if path == f"{cls.__module__}.{cls.__qualname__}":
+        if path == _naming.full_name(cls, None):
             return f"{where}: name the app's package, not its config class"
         return (
             f"{where}: its declaration names {_shown(declaration.name)}; name the "
@@ -351,6 +347,10 @@ def databases_difference(found: object, built: dict[str, Any]) -> str | None:
     if type(found) is not dict:
         return f"it is a {_type(found)}, the host builds a dict"
     entries: dict[object, object] = found
+    # Before any key is looked up, so that no key's own __eq__ runs.
+    for alias in entries:
+        if type(alias) is not str:
+            return f"alias {_repr(alias)} is not one the host builds"
     missing = [alias for alias in built if alias not in entries]
     if missing:
         return f"alias {missing[0]!r} is missing"
@@ -365,10 +365,7 @@ def databases_difference(found: object, built: dict[str, Any]) -> str | None:
 
 
 def _repr(value: object) -> str:
-    try:
-        return _shown(repr(value))
-    except Exception:
-        return f"a value of type {_type(value)}"
+    return _naming.shown(value, _SHOWN + 3)
 
 
 def _difference(
@@ -381,8 +378,13 @@ def _difference(
     if found is _checks.MISSING:
         return "it is absent"
     if type(expected) is dict:
-        if not isinstance(found, dict):
+        if not _naming.is_a(found, dict):
             return f"{where or 'it'} is a {_type(found)}, the host builds a dict"
+        found = cast("dict[Any, Any]", found)
+        # Before any key is looked up, so that no key's own code runs.
+        for key in found:
+            if type(key) is not str:
+                return f"{where}[{_repr(key)}] is not one the host builds"
         own: dict[str, Any] = expected
         if not where:
             extra = [k for k in found if k not in own]

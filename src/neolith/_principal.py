@@ -29,6 +29,7 @@ import keyword
 import logging
 import re
 import threading
+import types
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any, Final, final
@@ -37,6 +38,7 @@ from django.core.exceptions import ImproperlyConfigured
 from django.http import HttpRequest
 from django.utils.module_loading import import_string
 
+from neolith import _naming
 from neolith._context import Principal, principal_form
 from neolith._frozen import once
 from neolith.principals import PrincipalBackend
@@ -70,7 +72,7 @@ _CACHE: Final = "django.middleware.cache.UpdateCacheMiddleware"
 
 
 def _type(value: object) -> str:
-    return type(value).__qualname__
+    return _naming.type_name(value)
 
 
 def _shown(value: object) -> str:
@@ -85,10 +87,7 @@ def _cause(error: BaseException, *, bounded: bool = True) -> str:
     """An error's class and message, bounded unless ``bounded`` is false,
     never raising.
     """
-    try:
-        text = f"{_type(error)}: {error}"
-    except Exception:
-        text = _type(error)
+    text = _naming.cause(error, None)
     if not bounded or len(text) <= 2 * _SHOWN:
         return text
     return f"{text[: 2 * _SHOWN - 3]}..."
@@ -179,12 +178,14 @@ def _inputs_problems(value: object) -> list[str]:
     if type(value) is not tuple:
         return [f"request_inputs is a {_type(value)}, not a tuple of header names"]
     names: tuple[object, ...] = value
-    if names == _ANY and type(names[0]) is str:
+    # Each name is judged by type() before it is compared, so that no
+    # name's own __eq__ runs.
+    if len(names) == 1 and type(names[0]) is str and names == _ANY:
         return []
     problems: list[str] = []
     for name in names:
         if type(name) is not str or not _HEADER.fullmatch(name):
-            extra = " ('*' stands alone)" if name == "*" else ""
+            extra = " ('*' stands alone)" if type(name) is str and name == "*" else ""
             problem = (
                 f"request_inputs holds {_shown(name)}, which is not a header name "
                 f"in lower case{extra}; the form is ('authorization', 'cookie'), "
@@ -203,6 +204,20 @@ def _inputs_problems(value: object) -> list[str]:
         shown = ", ".join(_shown(name) for name in twice)
         problems.append(f"request_inputs names a header twice: {shown}")
     return problems
+
+
+_FLAGS: Final[Any] = type.__dict__["__flags__"]
+
+
+def _function(cls: type, name: str) -> object:
+    """The function a backend class holds as ``name``, its own or inherited,
+    unwrapped from a staticmethod or classmethod, or None; read through
+    type's own descriptors, so its metaclass runs no code.
+    """
+    held = _naming.find(cls, name)
+    if type(held) is staticmethod or type(held) is classmethod:
+        held = held.__func__
+    return held if type(held) is types.FunctionType else None
 
 
 def build(value: list[dict[str, Any]]) -> tuple[tuple[Built, ...], list[str]]:
@@ -229,18 +244,27 @@ def build(value: list[dict[str, Any]]) -> tuple[tuple[Built, ...], list[str]]:
                 f"subclass of {_BASE}"
             )
             continue
-        if found is PrincipalBackend or not issubclass(found, PrincipalBackend):
+        # The class is judged through type's own descriptors and by
+        # identity: issubclass against an ABC hashes it, and getattr asks
+        # its metaclass.
+        if found is PrincipalBackend or not _naming.derives(found, PrincipalBackend):
             problems.append(
                 f"{where}: is not a subclass of {_BASE}; a backend subclasses it"
             )
             continue
         own: list[str] = []
-        if inspect.isabstract(found):
-            missing = ", ".join(sorted(getattr(found, "__abstractmethods__", ())))
+        if _FLAGS.__get__(found) & inspect.TPFLAGS_IS_ABSTRACT:
+            held = _naming.find(found, "__abstractmethods__", ())
+            abstract = (
+                [name for name in held if type(name) is str]
+                if type(held) is frozenset
+                else []
+            )
+            missing = ", ".join(sorted(abstract))
             own.append(f"{where}: is abstract; it does not define {missing}")
-        if inspect.iscoroutinefunction(getattr(found, "resolve", None)):
+        if inspect.iscoroutinefunction(_function(found, "resolve")):
             own.append(f"{where}: resolve is a coroutine function; it is a plain one")
-        if not inspect.iscoroutinefunction(getattr(found, "aresolve", None)):
+        if not inspect.iscoroutinefunction(_function(found, "aresolve")):
             own.append(f"{where}: aresolve is not a coroutine function")
         if own:
             problems.extend(own)
@@ -251,7 +275,7 @@ def build(value: list[dict[str, Any]]) -> tuple[tuple[Built, ...], list[str]]:
             names = ", ".join(sorted(options)) or "none"
             # A backend's own refusal lists every problem it found (ADR 0023
             # Decision 10), so it is kept whole; any other cause is bounded.
-            cause = _cause(error, bounded=not isinstance(error, ImproperlyConfigured))
+            cause = _cause(error, bounded=not _naming.is_a(error, ImproperlyConfigured))
             problems.append(
                 f"{where}: the constructor raised, with the options {names}: {cause}"
             )

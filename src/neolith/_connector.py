@@ -53,7 +53,7 @@ from typing import Any, NoReturn, Protocol, final
 
 from pydantic import BaseModel
 
-from neolith import _context
+from neolith import _context, _naming
 from neolith._context import Sent
 from neolith._contracts import (
     _STANDARD_KINDS,
@@ -223,7 +223,7 @@ class InProcess:
         cls = type(implementation)
         contract._check_implementation(cls)
         if app is not None and type(app) is not str:
-            raise TypeError(f"an app is named by a str, not {type(app).__qualname__}")
+            raise TypeError(f"an app is named by a str, not {_naming.type_name(app)}")
         self._requires = _context.requires_option(requires)
         try:
             self._allowed = frozenset(_context.names(principal_from, "app names"))
@@ -233,9 +233,7 @@ class InProcess:
         # instance, or a __getattr__, never stands in for an action.
         self._functions: Mapping[str, Callable[..., object]] = types.MappingProxyType(
             {
-                name: typing.cast(
-                    "Callable[..., object]", inspect.getattr_static(cls, name)
-                )
+                name: typing.cast("Callable[..., object]", _naming.find(cls, name))
                 for name in contract.actions
             }
         )
@@ -269,7 +267,7 @@ class InProcess:
             )
         if type(context) is not Sent:
             raise TypeError(
-                f"a call's context is sent as Sent, not {type(context).__qualname__}"
+                f"a call's context is sent as Sent, not {_naming.type_name(context)}"
             )
         # The calling app comes first: a call it refuses is refused before
         # anything else is read, and its action never runs.
@@ -400,7 +398,7 @@ class InProcess:
         if action.reply is None:
             if reply is not None:
                 raise TypeError(
-                    f"the reply is {type(reply).__qualname__}, but the action's "
+                    f"the reply is {_naming.type_name(reply)}, but the action's "
                     "reply is empty"
                 )
             return None
@@ -469,7 +467,7 @@ class Connector:
                     inspect.signature(
                         typing.cast(
                             Callable[..., object],
-                            inspect.getattr_static(declaration, name),
+                            _naming.find(declaration, name),
                         )
                     ).parameters
                 )[1]
@@ -658,7 +656,7 @@ class Connector:
         if type(kind) is not str or type(message) is not str:
             raise TypeError("an error's kind and message are text")
         if detail is not None and type(detail) is not bytes:
-            raise TypeError(f"an error's detail is {type(detail).__qualname__}")
+            raise TypeError(f"an error's detail is {_naming.type_name(detail)}")
         if kind in _STANDARD_KINDS:
             if detail is not None:
                 raise ValueError(f"a {kind!r} error arrived with a detail")
@@ -683,5 +681,5 @@ class Connector:
                 raise TypeError("a reply arrived for an action whose reply is empty")
             return None
         if type(reply) is not bytes:
-            raise TypeError(f"the reply is {type(reply).__qualname__}, not text")
+            raise TypeError(f"the reply is {_naming.type_name(reply)}, not text")
         return codec(self._contract, action.reply).read(reply)

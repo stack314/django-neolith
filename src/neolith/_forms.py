@@ -33,6 +33,7 @@ from pydantic import GetCoreSchemaHandler, GetJsonSchemaHandler
 from pydantic.json_schema import JsonSchemaValue
 from pydantic_core import CoreSchema, core_schema
 
+from neolith import _naming
 from neolith._frozen import once
 
 # Each pattern is ASCII-only and anchored with ^...$, and matches the same
@@ -268,7 +269,7 @@ class _Form:
         if source is not self.python_type:
             raise TypeError(
                 f"neolith.{self.name} annotates {self.python_type.__name__}, "
-                f"not {source!r}; use neolith.{self.name} itself"
+                f"not {_naming.shown(source)}; use neolith.{self.name} itself"
             )
         # Pydantic applies whatever precedes this marker, such as a Field(...)
         # in the default slot, to the plain type first and hands the result

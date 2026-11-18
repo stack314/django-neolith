@@ -31,6 +31,7 @@ from django.core.exceptions import ImproperlyConfigured
 from django.http import HttpRequest
 from django.utils.functional import SimpleLazyObject
 
+from neolith import _naming
 from neolith._context import Principal
 
 __all__ = ["DjangoUserBackend", "PrincipalBackend"]
@@ -214,14 +215,14 @@ class DjangoUserBackend(PrincipalBackend):
         model = self._model
         if not isinstance(user, model):
             raise TypeError(
-                f"the authenticated user is a {user.__class__.__qualname__}, not an "
+                f"the authenticated user is a {_naming.type_name(user)}, not an "
                 f"instance of the user model {model._meta.label}"
             )
         key = user.pk
         if type(key) is int or type(key) is uuid.UUID:
             return Principal(self._issuer, str(key))
         raise TypeError(
-            f"the user's key is a {type(key).__qualname__}, not exactly an int "
+            f"the user's key is a {_naming.type_name(key)}, not exactly an int "
             "or a UUID"
         )
 
@@ -264,7 +265,7 @@ def key_problem(model: type) -> str | None:
         else ""
     )
     return (
-        f"the user model {model._meta.label}'s key is a {kind.__qualname__}"  # type: ignore[attr-defined]
+        f"the user model {model._meta.label}'s key is a {_naming.qualname(kind)}"  # type: ignore[attr-defined]
         f"{inherited}; the subject is the key, which is an {_ADMITTED_KEYS}, "
         "or a subclass of one"
     )
