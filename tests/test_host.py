@@ -190,9 +190,9 @@ def test_a_requirement_without_a_provider_is_refused(write_app: WriteApp) -> Non
     stock = _stock_app(write_app, requires=["Invoices", "Couriers"])
     assert _refusals(stock) == [
         f"app {stock}: requires: billing.invoices.v1 has no provider; no app of "
-        "this host provides it, so install the app that does",
+        'this host provides it and NEOLITH["REMOTE_PROVIDERS"] has no entry for it',
         f"app {stock}: requires: couriers.v3 has no provider; no app of this "
-        "host provides it, so install the app that does",
+        'host provides it and NEOLITH["REMOTE_PROVIDERS"] has no entry for it',
     ]
     # Following the advice: installing the providers admits the host.
     couriers = write_app(
@@ -239,7 +239,7 @@ def test_one_identity_with_two_contract_classes_in_a_host_is_refused(
     v2 = write_app(_apps_module(requires=["StockV2"]))
     assert _refusals(stock, v2) == [
         f"app {v2}: requires: stock.v2 has no provider; no app of this host "
-        "provides it, so install the app that does"
+        'provides it and NEOLITH["REMOTE_PROVIDERS"] has no entry for it'
     ]
 
 
@@ -901,7 +901,7 @@ def test_a_host_with_an_unsatisfied_requirement_fails_to_start(
     printed = in_fresh_process(_SET_UP_FAILS, [stock, "neolith"])
     line = (
         f"app {stock}: requires: billing.invoices.v1 has no provider; no app of "
-        "this host provides it, so install the app that does"
+        'this host provides it and NEOLITH["REMOTE_PROVIDERS"] has no entry for it'
     )
     assert printed == (
         f"DeclarationError\n{line}\n"
@@ -963,7 +963,7 @@ def test_connect_before_set_up_to_an_unknown_identity_stops_the_host(
             f"connect: 'nope.v4' at {root / 'services.py'}:13 is not a contract "
             f"this host knows; {knows}",
             f"app {unmet}: requires: couriers.v3 has no provider; no app of this "
-            "host provides it, so install the app that does",
+            'host provides it and NEOLITH["REMOTE_PROVIDERS"] has no entry for it',
         ]
     )
 
