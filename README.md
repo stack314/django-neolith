@@ -22,7 +22,7 @@
 
 </div>
 
-**Status: alpha (0.1.0a2). The API may change before 0.1.**
+**Status: alpha (0.1.0a3). The API may change before 0.1.**
 
 ```
 pip install --pre django-neolith
@@ -44,9 +44,12 @@ What this version does. The [changelog](https://github.com/stack314/django-neoli
 - **One database per app.** `neolith.routers.AppRouter` keeps each app's data on a database alias of its own.
 - **Call context.** A principal, a trace, a deadline and the calling app travel with each call. A root is opened for each request by `RootMiddleware`, and for a command or background work by `command_scope`.
 - **Request principal.** `NEOLITH["PRINCIPAL_BACKENDS"]` lists ordered principal backends, such as `neolith.principals.DjangoUserBackend` for the logged-in Django user. They name who a request is for, and `PrincipalMiddleware` fixes that principal for the request's calls.
+- **HTTP transport.** `NEOLITH["REMOTE_PROVIDERS"]` names a provider that another host serves, and a connector then sends that contract's calls over HTTP with the calling app's token (`NEOLITH["CALLER_BACKENDS"]`). The host serves its own contract endpoints and an OpenAPI 3.1.2 document at `/.well-known/neolith/openapi.json`, and the client uses only the standard library.
+- **`local-first` routing.** `NEOLITH["ROUTING_POLICIES"]` can name `local-first` for a contract version with two or more providers, tried in order; an idempotent call moves to the next on `unavailable`, within its one deadline.
+- **Conformance suite.** Spec 06's suite runs each contract case over the in-process and the HTTP transports and checks that they give one outcome.
 - **One app alone.** `neolith run <app>` boots apps from their declarations and serves them, and `neolith migrate <app>` applies each app's migrations to its own database.
 
-Not yet in this version: the HTTP transport, the conformance suite and events. See the roadmap below.
+Not yet in this version: events. See the roadmap below.
 
 ## A short example
 
