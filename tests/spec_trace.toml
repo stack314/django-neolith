@@ -14,11 +14,3 @@ OVR-5 = "Shown by the example apps running attached and detached, roadmap step 8
 OVR-7 = "Binds app code, which keeps the call context out of request types."
 CON-1 = "Binds contract authors. Breaking-change detection is deferred past 0.1."
 APP-4 = "Binds deployment. A host sees only the apps it holds, so no host can check names across hosts."
-
-# SHOULD- and MAY-level requirements that no code implements yet, each with
-# the step that implements it. An entry is removed when a test starts citing
-# the requirement.
-[not-implemented]
-APP-66 = "The check's import rules, roadmap step 7 task 4 (#14)."
-APP-68 = "The check's call rules, roadmap step 7 task 5 (#14)."
-APP-69 = "The check's rule on views in no app, roadmap step 7 task 6 (#14)."
