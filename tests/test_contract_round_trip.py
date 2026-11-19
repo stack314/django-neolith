@@ -443,6 +443,37 @@ def test_generated_detail_records_round_trip_through_their_description(
     _round_trip_with_defaults(record, schema, value)
 
 
+# The record other modules take as a contract that holds every admitted form;
+# its round trip is the contract part's (tests/conformance/contract/test_values.py).
+class RefColour(enum.StrEnum):
+    RED = "red"
+    GREEN = "green"
+
+
+class RefPart(BaseModel):
+    sku: Annotated[str, Field(min_length=1)]
+    quantity: Annotated[int, Field(ge=0)] = 1
+
+
+class Reference(BaseModel):
+    """Every admitted portable form, with defaults as authors write them."""
+
+    flag: bool = False
+    count: int = 0
+    ratio: float = 1.0
+    name: str = ""
+    raw: Binary = b"\xff"
+    amount: Decimal128 = Decimal("1.50")
+    span: Duration = timedelta(seconds=90)
+    when: AwareDatetime
+    day: date
+    parts: list[RefPart] = []
+    totals: dict[str, int] = {}
+    colour: RefColour = RefColour.RED
+    size: Literal["s", "m"] = "s"
+    note: str | None = None
+
+
 class Tree(BaseModel):
     name: str
     children: list["Tree"] = []
