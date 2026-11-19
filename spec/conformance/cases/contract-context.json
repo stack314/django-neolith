@@ -1,0 +1,45 @@
+[
+  {
+    "name": "call_with_no_open_scope",
+    "part": "contract",
+    "state": "An app of the host that may call reference.v1. Every account the case names is new to the reference provider.",
+    "procedure": "1. Call deposit of 1 on a new account from a fresh empty context, from a thread with one, with a context value naming a scope that has closed, with one this host did not issue, from a copy of a closed scope's context, and from a thread with that copy. 2. Read that account's total in-process.",
+    "expected": "Each call fails as a mistake in the calling code, a UsageError that says which of the three it is, and is never sent: the total is 0. The two legs give the same outcome (CNF-1).",
+    "requirements": [
+      "CNF-1",
+      "CON-29",
+      "HTTP-1",
+      "TRN-23",
+      "TRN-25",
+      "TRN-26"
+    ]
+  },
+  {
+    "name": "principal_not_valid",
+    "part": "contract",
+    "state": "An app of the host that may call reference.v1. Every account the case names is new to the reference provider.",
+    "procedure": "1. In a scope whose principal has an empty subject, an empty issuer, a lone surrogate, a lone surrogate in a claim list, an integer beyond 2^53-1 in a claim, or a sent form of 4097 bytes, call deposit of 1 on a new account. 2. Read that account's total in-process.",
+    "expected": "Each leg's call fails with internal, the fixed text and the scope's trace identifier, with no cause, and is never sent: the total is 0. The caller's host logs the cause under the identifier. The two legs give the same outcome (CNF-1).",
+    "requirements": [
+      "CNF-1",
+      "CON-46",
+      "CON-51",
+      "HTTP-1"
+    ]
+  },
+  {
+    "name": "principal_read_from_its_sent_form",
+    "part": "contract",
+    "state": "An app of the host that may call reference.v1.",
+    "procedure": "1. In a scope whose principal has a sent form of exactly 4096 bytes, holds U+FFFF, or holds a claim of each admitted kind, call seen.",
+    "expected": "The provider receives the principal decoded from its sent form: the same issuer, subject and claims, over both transports.",
+    "requirements": [
+      "CNF-1",
+      "CON-51",
+      "HTTP-1",
+      "OVR-6",
+      "TRN-30",
+      "TRN-36"
+    ]
+  }
+]

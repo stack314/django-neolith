@@ -7,19 +7,47 @@ connector, then once inside the private seam ``over_http(identity,
 origin)`` against the package's live server, and after each run waits
 until the server holds no open connection. Each run's outcome is the reply
 it returned, with its exact type, or the error it raised: its type, and for
-a ``ContractError`` its kind, detail and message.
+a ``ContractError`` its kind, detail and message. Two outcomes are the same
+when their portable forms and the types at every depth are: ``==`` is not the
+test, since it ignores data a portable form keeps (a decimal's scale) and
+equates what is not the same value (an enum member and its text).
 """
 
-from collections.abc import Callable, Iterator
+import datetime
+import enum
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Final
 
 import pytest
+from hypothesis import HealthCheck, settings
+from pydantic import BaseModel
 
+import neolith
 from neolith import ContractError
 from neolith._http_transport import over_http
 from tests.conformance import Live
+from tests.host_apps.reference.contract import Balance, Deposit
 
+# The settings of a Hypothesis case run inside ``over_both``: those of
+# ``tests/test_contract_round_trip.py``, so CI sees the same examples every
+# time (CONTRIBUTING T3), with the examples counted so the part fits the CI
+# budget (K10): each example is two calls, one over a local socket.
+# ``over_both`` is function-scoped but holds no state from one example to the
+# next, so the health check against such a fixture is suppressed, as
+# Hypothesis documents for a fixture like it.
+HYPOTHESIS: Final = settings(
+    derandomize=True,
+    database=None,
+    max_examples=40,
+    deadline=None,
+    suppress_health_check=[
+        HealthCheck.function_scoped_fixture,
+        HealthCheck.too_slow,
+        HealthCheck.data_too_large,
+    ],
+)
 # The transports a case runs over, in order; a later transport adds its
 # entry here and its seam in ``OverBoth``.
 TRANSPORTS: Final = ("in-process", "http")
@@ -74,23 +102,65 @@ def outcome_of(call: Callable[[], object]) -> Outcome:
         return Outcome(raised=True, value=error)
 
 
+def form(value: object) -> object:
+    """``value`` as its portable form, with the exact type at every depth.
+
+    Two values have one ``form`` only when each depth has the same type and
+    the same data on the wire (spec 01): a decimal's text with its trailing
+    zeros, a timestamp's instant (its offset is not data), a number's exact
+    value, a zero without its sign, a record's fields in turn, a map without
+    regard to order. A value of a type this does not list is judged by ``==``
+    beside its type.
+    """
+    match value:
+        case BaseModel():
+            return type(value), tuple((name, form(held)) for name, held in value)
+        case enum.Enum():
+            return type(value), form(value.value)
+        case Decimal():
+            # Written without an exponent or, for a zero, a sign (CON-37).
+            return type(value), format(abs(value) if value.is_zero() else value, "f")
+        case float():
+            # ``-0`` and ``0`` are one value (spec 01, CON-35).
+            return type(value), repr(value + 0.0)
+        case datetime.datetime() if value.tzinfo is not None:
+            return type(value), value.astimezone(datetime.UTC)
+        case list() | tuple():
+            return type(value), tuple(form(item) for item in value)
+        case Mapping():
+            return type(value), {form(key): form(item) for key, item in value.items()}
+        case _:
+            return type(value), value
+
+
 def same(first: Outcome, second: Outcome) -> bool:
-    """Whether two outcomes are the same: replies of one type that compare
-    equal, or errors of one type, kind and detail whose messages are equal,
-    apart from the kinds whose message is the transport's own.
+    """Whether two outcomes are the same: replies of one type and one portable
+    form, or errors of one type, kind and detail form whose messages are
+    equal, apart from the kinds whose message is the transport's own.
     """
     if first.raised != second.raised or type(first.value) is not type(second.value):
         return False
     if not first.raised:
-        return bool(first.value == second.value)
+        return bool(form(first.value) == form(second.value))
     one, other = first.value, second.value
     if isinstance(one, ContractError) and isinstance(other, ContractError):
-        if one.kind != other.kind or type(one.data) is not type(other.data):
-            return False
-        if one.data != other.data:
+        if one.kind != other.kind or form(one.data) != form(other.data):
             return False
         return one.kind in _OWN_MESSAGE or one.message == other.message
     return str(one) == str(other)
+
+
+def balance_of(account: str) -> int:
+    """The total of ``account`` on the reference provider, read in-process by a
+    deposit of zero, so a case can say a call was never sent: its account
+    still holds nothing.
+    """
+    with neolith.command_scope("reference_caller"):
+        total = neolith.connect("reference.v1").deposit(
+            Deposit(account=account, amount=0)
+        )
+    assert isinstance(total, Balance)
+    return total.total
 
 
 class OverBoth:
