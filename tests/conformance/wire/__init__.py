@@ -134,15 +134,20 @@ def mint(
     header: dict[str, object] | None = None,
     claims: dict[str, object] | None = None,
     key: bytes | None = None,
+    signer: str | None = None,
+    shift: int = 0,
+    lifetime: int = 300,
 ) -> str:
     """A shared-secret token for ``app`` and ``audience``, by spec 03's
-    table: HS256 over the first two parts as sent. ``header`` and ``claims``
-    replace or add members; a member given ``None`` is left out.
+    table: HS256 over the first two parts as sent, issued ``shift`` seconds
+    from now and expiring ``lifetime`` seconds later. ``signer`` signs with
+    another app's key id and secret; ``header`` and ``claims`` replace or
+    add members, and a member given ``None`` is left out.
     """
-    key_id, secret = secret_of(app)
-    now = int(time.time())
+    key_id, secret = secret_of(signer or app)
+    iat = int(time.time()) + shift
     head = {"alg": "HS256", "typ": "neolith+jwt", "kid": key_id, **(header or {})}
-    body = {"iss": app, "aud": audience, "iat": now, "exp": now + 300}
+    body = {"iss": app, "aud": audience, "iat": iat, "exp": iat + lifetime}
     body.update(claims or {})
     signing = ".".join(
         b64url(_json({k: v for k, v in part.items() if v is not None}))
@@ -363,8 +368,9 @@ def _read(connection: socket.socket) -> Received | None:
 
 @dataclass
 class Scripted:
-    """A provider on ``127.0.0.1`` that answers each request it reads, on
-    one connection, with the next of ``responses``, then closes it.
+    """A provider on ``127.0.0.1`` that answers each request it reads with
+    the next of ``responses``, on as many connections as the caller opens,
+    and stops once it has sent them all.
     """
 
     responses: Sequence[bytes]
@@ -372,22 +378,25 @@ class Scripted:
     errors: list[BaseException] = field(default_factory=list)
 
     def serve(self, server: socket.socket) -> None:
-        try:
-            connection, _ = server.accept()
-        except OSError as error:
-            self.errors.append(error)
-            return
-        with connection:
-            connection.settimeout(BOUND)
+        left = list(self.responses)
+        while left:
             try:
-                for answer in self.responses:
-                    request = _read(connection)
-                    if request is None:
-                        return
-                    self.received.append(request)
-                    connection.sendall(answer)
+                connection, _ = server.accept()
             except OSError as error:
                 self.errors.append(error)
+                return
+            with connection:
+                connection.settimeout(BOUND)
+                try:
+                    while left:
+                        request = _read(connection)
+                        if request is None:
+                            break
+                        self.received.append(request)
+                        connection.sendall(left.pop(0))
+                except OSError as error:
+                    self.errors.append(error)
+                    return
 
 
 @contextlib.contextmanager

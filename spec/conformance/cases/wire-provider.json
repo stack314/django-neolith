@@ -45,7 +45,7 @@
     "part": "wire",
     "state": "A host provides reference.v1, with the app reference_caller on its allow-list of apps that may assert a principal. The apps reference_caller and reference_stranger each hold a shared-secret key the host accepts.",
     "procedure": "1. POST /reference/v1/stall with Content-Type application/json, its Content-Length, Accept-Encoding identity and a valid shared-secret token for reference_caller, Neolith-Timeout 200 and the body {}.",
-    "expected": "Status 504 and a neolith error body of kind timeout with exactly kind and message.",
+    "expected": "Status 504 and a neolith error body of kind timeout with exactly kind and message, no sooner than 200 ms after the request was sent.",
     "requirements": [
       "TRN-4"
     ]
@@ -54,7 +54,7 @@
     "name": "wire_unauthenticated_carries_the_bearer_challenge",
     "part": "wire",
     "state": "A host provides reference.v1, with the app reference_caller on its allow-list of apps that may assert a principal. The apps reference_caller and reference_stranger each hold a shared-secret key the host accepts.",
-    "procedure": "1. POST /reference/v1/seen with the body {}, Content-Type and Content-Length, and in turn: no Authorization; a Basic credential; and a Bearer token for reference_caller that breaks one rule of spec 03's token: alg HS384, typ JWT, a kid the host does not hold, a signature under another key, aud other.v1, iat 1 and exp 301, an exp past iat + 300, and a claim sub beside the four.",
+    "procedure": "1. POST /reference/v1/seen with the body {}, Content-Type and Content-Length, and in turn: no Authorization; a Basic credential; and a Bearer token for reference_caller that breaks one rule of spec 03's token: alg HS384, typ JWT, a kid the host does not hold, the kid and secret of reference_stranger, iss naming no app, a signature under another key, aud other.v1, iat 1 and exp 301, an exp 200 seconds ago, an iat 120 seconds ahead, a lifetime of 301 seconds and of 0, an exp far ahead, and a claim sub beside the four.",
     "expected": "Each has status 401, a neolith error body of kind unauthenticated with exactly kind and message, and exactly one WWW-Authenticate field, Bearer realm=\"neolith\".",
     "requirements": [
       "HTTP-9",
@@ -72,10 +72,11 @@
     "name": "wire_valid_credential_names_the_calling_app",
     "part": "wire",
     "state": "A host provides reference.v1, with the app reference_caller on its allow-list of apps that may assert a principal. The apps reference_caller and reference_stranger each hold a shared-secret key the host accepts.",
-    "procedure": "1. POST /reference/v1/seen with the body {}, Content-Type, Content-Length and Authorization written bearer <token>, the scheme in lower case, with a valid token for reference_caller whose typ is in turn neolith+jwt, application/neolith+jwt and NEOLITH+JWT.",
+    "procedure": "1. POST /reference/v1/seen with the body {}, Content-Type, Content-Length and Authorization written bearer <token>, the scheme in lower case, with a valid token for reference_caller: in turn with typ neolith+jwt, application/neolith+jwt and NEOLITH+JWT, issued 30 seconds ahead, expired 30 seconds ago, and with a lifetime of 1 second.",
     "expected": "Each has status 200 and the reply {\"principal\": null, \"caller\": \"reference_caller\", \"deadline\": false, \"idempotency_key\": false}.",
     "requirements": [
       "HTTP-11",
+      "HTTP-15",
       "TRN-36"
     ]
   },

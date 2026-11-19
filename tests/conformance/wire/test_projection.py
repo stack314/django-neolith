@@ -263,7 +263,7 @@ def _changed(change: str) -> dict[str, Any]:
         values["required"].append("optional_boolean")
     elif change == "the scheme changed":
         tree["components"]["securitySchemes"]["bearer"]["scheme"] = "basic"
-    elif change == "a default's array reordered":
+    elif change == "a default changed":
         values["properties"]["optional_list"]["default"] = [1, 2]
     else:  # pragma: no cover
         raise AssertionError(change)
@@ -297,7 +297,7 @@ def test_what_the_comparison_leaves_free_still_holds(change: str) -> None:
         ("info changed", ["info"]),
         ("required with one name more", ["components schemas reference.v1.Values"]),
         ("the scheme changed", ["components securitySchemes bearer"]),
-        ("a default's array reordered", ["components schemas reference.v1.Values"]),
+        ("a default changed", ["components schemas reference.v1.Values"]),
     ],
 )
 def test_every_other_change_to_the_part_is_found(

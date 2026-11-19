@@ -7,6 +7,7 @@ are listed in ``spec/conformance/cases/wire-provider.json``. HTTP only: the
 wire is the subject (T2).
 """
 
+import time
 from typing import Any
 
 import pytest
@@ -122,9 +123,14 @@ def test_a_failure_inside_the_provider_is_internal(caller: Caller, action: str) 
 @pytest.mark.conformance_case("wire_deadline_passed_is_timeout")
 @pytest.mark.spec("TRN-4")
 def test_a_call_past_its_budget_is_timeout(caller: Caller) -> None:
+    started = time.monotonic()
     answer = caller.call("stall", fields=[("Neolith-Timeout", "200")])
+    waited = time.monotonic() - started
     body = _error(answer, "timeout", 504)
     assert set(body) == {"kind", "message"}
+    # stall returns only once its deadline has passed, and the host counts
+    # that deadline from the budget sent: never sooner than 200 ms.
+    assert waited >= 0.2
 
 
 # The calling app and the principal.
@@ -150,10 +156,18 @@ def test_a_call_past_its_budget_is_timeout(caller: Caller) -> None:
         pytest.param({"header": {"alg": "HS384"}}, id="alg"),
         pytest.param({"header": {"typ": "JWT"}}, id="typ"),
         pytest.param({"header": {"kid": "other-1"}}, id="kid"),
+        # A key the host holds, but for another app than iss names.
+        pytest.param({"signer": STRANGER}, id="kid-of-another-app"),
+        pytest.param({"claims": {"iss": "nobody"}}, id="iss-of-no-app"),
         pytest.param({"key": bytes(32)}, id="signature"),
         pytest.param({"audience": "other.v1"}, id="audience"),
-        pytest.param({"claims": {"iat": 1, "exp": 301}}, id="expired"),
-        pytest.param({"claims": {"exp": 2**40}}, id="exp-past-300-s"),
+        pytest.param({"claims": {"iat": 1, "exp": 301}}, id="expired-long-ago"),
+        # Past each bound by far more than the clocks here can differ.
+        pytest.param({"shift": -500}, id="expired-past-60-s"),
+        pytest.param({"shift": 120}, id="issued-past-60-s-ahead"),
+        pytest.param({"lifetime": 301}, id="lifetime-301-s"),
+        pytest.param({"lifetime": 0}, id="lifetime-0-s"),
+        pytest.param({"claims": {"exp": 2**40}}, id="exp-far-ahead"),
         pytest.param({"claims": {"sub": "u"}}, id="another-claim"),
     ],
 )
@@ -173,12 +187,23 @@ def test_a_call_without_a_valid_credential_is_401_with_one_challenge(
 
 
 @pytest.mark.conformance_case("wire_valid_credential_names_the_calling_app")
-@pytest.mark.spec("HTTP-11", "TRN-36")
+@pytest.mark.spec("HTTP-11", "HTTP-15", "TRN-36")
 @pytest.mark.parametrize(
-    "typ", ["neolith+jwt", "application/neolith+jwt", "NEOLITH+JWT"]
+    "given",
+    [
+        pytest.param({}, id="neolith+jwt"),
+        pytest.param({"header": {"typ": "application/neolith+jwt"}}, id="media-type"),
+        pytest.param({"header": {"typ": "NEOLITH+JWT"}}, id="upper-case"),
+        # Inside the 60 seconds each way, by more than the clocks here differ.
+        pytest.param({"shift": 30}, id="issued-30-s-ahead"),
+        pytest.param({"shift": -330}, id="expired-30-s-ago"),
+        pytest.param({"lifetime": 1}, id="lifetime-1-s"),
+    ],
 )
-def test_a_valid_token_names_its_calling_app(caller: Caller, typ: str) -> None:
-    token = mint(CALLER, header={"typ": typ})
+def test_a_valid_token_names_its_calling_app(
+    caller: Caller, given: dict[str, Any]
+) -> None:
+    token = mint(CALLER, **given)
     answer = caller.request(
         "POST",
         "/reference/v1/seen",

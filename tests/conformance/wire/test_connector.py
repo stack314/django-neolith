@@ -88,40 +88,53 @@ def _json(value: object) -> bytes:
 
 
 @pytest.mark.conformance_case("wire_connector_writes_the_request_spec_03_fixes")
-@pytest.mark.spec("HTTP-3", "TRN-2", "TRN-30", "TRN-31")
+@pytest.mark.spec("HTTP-3", "TRN-2", "TRN-30", "TRN-31", "TRN-33")
 def test_the_connector_writes_the_request_spec_03_fixes() -> None:
     principal = Principal(ISSUER, SUBJECT, {"roles": ("clerk",)})
+    answer = response(200, b'{"total":5}')
     with (
-        scripted(response(200, b'{"total":5}')) as (origin, provider),
+        scripted(answer, answer) as (origin, provider),
         over_http(IDENTITY, origin),
-        neolith.command_scope(CALLER, principal=principal, timeout=2),
+        neolith.command_scope(CALLER, principal=principal, timeout=10),
     ):
-        neolith.connect(IDENTITY).deposit(Deposit(account="aé", amount=5))
-    (request,) = provider.received
-    assert request.line == "POST /reference/v1/deposit HTTP/1.1"
-    assert request.field("Host") == origin.removeprefix("http://")
-    assert request.field("Accept-Encoding") == "identity"
-    assert request.field("Content-Type") == "application/json"
-    assert request.field("Content-Length") == str(len(request.body))
-    assert request.field("Transfer-Encoding") is None
-    assert read_json(request.body) == {"account": "aé", "amount": 5}
-    authorization = request.field("Authorization")
-    assert authorization is not None
-    assert token_problem(authorization, CALLER, IDENTITY) is None
-    # Spec 03's own example: the principal's sent form, base64url.
-    assert request.field("Neolith-Principal") == PRINCIPAL_HEADER
-    budget = request.field("Neolith-Timeout")
-    assert budget is not None
-    assert re.fullmatch(r"[1-9][0-9]{0,9}", budget)
-    assert int(budget) <= 2000
-    key = request.field("Idempotency-Key")
-    assert key is not None
-    assert re.fullmatch(r'"([ !#-\[\]-~]|\\["\\]){1,255}"', key)
-    traceparent = request.field("traceparent")
-    assert traceparent is not None
-    assert re.fullmatch(
-        r"00-(?!0{32})[0-9a-f]{32}-(?!0{16})[0-9a-f]{16}-0[01]", traceparent
-    )
+        reference = neolith.connect(IDENTITY)
+        reference.deposit(Deposit(account="a\u00e9", amount=5))
+        reference.deposit(Deposit(account="a\u00e9", amount=5))
+    first, second = provider.received
+    for request in (first, second):
+        assert request.line == "POST /reference/v1/deposit HTTP/1.1"
+        assert request.field("Host") == origin.removeprefix("http://")
+        assert request.field("Accept-Encoding") == "identity"
+        assert request.field("Content-Type") == "application/json"
+        assert request.field("Content-Length") == str(len(request.body))
+        assert request.field("Transfer-Encoding") is None
+        assert read_json(request.body) == {"account": "a\u00e9", "amount": 5}
+        authorization = request.field("Authorization")
+        assert authorization is not None
+        assert token_problem(authorization, CALLER, IDENTITY) is None
+        # Spec 03's own example: the principal's sent form, base64url.
+        assert request.field("Neolith-Principal") == PRINCIPAL_HEADER
+        # The budget in whole milliseconds, left of the root's 10 seconds.
+        budget = request.field("Neolith-Timeout")
+        assert budget is not None
+        assert re.fullmatch(r"[1-9][0-9]{0,9}", budget)
+        assert 8000 < int(budget) <= 10000
+    # Each call from a root with no key gets a random key of its own, 128
+    # bits in base64url (TRN-33).
+    keys = [request.field("Idempotency-Key") for request in (first, second)]
+    for key in keys:
+        assert key is not None
+        assert re.fullmatch(r'"[A-Za-z0-9_-]{22}"', key)
+    assert keys[0] != keys[1]
+    # Both carry the root's trace identifier, each with a parent of its own.
+    parents = [request.field("traceparent") or "" for request in (first, second)]
+    found = [
+        re.fullmatch(r"00-((?!0{32})[0-9a-f]{32})-((?!0{16})[0-9a-f]{16})-0[01]", p)
+        for p in parents
+    ]
+    assert all(found), parents
+    traces = {match[1] for match in found if match}
+    assert len(traces) == 1, parents
 
 
 # A reply: 200 or 204, paired with the action's reply (HTTP-19).

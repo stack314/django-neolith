@@ -3,13 +3,14 @@
     "name": "wire_connector_writes_the_request_spec_03_fixes",
     "part": "wire",
     "state": "A host whose app reference_caller requires reference.v1 and holds a shared-secret key for it. The calls for reference.v1 go over HTTP to a provider on a loopback address that answers each request with the bytes the case gives, and records the request.",
-    "procedure": "1. From an explicit root of reference_caller with the principal of spec 03's example and a timeout of 2 seconds, call deposit with account \"aé\" and amount 5.\n2. The provider answers 200 with {\"total\":5}.",
-    "expected": "One request: the line POST /reference/v1/deposit HTTP/1.1; Host the provider's host and port; Accept-Encoding identity; Content-Type application/json; a Content-Length equal to the body's length and no Transfer-Encoding; a body whose JSON value is the request; an Authorization Bearer token valid under spec 03's rules for reference_caller and reference.v1; Neolith-Principal equal to spec 03's example header; a Neolith-Timeout in its form, at most 2000; an Idempotency-Key in its form; and a traceparent of version 00.",
+    "procedure": "1. From an explicit root of reference_caller with the principal of spec 03's example and a timeout of 10 seconds, call deposit twice with account \"aé\" and amount 5.\n2. The provider answers each with 200 and {\"total\":5}.",
+    "expected": "Two requests, each with: the line POST /reference/v1/deposit HTTP/1.1; Host the provider's host and port; Accept-Encoding identity; Content-Type application/json; a Content-Length equal to the body's length and no Transfer-Encoding; a body whose JSON value is the request; an Authorization Bearer token valid under spec 03's rules for reference_caller and reference.v1; Neolith-Principal equal to spec 03's example header; and a Neolith-Timeout in its form, above 8000 and at most 10000. Their Idempotency-Key values are two different strings of 22 base64url characters, quoted, and their traceparent values are of version 00 with one trace identifier.",
     "requirements": [
       "HTTP-3",
       "TRN-2",
       "TRN-30",
-      "TRN-31"
+      "TRN-31",
+      "TRN-33"
     ]
   },
   {
