@@ -106,7 +106,7 @@ def shown(text: str, limit: int = _SHOWN) -> str:
     return escaped if len(text) <= limit else f"{escaped[:limit]}..."
 
 
-@dataclasses.dataclass(frozen=True, slots=True, eq=False)
+@dataclasses.dataclass(slots=True, eq=False)
 class Finding:
     """One finding: Django's check message, never registered (ADR 0030
     Decision 8), the hosted app it names, and its place in source, if any.
@@ -223,6 +223,7 @@ def guarded() -> Iterator[None]:
 
     with _LOCK:
         if _guards == 0:
+            # safe read: Django's own class, never an author's.
             _connect = vars(BaseDatabaseWrapper)["connect"]
             BaseDatabaseWrapper.connect = _refused  # type: ignore[method-assign]
         _guards += 1

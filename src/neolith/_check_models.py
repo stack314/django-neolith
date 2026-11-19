@@ -37,6 +37,7 @@ from typing import Any, Final
 from django.apps import AppConfig
 from django.core import checks
 
+from neolith import _naming
 from neolith._check import Finding, place, shown
 
 __all__ = ["findings"]
@@ -229,7 +230,8 @@ def _source(model: type[Any]) -> tuple[str | None, int]:
         path = inspect.getsourcefile(model)
         _, line = inspect.getsourcelines(model)
     except (OSError, TypeError):
-        module = sys.modules.get(model.__module__)
+        name = _naming.module(model)
+        module = sys.modules.get(name) if name is not None else None
         file = getattr(module, "__file__", None)
         return (file if type(file) is str else None), 1
     return path, max(line, 1)
