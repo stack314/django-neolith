@@ -446,7 +446,7 @@ def _difference(
             try:
                 different = type(have) is not type(want) or bool(have != want)
             except Exception:
-                return f"{where}[{index}] differs"
+                return f"{where}[{index}] is not the value the host builds"
             if different:
                 if where:
                     return _inside(f"{where}[{index}]", have, want)

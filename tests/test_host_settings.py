@@ -1832,7 +1832,7 @@ def test_a_list_comparison_that_raises_names_only_its_path(nested: bool) -> None
     have: object = [Loud()] if nested else Loud()
     want: object = [Loud()] if nested else Loud()
     difference = _difference({"a": [have]}, {"a": [want]})
-    assert difference == "['a'][0] differs"
+    assert difference == "['a'][0] is not the value the host builds"
     assert "private" not in difference
 
 
@@ -1844,8 +1844,11 @@ def test_a_list_comparison_with_an_unusable_truth_value_names_only_its_path() ->
             raise ValueError("private truth detail")
 
     class Entry:
-        def __eq__(self, other: object) -> bool:
+        def __ne__(self, other: object) -> bool:
             # Deliberately malformed result: comparison truth conversion can fail too.
             return cast(bool, Truth())
 
-    assert _difference({"a": [Entry()]}, {"a": [Entry()]}) == "['a'][0] differs"
+    assert (
+        _difference({"a": [Entry()]}, {"a": [Entry()]})
+        == "['a'][0] is not the value the host builds"
+    )
