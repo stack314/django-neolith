@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import json
 import os
+import shutil
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 
@@ -995,11 +996,18 @@ def test_a_row_that_binds_others_must_name_a_live_must(
         ("## Requirements that bind others\n\n| Requirement | Binds |\n|---|---|\n"
          "| CON-3 | x |\n",
          'the table under "Requirements that bind others" needs the columns ID '
-         "and Binds"),
+         "and Binds, once each"),
         ("## Requirements that bind others\n\n| ID | Whom |\n|---|---|\n"
          "| CON-3 | x |\n",
          'the table under "Requirements that bind others" needs the columns ID '
-         "and Binds"),
+         "and Binds, once each"),
+        ("## Requirements that bind others\n\n| ID | ID | Binds |\n|---|---|---|\n"
+         "| CON-3 | CON-1 | x |\n",
+         'the table under "Requirements that bind others" needs the columns ID '
+         "and Binds, once each"),
+        (BINDS + "| CON-3 | x |\n\nAnd:\n\n| ID | Binds |\n|---|---|\n"
+         "| CON-1 | x |\n",
+         'a second table under "Requirements that bind others"'),
         (BINDS + "| CON-3 | x |\n\n" + BINDS + "| CON-1 | x |\n",
          'a second heading "Requirements that bind others"'),
     ],
@@ -1062,8 +1070,11 @@ def test_a_case_file_has_one_form_of_name(suite: Suite, name: str) -> None:
 
 
 def test_a_directory_among_the_case_files_is_refused(suite: Suite) -> None:
+    root = suite(**{"spec/conformance/cases/other/a.json": "[]"})
+    assert problems(root) == [f"conformance/cases/other{NAMING}"]
+    shutil.rmtree(root / "spec/conformance/cases/other")
     root = suite(**{"spec/conformance/cases/contract.json/a.json": "[]"})
-    assert problems(root) == [f"conformance/cases/contract.json{NAMING}"]
+    assert problems(root) == ["conformance/cases/contract.json: is not a file"]
 
 
 def test_the_cases_folder_is_a_directory(suite: Suite) -> None:
@@ -1396,13 +1407,44 @@ def test_a_run_conforms_only_when_no_requirement_keeps_it_from_it(
     assert trace.run["conforms"] is (reasons == [])
 
 
+STATUS = (
+    "README.md: one Status line must name the specification version, as "
+    '"- **Status:** draft 0.1."'
+)
+
+
 @pytest.mark.parametrize(
     ("readme", "problem"),
     [
-        (README_RUN.replace("draft 0.1", "draft"),
-         "README.md: the Status line names no specification version"),
+        *[(README_RUN.replace("draft 0.1. Nothing", line), STATUS)
+          for line in ["draft. Nothing", "draft 0.1 or 0.2. Nothing",
+                       "draft spec 0.1. Nothing", "draft 0.1x. Nothing"]],
+        (README_RUN + "- **Status:** final 0.1.\n", STATUS),
         (README_RUN.replace("In 0.1", "In 0.2"),
-         'README.md: no table of documents with an "In 0.1" column'),
+         'README.md:5: the table of documents needs a "#" and an "In 0.1" column, '
+         "once each"),
+        (README_RUN.replace("| IDs |", "| In 0.1 |"),
+         'README.md:5: the table of documents needs a "#" and an "In 0.1" column, '
+         "once each"),
+        (README_RUN + "\n| # | In 0.1 |\n|---|---|\n| 01 | no |\n",
+         'README.md: 2 tables have a "#" or an "In 0.1" column; one table of '
+         "documents has both"),
+        ("| # | In 0.1 |\n|---|---|\n| 01 | no |\n\n" + README_RUN,
+         'README.md: 2 tables have a "#" or an "In 0.1" column; one table of '
+         "documents has both"),
+        (README_RUN + "| 07 | [Next](07-next.md) | Next | no | `NXT` |\n",
+         'README.md:5: the "#" column names "01", "02", "06", "07"; spec/ holds '
+         "01, 02, 06, each once"),
+        (README_RUN.replace("| 06 |", "| 6 |"),
+         'README.md:5: the "#" column names "01", "02", "6"; spec/ holds 01, 02, '
+         "06, each once"),
+        (README_RUN.replace("| 02 |", "| 01 |"),
+         'README.md:5: the "#" column names "01", "01", "06"; spec/ holds 01, 02, '
+         "06, each once"),
+        (README_RUN.replace("In 0.1", "Ships")
+         + "\n| # | In 0.1 |\n|---|---|\n| 0 | yes |\n",
+         'README.md: 2 tables have a "#" or an "In 0.1" column; one table of '
+         "documents has both"),
         (README_RUN.replace("outline only", "Yes"),
          'README.md:8: "Yes" in the In 0.1 column; write yes, no or outline only'),
     ],
@@ -1413,7 +1455,10 @@ def test_a_run_needs_the_version_and_its_documents(
     trace = run_of(
         suite(spec__README_md=readme), {"t::a": (["CON-1", "CNF-1"], "passed")}
     )
-    assert trace.problems == [problem]
+    # A "#" cell that is not a document's number also breaks the area table,
+    # which the checker reports on its own.
+    readme_problems = [p for p in trace.problems if p.startswith("README.md")]
+    assert readme_problems[-1] == problem
     assert trace.run is not None
     assert trace.run["conforms"] is False
     assert trace.nonconforming[0] == "the specification's version or documents"
@@ -1570,7 +1615,7 @@ def test_a_run_of_the_tree_does_not_conform_and_says_why(tmp_path: Path) -> None
     assert trace.problems == []
     assert trace.run is not None
     version, documents = spec_trace.read_version(
-        spec_trace.ROOT / "spec" / "README.md", spec_trace.Trace()
+        spec_trace.ROOT / "spec" / "README.md", tree
     )
     assert documents is not None
     expected = [
@@ -1626,7 +1671,7 @@ _NAMES = st.from_regex(r"[a-z][a-z0-9_]{0,3}", fullmatch=True) | st.sampled_from
 )
 _TEXT = st.text(max_size=3) | st.none() | st.integers()
 _LIVE = st.sampled_from(["CON-1", "CON-2", "CNF-1", "TRN-1"])
-_IDS = _LIVE | st.sampled_from(["CON-4", "CON-9", "con-1", 1])
+_IDS = _LIVE | st.sampled_from(["CON-4", "CON-9", "con-1", 1, ["CON-1"]])
 _MEMBER = {
     "name": _NAMES | _TEXT,
     "part": st.sampled_from(["wire", "Contract"]) | _TEXT,
@@ -1776,7 +1821,6 @@ def test_the_suite_hash_follows_links_to_directories(suite: Suite) -> None:
     shared.mkdir()
     (shared / "data.json").write_text("{}")
     (root / "tests/shared").symlink_to(shared, target_is_directory=True)
-    (shared / "loop").symlink_to(shared, target_is_directory=True)
     before = spec_trace.suite(root)["tests"]
     (shared / "data.json").write_text("[]")
     assert spec_trace.suite(root)["tests"] != before
@@ -1907,3 +1951,152 @@ def test_the_suite_hash_does_not_depend_on_which_name_is_listed_first(
     for name in ["tests/x/f.py", "tests/y/f.py"]:
         expected.update(name.encode() + b"\0" + b"1" + b"\0" + b"f")
     assert first == expected.hexdigest()
+
+
+# The second review: around each input, what is absent, given twice, of the
+# wrong kind or unreadable is a problem, never a default
+
+
+def test_a_readme_whose_columns_move_is_read_by_name(suite: Suite) -> None:
+    readme = (
+        "- **Status:** draft 0.1. Nothing here is stable until 0.1 ships.\n\n"
+        "| In 0.1 | Document | # | IDs |\n|---|---|---|---|\n"
+        "| yes | [C](01-contracts.md) | 01 | `CON` |\n"
+        "| no | [T](02-transports.md) | 02 | `TRN` |\n"
+        "| yes | [Conformance](06-conformance.md) | 06 | `CNF` |\n"
+    )
+    root = suite(spec__README_md=README_RUN)
+    trace = spec_trace.check(root)
+    assert spec_trace.read_version(root / "spec/README.md", trace) == (
+        "0.1",
+        {"01", "06"},
+    )
+    (root / "spec/README.md").write_text(readme)
+    assert spec_trace.read_version(root / "spec/README.md", trace) == (
+        "0.1",
+        {"01", "06"},
+    )
+    assert [p for p in trace.problems if p.startswith("README")] == []
+
+
+def test_a_document_marked_no_does_not_count(suite: Suite) -> None:
+    # TRN-1 is a MUST with no test, in a document marked no.
+    root = suite(spec__README_md=README_RUN.replace("outline only", "no"))
+    trace = run_of(root, {"t::a": (["CON-1", "CNF-1"], "passed")})
+    assert trace.problems == []
+    assert trace.run is not None
+    assert trace.run["requirements"]["TRN-1"]["status"] == "uncovered"
+    assert trace.run["conforms"] is True
+    root = suite(spec__README_md=README_RUN.replace("outline only", "yes"))
+    trace = run_of(root, {"t::a": (["CON-1", "CNF-1"], "passed")})
+    assert trace.nonconforming == ["TRN-1 uncovered"]
+
+
+@pytest.mark.parametrize(
+    ("settings", "problem"),
+    [
+        (b'enforce = ["\xff"]\n', "'utf-8' codec can't decode"),
+        (b"a = " + b"[" * 3000 + b"]" * 3000 + b"\n", ""),
+    ],
+)
+def test_settings_that_cannot_be_read_are_a_problem(
+    suite: Suite, settings: bytes, problem: str
+) -> None:
+    root = suite()
+    (root / "tests/spec_trace.toml").write_bytes(settings)
+    (only,) = problems(root)
+    assert only.startswith(f"tests/spec_trace.toml: {problem}")
+
+
+def test_settings_that_are_not_a_file_are_a_problem(suite: Suite) -> None:
+    root = suite()
+    (root / "tests/spec_trace.toml").mkdir()
+    assert problems(root) == ["tests/spec_trace.toml: Is a directory"]
+    (root / "tests/spec_trace.toml").rmdir()
+    (root / "tests/spec_trace.toml").symlink_to(root / "nowhere")
+    assert problems(root) == ["tests/spec_trace.toml: No such file or directory"]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file")
+def test_settings_that_cannot_be_opened_are_a_problem(suite: Suite) -> None:
+    root = suite(tests__spec_trace_toml="enforce = []\n")
+    (root / "tests/spec_trace.toml").chmod(0)
+    try:
+        assert problems(root) == ["tests/spec_trace.toml: Permission denied"]
+    finally:
+        (root / "tests/spec_trace.toml").chmod(0o600)
+
+
+def _link(root: Path, name: str, target: str) -> None:
+    (root / name).parent.mkdir(parents=True, exist_ok=True)
+    (root / name).symlink_to(target)
+
+
+@pytest.mark.parametrize(
+    ("make", "problem"),
+    [
+        (lambda r: _link(r, "tests/loop", "loop"),
+         "tests/loop: cannot be read for the suite's hash: Too many levels of "
+         "symbolic links"),
+        (lambda r: _link(r, "tests/broken", "nowhere"),
+         "tests/broken: cannot be read for the suite's hash: neither a file nor "
+         "a directory"),
+        (lambda r: os.mkfifo(r / "tests/pipe"),
+         "tests/pipe: cannot be read for the suite's hash: neither a file nor a "
+         "directory"),
+        (lambda r: _link(r, "tests/a/b", ".."),
+         "tests/a/b: cannot be read for the suite's hash: a link to a directory "
+         "that holds it"),
+        (lambda r: _link(r, "tests/a/b/c", "../.."),
+         "tests/a/b/c: cannot be read for the suite's hash: a link to a directory "
+         "that holds it"),
+        (lambda r: _link(r, "tests/up", "."),
+         "tests/up: cannot be read for the suite's hash: a link to a directory "
+         "that holds it"),
+        (lambda r: _link(r, "spec/conformance/cases/wire.json", "wire.json"),
+         "spec/conformance/cases/wire.json: cannot be read for the suite's hash: "
+         "Too many levels of symbolic links"),
+    ],
+)  # fmt: skip
+def test_what_the_suite_hash_cannot_read_is_a_problem(
+    suite: Suite, make: Callable[[Path], None], problem: str
+) -> None:
+    root = suite(**{"spec/conformance/cases/contract.json": "[]"})
+    make(root)
+    found: list[str] = []
+    hashes = spec_trace.suite(root, found)
+    assert found == [problem]
+    assert None in hashes.values()
+
+
+def test_a_case_file_that_is_not_a_file_is_refused(suite: Suite) -> None:
+    root = suite()
+    _link(root, "spec/conformance/cases/wire.json", "wire.json")
+    assert problems(root) == ["conformance/cases/wire.json: is not a file"]
+
+
+def test_main_writes_no_run_when_the_check_finds_a_problem(suite: Suite) -> None:
+    # The report was read, but a test runs a case no case file lists.
+    root = suite()
+    report = write_report(
+        root, {"t::a": (["CON-1"], "passed")}, **{"t::a": {"case": "x"}}
+    )
+    out = root / "run.json"
+    argv = ["--root", str(root), "--report", str(report), "--conformance", str(out)]
+    assert spec_trace.main(argv) == 1
+    assert out.read_text() == ""
+
+
+def test_a_report_that_does_not_exist_is_a_problem(suite: Suite) -> None:
+    root = suite()
+    (only,) = problems(root, report=root / "missing.json")
+    assert only.startswith("report missing.json: cannot be read: ")
+
+
+def test_a_list_among_a_cases_requirements_is_refused(suite: Suite) -> None:
+    case = {**CASE, "requirements": [["CON-1"]]}
+    root = suite(**{"spec/conformance/cases/contract.json": cases_file(case)})
+    assert problems(root) == [
+        'conformance/cases/contract.json: case 1: requirements: ["CON-1"] is not '
+        "a live requirement"
+    ]

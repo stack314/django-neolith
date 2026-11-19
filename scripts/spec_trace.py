@@ -45,11 +45,13 @@ It always reports a problem, and exits 1, when:
   live, must-level requirement with a reason, or a ``[not-implemented]``
   entry that is not a live SHOULD- or MAY-level requirement with a reason;
 - spec 06 has more than one heading *Requirements that bind others*, or one
-  without a table under it (before the next heading) with an ``ID`` and a
-  ``Binds`` column, or a row whose ``ID`` cell is not one live must-level
-  requirement ID (bare or in backticks), is repeated, or has an empty
-  ``Binds`` cell. Without the heading the list is empty;
-- ``spec/conformance/cases/`` holds anything but case files named
+  without exactly one table under it (before the next heading) with an
+  ``ID`` and a ``Binds`` column, once each, or a row whose ``ID`` cell is
+  not one live must-level requirement ID (bare or in backticks), is
+  repeated, or has an empty ``Binds`` cell. Without the heading the list is
+  empty;
+- ``tests/spec_trace.toml`` exists but cannot be read as UTF-8 TOML;
+- ``spec/conformance/cases/`` holds anything but files named
   ``<part>.json`` or ``<part>-<topic>.json``, where ``<part>`` is
   ``contract``, ``wire``, ``routing`` or ``lifecycle`` and ``<topic>`` is
   ``[a-z][a-z0-9]*``;
@@ -91,8 +93,9 @@ With ``--report`` and ``--conformance PATH``, it writes the conformance run
   or ``null`` while it does not exist. ``cases`` is over every file under
   ``spec/conformance/cases/``, and ``tests`` over every file under ``tests/``
   apart from ``__pycache__`` directories, following links (a directory
-  reached by two names is read under both, and a link back to a directory
-  that holds it is left out): for each file, in the byte order of its path
+  reached by two names is read under both; a link to a directory that holds
+  it, a link that leads nowhere or loops, and anything that is neither a
+  file nor a directory are problems): for each file, in the byte order of its path
   from the repository root, written with ``/``, the hash takes the path's
   bytes as the file system gives them (UTF-8 for a name that is UTF-8), a
   NUL byte, its size in bytes in decimal, a NUL byte and its bytes. A hash
@@ -113,14 +116,21 @@ With ``--report`` and ``--conformance PATH``, it writes the conformance run
 - ``conforms``: true exactly when no requirement is ``failed``, and every
   must-level requirement of every document that the table in
   ``spec/README.md`` marks ``yes`` in its ``In <version>`` column is
-  ``passed`` or ``not-applicable``. Every cell of that column must be
-  ``yes``, ``no`` or ``outline only``.
+  ``passed`` or ``not-applicable``.
 
 The command prints why a run does not conform: each requirement that keeps
 ``conforms`` false, with its status. It refuses ``--conformance`` without
 ``--report``, a value with no file name, and a path it cannot write; it
-empties PATH before reading anything, and writes the run only once the report
-has been read, so a run that stops leaves no earlier run behind.
+empties PATH before reading anything, and writes the run only when the report
+was read and the check found no problem, so a run that stops or that rests on
+a refused input leaves PATH empty.
+
+``spec/README.md`` has one *Status* line, whose version comes first, after at
+most one word (``- **Status:** draft 0.1.``). Exactly one table has a ``#``
+or an ``In <version>`` column; it has both, once each, its ``#`` cells name
+every document in spec/ once, and each cell of the version's column says
+``yes``, ``no`` or ``outline only``. Anything else is a problem, and the run
+does not conform.
 
 Usage::
 
@@ -167,8 +177,9 @@ _CASE_NAME = re.compile(r"[a-z][a-z0-9_]*")
 _CASE_MEMBERS = ("name", "part", "state", "procedure", "expected", "requirements")
 _BINDS_OTHERS = "Requirements that bind others"
 _IN_VERSION = {"yes": True, "no": False, "outline only": False}
-_STATUS_LINE = re.compile(r"^\s*-\s*\*\*Status:\*\*.*$", re.MULTILINE)
-_VERSION = re.compile(r"\b(\d+\.\d+)\b")
+_STATUS_LINE = re.compile(r"^\s*-\s*\*\*Status:\*\*(.*)$", re.MULTILINE)
+# The version comes first, after at most one word: " draft 0.1." or " 0.1".
+_VERSION = re.compile(r"\s+(?:[A-Za-z]+\s+)?(\d+\.\d+)(?:[.,;]?(?:\s|$))")
 
 # RFC 2119 keywords. Longer phrases come first so "MUST NOT" is one match.
 _NORMATIVE = re.compile(
@@ -637,6 +648,11 @@ def _table(
     return header, rows
 
 
+def _column(header: list[str], name: str) -> int | None:
+    """The index of the one column called ``name``; None if there is not one."""
+    return header.index(name) if header.count(name) == 1 else None
+
+
 def _read_binds_others(name: str, text: str, trace: Trace) -> None:
     """Collect the rows of spec 06's table of requirements that bind others.
 
@@ -668,14 +684,22 @@ def _read_binds_others(name: str, text: str, trace: Trace) -> None:
     if index == len(tokens) or tokens[index].type != "table_open":
         trace.problems.append(f"{name}:{line}: no table {where}")
         return
-    header, rows = _table(tokens, index)
-    if "ID" not in header or "Binds" not in header:
+    table = index
+    header, rows = _table(tokens, table)
+    while index < len(tokens) and tokens[index].type != "heading_open":
+        if index > table and tokens[index].type == "table_open":
+            trace.problems.append(
+                f"{name}:{_line(tokens[index])}: a second table {where}"
+            )
+            return
+        index += 1
+    id_column, binds_column = _column(header, "ID"), _column(header, "Binds")
+    if id_column is None or binds_column is None:
         trace.problems.append(
-            f"{name}:{_line(tokens[index])}: the table {where} needs the columns "
-            "ID and Binds"
+            f"{name}:{_line(tokens[table])}: the table {where} needs the columns "
+            "ID and Binds, once each"
         )
         return
-    id_column, binds_column = header.index("ID"), header.index("Binds")
     seen: set[str] = set()
     for row_line, cells in rows:
         cells += [""] * (len(header) - len(cells))
@@ -713,7 +737,10 @@ def read_cases(spec_dir: Path, trace: Trace) -> None:
     for path in paths:
         label = f"{CASES}/{path.name}"
         match = _CASE_FILE.fullmatch(path.name)
-        if match is None or not path.is_file():
+        if match is not None and not path.is_file():
+            trace.problems.append(f"{label}: is not a file")
+            continue
+        if match is None:
             trace.problems.append(
                 f"{label}: a case file is named <part>.json or <part>-<topic>.json, "
                 f"where <part> is {', '.join(_PARTS[:-1])} or {_PARTS[-1]}"
@@ -839,12 +866,14 @@ def _case_requirements(value: object, problem: _CaseProblems) -> tuple[str, ...]
 
 def read_settings(path: Path, trace: Trace) -> list[str]:
     """Read ``tests/spec_trace.toml``: the enforced documents and [not-tested]."""
-    if not path.is_file():
+    if not path.exists() and not path.is_symlink():
         return []
     try:
         settings = tomllib.loads(path.read_text(encoding="utf-8"))
-    except tomllib.TOMLDecodeError as error:
-        trace.problems.append(f"{SETTINGS}: {error}")
+    except (OSError, ValueError, RecursionError) as error:
+        # TOMLDecodeError and UnicodeDecodeError are ValueErrors.
+        reason = error.strerror if isinstance(error, OSError) else None
+        trace.problems.append(f"{SETTINGS}: {reason or error}")
         return []
     for key in sorted(settings.keys() - _SETTINGS_KEYS):
         trace.problems.append(f"{SETTINGS}: unknown key {key!r}")
@@ -1120,36 +1149,54 @@ def _unreadable(name: bytes, error: OSError) -> str:
 
 def _files(root: Path, folder: Path, problems: list[str]) -> list[Path] | None:
     """Every file under ``folder``, apart from ``__pycache__`` directories;
-    None, with a problem, if a directory cannot be read.
+    None, with a problem, if anything in it cannot be read as a file or a
+    directory.
 
     Links are followed, so a directory reached by two names is read under
-    both. A link back to a directory that holds it would never end, so it is
-    left out, whatever order the directories are listed in.
+    both. A link to a directory that holds it, a link that leads nowhere or
+    loops, and anything that is neither a file nor a directory (a pipe, a
+    socket) are problems: the hash would otherwise depend on what the walk
+    chose to skip.
     """
     found: list[Path] = []
+
+    def problem(path: Path, reason: str) -> bool:
+        name = path.relative_to(root).as_posix()
+        shown = os.fsencode(name).decode("utf-8", "backslashreplace")
+        problems.append(f"{shown}: cannot be read for the suite's hash: {reason}")
+        return False
 
     def visit(directory: Path, ancestors: frozenset[str]) -> bool:
         try:
             with os.scandir(directory) as listing:
                 entries = list(listing)
         except OSError as error:
-            name = os.fsencode(directory.relative_to(root).as_posix())
-            problems.append(_unreadable(name, error))
-            return False
+            return problem(directory, str(error.strerror or error))
         for entry in entries:
             path = Path(entry.path)
-            if entry.is_dir():
-                real = os.path.realpath(path)
-                if entry.name == "__pycache__" or real in ancestors:
+            try:
+                is_directory, is_file = entry.is_dir(), entry.is_file()
+            except OSError as error:
+                return problem(path, str(error.strerror or error))
+            if is_directory:
+                if entry.name == "__pycache__":
                     continue
+                real = os.path.realpath(path)
+                if real in ancestors:
+                    return problem(path, "a link to a directory that holds it")
                 if not visit(path, ancestors | {real}):
                     return False
-            elif entry.is_file():
+            elif is_file:
                 found.append(path)
+            elif os.path.lexists(path):
+                return problem(path, "neither a file nor a directory")
         return True
 
-    if not folder.is_dir():
+    if not folder.exists() and not folder.is_symlink():
         return []
+    if not folder.is_dir():
+        problem(folder, "not a directory")
+        return None
     return found if visit(folder, frozenset({os.path.realpath(folder)})) else None
 
 
@@ -1161,7 +1208,7 @@ def suite(root: Path, problems: list[str] | None = None) -> dict[str, str | None
     problems = [] if problems is None else problems
     path = root / "spec" / REFERENCE
     reference: str | None = None
-    if path.is_file():
+    if path.exists() or path.is_symlink():
         try:
             reference = hashlib.sha256(path.read_bytes()).hexdigest()
         except OSError as error:
@@ -1180,39 +1227,75 @@ def read_version(readme: Path, trace: Trace) -> tuple[str | None, set[str] | Non
     """The specification version in the README's *Status* line, and the
     documents its table marks as part of that version; None for what cannot
     be read, which is a problem.
+
+    The README has one *Status* line, whose version comes first, after at most
+    one word ("draft 0.1."). Exactly one table has a ``#`` and an
+    ``In <version>`` column, each once; its ``#`` cells name every document
+    in spec/ once, and each cell of the version's column says ``yes``, ``no``
+    or ``outline only``.
     """
-    text = readme.read_text(encoding="utf-8")
-    status = _STATUS_LINE.search(text)
-    version = _VERSION.search(status.group(0)) if status else None
+    try:
+        text = readme.read_text(encoding="utf-8")
+    except (OSError, ValueError) as error:
+        reason = error.strerror if isinstance(error, OSError) else None
+        trace.problems.append(f"README.md: cannot be read: {reason or error}")
+        return None, None
+    lines = _STATUS_LINE.findall(text)
+    version = _VERSION.match(lines[0]) if len(lines) == 1 else None
+    if version is not None and {
+        found.group(0) for found in re.finditer(r"\b\d+\.\d+\b", lines[0])
+    } != {version.group(1)}:
+        version = None  # "draft 0.1 or 0.2": two versions
     if version is None:
         trace.problems.append(
-            "README.md: the Status line names no specification version"
+            "README.md: one Status line must name the specification version, "
+            'as "- **Status:** draft 0.1."'
         )
         return None, None
     column = f"In {version.group(1)}"
     tokens = _MARKDOWN.parse(text)
+    tables = []
     for index, token in enumerate(tokens):
-        if token.type != "table_open":
-            continue
-        header, rows = _table(tokens, index)
-        if "#" not in header or column not in header:
-            continue
-        number, marked = header.index("#"), header.index(column)
-        documents: set[str] | None = set()
-        for line, cells in rows:
-            cells += [""] * (len(header) - len(cells))
-            value = cells[marked]
-            if value not in _IN_VERSION:
-                trace.problems.append(
-                    f"README.md:{line}: {_shown(value)} in the {column} column; "
-                    "write yes, no or outline only"
-                )
-                documents = None
-            elif _IN_VERSION[value] and documents is not None:
-                documents.add(cells[number])
-        return version.group(1), documents
-    trace.problems.append(f'README.md: no table of documents with an "{column}" column')
-    return version.group(1), None
+        if token.type == "table_open":
+            header, rows = _table(tokens, index)
+            if "#" in header or column in header:
+                tables.append((_line(token), header, rows))
+    if len(tables) != 1:
+        trace.problems.append(
+            f'README.md: {len(tables)} tables have a "#" or an "{column}" column; '
+            "one table of documents has both"
+        )
+        return version.group(1), None
+    line, header, rows = tables[0]
+    number, marked = _column(header, "#"), _column(header, column)
+    if number is None or marked is None:
+        trace.problems.append(
+            f'README.md:{line}: the table of documents needs a "#" and an '
+            f'"{column}" column, once each'
+        )
+        return version.group(1), None
+    documents: set[str] | None = set()
+    seen: list[str] = []
+    for row_line, cells in rows:
+        cells += [""] * (len(header) - len(cells))
+        seen.append(cells[number])
+        value = cells[marked]
+        if value not in _IN_VERSION:
+            trace.problems.append(
+                f"README.md:{row_line}: {_shown(value)} in the {column} column; "
+                "write yes, no or outline only"
+            )
+            documents = None
+        elif _IN_VERSION[value] and documents is not None:
+            documents.add(cells[number])
+    if sorted(seen) != sorted(trace.documents):
+        trace.problems.append(
+            f'README.md:{line}: the "#" column names '
+            f"{', '.join(_shown(cell) for cell in sorted(seen)) or 'nothing'}; "
+            f"spec/ holds {', '.join(sorted(trace.documents))}, each once"
+        )
+        documents = None
+    return version.group(1), documents
 
 
 def status(trace: Trace, rid: str) -> tuple[str, str | None]:
@@ -1343,7 +1426,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     trace = check(
         args.root, args.enforce, args.report, conformance=run_path is not None
     )
-    if run_path is not None and trace.run is not None:
+    if run_path is not None and trace.run is not None and not trace.problems:
         try:
             run_path.write_text(
                 json.dumps(trace.run, indent=1) + "\n", encoding="utf-8"

@@ -445,6 +445,7 @@ DIFFERENT = {"in-process": "replied 1", "http": "replied 2"}
         ([DIFFERENT], "passed", DIFFERENT),
         ([{}], "error", None),
         ([{"http": 1}], "error", None),
+        ([{"in-process": "same", "http": 1}], "error", None),
         ([{1: "same"}], "error", None),
         ([["same"]], "error", None),
         ([SAME, SAME], "error", None),
@@ -495,4 +496,36 @@ def test_a_failing_case_keeps_its_transport_outcomes(
         "ids": ["CON-1"],
         "outcome": "failed",
         "transport_outcomes": {"in-process": "replied 1", "http": "raised X"},
+    }
+
+
+def test_other_properties_and_earlier_phases_are_not_transport_outcomes(
+    pytester: pytest.Pytester,
+) -> None:
+    # Only a property named transport_outcomes counts, and only as the
+    # teardown report has it: a value the call phase saw is not kept beside
+    # a later error.
+    source = (
+        "import pytest\n\n"
+        "@pytest.fixture\n"
+        "def record(request):\n"
+        "    yield\n"
+        "    props = request.node.user_properties\n"
+        "    props.append(('transport_outcomes', {'http': 'x'}))\n"
+        "\n"
+        "@pytest.mark.spec('CON-1')\n"
+        "def test_other(record_property):\n"
+        "    record_property('duration', 1)\n"
+        "\n"
+        "@pytest.mark.spec('CON-1')\n"
+        "def test_twice(request, record):\n"
+        "    props = request.node.user_properties\n"
+        "    props.append(('transport_outcomes', {'http': 'y'}))\n"
+    )
+    tests = {
+        name.split("::", 1)[1]: entry for name, entry in run(pytester, source).items()
+    }
+    assert tests == {
+        "test_other": {"ids": ["CON-1"], "outcome": "passed"},
+        "test_twice": {"ids": ["CON-1"], "outcome": "error"},
     }
