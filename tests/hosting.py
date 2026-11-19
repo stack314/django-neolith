@@ -15,7 +15,7 @@ from collections.abc import Mapping, Sequence
 # the host's table changes one line of the tests (ADR 0022 Decision 3).
 NEOLITH_KEYS = (
     "the keys are CALLER_BACKENDS, DATABASES, PRINCIPAL_BACKENDS, REMOTE_PROVIDERS, "
-    "REQUEST_DEADLINE, SIGNING_SECRETS, UNDECLARED_APPS"
+    "REQUEST_DEADLINE, ROUTING_POLICIES, SIGNING_SECRETS, UNDECLARED_APPS"
 )
 
 _PREAMBLE = """\

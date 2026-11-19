@@ -70,7 +70,8 @@ class DeclarationError(ImproperlyConfigured):
     refuses what the hosted apps and ``NEOLITH`` name. The message holds one
     line per refusal, sorted. Each line names the app and the field, or the
     place of a ``connect()``, or, for Resolve, the part of ``NEOLITH`` it
-    read, such as ``NEOLITH["REMOTE_PROVIDERS"]`` (ADR 0014).
+    read, such as ``NEOLITH["REMOTE_PROVIDERS"]`` (ADR 0014) or
+    ``NEOLITH["ROUTING_POLICIES"]`` (ADR 0031).
     """
 
 
@@ -258,8 +259,10 @@ class NeolithAppConfig(AppConfig):
         provides: The contracts the app provides, one ``Provided`` each.
         requires: The contract classes the app calls. The host finds each
             one's provider: the app of the host that provides it, or the
-            remote provider the deployer names for it in
-            ``NEOLITH["REMOTE_PROVIDERS"]``.
+            remote providers the deployer lists for it in
+            ``NEOLITH["REMOTE_PROVIDERS"]``: one under ``single``, or two or
+            more, tried in order, when ``NEOLITH["ROUTING_POLICIES"]`` names
+            ``local-first`` for it.
         resources: The kinds of resource the app needs; ``"database"`` is
             the one kind admitted.
         batteries: The Django apps the app relies on, each by its dotted
