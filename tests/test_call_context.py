@@ -262,80 +262,6 @@ def test_a_call_from_a_fresh_empty_context_is_a_usage_error() -> None:
     assert provider.seen == []
 
 
-def _closed_scope() -> Scope:
-    with _root() as scope:
-        return cast("Scope", scope)
-
-
-def _closed_ambient() -> contextvars.Context:
-    """A copy of the context made inside a root, taken out after it closed."""
-    with _root():
-        copied = contextvars.copy_context()
-    return copied
-
-
-def _in_a_thread(call: Callable[[], object]) -> object:
-    """Run ``call`` in a thread and hand back its outcome or its error."""
-    outcome: list[object] = []
-
-    def run() -> None:
-        try:
-            outcome.append(call())
-        except BaseException as error:  # the test reads it
-            outcome.append(error)
-
-    thread = threading.Thread(target=run)
-    thread.start()
-    thread.join()
-    if isinstance(outcome[0], BaseException):
-        raise outcome[0]
-    return outcome[0]
-
-
-# Every way a connector call finds no open scope to derive its context from.
-_NO_OPEN_SCOPE: dict[str, tuple[Callable[[Any], object], str]] = {
-    "no scope": (
-        lambda c: contextvars.Context().run(c.ask, Ask()),
-        "needs a call context",
-    ),
-    "no scope, in a thread": (
-        lambda c: _in_a_thread(lambda: contextvars.Context().run(c.ask, Ask())),
-        "needs a call context",
-    ),
-    "context= naming a closed scope": (
-        lambda c: c.ask(Ask(), context=_closed_scope().context),
-        "names no open scope",
-    ),
-    "context= naming a scope this host did not issue": (
-        lambda c: c.ask(
-            Ask(),
-            context=dataclasses.replace(
-                _closed_scope().context, scope_id=secrets.token_hex(16)
-            ),
-        ),
-        "names no open scope",
-    ),
-    "a closed ambient scope copied into a context": (
-        lambda c: _closed_ambient().run(c.ask, Ask()),
-        "has ended",
-    ),
-    "a closed ambient scope copied into a thread": (
-        lambda c: _in_a_thread(lambda: _closed_ambient().run(c.ask, Ask())),
-        "has ended",
-    ),
-}
-
-
-@pytest.mark.spec("TRN-23", "TRN-25", "TRN-26", "CON-29")
-@pytest.mark.parametrize("case", list(_NO_OPEN_SCOPE))
-def test_every_call_with_no_open_scope_is_exactly_a_usage_error(case: str) -> None:
-    connector, provider, _ = _desk()
-    call, message = _NO_OPEN_SCOPE[case]
-    with _usage_error(message):
-        call(connector)
-    assert provider.seen == []
-
-
 @pytest.mark.spec("TRN-22")
 def test_a_thread_calls_with_the_context_it_is_handed_or_a_copy() -> None:
     connector, provider, _ = _desk()
@@ -1764,65 +1690,24 @@ def test_the_request_is_checked_before_the_deadline(clock: Clock) -> None:
     assert carrying.sent == []
 
 
+# 3072 bytes of JSON is the 4096 bytes of base64url a sent principal may have.
 _FITS = 3072 - len(b'{"issuer":"i","subject":""}')
 
 
-@pytest.mark.spec("CON-51", "CON-46")
-@pytest.mark.parametrize(
-    "principal",
-    [
-        Principal("i", ""),
-        Principal("", "s"),
-        Principal("i", "s\ud800"),
-        Principal("i", "s", {"a": ["\udfff"]}),
-        Principal("i", "s", {"a": 2**53}),
-        Principal("i", "s" * (_FITS + 1)),
-    ],
-    ids=["empty subject", "empty issuer", "surrogate", "in a list", "integer", "4097"],
-)
-def test_a_call_whose_principal_is_not_valid_fails_at_the_caller_with_internal(
-    principal: Principal, caplog: pytest.LogCaptureFixture
-) -> None:
-    connector, provider, carrying = _desk()
-    with (
-        _root("shop", principal=principal) as scope,
-        caplog.at_level(logging.ERROR, "neolith"),
-        pytest.raises(ContractError) as raised,
-    ):
-        connector.ask(Ask())
-    trace = scope.context.trace_id
-    error = raised.value
-    # Fixed text and the trace identifier, and nothing of the cause.
-    assert (error.kind, error.message, error.data) == (
-        "internal",
-        internal_message(trace),
-        None,
-    )
-    assert error.__cause__ is None
-    assert error.__context__ is None
-    assert type(error) is ContractError
-    assert is_received(error)
-    assert carrying.sent == []
-    assert provider.seen == []
-    # The caller's host records the cause under the trace identifier.
-    (record,) = caplog.records
-    assert trace in record.getMessage()
-    assert "principal is not valid" in record.getMessage()
-    assert record.exc_info is not None
-    assert type(record.exc_info[1]) is ValueError
-
-
+# The other cases of a principal that crosses are the contract part's
+# (``tests/conformance/contract/test_context.py``); that a provider is handed
+# a copy, not the caller's object, shows only in-process.
 @pytest.mark.spec("CON-51", "TRN-30", "TRN-36")
 @pytest.mark.parametrize(
     "principal",
     [
         Principal("i", "s" * _FITS),
-        Principal("i￿", "￿", {"￿": ["￿"]}),
+        Principal("i\uffff", "\uffff", {"\uffff": ["\uffff"]}),
         Principal("i", "s", {"a": 2**53 - 1, "b": True, "c": [], "d": ""}),
     ],
     ids=["exactly 4096", "U+FFFF", "every kind of claim"],
 )
-def test_a_valid_principal_reaches_the_provider_read_from_its_sent_form(
+def test_a_provider_is_handed_a_copy_of_the_principal_read_from_its_sent_form(
     principal: Principal,
 ) -> None:
     connector, provider, carrying = _desk()

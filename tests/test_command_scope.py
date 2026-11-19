@@ -5,6 +5,10 @@ for a hosted app, with no principal and no deadline unless given, and a fresh
 trace (ADR 0022 Decision 8, ADR 0017 Decision 4). It closes on exit, however
 the block ends, and is used once. Time is a clock the tests set, never a
 sleep.
+
+These tests stay outside the contract suite (CONTRIBUTING T2): they check the
+host's own scope for its apps, how it opens, closes and refuses a use, not
+what a contract's semantics are over every transport.
 """
 
 import asyncio

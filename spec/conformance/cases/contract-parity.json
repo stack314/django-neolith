@@ -1,0 +1,209 @@
+[
+  {
+    "name": "reply_of_every_form",
+    "part": "contract",
+    "state": "An app of the host that may call reference.v1. The provider echoes what it receives.",
+    "procedure": "1. Call echo with a Values that sets every required form and every optional one. 2. Call echo with a Values that sets the required forms only. 3. Compare each reply with what was sent.",
+    "expected": "Each reply holds the sent value by its portable form and exact types, at every depth, over both transports.",
+    "requirements": [
+      "CNF-1",
+      "HTTP-1",
+      "HTTP-41",
+      "TRN-1",
+      "TRN-16"
+    ]
+  },
+  {
+    "name": "empty_reply",
+    "part": "contract",
+    "state": "An app of the host that may call reference.v1. accept returns no value.",
+    "procedure": "1. Call accept with a Values.",
+    "expected": "The reply is None over both transports.",
+    "requirements": [
+      "CNF-1",
+      "HTTP-1",
+      "HTTP-41",
+      "TRN-1",
+      "TRN-16"
+    ]
+  },
+  {
+    "name": "provider_sees_the_context",
+    "part": "contract",
+    "state": "An app of the host that may call reference.v1 with no principal; the scope has a timeout of 10 seconds.",
+    "procedure": "1. Call seen.",
+    "expected": "The reply names the calling app, says a deadline is present and says an idempotency key is present, over both transports.",
+    "requirements": [
+      "CNF-1",
+      "HTTP-1",
+      "HTTP-42",
+      "OVR-6",
+      "TRN-31"
+    ]
+  },
+  {
+    "name": "principal_reaches_the_provider",
+    "part": "contract",
+    "state": "An app of the host that may call reference.v1, from a scope whose principal has an issuer, a subject and claims.",
+    "procedure": "1. Call seen.",
+    "expected": "The reply holds the principal's issuer, subject and claims as sorted JSON text, over both transports.",
+    "requirements": [
+      "CNF-1",
+      "HTTP-1",
+      "HTTP-46",
+      "OVR-6",
+      "TRN-2",
+      "TRN-36"
+    ]
+  },
+  {
+    "name": "principal_off_the_allow_list",
+    "part": "contract",
+    "state": "An app of the host that is not on reference.v1's allow-list for a principal; a scope of it holds a principal.",
+    "procedure": "1. Call seen.",
+    "expected": "The call fails with permission_denied, with the message that names the app and the contract, over both transports.",
+    "requirements": [
+      "CNF-1",
+      "HTTP-1",
+      "HTTP-46",
+      "TRN-43"
+    ]
+  },
+  {
+    "name": "no_principal_off_the_allow_list",
+    "part": "contract",
+    "state": "The app of the previous case, in a scope with no principal.",
+    "procedure": "1. Call seen.",
+    "expected": "The call is served. The reply holds no principal and names the app as the caller, over both transports.",
+    "requirements": [
+      "CNF-1",
+      "HTTP-1",
+      "TRN-43"
+    ]
+  },
+  {
+    "name": "call_from_no_app",
+    "part": "contract",
+    "state": "A scope that belongs to no app. Every account the case names is new to the reference provider.",
+    "procedure": "1. Call deposit of 1 on a new account. 2. Read that account's total in-process.",
+    "expected": "The call fails with unauthenticated and the message that says a call is made from a scope that belongs to an app, and is never sent: the total is 0. The two legs give the same outcome (CNF-1).",
+    "requirements": [
+      "CNF-1",
+      "HTTP-1",
+      "HTTP-18",
+      "TRN-42"
+    ]
+  },
+  {
+    "name": "deadline_passed_at_the_caller",
+    "part": "contract",
+    "state": "An app of the host that may call reference.v1, in a scope with a timeout of zero. Every account the case names is new to the reference provider.",
+    "procedure": "1. Call deposit of 1 on a new account. 2. Read that account's total in-process.",
+    "expected": "The call fails with timeout and is never sent: the total is 0. The two legs give the same outcome (CNF-1).",
+    "requirements": [
+      "CNF-1",
+      "HTTP-1",
+      "TRN-28",
+      "TRN-4",
+      "TRN-48"
+    ]
+  },
+  {
+    "name": "deadline_passes_at_the_provider",
+    "part": "contract",
+    "state": "An app of the host that may call reference.v1, in a scope with a timeout of 0.2 seconds.",
+    "procedure": "1. Call stall, which returns only once its deadline has passed.",
+    "expected": "The call fails with timeout over both transports.",
+    "requirements": [
+      "CNF-1",
+      "HTTP-1",
+      "TRN-4"
+    ]
+  },
+  {
+    "name": "no_deadline_reaches_the_provider",
+    "part": "contract",
+    "state": "An app of the host that may call reference.v1, in a scope with no timeout.",
+    "procedure": "1. Call stall.",
+    "expected": "The provider sees no deadline and refuses with invalid_argument and its own message, over both transports.",
+    "requirements": [
+      "CNF-1",
+      "HTTP-1"
+    ]
+  },
+  {
+    "name": "request_refused_at_the_caller",
+    "part": "contract",
+    "state": "An app of the host that may call reference.v1. Every account the case names is new to the reference provider.",
+    "procedure": "1. Call deposit with an amount that is text, not an integer, built without validation. 2. Read that account's total in-process.",
+    "expected": "The caller refuses the request with an error that is not a contract error and never sends it: the total is 0. The two legs give the same outcome (CNF-1).",
+    "requirements": [
+      "CNF-1",
+      "HTTP-1",
+      "TRN-14",
+      "TRN-15"
+    ]
+  },
+  {
+    "name": "version_not_required",
+    "part": "contract",
+    "state": "The app that provides reference.v1, which does not require it.",
+    "procedure": "1. Call seen.",
+    "expected": "The call is a mistake in the calling code, a UsageError, over both transports.",
+    "requirements": [
+      "CNF-1",
+      "HTTP-1",
+      "TRN-39"
+    ]
+  },
+  {
+    "name": "error_of_every_kind",
+    "part": "contract",
+    "state": "An app of the host that may call reference.v1.",
+    "procedure": "1. For each of invalid_argument, unauthenticated, permission_denied, not_found, conflict and the declared kind gone, call refuse with that kind and a message.",
+    "expected": "The caller receives that kind and message, with no detail for a standard kind and the record Gone, with the message as its reason, for gone, over both transports.",
+    "requirements": [
+      "CNF-1",
+      "CON-26",
+      "CON-27",
+      "CON-43",
+      "HTTP-1"
+    ]
+  },
+  {
+    "name": "reply_of_another_type",
+    "part": "contract",
+    "state": "An app of the host that may call reference.v1.",
+    "procedure": "1. Call leak, whose provider returns a record of another type.",
+    "expected": "The call fails with internal over both transports.",
+    "requirements": [
+      "CNF-1",
+      "HTTP-1",
+      "TRN-18"
+    ]
+  },
+  {
+    "name": "provider_fails",
+    "part": "contract",
+    "state": "An app of the host that may call reference.v1.",
+    "procedure": "1. Call boom, whose provider raises an exception of its own.",
+    "expected": "The call fails with internal, and its message holds nothing of the exception, over both transports.",
+    "requirements": [
+      "CNF-1",
+      "CON-44",
+      "CON-46",
+      "HTTP-1"
+    ]
+  },
+  {
+    "name": "deposits_in_one_scope",
+    "part": "contract",
+    "state": "An app of the host that may call reference.v1. Every account the case names is new to the reference provider.",
+    "procedure": "1. In one scope call deposit of 5, then deposit of 2, on a new account. 2. Read that account's total in-process.",
+    "expected": "The replies are totals 5 and 7, and the account holds 7, after each leg. The two legs give the same outcome (CNF-1).",
+    "requirements": [
+      "CNF-1",
+      "HTTP-1"
+    ]
+  }
+]

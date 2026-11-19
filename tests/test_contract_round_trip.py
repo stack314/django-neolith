@@ -443,6 +443,8 @@ def test_generated_detail_records_round_trip_through_their_description(
     _round_trip_with_defaults(record, schema, value)
 
 
+# The record other modules take as a contract that holds every admitted form;
+# its round trip is the contract part's (tests/conformance/contract/test_values.py).
 class RefColour(enum.StrEnum):
     RED = "red"
     GREEN = "green"
@@ -470,17 +472,6 @@ class Reference(BaseModel):
     colour: RefColour = RefColour.RED
     size: Literal["s", "m"] = "s"
     note: str | None = None
-
-
-@pytest.mark.spec("CON-16", "CON-34")
-@_HYPOTHESIS
-@given(st.data())
-def test_reference_contract_round_trips_through_its_description(
-    data: st.DataObject,
-) -> None:
-    schema = _declare(Reference)
-    value = data.draw(admitted_by(schema))
-    _round_trip_with_defaults(Reference, schema, value)
 
 
 class Tree(BaseModel):

@@ -6,6 +6,11 @@ call from no app with ``unauthenticated``, and a principal from a calling app
 not on the contract's allow-list with ``permission_denied``, before it checks
 the deadline or reads the request (ADR 0017 Decisions 6 and 9, ADR 0010
 Decision 7). Time is a clock the tests set, never a sleep.
+
+These tests stay outside the contract suite (CONTRIBUTING T2): they check the
+host's own apps, what each app's declaration requires and which calling app a
+scope names, on the in-process transport with a clock the tests set, not what
+a contract's semantics are over every transport.
 """
 
 import itertools

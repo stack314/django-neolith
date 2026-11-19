@@ -91,6 +91,7 @@ def _reference() -> neolith.Connector:
     return neolith.connect("reference.v1")
 
 
+@pytest.mark.conformance_case("reply_of_every_form")
 @PARITY
 @pytest.mark.spec("TRN-1", "TRN-16", "HTTP-41")
 @pytest.mark.parametrize("values", [EVERY, FEWEST], ids=["every", "fewest"])
@@ -109,6 +110,7 @@ def test_a_reply_is_the_same_over_both(over_both: OverBoth, values: Values) -> N
     assert [_data(reply) for reply in replies] == [_data(values)] * 2
 
 
+@pytest.mark.conformance_case("empty_reply")
 @PARITY
 @pytest.mark.spec("TRN-1", "TRN-16", "HTTP-41")
 def test_an_empty_reply_is_the_same_over_both(over_both: OverBoth) -> None:
@@ -119,8 +121,9 @@ def test_an_empty_reply_is_the_same_over_both(over_both: OverBoth) -> None:
     assert over_both(call).reply is None
 
 
+@pytest.mark.conformance_case("provider_sees_the_context")
 @PARITY
-@pytest.mark.spec("TRN-31", "HTTP-42")
+@pytest.mark.spec("TRN-31", "HTTP-42", "OVR-6")
 def test_the_provider_sees_the_same_context_over_both(over_both: OverBoth) -> None:
     # Over HTTP the calling app is the one the token names, authenticated
     # under the key both sides hold; in-process it is the scope's app.
@@ -133,8 +136,9 @@ def test_the_provider_sees_the_same_context_over_both(over_both: OverBoth) -> No
     )
 
 
+@pytest.mark.conformance_case("principal_reaches_the_provider")
 @PARITY
-@pytest.mark.spec("TRN-2", "TRN-36", "HTTP-46")
+@pytest.mark.spec("TRN-2", "TRN-36", "HTTP-46", "OVR-6")
 def test_the_principal_reaches_the_provider_alike(over_both: OverBoth) -> None:
     def call() -> object:
         with neolith.command_scope(CALLER, principal=ALICE):
@@ -149,6 +153,7 @@ def test_the_principal_reaches_the_provider_alike(over_both: OverBoth) -> None:
     )
 
 
+@pytest.mark.conformance_case("principal_off_the_allow_list")
 @PARITY
 @pytest.mark.spec("TRN-43", "HTTP-46")
 def test_a_principal_from_an_app_off_the_allow_list_is_refused_alike(
@@ -167,6 +172,7 @@ def test_a_principal_from_an_app_off_the_allow_list_is_refused_alike(
     )
 
 
+@pytest.mark.conformance_case("no_principal_off_the_allow_list")
 @PARITY
 @pytest.mark.spec("TRN-43")
 def test_a_call_with_no_principal_from_an_app_off_the_allow_list_is_served_alike(
@@ -181,6 +187,7 @@ def test_a_call_with_no_principal_from_an_app_off_the_allow_list_is_served_alike
     assert (seen.principal, seen.caller) == (None, STRANGER)
 
 
+@pytest.mark.conformance_case("call_from_no_app")
 @PARITY
 @pytest.mark.spec("HTTP-18", "TRN-42")
 def test_a_call_from_no_app_is_refused_alike_and_never_sent(
@@ -202,6 +209,7 @@ def test_a_call_from_no_app_is_refused_alike_and_never_sent(
     assert _balances(account) == [0, 0]
 
 
+@pytest.mark.conformance_case("deadline_passed_at_the_caller")
 @PARITY
 @pytest.mark.spec("TRN-4", "TRN-28", "TRN-48")
 def test_a_call_whose_deadline_has_passed_is_a_timeout_over_both(
@@ -220,6 +228,7 @@ def test_a_call_whose_deadline_has_passed_is_a_timeout_over_both(
     assert _balances(account) == [0, 0]
 
 
+@pytest.mark.conformance_case("deadline_passes_at_the_provider")
 @PARITY
 @pytest.mark.spec("TRN-4")
 def test_a_call_whose_deadline_passes_at_the_provider_is_a_timeout_over_both(
@@ -233,6 +242,7 @@ def test_a_call_whose_deadline_passes_at_the_provider_is_a_timeout_over_both(
     assert over_both(call).kind == "timeout"
 
 
+@pytest.mark.conformance_case("no_deadline_reaches_the_provider")
 @PARITY
 def test_a_call_with_no_deadline_reaches_the_provider_with_none_over_both(
     over_both: OverBoth,
@@ -248,6 +258,7 @@ def test_a_call_with_no_deadline_reaches_the_provider_with_none_over_both(
     )
 
 
+@pytest.mark.conformance_case("request_refused_at_the_caller")
 @PARITY
 @pytest.mark.spec("TRN-14", "TRN-15")
 def test_a_request_the_caller_refuses_is_refused_alike_and_never_sent(
@@ -268,6 +279,7 @@ def test_a_request_the_caller_refuses_is_refused_alike_and_never_sent(
     assert _balances(account) == [0, 0]
 
 
+@pytest.mark.conformance_case("version_not_required")
 @PARITY
 @pytest.mark.spec("TRN-39")
 def test_a_call_to_a_version_the_app_does_not_require_is_refused_alike(
@@ -281,6 +293,7 @@ def test_a_call_to_a_version_the_app_does_not_require_is_refused_alike(
     assert isinstance(over_both(call).error, UsageError)
 
 
+@pytest.mark.conformance_case("error_of_every_kind")
 @PARITY
 @pytest.mark.spec("CON-43", "CON-26", "CON-27")
 @pytest.mark.parametrize("kind", list(RefusalKind))
@@ -303,6 +316,7 @@ def test_an_error_the_action_raises_is_the_same_over_both(
         assert error.data is None
 
 
+@pytest.mark.conformance_case("reply_of_another_type")
 @PARITY
 @pytest.mark.spec("TRN-18")
 def test_a_reply_of_another_type_is_internal_over_both(over_both: OverBoth) -> None:
@@ -313,6 +327,7 @@ def test_a_reply_of_another_type_is_internal_over_both(over_both: OverBoth) -> N
     assert over_both(call).kind == "internal"
 
 
+@pytest.mark.conformance_case("provider_fails")
 @PARITY
 @pytest.mark.spec("CON-44", "CON-46")
 def test_a_provider_that_fails_is_internal_over_both(over_both: OverBoth) -> None:
@@ -326,6 +341,7 @@ def test_a_provider_that_fails_is_internal_over_both(over_both: OverBoth) -> Non
     assert "the reference provider failed" not in error.message
 
 
+@pytest.mark.conformance_case("deposits_in_one_scope")
 @PARITY
 def test_a_deposit_is_the_same_over_both(over_both: OverBoth) -> None:
     account = []
