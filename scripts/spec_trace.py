@@ -50,7 +50,12 @@ It always reports a problem, and exits 1, when:
   not one live must-level requirement ID (bare or in backticks), is
   repeated, or has an empty ``Binds`` cell. Without the heading the list is
   empty;
-- ``tests/spec_trace.toml`` exists but cannot be read as UTF-8 TOML;
+- a file it reads (spec/, the settings, the case files, the report, the
+  files the suite's hash reads) is missing where it is required, is not a
+  regular file, cannot be read, or is not UTF-8 where it is text. Every file
+  goes through one reader, so a pipe never hangs the check; only the
+  settings and the reference document may be absent;
+- ``tests/spec_trace.toml`` is not valid TOML;
 - ``spec/conformance/cases/`` holds anything but files named
   ``<part>.json`` or ``<part>-<topic>.json``, where ``<part>`` is
   ``contract``, ``wire``, ``routing`` or ``lifecycle`` and ``<topic>`` is
@@ -147,6 +152,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import sys
 import tomllib
 from collections.abc import Sequence
@@ -291,13 +297,85 @@ def _shown(value: object) -> str:
     return text if len(text) <= 40 else text[:37] + "..."
 
 
+# Reading files: every file the checker reads goes through these two, so
+# whatever is missing, of another kind or unreadable is a problem, never a
+# crash, a hang (a pipe) or a silent default.
+
+
+def _reason(error: Exception) -> str:
+    if isinstance(error, OSError):
+        return str(error.strerror or error)
+    return str(error)
+
+
+def _read_file(
+    path: Path, where: str, problems: list[str], *, absent: bool = False
+) -> bytes | None:
+    """The bytes of the regular file at ``path``; None, with the problem
+    ``<where>: <reason>``, for anything else.
+
+    With ``absent``, a path where nothing is (not even a link) is None with
+    no problem.
+    """
+    try:
+        try:
+            mode = path.stat().st_mode
+        except FileNotFoundError:
+            if absent and not os.path.lexists(path):
+                return None
+            raise
+        if not stat.S_ISREG(mode):
+            problems.append(f"{where}: not a regular file")
+            return None
+        return path.read_bytes()
+    except OSError as error:
+        problems.append(f"{where}: {_reason(error)}")
+        return None
+
+
+def _read_text(
+    path: Path, where: str, problems: list[str], *, absent: bool = False
+) -> str | None:
+    """As ``_read_file``, decoded as UTF-8."""
+    data = _read_file(path, where, problems, absent=absent)
+    if data is None:
+        return None
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as error:
+        problems.append(f"{where}: {error}")
+        return None
+
+
+def _directory(path: Path, where: str, problems: list[str]) -> bool | None:
+    """True if ``path`` is a directory, None if nothing is there; False, with
+    a problem, for anything else.
+    """
+    try:
+        try:
+            mode = path.stat().st_mode
+        except FileNotFoundError:
+            if not os.path.lexists(path):
+                return None
+            raise
+    except OSError as error:
+        problems.append(f"{where}: {_reason(error)}")
+        return False
+    if not stat.S_ISDIR(mode):
+        problems.append(f"{where}: not a directory")
+        return False
+    return True
+
+
 # Reading the specification
 
 
 def read_areas(readme: Path, trace: Trace | None = None) -> dict[str, str]:
     """Map document numbers to ID areas, from the table in spec/README.md."""
     areas: dict[str, str] = {}
-    for line in readme.read_text(encoding="utf-8").splitlines():
+    problems = trace.problems if trace is not None else []
+    text = _read_text(readme, "README.md: cannot be read", problems)
+    for line in (text or "").splitlines():
         match = _AREA_ROW.match(line)
         if not match:
             continue
@@ -590,8 +668,13 @@ class _DocumentReader:
 def read_spec(spec_dir: Path, trace: Trace) -> None:
     """Collect requirements from every numbered document in ``spec_dir``."""
     areas = read_areas(spec_dir / "README.md", trace)
-    for path in sorted(spec_dir.rglob("*")):
-        if path.suffix.lower() not in (".md", ".markdown") or not path.is_file():
+    try:
+        paths = sorted(spec_dir.rglob("*"))
+    except OSError as error:
+        trace.problems.append(f"spec: cannot be read: {_reason(error)}")
+        return
+    for path in paths:
+        if path.suffix.lower() not in (".md", ".markdown"):
             continue
         name = path.relative_to(spec_dir).as_posix()
         if name == "README.md":
@@ -611,7 +694,9 @@ def read_spec(spec_dir: Path, trace: Trace) -> None:
         if area is None:
             trace.problems.append(f"{name}: no ID area in the table in spec/README.md")
             continue
-        text = path.read_text(encoding="utf-8")
+        text = _read_text(path, f"{name}: cannot be read", trace.problems)
+        if text is None:
+            continue
         _DocumentReader(name, area, trace).read(text)
         if number == "06":
             _read_binds_others(name, text, trace)
@@ -725,21 +810,16 @@ def _read_binds_others(name: str, text: str, trace: Trace) -> None:
 def read_cases(spec_dir: Path, trace: Trace) -> None:
     """Read and check the case files in ``spec/conformance/cases/``."""
     folder = spec_dir / CASES
-    if not folder.is_dir():
-        if folder.exists() or folder.is_symlink():
-            trace.problems.append(f"{CASES}: is not a directory")
+    if not _directory(folder, f"{CASES}: cannot be read", trace.problems):
         return
     try:
         paths = sorted(folder.iterdir())
     except OSError as error:
-        trace.problems.append(f"{CASES}: cannot be read: {error.strerror or error}")
+        trace.problems.append(f"{CASES}: cannot be read: {_reason(error)}")
         return
     for path in paths:
         label = f"{CASES}/{path.name}"
         match = _CASE_FILE.fullmatch(path.name)
-        if match is not None and not path.is_file():
-            trace.problems.append(f"{label}: is not a file")
-            continue
         if match is None:
             trace.problems.append(
                 f"{label}: a case file is named <part>.json or <part>-<topic>.json, "
@@ -775,11 +855,12 @@ def _once(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 
 def _read_case_file(label: str, part: str, path: Path, trace: Trace) -> None:
+    text = _read_text(path, f"{label}: cannot be read", trace.problems)
+    if text is None:
+        return
     try:
-        cases = json.loads(
-            path.read_bytes().decode("utf-8"), object_pairs_hook=_members
-        )
-    except (OSError, ValueError, RecursionError) as error:
+        cases = json.loads(text, object_pairs_hook=_members)
+    except (ValueError, RecursionError) as error:
         trace.problems.append(f"{label}: cannot be read: {error}")
         return
     if not isinstance(cases, list):
@@ -866,14 +947,13 @@ def _case_requirements(value: object, problem: _CaseProblems) -> tuple[str, ...]
 
 def read_settings(path: Path, trace: Trace) -> list[str]:
     """Read ``tests/spec_trace.toml``: the enforced documents and [not-tested]."""
-    if not path.exists() and not path.is_symlink():
-        return []
+    text = _read_text(path, f"{SETTINGS}: cannot be read", trace.problems, absent=True)
+    if text is None:
+        return []  # absent, or a problem
     try:
-        settings = tomllib.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, RecursionError) as error:
-        # TOMLDecodeError and UnicodeDecodeError are ValueErrors.
-        reason = error.strerror if isinstance(error, OSError) else None
-        trace.problems.append(f"{SETTINGS}: {reason or error}")
+        settings = tomllib.loads(text)
+    except (ValueError, RecursionError) as error:
+        trace.problems.append(f"{SETTINGS}: {error}")
         return []
     for key in sorted(settings.keys() - _SETTINGS_KEYS):
         trace.problems.append(f"{SETTINGS}: unknown key {key!r}")
@@ -950,9 +1030,12 @@ def _ran(entry: object) -> Ran | None:
 def read_report(path: Path, trace: Trace) -> None:
     """Read the report the pytest plugin wrote."""
     where = f"report {path.name}"
+    text = _read_text(path, f"{where}: cannot be read", trace.problems)
+    if text is None:
+        return
     try:
-        report = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_once)
-    except (OSError, ValueError, RecursionError) as error:
+        report = json.loads(text, object_pairs_hook=_once)
+    except (ValueError, RecursionError) as error:
         trace.problems.append(f"{where}: cannot be read: {error}")
         return
     if not isinstance(report, dict):
@@ -1073,6 +1156,7 @@ def check(
     for table, rid in refused:
         del table[rid]
     if not trace.measured:
+        _once_each(trace)
         return trace
     for requirement in trace.requirements.values():
         if (
@@ -1089,7 +1173,13 @@ def check(
     _check_markers(trace)
     if conformance:
         trace.run = conformance_run(root, trace)
+    _once_each(trace)
     return trace
+
+
+def _once_each(trace: Trace) -> None:
+    """Report each problem once: a file read twice is refused twice."""
+    trace.problems[:] = list(dict.fromkeys(trace.problems))
 
 
 def _check_markers(trace: Trace) -> None:
@@ -1132,19 +1222,16 @@ def _digest(root: Path, folder: Path, problems: list[str]) -> str | None:
         (os.fsencode(path.relative_to(root).as_posix()), path) for path in files
     )
     for name, path in named:
-        try:
-            data = path.read_bytes()
-        except OSError as error:
-            problems.append(_unreadable(name, error))
+        shown = name.decode("utf-8", "backslashreplace")
+        data = _read_file(path, f"{shown}: {_HASH}", problems)
+        if data is None:
             return None
         digest.update(name + b"\0" + str(len(data)).encode() + b"\0")
         digest.update(data)
     return digest.hexdigest()
 
 
-def _unreadable(name: bytes, error: OSError) -> str:
-    shown = name.decode("utf-8", "backslashreplace")
-    return f"{shown}: cannot be read for the suite's hash: {error.strerror or error}"
+_HASH = "cannot be read for the suite's hash"
 
 
 def _files(root: Path, folder: Path, problems: list[str]) -> list[Path] | None:
@@ -1163,7 +1250,7 @@ def _files(root: Path, folder: Path, problems: list[str]) -> list[Path] | None:
     def problem(path: Path, reason: str) -> bool:
         name = path.relative_to(root).as_posix()
         shown = os.fsencode(name).decode("utf-8", "backslashreplace")
-        problems.append(f"{shown}: cannot be read for the suite's hash: {reason}")
+        problems.append(f"{shown}: {_HASH}: {reason}")
         return False
 
     def visit(directory: Path, ancestors: frozenset[str]) -> bool:
@@ -1192,10 +1279,11 @@ def _files(root: Path, folder: Path, problems: list[str]) -> list[Path] | None:
                 return problem(path, "neither a file nor a directory")
         return True
 
-    if not folder.exists() and not folder.is_symlink():
+    shown = folder.relative_to(root).as_posix()
+    present = _directory(folder, f"{shown}: {_HASH}", problems)
+    if present is None:
         return []
-    if not folder.is_dir():
-        problem(folder, "not a directory")
+    if not present:
         return None
     return found if visit(folder, frozenset({os.path.realpath(folder)})) else None
 
@@ -1207,15 +1295,8 @@ def suite(root: Path, problems: list[str] | None = None) -> dict[str, str | None
     """
     problems = [] if problems is None else problems
     path = root / "spec" / REFERENCE
-    reference: str | None = None
-    if path.exists() or path.is_symlink():
-        try:
-            reference = hashlib.sha256(path.read_bytes()).hexdigest()
-        except OSError as error:
-            problems.append(
-                f"spec/{REFERENCE}: cannot be read for the suite's hash: "
-                f"{error.strerror or error}"
-            )
+    data = _read_file(path, f"spec/{REFERENCE}: {_HASH}", problems, absent=True)
+    reference = None if data is None else hashlib.sha256(data).hexdigest()
     return {
         "cases": _digest(root, root / "spec" / CASES, problems),
         "reference": reference,
@@ -1234,11 +1315,8 @@ def read_version(readme: Path, trace: Trace) -> tuple[str | None, set[str] | Non
     in spec/ once, and each cell of the version's column says ``yes``, ``no``
     or ``outline only``.
     """
-    try:
-        text = readme.read_text(encoding="utf-8")
-    except (OSError, ValueError) as error:
-        reason = error.strerror if isinstance(error, OSError) else None
-        trace.problems.append(f"README.md: cannot be read: {reason or error}")
+    text = _read_text(readme, "README.md: cannot be read", trace.problems)
+    if text is None:
         return None, None
     lines = _STATUS_LINE.findall(text)
     version = _VERSION.match(lines[0]) if len(lines) == 1 else None
@@ -1448,6 +1526,8 @@ def _emptied(parser: argparse.ArgumentParser, value: str) -> Path:
         parser.error(f"--conformance needs a file path, not {value!r}")
     path = Path(expanded).absolute()
     try:
+        if os.path.lexists(path) and not stat.S_ISREG(path.stat().st_mode):
+            parser.error(f"--conformance cannot write {path}: not a regular file")
         path.write_text("", encoding="utf-8")
     except OSError as error:
         parser.error(f"--conformance cannot write {path}: {error.strerror or error}")

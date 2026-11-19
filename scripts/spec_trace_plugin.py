@@ -58,6 +58,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import stat
 from importlib import metadata
 from pathlib import Path
 
@@ -91,6 +92,10 @@ def _emptied(value: str) -> Path:
         raise pytest.UsageError(f"--spec-report needs a file path, not {value!r}")
     path = Path(expanded).absolute()
     try:
+        if os.path.lexists(path) and not stat.S_ISREG(path.stat().st_mode):
+            raise pytest.UsageError(
+                f"--spec-report cannot write {path}: not a regular file"
+            )
         path.write_text("", encoding="utf-8")
     except OSError as error:
         raise pytest.UsageError(

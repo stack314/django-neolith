@@ -529,3 +529,12 @@ def test_other_properties_and_earlier_phases_are_not_transport_outcomes(
         "test_other": {"ids": ["CON-1"], "outcome": "passed"},
         "test_twice": {"ids": ["CON-1"], "outcome": "error"},
     }
+
+
+def test_a_report_path_of_another_kind_is_refused(pytester: pytest.Pytester) -> None:
+    pytester.makeini(INI)
+    pytester.makepyfile("def test_it(): pass\n")
+    os.mkfifo(pytester.path / "report.json")
+    result = pytester.runpytest(*ARGS, "--spec-report=report.json")
+    assert result.ret == pytest.ExitCode.USAGE_ERROR
+    result.stderr.fnmatch_lines(["*--spec-report cannot write *: not a regular file*"])

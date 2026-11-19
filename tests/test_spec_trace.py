@@ -1074,12 +1074,14 @@ def test_a_directory_among_the_case_files_is_refused(suite: Suite) -> None:
     assert problems(root) == [f"conformance/cases/other{NAMING}"]
     shutil.rmtree(root / "spec/conformance/cases/other")
     root = suite(**{"spec/conformance/cases/contract.json/a.json": "[]"})
-    assert problems(root) == ["conformance/cases/contract.json: is not a file"]
+    assert problems(root) == [
+        "conformance/cases/contract.json: cannot be read: not a regular file"
+    ]
 
 
 def test_the_cases_folder_is_a_directory(suite: Suite) -> None:
     root = suite(**{"spec/conformance/cases": "[]"})
-    assert problems(root) == ["conformance/cases: is not a directory"]
+    assert problems(root) == ["conformance/cases: cannot be read: not a directory"]
 
 
 @pytest.mark.parametrize(
@@ -1995,7 +1997,7 @@ def test_a_document_marked_no_does_not_count(suite: Suite) -> None:
 @pytest.mark.parametrize(
     ("settings", "problem"),
     [
-        (b'enforce = ["\xff"]\n', "'utf-8' codec can't decode"),
+        (b'enforce = ["\xff"]\n', "cannot be read: 'utf-8' codec can't decode"),
         (b"a = " + b"[" * 3000 + b"]" * 3000 + b"\n", ""),
     ],
 )
@@ -2011,10 +2013,14 @@ def test_settings_that_cannot_be_read_are_a_problem(
 def test_settings_that_are_not_a_file_are_a_problem(suite: Suite) -> None:
     root = suite()
     (root / "tests/spec_trace.toml").mkdir()
-    assert problems(root) == ["tests/spec_trace.toml: Is a directory"]
+    assert problems(root) == [
+        "tests/spec_trace.toml: cannot be read: not a regular file"
+    ]
     (root / "tests/spec_trace.toml").rmdir()
     (root / "tests/spec_trace.toml").symlink_to(root / "nowhere")
-    assert problems(root) == ["tests/spec_trace.toml: No such file or directory"]
+    assert problems(root) == [
+        "tests/spec_trace.toml: cannot be read: No such file or directory"
+    ]
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file")
@@ -2022,7 +2028,9 @@ def test_settings_that_cannot_be_opened_are_a_problem(suite: Suite) -> None:
     root = suite(tests__spec_trace_toml="enforce = []\n")
     (root / "tests/spec_trace.toml").chmod(0)
     try:
-        assert problems(root) == ["tests/spec_trace.toml: Permission denied"]
+        assert problems(root) == [
+            "tests/spec_trace.toml: cannot be read: Permission denied"
+        ]
     finally:
         (root / "tests/spec_trace.toml").chmod(0o600)
 
@@ -2072,7 +2080,9 @@ def test_what_the_suite_hash_cannot_read_is_a_problem(
 def test_a_case_file_that_is_not_a_file_is_refused(suite: Suite) -> None:
     root = suite()
     _link(root, "spec/conformance/cases/wire.json", "wire.json")
-    assert problems(root) == ["conformance/cases/wire.json: is not a file"]
+    assert problems(root) == [
+        "conformance/cases/wire.json: cannot be read: Too many levels of symbolic links"
+    ]
 
 
 def test_main_writes_no_run_when_the_check_finds_a_problem(suite: Suite) -> None:
@@ -2100,3 +2110,98 @@ def test_a_list_among_a_cases_requirements_is_refused(suite: Suite) -> None:
         'conformance/cases/contract.json: case 1: requirements: ["CON-1"] is not '
         "a live requirement"
     ]
+
+
+# The third review: every file is read by one reader, so no second, unguarded
+# read of the same file comes first. Each case runs through main, as CI does.
+
+
+def _main(root: Path, capsys: pytest.CaptureFixture[str]) -> tuple[int, str, str]:
+    report = write_report(root, {"t::a": (["CON-1", "CNF-1"], "passed")})
+    out = root / "run.json"
+    argv = ["--root", str(root), "--report", str(report), "--conformance", str(out)]
+    code = spec_trace.main(argv)
+    return code, capsys.readouterr().out, out.read_text()
+
+
+def _fifo(path: Path) -> None:
+    path.unlink(missing_ok=True)
+    os.mkfifo(path)
+
+
+@pytest.mark.parametrize(
+    ("change", "problem"),
+    [
+        (lambda r: (r / "spec/README.md").unlink(),
+         "README.md: cannot be read: No such file or directory"),
+        (lambda r: ((r / "spec/README.md").unlink(), (r / "spec/README.md").mkdir()),
+         "README.md: cannot be read: not a regular file"),
+        (lambda r: (r / "spec/README.md").write_bytes(README_RUN.encode() + b"\xff"),
+         "README.md: cannot be read: 'utf-8' codec can't decode byte 0xff"),
+        (lambda r: _fifo(r / "spec/README.md"),
+         "README.md: cannot be read: not a regular file"),
+        (lambda r: (r / "spec/06-conformance.md").write_bytes(b"\xff"),
+         "06-conformance.md: cannot be read: 'utf-8' codec can't decode byte 0xff"),
+        (lambda r: _fifo(r / "spec/01-contracts.md"),
+         "01-contracts.md: cannot be read: not a regular file"),
+        (lambda r: _fifo(r / "tests/spec_trace.toml"),
+         "tests/spec_trace.toml: cannot be read: not a regular file"),
+        (lambda r: _fifo(r / "spec/conformance/reference.v1.openapi.json"),
+         "spec/conformance/reference.v1.openapi.json: cannot be read for the "
+         "suite's hash: not a regular file"),
+        (lambda r: _fifo(r / "spec/conformance/cases/contract.json"),
+         "conformance/cases/contract.json: cannot be read: not a regular file"),
+    ],
+)  # fmt: skip
+def test_an_input_of_another_kind_is_a_problem_through_main(
+    suite: Suite,
+    capsys: pytest.CaptureFixture[str],
+    change: Callable[[Path], object],
+    problem: str,
+) -> None:
+    root = suite(**{"spec/conformance/cases/contract.json": "[]"})
+    change(root)
+    code, out, run = _main(root, capsys)
+    assert code == 1
+    assert run == ""
+    assert any(line.startswith(f"problem: {problem}") for line in out.splitlines()), out
+    assert out.count(f"problem: {problem}") == 1
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any directory")
+def test_settings_in_a_folder_that_cannot_be_searched_are_a_problem(
+    suite: Suite, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = suite()
+    report = write_report(root, {})
+    (root / "tests").chmod(0)
+    try:
+        code = spec_trace.main(["--root", str(root), "--report", str(report)])
+    finally:
+        (root / "tests").chmod(0o700)
+    assert code == 1
+    assert "problem: tests/spec_trace.toml: cannot be read: Permission denied" in (
+        capsys.readouterr().out
+    )
+
+
+def test_a_report_of_another_kind_is_a_problem(suite: Suite) -> None:
+    root = suite()
+    (root / "report").mkdir()
+    assert problems(root, report=root / "report") == [
+        "report report: cannot be read: not a regular file"
+    ]
+
+
+def test_main_refuses_a_conformance_path_of_another_kind(
+    suite: Suite, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = suite()
+    report = write_report(root, {})
+    os.mkfifo(root / "run.json")
+    argv = ["--root", str(root), "--report", str(report), "--conformance"]
+    with pytest.raises(SystemExit):
+        spec_trace.main([*argv, str(root / "run.json")])
+    assert capsys.readouterr().err.endswith(
+        f"error: --conformance cannot write {root}/run.json: not a regular file\n"
+    )
