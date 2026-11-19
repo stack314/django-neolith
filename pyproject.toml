@@ -129,7 +129,11 @@ DJANGO_SETTINGS_MODULE = "tests.settings"
 django_find_project = false
 pythonpath = ["."]
 # ADR 0018: a test cites the requirements it verifies; scripts/spec_trace.py checks the IDs.
-markers = ["spec(*ids): requirement IDs from spec/ that this test verifies"]
+# ADR 0032: a conformance test names the case it runs, from spec/conformance/cases/.
+markers = [
+    "spec(*ids): requirement IDs from spec/ that this test verifies",
+    "conformance_case(name): the conformance case, from spec/conformance/cases/, that this test runs",
+]
 # ADR 0012: deprecations are errors. Django's RemovedInDjango*Warning classes
 # subclass DeprecationWarning or PendingDeprecationWarning, so they are covered.
 # A filter for a third-party warning names the package and the upstream issue.

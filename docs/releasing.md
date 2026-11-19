@@ -376,6 +376,16 @@ If a job fails before *Publish to PyPI* runs, nothing was published. See [sectio
   done
   ```
   Expected: `neolith <VERSION> on Django ...` for each pair, then the tests pass. `pip install --group test` installs only the test tools, so the tests import the release from PyPI. A new release can take a few minutes to reach every PyPI mirror; if pip cannot find it, wait and try again.
+- [ ] Download the conformance runs of the release commit: CI's run of the push to `main` writes one per leg of its matrix, four in all ([ADR 0032](adr/0032-the-conformance-suite-runs-each-case-once-per-transport.md), Decision 9). CI keeps them for 90 days, so the release keeps a copy.
+  ```
+  CI_RUN=$(gh run list --repo "$REPO" --workflow ci.yml --commit "$MERGE" --event push \
+    --status success -L 1 --json databaseId -q '.[0].databaseId')
+  gh run download "$CI_RUN" --repo "$REPO" --pattern 'conformance-run-*' --dir "$WORK/conformance"
+  for f in "$WORK"/conformance/*/conformance-run-*.json; do
+    python3 -c 'import json, sys; r = json.load(open(sys.argv[1])); print(sys.argv[1].rsplit("/", 1)[1], "spec", r["spec"], r["implementation"]["version"], "conforms:", r["conforms"])' "$f"
+  done
+  ```
+  Expected: four lines, one per leg (`3.12-django5.2` and `3.15-django6.1`, each on `x86-64` and `arm64`), each with `spec 0.1`, the version `<VERSION>` and whether the run conforms. If `CI_RUN` is empty, CI has not passed on the merge commit: wait for it, or rerun it, before going on. Until roadmap step 8 the runs say `conforms: False`, since OVR-5 is not tested yet; that is expected for an alpha, and the notes say it.
 - [ ] Create the GitHub Release, with the changelog section as its notes. This step is required: the release workflow does not create one, the changelog links to it, and the website's status reads GitHub Releases. Relative links in the section are made absolute at the tag.
   ```
   cd "$WORK/tag"
@@ -394,11 +404,25 @@ If a job fails before *Publish to PyPI* runs, nothing was published. See [sectio
   links = re.compile(r"\]\((?!https?://|#)([^)]+)\)")
   print(links.sub(lambda m: f"]({base}{m[1]})", section[1]).strip())
   PY
+  python3 - "$WORK"/conformance/*/conformance-run-*.json >> "$WORK/notes.md" <<'PY'
+  import json
+  import pathlib
+  import sys
+
+  print("\n### Conformance runs\n")
+  print("The four runs of the conformance suite on the release commit, one per CI leg, are attached (spec 06):\n")
+  for name in sys.argv[1:]:
+      path = pathlib.Path(name)
+      run = json.loads(path.read_text(encoding="utf-8"))
+      print(f"- `{path.name}`: spec {run['spec']}, conforms: {str(run['conforms']).lower()}")
+  PY
   gh release create "v${VERSION}" --repo "$REPO" --verify-tag --title "${VERSION}" \
     --notes-file "$WORK/notes.md" --prerelease
+  gh release upload "v${VERSION}" --repo "$REPO" "$WORK"/conformance/*/conformance-run-*.json
   gh release view "v${VERSION}" --repo "$REPO" | head -8
+  gh release view "v${VERSION}" --repo "$REPO" --json assets -q '.assets[].name'
   ```
-  Leave out `--prerelease` for a final release. Expected: the URL of the release, then `title: <VERSION>`, `tag: v<VERSION>`, `draft: false`, and `prerelease: true` for a pre-release. A release that does not exist prints `release not found`. If it was already created, `gh release create` refuses; check it with `gh release view`.
+  Leave out `--prerelease` for a final release. Expected: the URL of the release, then `title: <VERSION>`, `tag: v<VERSION>`, `draft: false`, and `prerelease: true` for a pre-release, then the four `conformance-run-*.json` files. A release that does not exist prints `release not found`. If it was already created, `gh release create` refuses; check it with `gh release view`, and attach the runs with `gh release upload` if they are missing.
 - [ ] The changelog's link to the release works.
   ```
   curl -s -o /dev/null -w '%{http_code}\n' "https://github.com/stack314/django-neolith/releases/tag/v${VERSION}"
