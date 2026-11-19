@@ -53,8 +53,10 @@ It always reports a problem, and exits 1, when:
 - a file it reads (spec/, the settings, the case files, the report, the
   files the suite's hash reads) is missing where it is required, is not a
   regular file, cannot be read, or is not UTF-8 where it is text. Every file
-  goes through one reader, so a pipe never hangs the check; only the
-  settings and the reference document may be absent;
+  goes through one reader, so a pipe never hangs the check. Only the
+  settings, the reference document and ``spec/conformance/cases/`` (which
+  then hashes as empty) may be absent. A folder under spec/ that cannot be
+  listed, and a link to a folder there, are problems too;
 - ``tests/spec_trace.toml`` is not valid TOML;
 - ``spec/conformance/cases/`` holds anything but files named
   ``<part>.json`` or ``<part>-<topic>.json``, where ``<part>`` is
@@ -665,15 +667,37 @@ class _DocumentReader:
         )
 
 
+def _listed(spec_dir: Path, trace: Trace) -> list[Path]:
+    """Every file and folder under ``spec_dir``, in order of path.
+
+    A folder that cannot be listed and a link to a folder are problems,
+    labelled by their path from ``spec_dir`` (``spec`` for the folder
+    itself): ``rglob`` would skip both without a word.
+    """
+
+    def label(path: str) -> str:
+        name = Path(path).relative_to(spec_dir).as_posix()
+        return "spec" if name == "." else name
+
+    def refused(error: OSError) -> None:
+        where = label(error.filename) if error.filename else "spec"
+        trace.problems.append(f"{where}: cannot be read: {_reason(error)}")
+
+    paths: list[Path] = []
+    for directory, folders, files in os.walk(spec_dir, onerror=refused):
+        for folder in list(folders):
+            path = os.path.join(directory, folder)
+            if os.path.islink(path):
+                trace.problems.append(f"{label(path)}: a link to a folder")
+                folders.remove(folder)
+        paths.extend(Path(directory, name) for name in [*folders, *files])
+    return sorted(paths)
+
+
 def read_spec(spec_dir: Path, trace: Trace) -> None:
     """Collect requirements from every numbered document in ``spec_dir``."""
     areas = read_areas(spec_dir / "README.md", trace)
-    try:
-        paths = sorted(spec_dir.rglob("*"))
-    except OSError as error:
-        trace.problems.append(f"spec: cannot be read: {_reason(error)}")
-        return
-    for path in paths:
+    for path in _listed(spec_dir, trace):
         if path.suffix.lower() not in (".md", ".markdown"):
             continue
         name = path.relative_to(spec_dir).as_posix()
@@ -1297,10 +1321,15 @@ def suite(root: Path, problems: list[str] | None = None) -> dict[str, str | None
     path = root / "spec" / REFERENCE
     data = _read_file(path, f"spec/{REFERENCE}: {_HASH}", problems, absent=True)
     reference = None if data is None else hashlib.sha256(data).hexdigest()
+    tests: str | None = None
+    if os.path.lexists(root / "tests"):
+        tests = _digest(root, root / "tests", problems)
+    else:
+        problems.append(f"tests: {_HASH}: missing; the report came from a suite there")
     return {
         "cases": _digest(root, root / "spec" / CASES, problems),
         "reference": reference,
-        "tests": _digest(root, root / "tests", problems),
+        "tests": tests,
     }
 
 

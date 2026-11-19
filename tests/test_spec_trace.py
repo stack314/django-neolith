@@ -2205,3 +2205,71 @@ def test_main_refuses_a_conformance_path_of_another_kind(
     assert capsys.readouterr().err.endswith(
         f"error: --conformance cannot write {root}/run.json: not a regular file\n"
     )
+
+
+# The fourth review: listing spec/ is checked too, not only reading files
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root lists any folder")
+@pytest.mark.parametrize(
+    ("folder", "mode", "problem"),
+    [
+        ("spec/extra", 0, "extra: cannot be read: Permission denied"),
+        ("spec", 0o300, "spec: cannot be read: Permission denied"),
+    ],
+)
+def test_a_spec_folder_that_cannot_be_listed_is_a_problem_through_main(
+    suite: Suite,
+    capsys: pytest.CaptureFixture[str],
+    folder: str,
+    mode: int,
+    problem: str,
+) -> None:
+    root = suite(**{"spec/extra/07-x.md": "x"})
+    (root / folder).chmod(mode)
+    try:
+        code, out, run = _main(root, capsys)
+    finally:
+        (root / folder).chmod(0o700)
+    assert code == 1
+    assert run == ""
+    assert out.count(f"problem: {problem}") == 1, out
+
+
+@pytest.mark.parametrize(
+    ("name", "target"),
+    [("spec/linked", "../elsewhere"), ("spec/self", ".")],
+)
+def test_a_link_to_a_folder_in_spec_is_a_problem_through_main(
+    suite: Suite, capsys: pytest.CaptureFixture[str], name: str, target: str
+) -> None:
+    root = suite(**{"elsewhere/07-x.md": "x"})
+    _link(root, name, target)
+    code, out, run = _main(root, capsys)
+    assert code == 1
+    assert run == ""
+    label = name.removeprefix("spec/")
+    assert out.count(f"problem: {label}: a link to a folder") == 1, out
+
+
+def test_a_folder_named_like_a_document_is_read_and_refused(suite: Suite) -> None:
+    root = suite()
+    (root / "spec/02-transports.md").unlink()
+    (root / "spec/02-transports.md").mkdir()
+    assert problems(root) == ["02-transports.md: cannot be read: not a regular file"]
+
+
+def test_a_run_without_tests_is_a_problem_through_main(
+    suite: Suite, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = suite()
+    shutil.rmtree(root / "tests")
+    report = write_report(root, {"t::a": (["CON-1", "CNF-1"], "passed")})
+    out = root / "run.json"
+    argv = ["--root", str(root), "--report", str(report), "--conformance", str(out)]
+    assert spec_trace.main(argv) == 1
+    assert out.read_text() == ""
+    assert (
+        "problem: tests: cannot be read for the suite's hash: missing; the report "
+        "came from a suite there" in capsys.readouterr().out
+    )
