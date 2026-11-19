@@ -548,11 +548,14 @@ def _remote(
     configs: Iterable[AppConfig],
     callers: _caller.Callers,
 ) -> Mapping[str, Bound]:
-    """``connectors`` with a connector over HTTP to each remote provider of
-    ``settings.NEOLITH``, which set-up's checks have passed: under
-    ``single``, a contract's one provider is the app of the host that
-    provides it, else its remote provider (ADR 0014 Decision 2). The
-    transports share one pool per origin and open nothing until a call.
+    """``connectors`` with a connector over HTTP for each contract version
+    ``settings.NEOLITH`` lists remote providers for, which set-up's checks
+    have passed: one transport per entry, in the order listed (ADR 0014
+    Decision 2, ADR 0031 Decision 2). Under ``single`` that is the one
+    remote provider; under ``local-first``, the order the connector walks.
+    Resolve has refused a remote provider for a contract an app of the host
+    provides. The transports share one pool per origin and open nothing
+    until a call.
 
     The pools belong to the set-up that ``config`` ran, and close when the
     config is gone, such as when Django drops the registry of an override
@@ -568,11 +571,15 @@ def _remote(
     }
     pools = _http.Pools()
     chosen = dict(connectors)
-    for identity, url in urls.items():
+    for identity, listed in urls.items():
         declaration = required[identity].declaration
-        pool = pools.pool(_http.Origin.parse(url))
-        transport = _http_transport.HTTPTransport(declaration, pool, callers)
-        chosen.setdefault(identity, Bound(declaration, transport))
+        transports = [
+            _http_transport.HTTPTransport(
+                declaration, pools.pool(_http.Origin.parse(url)), callers
+            )
+            for url in listed
+        ]
+        chosen.setdefault(identity, Bound(declaration, *transports))
     weakref.finalize(config, pools.close)
     return types.MappingProxyType(chosen)
 
@@ -694,8 +701,8 @@ def build(registry: Apps) -> tuple[Host, list[str]]:
 
     Returns the table and every refusal; the table is used only when there is
     none. Every check runs whatever the others found, so one refusal hides
-    none behind it. Resolve reads the remote providers that
-    ``settings.NEOLITH`` names; when it refuses, every problem of
+    none behind it. Resolve reads the remote providers and the routing
+    policies that ``settings.NEOLITH`` names; when it refuses, every problem of
     ``NEOLITH``, and each app that requires a remote provider's contract
     with no signing key, comes with its refusals. Set-up adds the remote
     providers' transports to the table once its checks have passed
@@ -708,7 +715,9 @@ def build(registry: Apps) -> tuple[Host, list[str]]:
     ]
     neolith = getattr(settings, "NEOLITH", _checks.MISSING)
     declarations = [declaration for _, declaration in hosted]
-    contracts, refusals = resolve(declarations, _checks.remote_identities(neolith))
+    contracts, refusals = resolve(
+        declarations, _checks.remote_identities(neolith), _checks.routed(neolith)
+    )
     if refusals:
         # Resolve reads NEOLITH, so a requirement it finds unmet may come
         # from a problem there: those, and its remote providers' callers
@@ -764,7 +773,9 @@ def build(registry: Apps) -> tuple[Host, list[str]]:
 
 
 def resolve(
-    declarations: Sequence[Declaration], remote: Collection[str] = ()
+    declarations: Sequence[Declaration],
+    remote: Collection[str] = (),
+    routed: Mapping[str, int | None] | None = None,
 ) -> tuple[dict[str, Contract], list[str]]:
     """Resolve: the contracts the host knows by identity, and the refusals.
 
@@ -773,7 +784,13 @@ def resolve(
     or provides it again, is refused naming the first. A requirement is
     met by the app that provides it or by a remote provider, one of the
     identities ``remote`` names; a remote identity that no app requires, or
-    that an app provides, is refused (ADR 0014, the Resolve rows).
+    that an app provides, is refused under every policy (ADR 0014, the
+    Resolve rows, as ADR 0031 words them). ``routed`` maps each identity
+    ``NEOLITH["ROUTING_POLICIES"]`` names to its number of remote entries
+    under ``local-first``, or ``None`` for a value its own row refuses: one
+    that no app requires or that an app provides is refused, and one under
+    ``local-first`` with exactly one entry; one with none is left to the
+    refusal of the requirement it leaves unmet (ADR 0031, the Resolve rows).
     """
     refusals: list[str] = []
     named: dict[str, tuple[Contract, str]] = {}
@@ -808,9 +825,28 @@ def resolve(
         if identity in providers:
             refusals.append(
                 f"{_checks.REMOTE}: {identity} is provided by app "
-                f"{providers[identity]} in this host; a contract provided in the "
-                "host and remotely at once needs a routing policy other than "
-                "single, which arrives with step 6 (ADR 0016)"
+                f"{providers[identity]} in this host, which answers every call "
+                "to it; an in-process call never ends with unavailable, so a "
+                "remote provider listed beside it would never be called; remove "
+                "the entry"
+            )
+    counts = routed or {}
+    for identity in sorted(counts):
+        if identity not in required:
+            refusals.append(
+                f"{_checks.ROUTING}: {identity} is required by no hosted app; remove it"
+            )
+        if identity in providers:
+            refusals.append(
+                f"{_checks.ROUTING}: {identity} is provided by app "
+                f"{providers[identity]} in this host, which is its one provider; "
+                "remove it"
+            )
+        if counts[identity] == 1:
+            refusals.append(
+                f"{_checks.ROUTING}: {identity} has one entry in {_checks.REMOTE}, "
+                f"and {_checks.LOCAL_FIRST} orders two or more; remove it, since "
+                "one provider is routed by single"
             )
     for declaration in declarations:
         for contract in declaration.requires:
