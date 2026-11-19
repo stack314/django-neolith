@@ -33,13 +33,14 @@
     "name": "failure_is_internal_and_names_nothing",
     "part": "contract",
     "state": "An app of the host that may call reference.v1, in a scope with a timeout of 10 seconds.",
-    "procedure": "1. Call boom, then leak.",
-    "expected": "Each leg's caller receives internal with the fixed text and the call's trace identifier, no cause and no context, and the leg's host has logged the failure under that identifier. The two legs give the same outcome (CNF-1).",
+    "procedure": "1. In a scope with a timeout of 10 seconds, whose trace identifier the case reads, call boom, then leak.",
+    "expected": "Each leg's caller receives internal with the fixed text and the trace identifier of its own scope, no cause and no context, and the provider's host has logged the failure under that identifier, so the identifier reached the provider. The two legs give the same outcome (CNF-1).",
     "requirements": [
       "CNF-1",
       "CON-44",
       "CON-46",
       "HTTP-1",
+      "OVR-6",
       "TRN-18"
     ]
   },

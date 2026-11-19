@@ -25,7 +25,7 @@ PARITY = pytest.mark.spec("CNF-1", "HTTP-1")
 
 
 @PARITY
-@pytest.mark.spec("TRN-27", "TRN-36", "TRN-48", "TRN-29")
+@pytest.mark.spec("TRN-27", "TRN-36", "TRN-48", "TRN-29", "OVR-6")
 @pytest.mark.conformance_case("deadline_reaches_the_provider")
 @pytest.mark.parametrize(
     "timeout",

@@ -104,10 +104,18 @@ _EDGES: dict[str, Values] = {
             2027, 6, 1, 12, tzinfo=timezone(timedelta(hours=14))
         ),
     ),
+    "timestamp at the largest offset": _base(
+        timestamp=datetime(
+            2027, 6, 1, 12, tzinfo=timezone(timedelta(hours=23, minutes=59))
+        )
+    ),
     "date at the ends": _base(date=date(1, 1, 1), optional_date=date(9999, 12, 31)),
     "duration negative": _base(duration=timedelta(seconds=-1, microseconds=-1)),
     "duration at its bound": _base(
         duration=timedelta(seconds=99999999999, microseconds=999999)
+    ),
+    "duration at its negative bound": _base(
+        duration=-timedelta(seconds=99999999999, microseconds=999999)
     ),
     "duration of a microsecond": _base(duration=timedelta(microseconds=1)),
     "every enum member": _base(enum=Colour.GREEN, optional_enum=Colour.RED),

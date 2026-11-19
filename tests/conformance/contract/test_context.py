@@ -200,7 +200,7 @@ _VALID = {
 
 
 @PARITY
-@pytest.mark.spec("CON-51", "TRN-30", "TRN-36")
+@pytest.mark.spec("CON-51", "TRN-30", "TRN-36", "OVR-6")
 @pytest.mark.conformance_case("principal_read_from_its_sent_form")
 @pytest.mark.parametrize("which", list(_VALID))
 def test_a_valid_principal_reaches_the_provider_read_from_its_sent_form(

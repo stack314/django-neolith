@@ -16,7 +16,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 import neolith
-from neolith import ContractError, _connector
+from neolith import ContractError, _connector, _context
 from tests.conformance.contract.conftest import HYPOTHESIS, OverBoth, form
 from tests.host_apps.reference.contract import Empty, Gone, Refusal, RefusalKind, Values
 
@@ -102,23 +102,27 @@ def test_any_error_of_the_action_arrives_as_it_was_raised(
 
 
 @PARITY
-@pytest.mark.spec("CON-44", "CON-46", "TRN-18")
+@pytest.mark.spec("CON-44", "CON-46", "TRN-18", "OVR-6")
 @pytest.mark.conformance_case("failure_is_internal_and_names_nothing")
 @pytest.mark.parametrize("action", ["boom", "leak"])
 def test_a_failure_arrives_as_internal_with_nothing_of_it_over_each_leg(
     over_both: OverBoth, action: str, caplog: pytest.LogCaptureFixture
 ) -> None:
     errors: list[ContractError] = []
+    traces: list[str] = []
 
     def call() -> object:
-        with neolith.command_scope(CALLER, timeout=10):
+        with _context.root(CALLER, requires=("reference.v1",), timeout=10) as scope:
+            traces.append(scope.context.trace_id)
             try:
                 return getattr(neolith.connect("reference.v1"), action)(Empty())
             except ContractError as error:
                 errors.append(error)
                 raise
 
-    with caplog.at_level(logging.ERROR, "neolith"):
+    # Both loggers: the provider's host logs under ``neolith`` in-process and
+    # under ``django.neolith`` when it serves a request.
+    with caplog.at_level(logging.ERROR):
         over_both(call)
     assert len(errors) == 2
     for error in errors:
@@ -132,10 +136,16 @@ def test_a_failure_arrives_as_internal_with_nothing_of_it_over_each_leg(
         assert len(trace) == 32
         assert error.__cause__ is None
         assert error.__context__ is None
-    # Each leg's host recorded the failure under that leg's trace identifier.
-    logged = " ".join(record.getMessage() for record in caplog.records)
-    for error in errors:
-        assert error.message.rsplit(" ", 1)[-1] in logged
+    # The trace identifier is the caller's, so it reached the provider over
+    # both transports (OVR-6): the provider's host recorded the failure under
+    # it, which the caller's own record of the call does not show.
+    assert len(set(traces)) == 2
+    logged = [record.getMessage() for record in caplog.records]
+    for trace, error in zip(traces, errors, strict=True):
+        assert error.message == _connector.internal_message(trace)
+        assert (
+            sum(f"the provider failed (trace {trace})" in line for line in logged) == 1
+        )
 
 
 @PARITY

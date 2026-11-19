@@ -123,7 +123,7 @@ def test_an_empty_reply_is_the_same_over_both(over_both: OverBoth) -> None:
 
 @pytest.mark.conformance_case("provider_sees_the_context")
 @PARITY
-@pytest.mark.spec("TRN-31", "HTTP-42")
+@pytest.mark.spec("TRN-31", "HTTP-42", "OVR-6")
 def test_the_provider_sees_the_same_context_over_both(over_both: OverBoth) -> None:
     # Over HTTP the calling app is the one the token names, authenticated
     # under the key both sides hold; in-process it is the scope's app.
@@ -138,7 +138,7 @@ def test_the_provider_sees_the_same_context_over_both(over_both: OverBoth) -> No
 
 @pytest.mark.conformance_case("principal_reaches_the_provider")
 @PARITY
-@pytest.mark.spec("TRN-2", "TRN-36", "HTTP-46")
+@pytest.mark.spec("TRN-2", "TRN-36", "HTTP-46", "OVR-6")
 def test_the_principal_reaches_the_provider_alike(over_both: OverBoth) -> None:
     def call() -> object:
         with neolith.command_scope(CALLER, principal=ALICE):
