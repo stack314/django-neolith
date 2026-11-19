@@ -165,6 +165,18 @@ def test_a_reply_is_checked_against_exact_integer_bounds() -> None:
     assert _outcome(_response(200, b'{"n":9007199254740991}')) == Told(n=2**53 - 1)
 
 
+@pytest.mark.spec("CON-40", "CON-49")
+def test_a_declared_detail_is_checked_against_exact_integer_bounds() -> None:
+    # The reference contract's declared detail holds no integer, so this row
+    # stays here, with desk.v1's.
+    past = b'{"kind":"gone","message":"m","data":{"n":9007199254740993}}'
+    assert _kind(_outcome(_response(422, past))) == "internal"
+    last = b'{"kind":"gone","message":"m","data":{"n":9007199254740991}}'
+    outcome = _outcome(_response(422, last))
+    assert type(outcome) is ContractError
+    assert (outcome.kind, outcome.data) == ("gone", Gone(n=2**53 - 1))
+
+
 @pytest.mark.spec("CON-28")
 def test_an_unknown_kind_arrives_with_its_detail_as_an_untyped_map() -> None:
     body = b'{"kind":"moved","message":"m","data":{"to":"b-2","n":[1,2.5,null]}}'

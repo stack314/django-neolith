@@ -27,10 +27,22 @@
     "name": "wire_connector_success_that_is_no_reply_is_internal",
     "part": "wire",
     "state": "A host whose app reference_caller requires reference.v1 and holds a shared-secret key for it. The calls for reference.v1 go over HTTP to a provider on a loopback address that answers each request with the bytes the case gives, and records the request.",
-    "procedure": "1. Call accept; the provider answers 200 with {} and with null.\n2. Call deposit; the provider answers 204; 201, 206 or 299 with {\"total\":1}; 200 with an empty body, an HTML body, {\"total\":\"seven\"}, {} or a neolith error body.\n3. Call accept; the provider answers 202 with an empty body.\n4. Call deposit; the provider answers 200 with a body that holds a member twice, a lone surrogate, a number past a double, NaN, 300 levels of nesting, or a byte that is not UTF-8.",
+    "procedure": "1. Call accept; the provider answers 200 with {} and with null.\n2. Call deposit; the provider answers 204; 201, 206 or 299 with {\"total\":1}; 200 with an empty body, an HTML body, {\"total\":\"seven\"}, {} or a neolith error body.\n3. Call accept; the provider answers 202 with an empty body.",
     "expected": "Each call fails with internal.",
     "requirements": [
       "HTTP-19",
+      "TRN-18"
+    ]
+  },
+  {
+    "name": "wire_connector_reply_gets_the_receive_check",
+    "part": "wire",
+    "state": "A host whose app reference_caller requires reference.v1 and holds a shared-secret key for it. The calls for reference.v1 go over HTTP to a provider on a loopback address that answers each request with the bytes the case gives, and records the request.",
+    "procedure": "1. Call deposit; the provider answers 200 with {\"total\":1} plus one of: the member total twice, a lone surrogate, a number past a double, NaN, 300 levels of nesting, or a byte that is not UTF-8 after the object.",
+    "expected": "Each call fails with internal.",
+    "requirements": [
+      "HTTP-19",
+      "CON-42",
       "TRN-18"
     ]
   },
@@ -59,7 +71,7 @@
     "name": "wire_connector_error_body_it_cannot_read_is_internal",
     "part": "wire",
     "state": "A host whose app reference_caller requires reference.v1 and holds a shared-secret key for it. The calls for reference.v1 go over HTTP to a provider on a loopback address that answers each request with the bytes the case gives, and records the request.",
-    "procedure": "1. Call refuse; the provider answers 422 with a neolith error body that cannot be read against the contract: an unknown kind whose data is null, an array, a string, a number, holds 2^53 or nests 40 levels; gone without data, with null, with a reason that is a number; a standard kind with data; a kind or message outside spec 01's forms; a body without message, with a message that is not a string, or with another member; and a body that is not I-JSON.",
+    "procedure": "1. Call refuse; the provider answers 422 with a neolith error body that cannot be read against the contract: an unknown kind whose data is null, an array, a string, a number, holds 2^53 or nests 40 levels; gone without data, with null, or with a reason that is a number; a standard kind with data; a kind or message outside spec 01's forms; a body without message, with a message that is not a string, or with another member; and a body that is not I-JSON.",
     "expected": "Each call fails with internal, whose message says the cause is logged under a trace, and the cause is logged.",
     "requirements": [
       "CON-49",

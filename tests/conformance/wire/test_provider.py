@@ -203,16 +203,13 @@ def test_a_valid_token_names_its_calling_app(caller: Caller, typ: str) -> None:
 def test_a_listed_caller_s_principal_reaches_the_action(caller: Caller) -> None:
     answer = caller.call("seen", fields=[("Neolith-Principal", PRINCIPAL_HEADER)])
     assert answer.status == 200, answer
-    assert read_json(answer.body) == {
-        "principal": {
-            "issuer": "https://id.example.com",
-            "subject": "u-81f3",
-            "claims": '{"roles": ["clerk"]}',
-        },
-        "caller": CALLER,
-        "deadline": False,
-        "idempotency_key": False,
-    }
+    seen = read_json(answer.body)
+    principal = seen.pop("principal")
+    assert seen == {"caller": CALLER, "deadline": False, "idempotency_key": False}
+    # The claims arrive as JSON text, judged by its value, not its spelling.
+    claims = read_json(principal.pop("claims").encode())
+    assert principal == {"issuer": "https://id.example.com", "subject": "u-81f3"}
+    assert claims == {"roles": ["clerk"]}
 
 
 @pytest.mark.conformance_case("wire_principal_from_an_unlisted_app_is_403")
@@ -276,7 +273,16 @@ def test_a_listed_app_s_malformed_principal_is_400(
 @pytest.mark.spec("HTTP-21", "HTTP-22", "HTTP-23", "TRN-36")
 @pytest.mark.parametrize(
     ("timeout", "key"),
-    [("5000", '"k"'), ("9999999999", '"' + "k" * 255 + '"'), ("1000", '"a\\"b"')],
+    [
+        ("5000", '"k"'),
+        ("9999999999", '"' + "k" * 255 + '"'),
+        ("1000", '"a\\"b"'),
+        # 255 characters once unescaped, 257 as written between the quotes.
+        ("1000", '"' + "k" * 253 + '\\"\\\\"'),
+        # OWS at either end is not part of the value (HTTP-21).
+        (" 1000\t", '\t"k" '),
+    ],
+    ids=["shortest", "longest", "escaped", "longest-escaped", "ows"],
 )
 def test_a_budget_and_a_key_in_their_forms_reach_the_action(
     caller: Caller, timeout: str, key: str
@@ -290,7 +296,7 @@ def test_a_budget_and_a_key_in_their_forms_reach_the_action(
 
 
 @pytest.mark.conformance_case("wire_context_header_outside_its_form_is_400")
-@pytest.mark.spec("HTTP-22", "HTTP-23")
+@pytest.mark.spec("HTTP-21", "HTTP-22", "HTTP-23")
 @pytest.mark.parametrize(
     ("name", "value"),
     [
@@ -303,6 +309,12 @@ def test_a_budget_and_a_key_in_their_forms_reach_the_action(
         ("Idempotency-Key", '""'),
         ("Idempotency-Key", '"' + "k" * 256 + '"'),
         ("Idempotency-Key", '"k";a=1'),
+        # 256 characters once unescaped.
+        ("Idempotency-Key", '"' + "k" * 254 + '\\"\\\\"'),
+        # Whitespace inside, and a character outside ASCII (HTTP-21). One at
+        # either end is #156.
+        ("Neolith-Timeout", "10 00"),
+        ("Idempotency-Key", '"k\xe9"'),
     ],
 )
 def test_a_context_header_outside_its_form_is_invalid_argument(

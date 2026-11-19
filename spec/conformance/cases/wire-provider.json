@@ -84,7 +84,7 @@
     "part": "wire",
     "state": "A host provides reference.v1, with the app reference_caller on its allow-list of apps that may assert a principal. The apps reference_caller and reference_stranger each hold a shared-secret key the host accepts.",
     "procedure": "1. POST /reference/v1/seen with Content-Type application/json, its Content-Length, Accept-Encoding identity and a valid shared-secret token for reference_caller, the body {}, and Neolith-Principal holding spec 03's example principal as spec 03 writes it.",
-    "expected": "Status 200 and a reply whose principal has issuer https://id.example.com, subject u-81f3 and the claims {\"roles\": [\"clerk\"]}, and whose caller is reference_caller.",
+    "expected": "Status 200 and a reply whose principal has issuer https://id.example.com, subject u-81f3, and claims holding JSON text whose value is {\"roles\": [\"clerk\"]}; whose caller is reference_caller; and whose deadline and idempotency_key are false.",
     "requirements": [
       "TRN-36"
     ]
@@ -114,7 +114,7 @@
     "name": "wire_context_headers_reach_the_action",
     "part": "wire",
     "state": "A host provides reference.v1, with the app reference_caller on its allow-list of apps that may assert a principal. The apps reference_caller and reference_stranger each hold a shared-secret key the host accepts.",
-    "procedure": "1. POST /reference/v1/seen with Content-Type application/json, its Content-Length, Accept-Encoding identity and a valid shared-secret token for reference_caller and the body {}, with Neolith-Timeout and Idempotency-Key in turn 5000 and \"k\", 9999999999 and a key of 255 characters, and 1000 and \"a\\\"b\".",
+    "procedure": "1. POST /reference/v1/seen with Content-Type application/json, its Content-Length, Accept-Encoding identity and a valid shared-secret token for reference_caller and the body {}, with Neolith-Timeout and Idempotency-Key in turn: 5000 and \"k\"; 9999999999 and a key of 255 characters; 1000 and \"a\\\"b\"; 1000 and a key of 255 characters once unescaped, ending in \\\" and \\\\; and each value with a space or tab at either end.",
     "expected": "Each has status 200 and a reply whose deadline and idempotency_key are both true.",
     "requirements": [
       "HTTP-21",
@@ -127,9 +127,10 @@
     "name": "wire_context_header_outside_its_form_is_400",
     "part": "wire",
     "state": "A host provides reference.v1, with the app reference_caller on its allow-list of apps that may assert a principal. The apps reference_caller and reference_stranger each hold a shared-secret key the host accepts.",
-    "procedure": "1. POST /reference/v1/seen with Content-Type application/json, its Content-Length, Accept-Encoding identity and a valid shared-secret token for reference_caller and the body {}, with in turn Neolith-Timeout 0050, 0, 12345678901, 1.5 and an empty value, and Idempotency-Key k (unquoted), \"\", a key of 256 characters, and \"k\";a=1.",
+    "procedure": "1. POST /reference/v1/seen with Content-Type application/json, its Content-Length, Accept-Encoding identity and a valid shared-secret token for reference_caller and the body {}, with in turn Neolith-Timeout 0050, 0, 12345678901, 1.5, an empty value and 10 00; and Idempotency-Key k (unquoted), \"\", a key of 256 characters, \"k\";a=1, a key of 256 characters once unescaped, and a key holding U+00E9.",
     "expected": "Each has status 400 and a neolith error body of kind invalid_argument.",
     "requirements": [
+      "HTTP-21",
       "HTTP-22",
       "HTTP-23"
     ]
@@ -251,10 +252,19 @@
     "part": "wire",
     "state": "A host provides reference.v1, with the app reference_caller on its allow-list of apps that may assert a principal. The apps reference_caller and reference_stranger each hold a shared-secret key the host accepts.",
     "procedure": "1. GET /.well-known/neolith/openapi.json.\n2. Take the reference contract's part of the document served and of the reference document: the paths that start with /reference/v1/, every component those paths reach through $ref, the security schemes the top-level security names, and openapi, info, jsonSchemaDialect, security and servers.\n3. Compare the two parts as spec 06's CNF-2 says.",
-    "expected": "Status 200, Content-Type application/json, and the two parts equal. The document served also has paths of other contract versions.",
+    "expected": "Status 200, Content-Type application/json, and the two parts equal.",
     "requirements": [
       "CNF-2",
-      "HTTP-2",
+      "HTTP-2"
+    ]
+  },
+  {
+    "name": "wire_projection_orders_its_paths",
+    "part": "wire",
+    "state": "A host provides reference.v1, with the app reference_caller on its allow-list of apps that may assert a principal. The apps reference_caller and reference_stranger each hold a shared-secret key the host accepts.",
+    "procedure": "1. GET /.well-known/neolith/openapi.json.\n2. Read the identity <name>.v<N> of each path /<name>/v<N>/<action>, in the order the paths object gives them.",
+    "expected": "The identities are in code point order, each version's paths together, and the paths that start with /reference/v1/ are in the reference document's order.",
+    "requirements": [
       "HTTP-20"
     ]
   },
@@ -262,7 +272,7 @@
     "name": "wire_deposit_once_per_key",
     "part": "wire",
     "state": "A host provides reference.v1, with the app reference_caller on its allow-list of apps that may assert a principal. The apps reference_caller and reference_stranger each hold a shared-secret key the host accepts. The account the case uses has no deposits.",
-    "procedure": "1. POST /reference/v1/deposit with Content-Type application/json, its Content-Length, Accept-Encoding identity and a valid shared-secret token for reference_caller, the body {\"account\": <the account>, \"amount\": 5} and Idempotency-Key K1.\n2. The same again, under K1.\n3. The same under another key, K2.\n4. The same under K1, then under K2.\n5. With another fresh account, the same twice with no Idempotency-Key.\nK1 and K2 are in turn \"k-1\" and \"k-2\", \"a\\\"b\" and \"a\\\\b\", and a key of 255 characters and \"K\".",
+    "procedure": "1. POST /reference/v1/deposit with Content-Type application/json, its Content-Length, Accept-Encoding identity and a valid shared-secret token for reference_caller, the body {\"account\": <the account>, \"amount\": 5} and Idempotency-Key K1.\n2. The same again, under K1.\n3. The same under another key, K2.\n4. The same under K1, then under K2.\n5. With another fresh account, the same twice with no Idempotency-Key.\nK1 and K2 are in turn: \"k-1\" and \"k-2\"; \"a\\\"b\" and \"a\\\\b\"; \"A\" and \"a\"; \"k\" and \"k \"; 255 k and 254 k followed by K; and 253 k followed by the escapes \\\" \\\\, and by the same two escapes the other way round.",
     "expected": "Each call has status 200 and a reply with exactly total, an integer. Steps 1 and 2 give 5, step 3 gives 10, and step 4 gives 5 and then 10: one effect per key. Step 5 gives 5 and then 10.",
     "requirements": [
       "CON-5",

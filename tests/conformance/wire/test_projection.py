@@ -7,8 +7,10 @@ document, ``spec/conformance/reference.v1.openapi.json``: the reference
 contract's paths, every component they reach, and the top-level members
 spec 03's projection list fixes. Members are compared as JSON values, so
 their order and spacing are free. Arrays compare in order, apart from
-``required``, ``enum``, ``oneOf``, ``anyOf`` and ``allOf``, which compare as
-sets. The case is listed in ``spec/conformance/cases/wire-provider.json``.
+``required``, ``enum``, ``oneOf``, ``anyOf`` and ``allOf``, which compare
+without their order: the same entries, each as often. A second case checks
+the order spec 03 gives the paths (HTTP-20). The cases are listed in
+``spec/conformance/cases/wire-provider.json``.
 
 The comparison is the suite's oracle, so the tests after the case check it
 on its own: each rule it applies, and the nearest change it must catch.
@@ -175,17 +177,43 @@ def _reference() -> dict[str, Any]:
     return tree
 
 
-@pytest.mark.conformance_case("wire_projection_holds_the_reference_document")
-@pytest.mark.spec("CNF-2", "HTTP-2", "HTTP-20")
-def test_the_served_document_holds_the_reference_document(live: Live) -> None:
+def _served(live: Live) -> dict[str, Any]:
     answer = Caller(live.origin, live.settle).request("GET", OPENAPI)
     assert answer.status == 200, answer
     assert answer.field("Content-Type") == "application/json"
     served = read_json(answer.body)
     assert isinstance(served, dict)
+    return served
+
+
+@pytest.mark.conformance_case("wire_projection_holds_the_reference_document")
+@pytest.mark.spec("CNF-2", "HTTP-2")
+def test_the_served_document_holds_the_reference_document(live: Live) -> None:
+    served = _served(live)
     assert holds(served, _reference()) == []
-    # The document describes the host's other contracts too (HTTP-2).
+    # This suite's test host provides other contract versions too, so the
+    # case runs where the comparison has to leave them out.
     assert set(served["paths"]) > set(_reference()["paths"])
+
+
+def _identity(path: str) -> str:
+    """The identity a path's contract version has: ``<name>.v<N>``."""
+    _, name, version, _ = path.split("/", 3)
+    return f"{name}.{version}"
+
+
+@pytest.mark.conformance_case("wire_projection_orders_its_paths")
+@pytest.mark.spec("HTTP-20")
+def test_the_served_paths_are_in_the_projection_s_order(live: Live) -> None:
+    paths = list(_served(live)["paths"])
+    identities = [_identity(path) for path in paths]
+    # Contract versions ordered by identity, code point by code point, each
+    # version's paths together.
+    assert identities == sorted(identities)
+    # The reference contract's actions in their declaration order, which is
+    # the reference document's.
+    ours = [path for path in paths if path.startswith(PREFIX)]
+    assert ours == list(_reference()["paths"])
 
 
 # The comparison itself.
@@ -285,7 +313,9 @@ def test_every_other_change_to_the_part_is_found(
 
 
 @pytest.mark.parametrize("name", sorted(_SETS))
-def test_each_array_spec_03_does_not_order_compares_as_a_set(name: str) -> None:
+def test_each_array_spec_03_does_not_order_compares_without_order(
+    name: str,
+) -> None:
     entries = [{"type": "string"}, {"type": "null"}, "a"]
     assert canonical({name: entries}) == canonical({name: entries[::-1]})
     assert canonical({name: entries}) != canonical({name: entries[:2]})
@@ -295,7 +325,9 @@ def test_each_array_spec_03_does_not_order_compares_as_a_set(name: str) -> None:
     )
 
 
-def test_a_set_keeps_how_often_each_entry_occurs() -> None:
+def test_an_unordered_array_keeps_how_often_each_entry_occurs() -> None:
+    # oneOf with an entry twice matches nothing either entry matches, so
+    # the count is part of what the array says.
     once = {"required": ["a", "b"]}
     twice = {"required": ["a", "b", "b"]}
     assert canonical(once) != canonical(twice)

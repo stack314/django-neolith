@@ -23,8 +23,8 @@ The reference contract is `reference.v1`. Its definition is the reference docume
 | `echo` | yes | `Values` → `Values` | Returns the request. `Values` holds every portable form of [01](01-contracts.md), each once required and once optional. |
 | `accept` | no | `Values` → empty | Returns nothing. |
 | `refuse` | yes | `Refusal` → `Values` | Fails with the kind the request names, one of `invalid_argument`, `unauthenticated`, `permission_denied`, `not_found`, `conflict` and the declared kind `gone`, with the request's message; `gone` carries the detail `Gone`, whose `reason` is that message. |
-| `seen` | yes | `Empty` → `Seen` | Returns what its call context holds: the principal or none, the calling app, and whether a deadline and an idempotency key are present. |
-| `deposit` | yes | `Deposit` → `Balance` | Adds `amount` to `account` once per idempotency key, and returns the total as it stood after the call that first used the key; a call with no key always adds. |
+| `seen` | yes | `Empty` → `Seen` | Returns what its call context holds: the principal or none, with the principal's claims as the JSON text of an object, the calling app, and whether a deadline and an idempotency key are present. |
+| `deposit` | yes | `Deposit` → `Balance` | Adds `amount` to `account` once per account and idempotency key, and returns the total as it stood after the call that first used that pair; a call with no key always adds. |
 | `leak` | yes | `Empty` → `Values` | Returns a value that is not of the reply type. |
 | `boom` | yes | `Empty` → `Values` | Fails with an error that is not one of the contract's errors. |
 | `stall` | yes | `Empty` → `Values` | Returns once its deadline has passed; with no deadline, fails at once with `invalid_argument`. |
@@ -33,7 +33,7 @@ A provider's host serves one OpenAPI document for every contract version it prov
 
 **CNF-2.** The OpenAPI document that a provider of the reference contract serves at the projection's location MUST hold the reference contract's part of the reference document unchanged.
 
-Members are compared as JSON values, so the order of an object's members and the spacing are free, a number is compared by its value and never equals `true` or `false`, and a member name given twice is not JSON a reader accepts. Arrays compare in order, apart from `required`, `enum`, `oneOf`, `anyOf` and `allOf`, which [03](03-http-transport.md#projection) does not order and which compare as sets. Those names are keywords only where a schema or an OpenAPI object has them; a record's field called `required` keeps its schema, and a value given as data (`const`, `default`, `examples`) compares as written. The document can describe other contract versions beside the reference contract, and their paths and components are not compared.
+Members are compared as JSON values, so the order of an object's members and the spacing are free, a number is compared by its value and never equals `true` or `false`, and a member name given twice is not JSON a reader accepts. Arrays compare in order, apart from `required`, `enum`, `oneOf`, `anyOf` and `allOf`, which [03](03-http-transport.md#projection) does not order and which compare without their order: the same entries, each as many times. Those names are keywords only where a schema or an OpenAPI object has them; a record's field called `required` keeps its schema, and a value given as data (`const`, `default`, `examples`) compares as written. The document can describe other contract versions beside the reference contract, and their paths and components are not compared.
 
 ## Same outcome over both transports
 

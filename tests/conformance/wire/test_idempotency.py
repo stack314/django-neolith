@@ -32,8 +32,16 @@ def _total(answer: Answer) -> int:
 @pytest.mark.spec("CON-5", "HTTP-23")
 @pytest.mark.parametrize(
     ("first", "second"),
-    [('"k-1"', '"k-2"'), ('"a\\"b"', '"a\\\\b"'), ('"' + "k" * 255 + '"', '"K"')],
-    ids=["plain", "escaped", "longest"],
+    [
+        ('"k-1"', '"k-2"'),
+        ('"a\\"b"', '"a\\\\b"'),
+        # Keys that differ only where a careless reading would join them.
+        ('"A"', '"a"'),
+        ('"k"', '"k "'),
+        ('"' + "k" * 255 + '"', '"' + "k" * 254 + 'K"'),
+        ('"' + "k" * 253 + '\\"\\\\"', '"' + "k" * 253 + '\\\\\\""'),
+    ],
+    ids=["plain", "escaped", "case", "trailing-space", "longest", "longest-escaped"],
 )
 def test_a_deposit_under_one_key_takes_effect_once(
     live: Live, first: str, second: str

@@ -169,7 +169,7 @@ def test_a_success_that_is_not_a_reply_is_internal(answer: bytes, call: Call) ->
     assert _error(outcome).kind == "internal"
 
 
-@pytest.mark.conformance_case("wire_connector_success_that_is_no_reply_is_internal")
+@pytest.mark.conformance_case("wire_connector_reply_gets_the_receive_check")
 @pytest.mark.spec("HTTP-19", "CON-42", "TRN-18")
 @pytest.mark.parametrize(
     "body",
@@ -257,7 +257,7 @@ def test_the_kind_comes_from_the_body_whatever_the_status(
 
 
 @pytest.mark.conformance_case("wire_connector_takes_the_kind_from_the_body")
-@pytest.mark.spec("HTTP-19", "CON-43")
+@pytest.mark.spec("HTTP-19")
 def test_a_declared_kind_arrives_with_its_detail_record() -> None:
     body = b'{"kind":"gone","message":"m","data":{"reason":"r"}}'
     error = _error(_outcome(response(422, body), _refuse)[0])
@@ -292,7 +292,6 @@ def test_a_detail_is_read_from_the_text_the_provider_wrote() -> None:
         b'{"kind":"gone","message":"m"}',
         b'{"kind":"gone","message":"m","data":null}',
         b'{"kind":"gone","message":"m","data":{"reason":7}}',
-        b'{"kind":"gone","message":"m","data":{"reason":9007199254740993}}',
         # A standard kind with a detail.
         b'{"kind":"not_found","message":"m","data":{}}',
         b'{"kind":"not_found","message":"m","data":null}',
