@@ -1,5 +1,27 @@
 [
   {
+    "name": "lifecycle_an_unsatisfied_requirement_stops_the_host",
+    "part": "lifecycle",
+    "state": "A host of an app that requires a contract version that no app of the host provides and for which the host's configuration names no remote provider.",
+    "procedure": "1. Set the host up in a process of its own.",
+    "expected": "Set-up is refused, with a diagnostic naming the app and the contract version, which has no provider since no app of the host provides it and the configuration names no remote provider for it. The refusal is logged at error level.",
+    "requirements": [
+      "APP-1",
+      "APP-8"
+    ]
+  },
+  {
+    "name": "lifecycle_a_missing_action_stops_the_host",
+    "part": "lifecycle",
+    "state": "A host of an app that provides a contract version whose implementation does not define one of its actions.",
+    "procedure": "1. Set the host up in a process of its own.",
+    "expected": "Set-up is refused, with a diagnostic naming the app, the contract version, its implementation and the missing action.",
+    "requirements": [
+      "APP-1",
+      "APP-11"
+    ]
+  },
+  {
     "name": "lifecycle_a_refusing_phase_stops_the_host",
     "part": "lifecycle",
     "state": "A host that refuses in one of its phases before it serves: in Declare, a second app whose declaration lists the resource database twice; in Configure, a second app that needs a framework app with records while the host has no default database; or in Boot, the desk app's database file not created yet.",

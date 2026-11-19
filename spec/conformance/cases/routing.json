@@ -25,7 +25,7 @@
     "name": "routing_moves_on_503",
     "part": "routing",
     "state": "A host whose one app, routing_caller, requires the test contract routing_moves_on_503.v1, whose actions are get (idempotent) and put (not idempotent), each taking and returning a record with one integer field n, and holds a shared-secret key to sign its calls. The host's settings list U, then B as the remote providers of routing_moves_on_503.v1, in that order, and name local-first for it. Each provider is bound on a loopback address; every one but R listens and records every request it receives: U answers 503 with no neolith error body; B answers 200 with the reply {\"n\":7}.",
-    "procedure": "1. From a root of routing_caller that holds a principal, a tracestate and a timeout of 10 seconds, call get with {\"n\":1}.\n2. The host's clock stands still at a whole number of seconds from before the root opens; U moves it by 5 ms after it reads its request and before it answers.",
+    "procedure": "1. From a root of routing_caller that holds a principal, a tracestate and a timeout of 10 seconds, call get with {\"n\":1}.\n2. The host's clock stands still at a whole number of seconds from before the root opens; U moves it by 5 ms after it reads its request and before it answers. The caller's own wait for each answer is not shortened by the move.",
     "expected": "The call returns B's reply, {\"n\":7}. U receives one request, then B one. The two carry the same Idempotency-Key, Neolith-Principal, trace identifier in traceparent and tracestate, a different span identifier in traceparent, and an Authorization token minted for each attempt. B's Neolith-Timeout is 5 less than U's.",
     "requirements": [
       "TRN-8",
@@ -190,7 +190,7 @@
     "name": "routing_no_time_left_ends_unavailable",
     "part": "routing",
     "state": "A host whose one app, routing_caller, requires the test contract routing_no_time_left_ends_unavailable.v1, whose actions are get (idempotent) and put (not idempotent), each taking and returning a record with one integer field n, and holds a shared-secret key to sign its calls. The host's settings list U, then B as the remote providers of routing_no_time_left_ends_unavailable.v1, in that order, and name local-first for it. Each provider is bound on a loopback address; every one but R listens and records every request it receives: U answers 503 with no neolith error body; B answers 200 with the reply {\"n\":7}.",
-    "procedure": "1. From a root of routing_caller that holds a principal, a tracestate and a timeout of 10 seconds, call get with {\"n\":1}.\n2. The host's clock stands still at a whole number of seconds from before the root opens; U moves it into the last millisecond before the call's deadline, so that under 1 ms is left and the deadline has not passed, after it reads its request and before it answers.",
+    "procedure": "1. From a root of routing_caller that holds a principal, a tracestate and a timeout of 10 seconds, call get with {\"n\":1}.\n2. The host's clock stands still at a whole number of seconds from before the root opens; U moves it into the last millisecond before the call's deadline, so that under 1 ms is left and the deadline has not passed, after it reads its request and before it answers. The caller's own wait for U's answer is not shortened by the move.",
     "expected": "The call fails with unavailable. U receives one request, and B none.",
     "requirements": [
       "TRN-70",

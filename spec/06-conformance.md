@@ -24,7 +24,7 @@ Most items restate requirements of the other documents, so they carry no ID of t
 | 2. In-process transport | `contract-parity.json`, `contract-values.json`, `contract-errors.json`, `contract-deadlines.json` | TRN-1, TRN-4, TRN-14 to TRN-16, TRN-18, TRN-27 to TRN-29, TRN-38, TRN-48, CON-44, CON-46 |
 | 3. HTTP transport | `wire-provider.json`, `wire-connector.json` | HTTP-3, HTTP-9 to HTTP-16, HTTP-19, HTTP-21 to HTTP-23, HTTP-28, HTTP-30 to HTTP-38, HTTP-41, HTTP-44 to HTTP-47, TRN-2, TRN-3, TRN-12, TRN-30, TRN-31, TRN-33, CON-42, CON-49 |
 | 4. Routing | `routing.json` | CON-4, TRN-8, TRN-17, TRN-18, TRN-38, TRN-68 to TRN-72, APP-63 |
-| 5. Lifecycle | `lifecycle.json` | APP-1, APP-16, APP-23, APP-31, APP-33, APP-38 to APP-41, APP-43 to APP-46 |
+| 5. Lifecycle | `lifecycle.json` | APP-1, APP-8, APP-11, APP-16, APP-23, APP-31, APP-33, APP-38 to APP-41, APP-43 to APP-46 |
 | 6. Same semantics | every `contract-*.json` case | CNF-1, HTTP-1 |
 | 7. Call context | `contract-context.json`, `contract-parity.json` | OVR-6, TRN-2, TRN-23, TRN-25, TRN-26, TRN-30, TRN-36, TRN-39, TRN-42, TRN-43, CON-29, CON-51, HTTP-18, HTTP-42 |
 
