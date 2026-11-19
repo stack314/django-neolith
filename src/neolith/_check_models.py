@@ -11,11 +11,13 @@ For each model of a hosted app ``<a>``:
   ``ContentType`` that a ``GenericForeignKey`` rests on is a foreign key
   like any other, and its message names the ``GenericForeignKey``. A
   relation is read from the model's own fields, so a field inherited from
-  an abstract model counts and one of a concrete parent is judged there.
-  Lazy references are resolved by Django. One that never resolved, such as
-  a foreign key to ``AUTH_USER_MODEL`` in a host without ``auth``, is still
-  ``"<label>.<Model>"``, and it is judged by that label: the check runs no
-  Django system check that would refuse it.
+  an abstract model counts and one of a concrete parent, a generic
+  relation included, is judged there. Lazy references are resolved by
+  Django. One that never resolved, such as a foreign key to
+  ``AUTH_USER_MODEL`` in a host without ``auth``, still holds the text
+  written; Django's ``resolve_relation`` reads it as it would, a bare model
+  name as one of the model's own app, and it is judged by that app's label:
+  the check runs no Django system check that would refuse it.
 - ``neolith.E107``: the model is a proxy of another app's model, or the
   table of the model, or of a many-to-many table it creates, names the
   table of another app's model. Names are compared as the database reads
@@ -90,8 +92,13 @@ def _folded(table: str) -> str:
 
 def _relations(label: str, model: type[Any]) -> list[Finding]:
     options = model._meta
+    # A concrete parent's private fields are copied into each child with
+    # mti_inherited set (ModelBase.__new__); they are judged on the parent.
+    private = [
+        f for f in options.private_fields if not getattr(f, "mti_inherited", False)
+    ]
     generic: dict[object, list[str]] = {}
-    for field in options.private_fields:
+    for field in private:
         if field.is_relation and field.related_model is None:
             generic.setdefault(getattr(field, "ct_field", None), []).append(
                 shown(field.name)
@@ -121,7 +128,7 @@ def _relations(label: str, model: type[Any]) -> list[Finding]:
                     "a many-to-many relation through",
                     through,
                 )
-    for field in options.private_fields:
+    for field in private:
         if field.is_relation and field.related_model is not None:
             found += _across(
                 label, model, field.name, "a generic relation to", field.related_model
@@ -156,12 +163,17 @@ def _across(
     target: object,
     note: str = "",
 ) -> list[Finding]:
+    from django.db.models.fields.related import resolve_relation
+
+    if type(target) is str:
+        # The text written, kept until the model is registered: read as
+        # Django reads it, "self" as the model and a bare name in its app.
+        target = resolve_relation(model, target)
     if _is_model(target):
         other: str = target._meta.app_label  # type: ignore[attr-defined]
         named: str = target._meta.label  # type: ignore[attr-defined]
         absent = ""
     elif type(target) is str:
-        # Django keeps "<label>.<Model>" until the model is registered.
         other, named = target.partition(".")[0], target
         absent = ", which this host does not hold"
     else:

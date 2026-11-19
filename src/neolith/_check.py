@@ -310,8 +310,10 @@ def _hosted() -> list[str]:
 
 
 def _boot_checks() -> bool:
-    """Phase 4: log what Boot's checks that read no database refuse and
-    warn about, as Boot logs them; return whether anything was refused.
+    """Phase 4: print what Boot's checks that read no database refuse and
+    warn about, in the form the host's log handler prints Boot's lines;
+    return whether anything was refused. They are printed, not logged, so
+    a project's ``LOGGING`` can neither hide nor repeat them.
     """
     from neolith import _boot
 
@@ -319,12 +321,14 @@ def _boot_checks() -> bool:
     errors = sorted(f"({m.id}) {m.msg}" for m in found if m.level >= checks.ERROR)
     for message in sorted(found, key=lambda m: (str(m.id), m.msg)):
         if checks.WARNING <= message.level < checks.ERROR:
-            with contextlib.suppress(Exception):
-                _log.warning("(%s) %s", message.id, message.msg)
+            for line in f"({message.id}) {message.msg}".splitlines():
+                say(sys.stderr, f"neolith: warning: {line}")
     lines = sorted(problems) + errors
     if lines:
-        with contextlib.suppress(Exception):
-            _log.error("host: Boot would refuse the host:\n%s", "\n".join(lines))
+        for line in "\n".join(
+            ["host: Boot would refuse the host:", *lines]
+        ).splitlines():
+            say(sys.stderr, f"neolith: {line}")
     return bool(lines)
 
 

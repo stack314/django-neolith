@@ -166,6 +166,14 @@ class Apart(models.Model):
         db_table = "legacy_things"
 
 
+class Parent(models.Model):
+    tags = GenericRelation(Item, related_query_name="+")
+
+
+class ParentChild(Parent):
+    pass
+
+
 class Pair(models.Model):
     content_type = models.ForeignKey(
         "contenttypes.ContentType", on_delete=models.CASCADE, related_name="+"
@@ -253,6 +261,7 @@ def test_each_relation_to_another_app_is_reported_and_none_inside_one(
             ", which the GenericForeignKey target rests on",
         ),
         relation("FromAbstract", "inherited", "a foreign key to", "shop.Item"),
+        relation("Parent", "tags", "a generic relation to", "shop.Item"),
         relation(
             "Pair",
             "content_type",
@@ -427,7 +436,8 @@ def test_a_relation_django_never_resolved_is_judged_by_its_label(
     tmp_path: Path, entry: str
 ) -> None:
     # In a host of desk alone, auth and shop are not installed, and Django's
-    # own checks, which would refuse these, do not run under the command.
+    # own checks, which would refuse these, do not run under the command. A
+    # bare model name is one of the model's own app, as Django reads it.
     project = Project(tmp_path)
     desk = """\
     from django.conf import settings
@@ -445,6 +455,8 @@ def test_a_relation_django_never_resolved_is_judged_by_its_label(
         item = models.ForeignKey("shop.Item", models.CASCADE, related_name="+")
         many = models.ManyToManyField(Own, through="shop.Link", related_name="+")
         mine = models.ForeignKey("desk.Missing", models.CASCADE, related_name="+")
+        bare = models.ForeignKey("Missing", models.CASCADE, related_name="+")
+        self = models.ManyToManyField("self", through="Gone", related_name="+")
         own = models.ForeignKey(Own, on_delete=models.CASCADE, related_name="+")
     """
     project.app("desk", models=desk)

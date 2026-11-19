@@ -529,6 +529,34 @@ def test_a_root_urlconf_that_does_not_import_is_a_refusal_beside_the_findings(
     assert ran.status == 1
 
 
+_LOGGING = """\
+LOGGING = {
+    "version": 1,
+    "handlers": {"console": {"class": "logging.StreamHandler"}},
+    "root": {"handlers": ["console"], "level": "WARNING"},
+}
+"""
+
+
+@pytest.mark.parametrize("entry", _ENTRIES)
+def test_the_project_s_logging_neither_hides_nor_repeats_boot_s_lines(
+    tmp_path: Path, entry: str
+) -> None:
+    # dictConfig disables the loggers that exist, neolith.host among them,
+    # and the root handler would print each logged line a second time.
+    project = Two(tmp_path, urls="raise ValueError('no routes today')\n")
+    project.deployer("shop", "desk", below=_LOGGING)
+    neolith = {"DATABASES": project.databases("shop", "desk")}
+    project.settings(["shop", "desk"], neolith=neolith, below=_LOGGING)
+    ran = project.entry(entry)
+    assert ran.errors == [
+        "neolith: host: Boot would refuse the host:",
+        "neolith: settings: ROOT_URLCONF urls cannot be imported: ValueError: no "
+        "routes today",
+    ]
+    assert ran.status == 1
+
+
 def test_a_refusal_while_the_host_is_built_ends_neolith_check_with_status_1(
     two: Two,
 ) -> None:
