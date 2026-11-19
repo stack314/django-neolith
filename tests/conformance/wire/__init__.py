@@ -437,7 +437,8 @@ def scripted(*responses: bytes) -> Iterator[tuple[str, Scripted]]:
     try:
         yield f"http://127.0.0.1:{server.getsockname()[1]}", provider
     finally:
-        thread.join(BOUND)
+        # Longer than the provider's own wait for a connection.
+        thread.join(2 * BOUND)
         server.close()
         assert not thread.is_alive(), "the scripted provider is still serving"
     assert not provider.errors, f"the scripted provider failed: {provider.errors}"

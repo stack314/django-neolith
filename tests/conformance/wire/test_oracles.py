@@ -14,12 +14,12 @@ import hashlib
 import hmac
 import json
 import socket
-import threading
-from collections.abc import Iterator
 from decimal import Decimal
+from typing import cast
 
 import pytest
 
+import tests.conformance.wire as wire
 from tests.conformance.wire import (
     PRINCIPAL_HEADER,
     Answer,
@@ -28,6 +28,8 @@ from tests.conformance.wire import (
     _read,
     b64url,
     read_json,
+    response,
+    scripted,
     token_problem,
     unb64url,
 )
@@ -312,38 +314,34 @@ def test_a_response_outside_the_error_form_fails_the_case(answer: Answer) -> Non
 # A request, as the scripted provider reads it.
 
 
-@pytest.fixture
-def pair() -> Iterator[tuple[socket.socket, socket.socket]]:
-    ends = socket.socketpair()
-    for end in ends:
-        end.settimeout(10)
-    yield ends
-    for end in ends:
-        end.close()
+class _Arrives:
+    """A connection whose reads return ``chunks`` in turn, then the end:
+    the reader sees each chunk as one read, however the bytes would group.
+    """
+
+    def __init__(self, *chunks: bytes) -> None:
+        self.chunks = list(chunks)
+        self.reads = 0
+
+    def recv(self, size: int) -> bytes:
+        self.reads += 1
+        # A reader that reads on after the end would spin: fail it instead.
+        assert self.reads <= 20, "read again after the connection ended"
+        return self.chunks.pop(0) if self.chunks else b""
 
 
-def _write(sock: socket.socket, *chunks: bytes) -> threading.Thread:
-    def run() -> None:
-        for chunk in chunks:
-            sock.sendall(chunk)
-
-    thread = threading.Thread(target=run)
-    thread.start()
-    return thread
+def _read_from(*chunks: bytes) -> Received | None:
+    return _read(cast("socket.socket", _Arrives(*chunks)))
 
 
-def test_a_request_is_read_by_its_content_length_across_reads(
-    pair: tuple[socket.socket, socket.socket],
-) -> None:
-    caller, provider = pair
-    writer = _write(
-        caller,
+def test_a_request_is_read_by_its_content_length_across_reads() -> None:
+    received = _read_from(
         b"POST /a/v1/b HTTP/1.1\r\nHost: h\r\nContent-",
-        b'Length: \t7 \r\nX-Two:  a b  \r\n\r\n{"a"',
+        b"Length: \t7 \r\nX-Two:  a b  \r\n\r\n{",
+        b'"a"',
         b":1}",
+        b"POST /next",
     )
-    received = _read(provider)
-    writer.join(10)
     assert received == Received(
         "POST /a/v1/b HTTP/1.1",
         (("Host", "h"), ("Content-Length", "7"), ("X-Two", "a b")),
@@ -354,31 +352,68 @@ def test_a_request_is_read_by_its_content_length_across_reads(
     assert received.field("Authorization") is None
 
 
+def test_a_body_cut_short_is_what_arrived() -> None:
+    received = _read_from(b"POST / HTTP/1.1\r\nContent-Length: 9\r\n\r\n{", b"}")
+    assert received is not None
+    assert received.body == b"{}"
+
+
 @pytest.mark.parametrize(
-    "length", ["", "²", "1, 1"], ids=["empty", "a-latin-1-digit", "two"]
+    "length", ["", "\u00b2", "1, 1"], ids=["empty", "a-latin-1-digit", "two"]
 )
-def test_a_content_length_outside_digits_reads_no_body(
-    pair: tuple[socket.socket, socket.socket], length: str
-) -> None:
-    caller, provider = pair
-    caller.sendall(
-        f"POST / HTTP/1.1\r\nContent-Length: {length}\r\n\r\n".encode("latin-1")
-    )
-    received = _read(provider)
+def test_a_content_length_outside_digits_reads_no_body(length: str) -> None:
+    head = f"POST / HTTP/1.1\r\nContent-Length: {length}\r\n\r\n".encode("latin-1")
+    received = _read_from(head, b"{}")
     assert received is not None
     assert received.body == b""
 
 
-def test_a_closed_connection_is_no_request(
-    pair: tuple[socket.socket, socket.socket],
-) -> None:
-    caller, provider = pair
-    caller.sendall(b"POST / HTTP/1.1\r\n")
-    caller.shutdown(socket.SHUT_WR)
-    assert _read(provider) is None
+def test_a_closed_connection_is_no_request() -> None:
+    assert _read_from(b"POST / HTTP/1.1\r\n") is None
+    assert _read_from() is None
 
 
 def test_a_field_given_twice_fails_the_case() -> None:
     received = Received("POST / HTTP/1.1", (("A", "1"), ("a", "2")), b"")
     with pytest.raises(AssertionError):
         received.field("A")
+
+
+# The scripted provider.
+
+
+def _exchange(origin: str, request: bytes) -> bytes:
+    host, _, port = origin.removeprefix("http://").rpartition(":")
+    with socket.create_connection((host, int(port)), timeout=10) as sock:
+        sock.sendall(request)
+        # Done writing: the provider reads the end once it has answered.
+        sock.shutdown(socket.SHUT_WR)
+        answer = b""
+        while chunk := sock.recv(65536):
+            answer += chunk
+        return answer
+
+
+REQUEST = b"POST /a HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}"
+
+
+def test_the_scripted_provider_answers_across_connections() -> None:
+    # The caller closes after each answer; the provider takes the next
+    # connection for the next answer, and records each request once.
+    with scripted(response(200, b"1"), response(201, b"2")) as (origin, provider):
+        first = _exchange(origin, REQUEST)
+        second = _exchange(origin, REQUEST)
+    assert first == response(200, b"1")
+    assert second == response(201, b"2")
+    assert [request.body for request in provider.received] == [b"{}", b"{}"]
+
+
+def test_a_scripted_provider_never_reached_fails_the_case(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(wire, "BOUND", 0.2)
+    with (
+        pytest.raises(AssertionError, match="the scripted provider failed"),
+        scripted(response(200)),
+    ):
+        pass

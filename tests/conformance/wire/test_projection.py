@@ -219,6 +219,15 @@ def test_the_served_paths_are_in_the_projection_s_order(live: Live) -> None:
 # The comparison itself.
 
 
+def test_a_reference_outside_components_fails_the_comparison() -> None:
+    tree = _changed("members reordered")
+    tree["paths"]["/reference/v1/echo"]["post"]["parameters"] = [
+        {"$ref": "#/paths/~1reference~1v1~1seen"}
+    ]
+    with pytest.raises(AssertionError, match="outside components"):
+        holds(tree, _reference())
+
+
 def test_the_reference_document_is_its_own_part() -> None:
     reference = _reference()
     part = reference_part(reference)
@@ -322,6 +331,10 @@ def test_each_array_spec_03_does_not_order_compares_without_order(
     # Any other array keeps its order.
     assert canonical({"prefixItems": entries}) != canonical(
         {"prefixItems": entries[::-1]}
+    )
+    # At any depth under a keyword, too.
+    assert canonical({"items": {name: entries}}) == canonical(
+        {"items": {name: entries[::-1]}}
     )
 
 
