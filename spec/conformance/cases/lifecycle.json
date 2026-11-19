@@ -4,7 +4,7 @@
     "part": "lifecycle",
     "state": "A host that refuses in one of its phases before it serves: in Declare, a second app whose declaration lists the resource database twice; in Configure, a second app that needs a framework app with records while the host has no default database; or in Boot, the desk app's database file not created yet.",
     "procedure": "1. Start the host in each of the three states.",
-    "expected": "Each start ends with a failure status and a diagnostic naming the refusal of that phase, printed once. No later phase runs: a refusal of a later phase is not printed, and the host never says it serves.",
+    "expected": "Each start ends with a failure status and a diagnostic naming the refusal of that phase. No later phase runs: no refusal of a later phase is printed, and the host never says it serves.",
     "requirements": [
       "APP-1",
       "APP-38"
@@ -15,7 +15,7 @@
     "part": "lifecycle",
     "state": "A host whose deployer's settings host an app desk that provides and requires its own contract desk.v1, declares a database of its own, and has one record type with one schema change, on a SQLite file of its own, whose settings also name an unknown key of the host's own settings and a default database.",
     "procedure": "1. Start the host to serve.\n2. Run the host's schema step.",
-    "expected": "Each ends with a failure status and one diagnostic naming both inputs: the unknown key, with the keys the host admits, and the default database, which the host does not host.",
+    "expected": "Each ends with a failure status and a diagnostic of exactly two refusals: the unknown key, with the keys the host admits, and the default database, which the host does not host.",
     "requirements": [
       "APP-16"
     ]
@@ -35,7 +35,7 @@
     "part": "lifecycle",
     "state": "A host whose deployer's settings host an app desk that provides and requires its own contract desk.v1, declares a database of its own, and has one record type with one schema change, on a SQLite file of its own, whose file does not exist yet.",
     "procedure": "1. Start the host to serve.\n2. Create the file with one table of another name, and start the host again.",
-    "expected": "Step 1 ends with a failure status and creates no file. Step 2 ends with a failure status and a diagnostic that the app has one schema change not applied; the file's bytes are unchanged.",
+    "expected": "Step 1 ends with a failure status and creates no file. Step 2 ends with a failure status and a diagnostic that the app's database has one schema change not applied, naming it and asking for the schema step; the file's bytes are unchanged.",
     "requirements": [
       "APP-33",
       "APP-46"
@@ -46,7 +46,7 @@
     "part": "lifecycle",
     "state": "A host whose deployer's settings host an app desk that provides and requires its own contract desk.v1, declares a database of its own, and has one record type with one schema change, on a SQLite file of its own, with its schema applied by the host's schema step and two records written.",
     "procedure": "1. Check the tables in the file.\n2. Start the host to serve on a loopback address, IPv4 or IPv6, and a port the system picks.\n3. Request the view that counts the records.\n4. Ask the host to shut down.",
-    "expected": "The file holds the app's table and the schema step's own table, and nothing else. The host says it serves the app at its address and port, with a server that is not for production; the view answers 200 with 2. The host then stops with a success status and says it stopped.",
+    "expected": "The file holds the app's table, the schema step's own table and SQLite's sequence table, and nothing else. The host says it serves the app at its address and port, with a server that is not for production; the view answers 200 with 2. The host then stops with a success status and says it stopped.",
     "requirements": [
       "APP-23",
       "APP-38",
@@ -58,7 +58,7 @@
     "part": "lifecycle",
     "state": "A host whose deployer's settings host an app desk that provides and requires its own contract desk.v1, declares a database of its own, and has one record type with one schema change, on a SQLite file of its own, with its schema applied, a long request deadline, and two views that each hold their request until the test lets it go.",
     "procedure": "1. Start the host, and make one request on a connection that then stays open and idle.\n2. Start one held request on each of two more connections.\n3. Ask the host to shut down, by either signal it takes.\n4. Open a new connection, and send a request on the idle one.\n5. Let the first held request go, then the second.",
-    "expected": "Once draining, the host refuses the new connection and closes the idle one without serving its request. Each held request makes its contract call and is answered, and its connection is closed after the response; the host is still running after the first. Once both end, the host stops with a success status and says every request in flight finished.",
+    "expected": "Once draining, the host refuses the new connection and closes the idle one without serving its request. Each held request is answered with 200, and its connection is closed after the response; the host is still running after the first. Once both end, the host stops with a success status and says every request in flight finished.",
     "requirements": [
       "APP-39",
       "APP-40",
@@ -81,8 +81,8 @@
     "name": "lifecycle_a_database_with_no_schema_stops_boot",
     "part": "lifecycle",
     "state": "A host of an app with a database of its own on a SQLite file that does not exist yet.",
-    "procedure": "1. Build a handler for the host.\n2. Create the file with the app's schema.\n3. Build a second handler in the same process.",
-    "expected": "The first handler is refused at Boot, with a diagnostic that there is no database at the file's path. The second is refused with the same diagnostic, though the file now exists: Boot runs once per process, and its refusal is logged once.",
+    "procedure": "1. In one process, run the host's Boot.\n2. Create the file with the app's schema.\n3. Run Boot again in the same process.",
+    "expected": "Step 1 is refused, with a diagnostic that there is no database at the file's path. Step 3 is refused with the same diagnostic, though the file now exists: Boot runs once per process, and its refusal is logged once.",
     "requirements": [
       "APP-1",
       "APP-31"
@@ -92,8 +92,8 @@
     "name": "lifecycle_a_pending_migration_stops_boot",
     "part": "lifecycle",
     "state": "A host of an app with a database of its own and two schema changes, on a SQLite file where only the first is recorded as applied.",
-    "procedure": "1. Build a handler for the host.",
-    "expected": "The handler is refused at Boot, with a diagnostic that the app's database has one schema change not applied, naming the first, and asking for the schema step.",
+    "procedure": "1. Run the host's Boot.",
+    "expected": "Boot is refused, with a diagnostic that the app's database has one schema change not applied, naming the second, and asking for the schema step.",
     "requirements": [
       "APP-1",
       "APP-33"

@@ -333,8 +333,9 @@ def main() -> None:
     bound = [_bind(case, positions, clock) for case in CASES]
     secret = secrets.token_urlsafe(32)
     with contextlib.ExitStack() as stack:
-        # Every provider closes, whatever ends the run; closing twice is
-        # harmless.
+        # Every provider closes, whatever ends the run: R, whose socket is
+        # held for the process's life, here; the others at the end of their
+        # case too, and closing twice is harmless.
         for b in bound:
             for provider in b.providers:
                 stack.callback(provider.close)

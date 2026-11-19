@@ -6,6 +6,7 @@ here on their own, with a client of raw sockets, not with neolith's
 connector. They cite no requirement ID: they are the suite's own tools.
 """
 
+import base64
 import json
 import socket
 import threading
@@ -254,13 +255,40 @@ def test_a_hidden_field_given_twice_is_recorded_as_such(journal: Journal) -> Non
     assert journal.requests[0].fields == {"authorization": "given twice"}
 
 
-def test_found_in_names_a_leak_by_position_only() -> None:
+# Values in the form each field sends them: a token with its scheme, a key
+# quoted as an sf-string, a principal as the base64url of its JSON text.
+SENT_TOKEN = "Bearer headerpart.claimspart.signaturepart"  # noqa: S105
+SENT_KEY = '"Kq3vT0x_\\"9mPbW2zYdA"'
+PRINCIPAL_JSON = '{"claims":{},"issuer":"https://id.test","subject":"u-81f3"}'
+SENT_PRINCIPAL = base64.urlsafe_b64encode(PRINCIPAL_JSON.encode()).rstrip(b"=").decode()
+
+
+@pytest.mark.parametrize(
+    ("leaked", "position"),
+    [
+        (SENT_TOKEN, "token 1"),
+        ("headerpart.claimspart.signaturepart", "token 1"),
+        ("signaturepart", "token 1"),
+        ("claimspart", "token 1"),
+        (SENT_KEY, "key 1"),
+        ('Kq3vT0x_"9mPbW2zYdA', "key 1"),
+        (SENT_PRINCIPAL, "principal 1"),
+        (PRINCIPAL_JSON, "principal 1"),
+        ("u-81f3", "principal 1"),
+        ("vendor=opaque", "tracestate 1"),
+    ],
+)
+def test_found_in_names_a_leak_in_any_spelling_by_position_only(
+    leaked: str, position: str
+) -> None:
     positions = Positions()
-    positions.of("authorization", TOKEN)
-    positions.of("idempotency-key", "k-1")
-    assert positions.found_in(f"logged {TOKEN} here") == ["token 1"]
-    assert positions.found_in("a line with k-1 in it") == ["key 1"]
-    assert positions.found_in("nothing hidden") == []
+    positions.of("authorization", SENT_TOKEN)
+    positions.of("idempotency-key", SENT_KEY)
+    positions.of("neolith-principal", SENT_PRINCIPAL)
+    positions.of("tracestate", "vendor=opaque")
+    assert positions.found_in(f"a line that logged {leaked} here") == [position]
+    # The nearest text that holds none of them.
+    assert positions.found_in("a line with Kq3vT0x and u-81 and Bearer") == []
 
 
 @pytest.mark.parametrize(
@@ -276,6 +304,21 @@ def test_a_provider_is_made_only_as_a_letter_says(
 ) -> None:
     with pytest.raises(ValueError, match=message):
         Provider(letter, journal, **options)  # type: ignore[arg-type]
+
+
+def test_started_keeps_r_bound_until_it_is_closed(journal: Journal) -> None:
+    r = Provider("R", journal)
+    with started(r):
+        pass
+    taken = socket.socket()
+    try:
+        with pytest.raises(OSError, match="Address already in use"):
+            taken.bind(("127.0.0.1", port(r)))
+        with pytest.raises(ConnectionRefusedError):
+            socket.create_connection(("127.0.0.1", port(r)), BOUND)
+    finally:
+        taken.close()
+        r.close()
 
 
 def test_started_closes_every_provider_and_its_threads(journal: Journal) -> None:

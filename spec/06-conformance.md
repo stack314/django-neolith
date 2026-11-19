@@ -16,19 +16,19 @@ An implementation conforms to neolith `spec 0.1` when it passes the conformance 
 
 ## Items and requirements
 
-Most items restate requirements of the other documents, so they carry no ID of their own; CNF-1 and CNF-2 are the two that no other document states. Each item is verified by the cases of the files named beside it ([Cases](#cases)), and these are the requirement IDs that state what the item checks:
+Most items restate requirements of the other documents, so they carry no ID of their own; CNF-1 and CNF-2 are the two that no other document states. Each item is verified by the cases named beside it ([Cases](#cases)). The last column gives the requirement IDs that state what the item checks; each is among the IDs those cases list, and a case can list others that another item states:
 
 | Item | Cases | Requirements |
 |---|---|---|
-| 1. Contracts | `contract-values.json`, `contract-errors.json`, and the projection and `deposit` cases of `wire-provider.json` | CNF-2, HTTP-2, HTTP-20, CON-5, CON-16, CON-26, CON-27, CON-34, CON-43 |
-| 2. In-process transport | `contract-parity.json`, `contract-values.json`, `contract-errors.json`, `contract-deadlines.json` | TRN-1, TRN-4, TRN-14, TRN-15, TRN-16, TRN-18, TRN-28, TRN-38 |
-| 3. HTTP transport | `wire-provider.json`, `wire-connector.json` | HTTP-3, HTTP-9 to HTTP-16, HTTP-19, HTTP-21 to HTTP-23, HTTP-28, HTTP-30 to HTTP-38, HTTP-41, HTTP-44 to HTTP-47, TRN-12, CON-42, CON-49 |
+| 1. Contracts | `contract-values.json`, `contract-errors.json`, and the projection and `deposit` cases of `wire-provider.json` | CNF-2, HTTP-2, HTTP-20, CON-5, CON-16, CON-25 to CON-27, CON-34, CON-35, CON-37, CON-43 |
+| 2. In-process transport | `contract-parity.json`, `contract-values.json`, `contract-errors.json`, `contract-deadlines.json` | TRN-1, TRN-4, TRN-14 to TRN-16, TRN-18, TRN-27 to TRN-29, TRN-38, TRN-48, CON-44, CON-46 |
+| 3. HTTP transport | `wire-provider.json`, `wire-connector.json` | HTTP-3, HTTP-9 to HTTP-16, HTTP-19, HTTP-21 to HTTP-23, HTTP-28, HTTP-30 to HTTP-38, HTTP-41, HTTP-44 to HTTP-47, TRN-2, TRN-3, TRN-12, TRN-30, TRN-31, TRN-33, CON-42, CON-49 |
 | 4. Routing | `routing.json` | CON-4, TRN-8, TRN-17, TRN-18, TRN-38, TRN-68 to TRN-72, APP-63 |
 | 5. Lifecycle | `lifecycle.json` | APP-1, APP-16, APP-23, APP-31, APP-33, APP-38 to APP-41, APP-43 to APP-46 |
-| 6. Same semantics | every `contract-*.json` case | CNF-1 |
-| 7. Call context | `contract-context.json`, `contract-parity.json` | OVR-6, TRN-2, TRN-23, TRN-25, TRN-26, TRN-30, TRN-36, TRN-43, CON-51 |
+| 6. Same semantics | every `contract-*.json` case | CNF-1, HTTP-1 |
+| 7. Call context | `contract-context.json`, `contract-parity.json` | OVR-6, TRN-2, TRN-23, TRN-25, TRN-26, TRN-30, TRN-36, TRN-39, TRN-42, TRN-43, CON-29, CON-51, HTTP-18, HTTP-42 |
 
-The routing record's TRN-73, the share of the connect phase, and TRN-74, the text of a `timeout` after a move, have no case: no case on one machine holds a connect phase open, or lets a deadline pass after a move without waiting for it. The implementation's own tests verify them.
+[02](02-transports.md)'s TRN-73, the share of the connect phase, and TRN-74, the text of a `timeout` after a move, have no case: no case on one machine holds a connect phase open, or lets a deadline pass after a move without waiting for it. The implementation's own tests verify them.
 
 ## Cases
 

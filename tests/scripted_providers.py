@@ -4,8 +4,8 @@ Each is a server on ``127.0.0.1`` and a port the system picks, bound when it
 is made, and answers every request it reads in one fixed way, named by a
 letter as in ADR 0031's Decision 9 table:
 
-- **R** refuses: a socket bound and never listening, so a connection to it
-  is refused at once;
+- **R** refuses: a socket bound and never listening, held until the
+  process closes it, so a connection to it is refused at once;
 - **U** answers ``503`` with no neolith error body, and **D** is a second U;
 - **N** answers ``503`` with a neolith error body of kind ``unavailable``;
 - **X** reads the whole request, then resets the connection;
@@ -29,6 +29,8 @@ the bytes each provider writes come from spec 03, so the oracle shares no
 code with the connector it drives.
 """
 
+import base64
+import binascii
 import contextlib
 import json
 import re
@@ -83,16 +85,50 @@ class Positions:
             return f"{HIDDEN[name]} {seen.index(value) + 1}"
 
     def found_in(self, text: str) -> list[str]:
-        """The position of every value seen that ``text`` holds, so a check
-        can name a leak without printing it.
+        """The position of every value seen that ``text`` holds, in any
+        spelling of it (``spellings``), so a check can name a leak without
+        printing it.
         """
         with self._lock:
             return [
                 f"{HIDDEN[name]} {index}"
                 for name, seen in self._seen.items()
                 for index, value in enumerate(seen, 1)
-                if value in text
+                if any(spelling in text for spelling in spellings(name, value))
             ]
+
+
+# A part of a value shorter than this is not looked for alone: it could
+# occur in other text by chance.
+_SHORTEST: Final = 6
+
+
+def spellings(name: str, value: str) -> set[str]:
+    """Each way a leak of ``value``, sent in field ``name``, could be
+    written: as sent; a token without its scheme, and each of its three
+    parts; a key without its quotes and escapes; a principal's sent form
+    decoded to its JSON text, and its subject.
+    """
+    found = {value}
+    if name == "authorization":
+        token = value.partition(" ")[2]
+        found.add(token)
+        found.update(token.split("."))
+    elif name == "idempotency-key" and len(value) >= 2 and value[0] == value[-1] == '"':
+        found.add(re.sub(r"\\(.)", r"\1", value[1:-1]))
+    elif name == "neolith-principal":
+        try:
+            text = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4)).decode()
+            principal = json.loads(text)
+        except (binascii.Error, UnicodeDecodeError, ValueError):
+            pass
+        else:
+            found.add(text)
+            if isinstance(principal, dict) and isinstance(
+                principal.get("subject"), str
+            ):
+                found.add(principal["subject"])
+    return {spelling for spelling in found if len(spelling) >= _SHORTEST}
 
 
 @dataclass(frozen=True)
@@ -332,11 +368,15 @@ class Provider:
 
 @contextlib.contextmanager
 def started(*providers: Provider) -> Iterator[None]:
-    """Start ``providers`` while entered; close them all on exit."""
+    """Start ``providers`` while entered, and close them on exit, apart from
+    R: its socket stays bound until its owner closes it, at the end of the
+    process, so that no other socket can take its port meanwhile.
+    """
     try:
         for provider in providers:
             provider.start()
         yield
     finally:
         for provider in providers:
-            provider.close()
+            if provider.letter != "R":
+                provider.close()
