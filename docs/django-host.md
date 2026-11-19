@@ -183,3 +183,35 @@ A call that is not moved ends with that attempt's outcome. When less than 1 ms i
 - not moved, no time left: `... was unavailable, and the call's deadline left under 1 ms to try provider 2 at <origin> (trace <trace>)`.
 
 A call whose first attempt succeeds, a call whose last entry fails, and every call under `single` log nothing new. No line holds a key, a token, a principal, `tracestate` or a refused value; the trace identifier ties a call's lines together.
+
+## The check before deployment
+
+`neolith check` reports, before deployment, what the hosted apps do across an app boundary ([ADR 0030](adr/0030-the-boundary-check-uses-the-standard-library-only.md); spec 05, *The check before deployment*). It is one command, `checkapps`, with two entries:
+
+```
+neolith check <app> [<app> ...] --settings <module>    a closed host, as neolith run builds it
+python manage.py checkapps                              the host the settings module builds
+```
+
+Run it on a host that holds every app of the repository, as a project's own settings module does: it judges only the apps of the host it builds, so in a host of one app an import of another app's code is an import of code in no installed app and is not reported.
+
+**What runs.** The command sets the host up, as starting it does, then runs Boot's checks that read no database: `ROOT_URLCONF` imports, `neolith.W001` and `neolith.W003` again, and the migration checks `neolith.E008`, `E010`, `E011` and `E013`. Then it runs the boundary pass. It runs no Django system check of its own (`requires_system_checks = []`), and no check that reads a database: `manage.py migrateapps --check` runs those, where the databases are. Host refusals and warnings print on standard error as `neolith run` prints them, `neolith: <message>` and `neolith: warning: <message>`, under both entries.
+
+**No database.** For the length of the command, Django's `BaseDatabaseWrapper.connect` is replaced, on the class and for the whole process, by a function that raises `neolith.UsageError` with `check: database <alias>: a connection was opened while the host was set up or checked, and the check runs without a database`. It is put back when the command ends, however it ends. Under `neolith check` the guard is in place before the apps load, so an app that queries while it loads is refused with that message as the cause. Under `manage.py checkapps`, Django loads the apps before the command starts, so a query while they load is not guarded there. Because the replacement is process-wide, the command is meant for a process of its own: run under `call_command` beside other threads, such as a live test server, it refuses their new connections while it runs.
+
+**Findings.** Each finding is one line on standard output, `<path>:<line>: <id> <message>; <hint>`, sorted by path, line and id; a finding with no place in source, `neolith.E113`, is `<id> <message>; <hint>` and comes after them. `<path>` is relative to the working directory when the file lies under it. The last line is the summary, `neolith check: <n> errors, <m> errors in report-only apps, <k> warnings`. The line form matches the usual problem-matcher pattern of CI annotations. This version reports:
+
+- `neolith.E106`: a model of a hosted app has a relation to a model of another installed app: a foreign key, one-to-one, many-to-many (to its target or through a model of another app) or generic relation, a multi-table inheritance link, or the foreign key to `ContentType` that a `GenericForeignKey` rests on. Contrib apps are apps, so a foreign key to `settings.AUTH_USER_MODEL` in `auth` is one. Keep the other record's identifier in a plain field, and reach that app through a contract it provides ([ADR 0004](adr/0004-each-app-owns-its-data.md)).
+- `neolith.E107`: a model of a hosted app is a proxy of another app's model, or its table, or a many-to-many table it creates, has the name of another app's model's table, compared without regard to ASCII case. Both apps of a shared name are reported.
+- `neolith.E113`: an app listed in `boundary-report-only` has no error finding.
+
+**Report-only apps.** Every hosted app is enforced: an error finding of the app makes the check exit 1. A repository that is still untangling an app lists its label in its `pyproject.toml`, the nearest one from the working directory upward:
+
+```toml
+[tool.neolith]
+boundary-report-only = ["orders"]
+```
+
+The errors of a listed app print with ` (report only)` after them, are counted apart in the summary, and do not change the status. A listed app with no error finding is `neolith.E113`, which does, so the entry goes once the app is clean. Only the check reads the key; no host does, so it can never stop a host from serving. Warnings never change the status.
+
+**Statuses.** `0`: no host refusal, no error finding of an enforced app and no `neolith.E113`. `1`: any of those. `2`: a mistake in the arguments or in `[tool.neolith]`, a label there that is not a hosted app, or an error of the check itself, printed as `neolith: check: internal error: <type>: <message>` (with Django's `--traceback`, the traceback follows). A signal to stop, such as Ctrl-C, ends the run as Python ends it.

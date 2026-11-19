@@ -1,10 +1,12 @@
-"""The ``neolith`` command line: ``neolith run`` and ``neolith migrate``
-(spec 05; ADR 0022 Decisions 9 to 12).
+"""The ``neolith`` command line: ``neolith run``, ``neolith migrate`` and
+``neolith check`` (spec 05; ADR 0022 Decisions 9 to 12; ADR 0030
+Decision 7).
 
 ::
 
     neolith run <app> [<app> ...] --settings <module> [--bind <host>:<port>]
     neolith migrate <app> [<app> ...] --settings <module>
+    neolith check <app> [<app> ...] --settings <module>
 
 Each ``<app>`` is the import path of an app package. ``--settings`` names
 the deployer's module: it holds the deployer's names, ``NEOLITH`` among
@@ -22,6 +24,12 @@ binds its address and serves until a signal, then drains;
 ``neolith migrate`` runs the ``migrateapps`` command. Each refusal is
 printed as ``neolith: <line>`` on standard error, with status 1. A mistake
 in the arguments prints usage with status 2.
+
+``neolith check`` first reads ``[tool.neolith]`` (status 2 on a mistake),
+then builds and sets the host up with every new database connection
+refused (``neolith._check.guarded``), so an app that queries while it loads
+is refused with that as the cause; then it runs the ``checkapps`` command,
+which exits with the check's status.
 """
 
 import argparse
@@ -164,7 +172,20 @@ def _parser() -> argparse.ArgumentParser:
         description="Apply each named app's migrations to the app's own database.",
         allow_abbrev=False,
     )
-    for command in (run, migrate):
+    check = commands.add_parser(
+        "check",
+        help="report what the named apps do across an app boundary",
+        description=(
+            "Set the named apps up in one host, run the host's checks that "
+            "read no database, and report what each app's code and models do "
+            "across an app boundary, with no database connection. Exit 1 "
+            "when the host refuses or an enforced app has an error finding, "
+            "and 2 for a mistake in the arguments or in [tool.neolith] of "
+            "pyproject.toml, or an error of the check itself."
+        ),
+        allow_abbrev=False,
+    )
+    for command in (run, migrate, check):
         command.add_argument(
             "apps", nargs="+", metavar="app", help="the import path of an app package"
         )
@@ -235,6 +256,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if arguments.command == "run":
             return _run(arguments)
+        if arguments.command == "check":
+            return _check(arguments)
         return _migrate(arguments)
     except (ImproperlyConfigured, CommandError) as refusal:
         _report(refusal, log.printed)
@@ -255,9 +278,13 @@ def _cause(error: BaseException) -> str:
     return _naming.cause(error, _SHOWN + 3)
 
 
-def _set_up(arguments: argparse.Namespace, *, serving: bool) -> None:
+def _set_up(
+    arguments: argparse.Namespace, *, serving: bool, checking: bool = False
+) -> None:
     """Import the deployer's module, build the settings, configure Django
-    and load its apps.
+    and load its apps. When ``checking``, an error other than a refusal
+    while the apps load, such as the check's refusal of a database
+    connection, is a refusal that names it as the cause.
     """
     import django
     from django.conf import settings
@@ -272,7 +299,17 @@ def _set_up(arguments: argparse.Namespace, *, serving: bool) -> None:
     finally:
         os.environ.pop(_SETTINGS, None)
     settings.configure(**built)
-    django.setup(set_prefix=not serving)
+    if not checking:
+        django.setup(set_prefix=not serving)
+        return
+    try:
+        django.setup(set_prefix=False)
+    except ImproperlyConfigured:
+        raise
+    except Exception as error:
+        raise ImproperlyConfigured(
+            f"host: the apps cannot be loaded: {_cause(error)}"
+        ) from error
 
 
 def _built(name: str, apps: list[str]) -> dict[str, Any]:
@@ -320,6 +357,23 @@ def _migrate(arguments: argparse.Namespace) -> int:
 
     _set_up(arguments, serving=False)
     call_command("migrateapps", stdout=sys.stdout, stderr=sys.stderr)
+    return 0
+
+
+def _check(arguments: argparse.Namespace) -> int:
+    from django.core.management import call_command
+
+    from neolith import _check, _server
+
+    problems = _check.read_config()[1]
+    for problem in problems:
+        _server.say(sys.stderr, f"neolith: {problem}")
+    if problems:
+        return 2
+    with _check.guarded():
+        _set_up(arguments, serving=False, checking=True)
+        # The command exits with the check's status itself when it is not 0.
+        call_command("checkapps", stdout=sys.stdout, stderr=sys.stderr)
     return 0
 
 
