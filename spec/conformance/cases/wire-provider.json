@@ -1,0 +1,272 @@
+[
+  {
+    "name": "wire_reply_is_200_with_its_json_text",
+    "part": "wire",
+    "state": "A host provides reference.v1, with the app reference_caller on its allow-list of apps that may assert a principal. The apps reference_caller and reference_stranger each hold a shared-secret key the host accepts.",
+    "procedure": "1. POST /reference/v1/echo with Content-Type application/json, its Content-Length, Accept-Encoding identity and a valid shared-secret token for reference_caller, and a body that sets every member of Values in its wire form.",
+    "expected": "Status 200, Content-Type application/json, a Content-Length equal to the body's length, and a body whose JSON value equals the request's.",
+    "requirements": [
+      "HTTP-41",
+      "TRN-1"
+    ]
+  },
+  {
+    "name": "wire_empty_reply_is_204",
+    "part": "wire",
+    "state": "A host provides reference.v1, with the app reference_caller on its allow-list of apps that may assert a principal. The apps reference_caller and reference_stranger each hold a shared-secret key the host accepts.",
+    "procedure": "1. POST /reference/v1/accept with Content-Type application/json, its Content-Length, Accept-Encoding identity and a valid shared-secret token for reference_caller, and a valid Values body.",
+    "expected": "Status 204 with an empty body and no Content-Type.",
+    "requirements": [
+      "HTTP-41"
+    ]
+  },
+  {
+    "name": "wire_error_has_its_kind_status_and_body",
+    "part": "wire",
+    "state": "A host provides reference.v1, with the app reference_caller on its allow-list of apps that may assert a principal. The apps reference_caller and reference_stranger each hold a shared-secret key the host accepts.",
+    "procedure": "1. POST /reference/v1/refuse with Content-Type application/json, its Content-Length, Accept-Encoding identity and a valid shared-secret token for reference_caller, once for each of invalid_argument, unauthenticated, permission_denied, not_found and conflict, with a message.\n2. Again with the kind gone and the message left.",
+    "expected": "Each standard kind has the status spec 03's table gives it and the body {\"kind\": <kind>, \"message\": <message>}, as application/json. gone has status 422 and the body {\"kind\": \"gone\", \"message\": \"left\", \"data\": {\"reason\": \"left\"}}.",
+    "requirements": [
+      "CON-43"
+    ]
+  },
+  {
+    "name": "wire_failure_inside_is_internal",
+    "part": "wire",
+    "state": "A host provides reference.v1, with the app reference_caller on its allow-list of apps that may assert a principal. The apps reference_caller and reference_stranger each hold a shared-secret key the host accepts.",
+    "procedure": "1. POST /reference/v1/boom with Content-Type application/json, its Content-Length, Accept-Encoding identity and a valid shared-secret token for reference_caller, and the body {}.\n2. The same to /reference/v1/leak.",
+    "expected": "Each has status 500 and a neolith error body of kind internal with exactly kind and message.",
+    "requirements": [
+      "TRN-18"
+    ]
+  },
+  {
+    "name": "wire_deadline_passed_is_timeout",
+    "part": "wire",
+    "state": "A host provides reference.v1, with the app reference_caller on its allow-list of apps that may assert a principal. The apps reference_caller and reference_stranger each hold a shared-secret key the host accepts.",
+    "procedure": "1. POST /reference/v1/stall with Content-Type application/json, its Content-Length, Accept-Encoding identity and a valid shared-secret token for reference_caller, Neolith-Timeout 200 and the body {}.",
+    "expected": "Status 504 and a neolith error body of kind timeout with exactly kind and message.",
+    "requirements": [
+      "TRN-4"
+    ]
+  },
+  {
+    "name": "wire_unauthenticated_carries_the_bearer_challenge",
+    "part": "wire",
+    "state": "A host provides reference.v1, with the app reference_caller on its allow-list of apps that may assert a principal. The apps reference_caller and reference_stranger each hold a shared-secret key the host accepts.",
+    "procedure": "1. POST /reference/v1/seen with the body {}, Content-Type and Content-Length, and in turn: no Authorization; a Basic credential; and a Bearer token for reference_caller that breaks one rule of spec 03's token: alg HS384, typ JWT, a kid the host does not hold, a signature under another key, aud other.v1, iat 1 and exp 301, an exp past iat + 300, and a claim sub beside the four.",
+    "expected": "Each has status 401, a neolith error body of kind unauthenticated with exactly kind and message, and exactly one WWW-Authenticate field, Bearer realm=\"neolith\".",
+    "requirements": [
+      "HTTP-9",
+      "HTTP-10",
+      "HTTP-12",
+      "HTTP-13",
+      "HTTP-14",
+      "HTTP-15",
+      "HTTP-16",
+      "HTTP-44",
+      "HTTP-45"
+    ]
+  },
+  {
+    "name": "wire_valid_credential_names_the_calling_app",
+    "part": "wire",
+    "state": "A host provides reference.v1, with the app reference_caller on its allow-list of apps that may assert a principal. The apps reference_caller and reference_stranger each hold a shared-secret key the host accepts.",
+    "procedure": "1. POST /reference/v1/seen with the body {}, Content-Type, Content-Length and Authorization written bearer <token>, the scheme in lower case, with a valid token for reference_caller whose typ is in turn neolith+jwt, application/neolith+jwt and NEOLITH+JWT.",
+    "expected": "Each has status 200 and the reply {\"principal\": null, \"caller\": \"reference_caller\", \"deadline\": false, \"idempotency_key\": false}.",
+    "requirements": [
+      "HTTP-11",
+      "TRN-36"
+    ]
+  },
+  {
+    "name": "wire_principal_reaches_the_action",
+    "part": "wire",
+    "state": "A host provides reference.v1, with the app reference_caller on its allow-list of apps that may assert a principal. The apps reference_caller and reference_stranger each hold a shared-secret key the host accepts.",
+    "procedure": "1. POST /reference/v1/seen with Content-Type application/json, its Content-Length, Accept-Encoding identity and a valid shared-secret token for reference_caller, the body {}, and Neolith-Principal holding spec 03's example principal as spec 03 writes it.",
+    "expected": "Status 200 and a reply whose principal has issuer https://id.example.com, subject u-81f3 and the claims {\"roles\": [\"clerk\"]}, and whose caller is reference_caller.",
+    "requirements": [
+      "TRN-36"
+    ]
+  },
+  {
+    "name": "wire_principal_from_an_unlisted_app_is_403",
+    "part": "wire",
+    "state": "A host provides reference.v1, with the app reference_caller on its allow-list of apps that may assert a principal. The apps reference_caller and reference_stranger each hold a shared-secret key the host accepts.",
+    "procedure": "1. POST /reference/v1/seen as reference_stranger, with Content-Type, Content-Length, Accept-Encoding identity, a valid token for reference_stranger and the body {}, and Neolith-Principal holding in turn: spec 03's example, an empty value, text outside base64url, an object without subject, and 5000 characters.\n2. The same with no Neolith-Principal.",
+    "expected": "Each call of step 1 has status 403 and a neolith error body of kind permission_denied. Step 2 has status 200 and the caller reference_stranger.",
+    "requirements": [
+      "HTTP-46",
+      "TRN-43"
+    ]
+  },
+  {
+    "name": "wire_malformed_principal_is_invalid_argument",
+    "part": "wire",
+    "state": "A host provides reference.v1, with the app reference_caller on its allow-list of apps that may assert a principal. The apps reference_caller and reference_stranger each hold a shared-secret key the host accepts.",
+    "procedure": "1. POST /reference/v1/seen with Content-Type application/json, its Content-Length, Accept-Encoding identity and a valid shared-secret token for reference_caller, the body {}, and Neolith-Principal holding in turn: an empty value, text outside base64url, an object without subject, one with an empty subject, one with a member beside issuer, subject and claims, one with subject twice, and spec 03's example followed by =.",
+    "expected": "Each has status 400 and a neolith error body of kind invalid_argument.",
+    "requirements": [
+      "HTTP-46"
+    ]
+  },
+  {
+    "name": "wire_context_headers_reach_the_action",
+    "part": "wire",
+    "state": "A host provides reference.v1, with the app reference_caller on its allow-list of apps that may assert a principal. The apps reference_caller and reference_stranger each hold a shared-secret key the host accepts.",
+    "procedure": "1. POST /reference/v1/seen with Content-Type application/json, its Content-Length, Accept-Encoding identity and a valid shared-secret token for reference_caller and the body {}, with Neolith-Timeout and Idempotency-Key in turn 5000 and \"k\", 9999999999 and a key of 255 characters, and 1000 and \"a\\\"b\".",
+    "expected": "Each has status 200 and a reply whose deadline and idempotency_key are both true.",
+    "requirements": [
+      "HTTP-21",
+      "HTTP-22",
+      "HTTP-23",
+      "TRN-36"
+    ]
+  },
+  {
+    "name": "wire_context_header_outside_its_form_is_400",
+    "part": "wire",
+    "state": "A host provides reference.v1, with the app reference_caller on its allow-list of apps that may assert a principal. The apps reference_caller and reference_stranger each hold a shared-secret key the host accepts.",
+    "procedure": "1. POST /reference/v1/seen with Content-Type application/json, its Content-Length, Accept-Encoding identity and a valid shared-secret token for reference_caller and the body {}, with in turn Neolith-Timeout 0050, 0, 12345678901, 1.5 and an empty value, and Idempotency-Key k (unquoted), \"\", a key of 256 characters, and \"k\";a=1.",
+    "expected": "Each has status 400 and a neolith error body of kind invalid_argument.",
+    "requirements": [
+      "HTTP-22",
+      "HTTP-23"
+    ]
+  },
+  {
+    "name": "wire_unnamed_headers_change_nothing",
+    "part": "wire",
+    "state": "A host provides reference.v1, with the app reference_caller on its allow-list of apps that may assert a principal. The apps reference_caller and reference_stranger each hold a shared-secret key the host accepts.",
+    "procedure": "1. POST /reference/v1/seen with Content-Type application/json, its Content-Length, Accept-Encoding identity and a valid shared-secret token for reference_caller, the body {}, Neolith-Deadline 1 and X-Idempotency-Key \"k\".",
+    "expected": "Status 200 and the reply {\"principal\": null, \"caller\": \"reference_caller\", \"deadline\": false, \"idempotency_key\": false}.",
+    "requirements": [
+      "HTTP-28"
+    ]
+  },
+  {
+    "name": "wire_method_other_than_post_is_400",
+    "part": "wire",
+    "state": "A host provides reference.v1, with the app reference_caller on its allow-list of apps that may assert a principal. The apps reference_caller and reference_stranger each hold a shared-secret key the host accepts.",
+    "procedure": "1. GET, PUT and DELETE /reference/v1/seen with Content-Type application/json, its Content-Length, Accept-Encoding identity and a valid shared-secret token for reference_caller and the body {}.",
+    "expected": "Each has status 400, a neolith error body of kind invalid_argument and exactly one Allow field, POST.",
+    "requirements": [
+      "HTTP-34"
+    ]
+  },
+  {
+    "name": "wire_query_is_400",
+    "part": "wire",
+    "state": "A host provides reference.v1, with the app reference_caller on its allow-list of apps that may assert a principal. The apps reference_caller and reference_stranger each hold a shared-secret key the host accepts.",
+    "procedure": "1. POST /reference/v1/seen?a=1 with Content-Type application/json, its Content-Length, Accept-Encoding identity and a valid shared-secret token for reference_caller and the body {}.",
+    "expected": "Status 400 and a neolith error body of kind invalid_argument.",
+    "requirements": [
+      "HTTP-35"
+    ]
+  },
+  {
+    "name": "wire_content_type_outside_json_is_400",
+    "part": "wire",
+    "state": "A host provides reference.v1, with the app reference_caller on its allow-list of apps that may assert a principal. The apps reference_caller and reference_stranger each hold a shared-secret key the host accepts.",
+    "procedure": "1. POST /reference/v1/seen with Content-Length, a valid token for reference_caller, the body {}, and Content-Type in turn text/plain, application/json; charset=latin-1, application/jsonx and an empty value.\n2. The same with Content-Type in turn application/json, Application/JSON and application/json ; charset=\"UTF-8\".",
+    "expected": "Each call of step 1 has status 400, a neolith error body of kind invalid_argument and exactly one Accept-Post field, application/json. Each call of step 2 has status 200.",
+    "requirements": [
+      "HTTP-36"
+    ]
+  },
+  {
+    "name": "wire_content_encoding_is_400",
+    "part": "wire",
+    "state": "A host provides reference.v1, with the app reference_caller on its allow-list of apps that may assert a principal. The apps reference_caller and reference_stranger each hold a shared-secret key the host accepts.",
+    "procedure": "1. POST /reference/v1/seen with Content-Type application/json, its Content-Length, Accept-Encoding identity and a valid shared-secret token for reference_caller, the body {}, and Content-Encoding in turn gzip and identity.",
+    "expected": "Each has status 400, a neolith error body of kind invalid_argument and exactly one Accept-Encoding field, identity.",
+    "requirements": [
+      "HTTP-37"
+    ]
+  },
+  {
+    "name": "wire_content_length_outside_its_form_is_400",
+    "part": "wire",
+    "state": "A host provides reference.v1, with the app reference_caller on its allow-list of apps that may assert a principal. The apps reference_caller and reference_stranger each hold a shared-secret key the host accepts.",
+    "procedure": "1. POST /reference/v1/seen with Content-Type, a valid token for reference_caller and the body {}, and in turn no Content-Length, and Content-Length x, -2, 2.0 and 1 followed by 19 zeros.",
+    "expected": "Each has status 400 and a neolith error body of kind invalid_argument.",
+    "requirements": [
+      "HTTP-38"
+    ]
+  },
+  {
+    "name": "wire_owned_path_with_no_action_is_an_empty_404",
+    "part": "wire",
+    "state": "A host provides reference.v1, with the app reference_caller on its allow-list of apps that may assert a principal. The apps reference_caller and reference_stranger each hold a shared-secret key the host accepts.",
+    "procedure": "1. POST with Content-Type application/json, its Content-Length, Accept-Encoding identity and a valid shared-secret token for reference_caller and the body {} to /reference/v1/none, /reference/v1/ and /.well-known/neolith/other.",
+    "expected": "Each has status 404 and an empty body.",
+    "requirements": [
+      "HTTP-30"
+    ]
+  },
+  {
+    "name": "wire_health_is_an_empty_200",
+    "part": "wire",
+    "state": "A host provides reference.v1, with the app reference_caller on its allow-list of apps that may assert a principal. The apps reference_caller and reference_stranger each hold a shared-secret key the host accepts.",
+    "procedure": "1. GET and HEAD /.well-known/neolith/health.",
+    "expected": "Each has status 200 and an empty body.",
+    "requirements": [
+      "HTTP-47",
+      "HTTP-31"
+    ]
+  },
+  {
+    "name": "wire_document_is_served_with_get_and_head",
+    "part": "wire",
+    "state": "A host provides reference.v1, with the app reference_caller on its allow-list of apps that may assert a principal. The apps reference_caller and reference_stranger each hold a shared-secret key the host accepts.",
+    "procedure": "1. GET /.well-known/neolith/openapi.json.\n2. HEAD /.well-known/neolith/openapi.json.",
+    "expected": "Step 1 has status 200, Content-Type application/json, a Content-Length equal to the body's length and a body that is a JSON object. Step 2 has status 200, the same Content-Type, no body, and either no Content-Length or step 1's.",
+    "requirements": [
+      "HTTP-2",
+      "HTTP-31"
+    ]
+  },
+  {
+    "name": "wire_well_known_path_other_method_is_405",
+    "part": "wire",
+    "state": "A host provides reference.v1, with the app reference_caller on its allow-list of apps that may assert a principal. The apps reference_caller and reference_stranger each hold a shared-secret key the host accepts.",
+    "procedure": "1. POST, PUT and DELETE /.well-known/neolith/openapi.json and /.well-known/neolith/health, each with Content-Length 0.",
+    "expected": "Each has status 405, an empty body and exactly one Allow field, GET, HEAD.",
+    "requirements": [
+      "HTTP-32"
+    ]
+  },
+  {
+    "name": "wire_well_known_path_with_a_query_is_400",
+    "part": "wire",
+    "state": "A host provides reference.v1, with the app reference_caller on its allow-list of apps that may assert a principal. The apps reference_caller and reference_stranger each hold a shared-secret key the host accepts.",
+    "procedure": "1. GET /.well-known/neolith/openapi.json?v=2 and /.well-known/neolith/health?v=2.",
+    "expected": "Each has status 400 and an empty body.",
+    "requirements": [
+      "HTTP-33"
+    ]
+  },
+  {
+    "name": "wire_projection_holds_the_reference_document",
+    "part": "wire",
+    "state": "A host provides reference.v1, with the app reference_caller on its allow-list of apps that may assert a principal. The apps reference_caller and reference_stranger each hold a shared-secret key the host accepts.",
+    "procedure": "1. GET /.well-known/neolith/openapi.json.\n2. Take the reference contract's part of the document served and of the reference document: the paths that start with /reference/v1/, every component those paths reach through $ref, the security schemes the top-level security names, and openapi, info, jsonSchemaDialect, security and servers.\n3. Compare the two parts as spec 06's CNF-2 says.",
+    "expected": "Status 200, Content-Type application/json, and the two parts equal. The document served also has paths of other contract versions.",
+    "requirements": [
+      "CNF-2",
+      "HTTP-2",
+      "HTTP-20"
+    ]
+  },
+  {
+    "name": "wire_deposit_once_per_key",
+    "part": "wire",
+    "state": "A host provides reference.v1, with the app reference_caller on its allow-list of apps that may assert a principal. The apps reference_caller and reference_stranger each hold a shared-secret key the host accepts. The account the case uses has no deposits.",
+    "procedure": "1. POST /reference/v1/deposit with Content-Type application/json, its Content-Length, Accept-Encoding identity and a valid shared-secret token for reference_caller, the body {\"account\": <the account>, \"amount\": 5} and Idempotency-Key K1.\n2. The same again, under K1.\n3. The same under another key, K2.\n4. The same under K1, then under K2.\n5. With another fresh account, the same twice with no Idempotency-Key.\nK1 and K2 are in turn \"k-1\" and \"k-2\", \"a\\\"b\" and \"a\\\\b\", and a key of 255 characters and \"K\".",
+    "expected": "Each call has status 200 and a reply with exactly total, an integer. Steps 1 and 2 give 5, step 3 gives 10, and step 4 gives 5 and then 10: one effect per key. Step 5 gives 5 and then 10.",
+    "requirements": [
+      "CON-5",
+      "HTTP-23"
+    ]
+  }
+]

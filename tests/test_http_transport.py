@@ -4,8 +4,10 @@ A provider is played on the far end of a socket pair (``tests.http_peer``),
 or by a local TCP server where the test says so. The transport writes ADR
 0027 Decision 9's fields in ADR 0028's order, refuses a call with no calling
 app or no signing key before anything is sent, reads the budget once a
-connection is ready, and maps each final response as spec 03 says. Time is
-a clock the tests set, or a short deadline on the local machine (T3).
+connection is ready, and maps each final response as spec 03 says; each
+row of that mapping is checked against bytes in the conformance suite's wire
+part (``tests/conformance/wire/test_connector.py``). Time is a clock the
+tests set, or a short deadline on the local machine (T3).
 """
 
 import base64
@@ -150,70 +152,9 @@ def _kind(outcome: object) -> str:
     return outcome.kind
 
 
-# HTTP-19: a reply is 200 or 204, paired with the action's reply.
-
-
-@pytest.mark.spec("HTTP-19", "TRN-12")
-def test_a_200_carries_the_reply() -> None:
-    assert _outcome(_response(200, b'{"n":7}')) == Told(n=7)
-
-
-@pytest.mark.spec("HTTP-19")
-def test_a_204_is_the_reply_of_an_action_whose_reply_is_empty() -> None:
-    assert _outcome(_response(204, length=False), lambda c: c.tell(Ask())) is None
-
-
-@pytest.mark.spec("HTTP-19", "TRN-18")
-@pytest.mark.parametrize(
-    ("response", "action"),
-    [
-        # The other pairing (ADR 0011 Decision 4).
-        (_response(200, b"{}"), "tell"),
-        (_response(200, b"null"), "tell"),
-        (_response(204, length=False), "ask"),
-        # A success status that is not 200 or 204.
-        (_response(201, b'{"n":1}'), "ask"),
-        (_response(202, b""), "tell"),
-        (_response(206, b'{"n":1}'), "ask"),
-        (_response(299, b'{"n":1}'), "ask"),
-        # A 200 whose body is not a valid reply.
-        (_response(200, b""), "ask"),
-        (_response(200, b"<html></html>"), "ask"),
-        (_response(200, b'{"n":"seven"}'), "ask"),
-        (_response(200, b"{}"), "ask"),
-        (_response(200, b'{"kind":"not_found","message":"m"}'), "ask"),
-    ],
-)
-def test_a_success_that_is_not_a_reply_is_internal(
-    response: bytes, action: str
-) -> None:
-    outcome = _outcome(response, lambda c: getattr(c, action)(Ask()))
-    assert _kind(outcome) == "internal"
-
-
-@pytest.mark.spec("HTTP-19", "CON-42", "TRN-18")
-@pytest.mark.parametrize(
-    "body",
-    [
-        b'{"n":1,"n":2}',
-        b'{"n":1,"x":"\\ud800"}',
-        b'{"n":1,"x":1e400}',
-        b'{"n":1,"x":NaN}',
-        b'{"n":1,"x":' + b"[" * 300 + b"]" * 300 + b"}",
-        b'{"n":1}\xff',
-    ],
-    ids=[
-        "a member twice",
-        "a lone surrogate",
-        "past a double",
-        "NaN",
-        "deep",
-        "not UTF-8",
-    ],
-)
-def test_a_reply_gets_the_network_receive_check(body: bytes) -> None:
-    # Each would read as a Told; the receive check refuses it first.
-    assert _kind(_outcome(_response(200, body))) == "internal"
+# What arrives, read against the contract (spec 01). Each row of spec 03's
+# response mapping is the conformance suite's wire part, against bytes
+# (tests/conformance/wire/test_connector.py).
 
 
 @pytest.mark.spec("CON-40")
@@ -222,77 +163,6 @@ def test_a_reply_is_checked_against_exact_integer_bounds() -> None:
     # 2**53 reads as 2**53 as a double, and is refused here as written.
     assert _kind(_outcome(_response(200, b'{"n":9007199254740993}'))) == "internal"
     assert _outcome(_response(200, b'{"n":9007199254740991}')) == Told(n=2**53 - 1)
-
-
-# HTTP-19: the kind is taken from the body only, never from the status.
-
-
-@pytest.mark.spec("HTTP-19", "TRN-3")
-@pytest.mark.parametrize(
-    "response",
-    [
-        _response(404, b""),
-        _response(404, b"<h1>Not Found</h1>"),
-        _response(302, b"", reason="Found"),
-        _response(301, b'{"n":1}', reason="Moved"),
-        _response(503, b"Service Unavailable"),
-        _response(500, b'{"error":"boom"}'),
-        _response(500, b'["internal"]'),
-        _response(400, b'{"kind":7,"message":"m"}'),
-        _response(400, b'{"kind":null,"message":"m"}'),
-        _response(400, b'{"kind":3,"kind":["moved"],"message":"m"}'),
-        _response(400, b'{"kind":"moved","message":"m","data":{"a":"\xff"}}'),
-        _response(400, b'{"message":"m","data":{"kind":"moved"}}'),
-        _response(400, b'"not_found"'),
-        _response(400, b'\xff{"kind":"not_found","message":"m"}'),
-        _response(400, b"[" * 100_000 + b"]" * 100_000),
-        _response(304, length=False),
-    ],
-)
-def test_a_failure_without_a_neolith_error_body_is_unavailable(
-    response: bytes, caplog: pytest.LogCaptureFixture
-) -> None:
-    with caplog.at_level(logging.WARNING, "neolith"):
-        outcome = _outcome(response)
-    assert _kind(outcome) == "unavailable"
-    assert isinstance(outcome, ContractError)
-    status = response.split(b" ")[1].decode()
-    assert outcome.message == (
-        f"the provider at {ORIGIN} answered {status} without a neolith error body"
-    )
-    # Logged once, with the trace identifier, at WARNING.
-    (record,) = caplog.records
-    assert record.levelno == logging.WARNING
-    assert re.search(r"\(trace [0-9a-f]{32}\)$", record.getMessage())
-
-
-@pytest.mark.spec("HTTP-19")
-@pytest.mark.parametrize("status", [400, 404, 409, 418, 422, 500, 503, 504, 302])
-@pytest.mark.parametrize(
-    "kind", ["not_found", "internal", "timeout", "unavailable", "permission_denied"]
-)
-def test_the_kind_comes_from_the_body_whatever_the_status(
-    status: int, kind: str
-) -> None:
-    outcome = _outcome(_response(status, _error(kind=kind, message="said so")))
-    assert type(outcome) is ContractError
-    assert (outcome.kind, outcome.message, outcome.data) == (kind, "said so", None)
-
-
-@pytest.mark.spec("HTTP-19", "CON-43")
-def test_a_declared_kind_arrives_with_its_detail_record() -> None:
-    outcome = _outcome(_response(422, b'{"kind":"gone","message":"m","data":{"n":4}}'))
-    assert type(outcome) is ContractError
-    assert (outcome.kind, outcome.data) == ("gone", Gone(n=4))
-
-
-@pytest.mark.spec("HTTP-19")
-def test_a_detail_is_read_from_the_text_the_provider_wrote() -> None:
-    # Whitespace anywhere JSON admits it, and members in any order.
-    body = b' \r\n{ "data" :\t{ "n" : 4 } , "message":"m" ,"kind" : "gone" }\n'
-    outcome = _outcome(_response(422, body))
-    assert type(outcome) is ContractError
-    assert (outcome.kind, outcome.message, outcome.data) == ("gone", "m", Gone(n=4))
 
 
 @pytest.mark.spec("CON-28")
@@ -309,55 +179,6 @@ def test_an_unknown_kind_without_data_arrives_without_a_detail() -> None:
     outcome = _outcome(_response(422, _error(kind="moved", message="m")))
     assert type(outcome) is ContractError
     assert (outcome.kind, outcome.message, outcome.data) == ("moved", "m", None)
-
-
-@pytest.mark.spec("CON-49", "HTTP-19")
-@pytest.mark.parametrize(
-    "body",
-    [
-        # An unknown kind whose data is not a JSON object (CON-30).
-        b'{"kind":"moved","message":"m","data":null}',
-        b'{"kind":"moved","message":"m","data":[1]}',
-        b'{"kind":"moved","message":"m","data":"x"}',
-        b'{"kind":"moved","message":"m","data":3}',
-        b'{"kind":"moved","message":"m","data":{"n":9007199254740992}}',
-        b'{"kind":"moved","message":"m","data":' + b'{"a":' * 40 + b"1" + b"}" * 41,
-        # A declared kind without its detail, or with one its record refuses.
-        b'{"kind":"gone","message":"m"}',
-        b'{"kind":"gone","message":"m","data":null}',
-        b'{"kind":"gone","message":"m","data":{"n":"x"}}',
-        b'{"kind":"gone","message":"m","data":{"n":9007199254740993}}',
-        # A standard kind with a detail.
-        b'{"kind":"not_found","message":"m","data":{}}',
-        b'{"kind":"not_found","message":"m","data":null}',
-        # A kind or a message outside CON-22 and CON-25.
-        b'{"kind":"Not Found","message":"m"}',
-        b'{"kind":"","message":"m"}',
-        b'{"kind":"not_found","message":"\\udc00"}',
-        # Not exactly kind, message and data.
-        b'{"kind":"not_found"}',
-        b'{"kind":"not_found","message":7}',
-        b'{"kind":"not_found","message":null}',
-        b'{"kind":"not_found","message":"m","detail":"d"}',
-        b'{"kind":"not_found","message":"m","trace":"t"}',
-        # Not I-JSON (CON-42), whichever occurrence of a name comes last.
-        b'{"kind":"not_found","message":"m","message":"n"}',
-        b'{"kind":"moved","kind":3,"message":"m"}',
-        b'{"kind":3,"kind":"moved","message":"m"}',
-        b'{"kind":null,"message":"m","kind":"moved"}',
-        b'{"kind":"moved","message":"m","data":{"a":1,"a":2}}',
-        b'{"kind":"not_found","message":"m","x":1e400}',
-    ],
-)
-def test_a_neolith_error_body_that_cannot_be_read_is_internal(
-    body: bytes, caplog: pytest.LogCaptureFixture
-) -> None:
-    with caplog.at_level(logging.ERROR, "neolith"):
-        outcome = _outcome(_response(422, body))
-    assert _kind(outcome) == "internal"
-    assert isinstance(outcome, ContractError)
-    assert "logged the cause under trace" in outcome.message
-    assert caplog.records
 
 
 @pytest.mark.spec("CON-28")
