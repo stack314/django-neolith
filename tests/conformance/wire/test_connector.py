@@ -135,6 +135,8 @@ def test_the_connector_writes_the_request_spec_03_fixes() -> None:
     assert all(found), parents
     traces = {match[1] for match in found if match}
     assert len(traces) == 1, parents
+    spans = {match[2] for match in found if match}
+    assert len(spans) == 2, parents
 
 
 # A reply: 200 or 204, paired with the action's reply (HTTP-19).

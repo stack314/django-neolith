@@ -103,12 +103,15 @@ def read_json(data: bytes) -> Any:  # noqa: ANN401
         text = data.decode("utf-8")
     except UnicodeDecodeError as error:
         raise NotJSON("not UTF-8") from error
-    return json.loads(
-        text,
-        object_pairs_hook=_pairs,
-        parse_constant=_constant,
-        parse_float=Decimal,
-    )
+    try:
+        return json.loads(
+            text,
+            object_pairs_hook=_pairs,
+            parse_constant=_constant,
+            parse_float=Decimal,
+        )
+    except json.JSONDecodeError as error:
+        raise NotJSON(str(error)) from error
 
 
 def secret_of(app: str) -> tuple[str, bytes]:
@@ -157,9 +160,18 @@ def mint(
     return f"{signing}.{b64url(signature.digest())}"
 
 
-def token_problem(authorization: str, app: str, audience: str) -> str | None:
+def token_problem(
+    authorization: str,
+    app: str,
+    audience: str,
+    *,
+    key: tuple[str, bytes] | None = None,
+    now: int | None = None,
+) -> str | None:
     """Why ``authorization`` is not a valid shared-secret credential of
-    ``app`` for ``audience`` under spec 03's rules, or ``None``.
+    ``app`` for ``audience`` under spec 03's rules, or ``None``: with
+    ``key``, a key id and its secret, the key ``app`` signs with on the test
+    host by default, at ``now``, the current time by default.
     """
     scheme, _, token = authorization.partition(" ")
     if scheme.lower() != "bearer":
@@ -176,19 +188,29 @@ def token_problem(authorization: str, app: str, audience: str) -> str | None:
         head, body = (read_json(part) for part in decoded[:2] if part is not None)
     except NotJSON as error:
         return f"a part is not I-JSON: {error}"
-    key_id, secret = secret_of(app)
+    if not (isinstance(head, dict) and isinstance(body, dict)):
+        return "a part is not a JSON object"
+    key_id, secret = key or secret_of(app)
     if head != {"alg": "HS256", "typ": "neolith+jwt", "kid": key_id}:
         return f"the header is {head}"
     if set(body) != {"iss", "aud", "iat", "exp"}:
         return f"the claims are {sorted(body)}"
-    if (body["iss"], body["aud"]) != (app, audience):
-        return f"iss and aud are {body['iss']!r} and {body['aud']!r}"
+    if body["iss"] != app:
+        return f"iss is {body['iss']!r}"
+    if body["aud"] != audience:
+        return f"aud is {body['aud']!r}"
     iat, exp = body["iat"], body["exp"]
     if not all(type(t) is int for t in (iat, exp)):
         return "iat and exp are not integers"
-    now = int(time.time())
-    if not (iat < exp <= iat + 300 and iat <= now + 60 and now < exp + 60):
-        return f"iat {iat} and exp {exp} are not valid at {now}"
+    now = int(time.time()) if now is None else now
+    if not iat < exp:
+        return f"exp {exp} is not after iat {iat}"
+    if not exp <= iat + 300:
+        return f"exp {exp} is more than 300 s after iat {iat}"
+    if not iat <= now + 60:
+        return f"iat {iat} is more than 60 s after now, {now}"
+    if not now < exp + 60:
+        return f"exp {exp} is 60 s or more before now, {now}"
     expected = hmac.new(
         secret, f"{parts[0]}.{parts[1]}".encode("ascii"), hashlib.sha256
     ).digest()
@@ -357,7 +379,8 @@ def _read(connection: socket.socket) -> Received | None:
         for name, _, value in (entry.partition(":") for entry in lines)
     )
     lengths = [v for n, v in fields if n.lower() == "content-length"]
-    length = int(lengths[0]) if len(lengths) == 1 and lengths[0].isdigit() else 0
+    single = len(lengths) == 1 and re.fullmatch("[0-9]+", lengths[0])
+    length = int(lengths[0]) if single else 0
     while len(body) < length:
         chunk = connection.recv(65536)
         if not chunk:

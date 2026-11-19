@@ -343,6 +343,16 @@ def test_a_name_that_is_a_keyword_is_still_a_name() -> None:
     assert canonical(record(["a", "b"])) != canonical(record(["b", "a"]))
     assert canonical(record(["a", "b"])) == canonical(record(["a", "b"]))
 
+    # A field called default, const or enum keeps its schema too: its
+    # anyOf compares without order, as a schema's does.
+    for name in ("default", "const", "enum", "example", "examples"):
+
+        def field(entries: list[object], name: str = name) -> dict[str, Any]:
+            return {"properties": {name: {"anyOf": entries}}}
+
+        one, other = {"type": "string"}, {"type": "null"}
+        assert canonical(field([one, other])) == canonical(field([other, one]))
+
 
 def test_data_is_compared_as_written() -> None:
     def default(value: object) -> dict[str, Any]:
