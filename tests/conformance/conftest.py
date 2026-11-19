@@ -21,7 +21,7 @@ _HANG: Final = 120
 @pytest.fixture(scope="package")
 def live() -> Iterator[Live]:
     """neolith's own development server on ``127.0.0.1``, serving the test
-    host behind the PEP 3333 validator.
+    host.
     """
     with serving("127.0.0.1", ipv6=False) as live:
         yield live

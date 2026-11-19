@@ -18,7 +18,6 @@ import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Final
-from wsgiref.validate import validator
 
 import pytest
 from django.core.handlers.wsgi import WSGIHandler
@@ -80,13 +79,22 @@ def serving(
     thread within ``BOUND`` seconds.
 
     The server serves Django's ``WSGIHandler`` directly, as ``neolith run``
-    does, so Django is not set up again, behind the standard library's PEP
-    3333 validator. ``secure`` wraps the listening socket, for TLS.
+    does, so Django is not set up again. ``secure`` wraps the listening
+    socket, for TLS.
+
+    It is not wrapped in ``wsgiref.validate``'s validator, which ADR 0032
+    Decision 5 tried: two of its checks go beyond PEP 3333 and refuse what
+    spec 03 asks for, so the wire part saw a 500 in their place.
+    ``check_content_type`` requires ``Content-Type`` on every response but a
+    204 or a 304, so the empty answers of HTTP-30, HTTP-32, HTTP-33 and
+    HTTP-47 failed; and ``check_environ`` reads ``CONTENT_LENGTH`` with
+    ``int()``, so a ``Content-Length`` of ``x`` raised before the host could
+    answer HTTP-38's 400.
     """
     server = _server.listen(host, 0, ipv6=ipv6)
     if secure is not None:
         server.socket = secure(server.socket)
-    server.set_app(validator(WSGIHandler()))
+    server.set_app(WSGIHandler())
     thread = threading.Thread(
         target=server.serve_forever, name="neolith-live-server", daemon=True
     )
