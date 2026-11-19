@@ -18,17 +18,19 @@ in its ``argv`` but the code that calls it. The process:
    providers recorded, hidden fields as positions only;
 5. prints a last record with what the run would leak: the position of any
    recorded secret, principal or key, or the signing secret, found in a
-   printed record or in a line the host logged.
+   printed record or in a line the host logged; and the ``argv`` it was
+   given.
 
 Each test contract has two actions, ``get`` (idempotent) and ``put`` (not
 idempotent); the contract of ``routing_stays_on_declared_kind`` also
 declares the kind ``gone`` on ``get``. The suite's clock, patched at
 ``_context.now`` and ``_http._now``, reads the machine's clock, apart from
 the cases that freeze it: it then starts at a whole number of seconds and
-moves only when U moves it, from inside, before it answers.
+moves only when U moves it, from inside, before it answers (``Clock``).
 """
 
 import contextlib
+import faulthandler
 import functools
 import json
 import logging
@@ -53,7 +55,9 @@ APP: Final = "routing_caller"
 PRINCIPAL: Final = Principal("https://id.example.com", "u-81f3", {"roles": ("clerk",)})
 TRACESTATE: Final = "routing=case"
 GONE: Final = "the scripted provider says gone"
-# The one bound on the whole process, as on every subprocess of the suite.
+# The one bound on the whole process, as on every subprocess of the suite
+# (ADR 0032 Decision 11): past it, the process prints every thread's stack
+# and exits.
 PROCESS_BOUND: Final = 120
 
 
@@ -165,15 +169,29 @@ class RoutingCallerConfig(NeolithAppConfig):
 
 
 class Clock:
-    """The suite's clock: the machine's, or frozen and moved by hand."""
+    """The suite's clock: the machine's, or frozen and moved by hand.
+
+    Called, it is the clock the call reads: its deadline, its budget, the
+    connector's checks (``_context.now``). ``waits`` is the clock the HTTP
+    client's own socket waits read (``_http._now``): while frozen it stays
+    at the start, and U's moves do not reach it. So a move into the
+    deadline's last millisecond cannot shrink the client's wait for U's
+    answer to half a millisecond of real time, which a slow thread would
+    lose to a ``timeout``.
+    """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        self._start: float | None = None
         self._at: float | None = None
 
     def __call__(self) -> float:
         with self._lock:
             return time.monotonic() if self._at is None else self._at
+
+    def waits(self) -> float:
+        with self._lock:
+            return time.monotonic() if self._start is None else self._start
 
     @contextlib.contextmanager
     def frozen(self) -> Iterator[None]:
@@ -182,12 +200,12 @@ class Clock:
         5 ms takes exactly 5 off.
         """
         with self._lock:
-            self._at = float(math.ceil(time.monotonic()))
+            self._start = self._at = float(math.ceil(time.monotonic()))
         try:
             yield
         finally:
             with self._lock:
-                self._at = None
+                self._start = self._at = None
 
     def move(self, seconds: float) -> None:
         with self._lock:
@@ -328,6 +346,7 @@ def main() -> None:
     """Run every case and print one JSON record per case, then the leaks."""
     if len(sys.argv) > 1:
         raise SystemExit("child: takes no arguments")
+    faulthandler.dump_traceback_later(PROCESS_BOUND, exit=True)
     positions = Positions()
     clock = Clock()
     bound = [_bind(case, positions, clock) for case in CASES]
@@ -341,13 +360,15 @@ def main() -> None:
                 stack.callback(provider.close)
         records = _host(bound, secret, clock)
     lines = [json.dumps(record, sort_keys=True) for record in records]
-    said = "\n".join([*lines, *_KEPT.lines])
+    # The records as text, unescaped too, so a value outside ASCII is found.
+    plain = [json.dumps(record, ensure_ascii=False) for record in records]
+    said = "\n".join([*lines, *plain, *_KEPT.lines])
     leaks = positions.found_in(said)
     if secret in said:
         leaks.append("the signing secret")
     for line in lines:
         print(line)
-    print(json.dumps({"leaks": leaks, "logged": len(_KEPT.lines)}))
+    print(json.dumps({"leaks": leaks, "logged": len(_KEPT.lines), "argv": sys.argv}))
 
 
 def _host(bound: list[Bound], secret: str, clock: Clock) -> list[dict[str, object]]:
@@ -370,5 +391,5 @@ def _host(bound: list[Bound], secret: str, clock: Clock) -> list[dict[str, objec
         logging.getLogger().setLevel(logging.DEBUG)
         django.setup()
         _context.now = clock
-        _http._now = clock
+        _http._now = clock.waits
         return [_run(b, clock) for b in bound]

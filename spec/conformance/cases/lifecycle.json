@@ -58,7 +58,7 @@
     "part": "lifecycle",
     "state": "A host whose deployer's settings host an app desk that provides and requires its own contract desk.v1, declares a database of its own, and has one record type with one schema change, on a SQLite file of its own, with its schema applied, a long request deadline, and two views that each hold their request until the test lets it go.",
     "procedure": "1. Start the host, and make one request on a connection that then stays open and idle.\n2. Start one held request on each of two more connections.\n3. Ask the host to shut down, by either signal it takes.\n4. Open a new connection, and send a request on the idle one.\n5. Let the first held request go, then the second.",
-    "expected": "Once draining, the host refuses the new connection and closes the idle one without serving its request. Each held request is answered with 200, and its connection is closed after the response; the host is still running after the first. Once both end, the host stops with a success status and says every request in flight finished.",
+    "expected": "Once draining, the host refuses the new connection and closes the idle one without serving its request. Each held request is answered with 200; the first's connection is closed after its response, while the host still runs. Once both end, the host stops with a success status and says every request in flight finished.",
     "requirements": [
       "APP-39",
       "APP-40",

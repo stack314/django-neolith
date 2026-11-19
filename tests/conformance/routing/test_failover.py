@@ -58,15 +58,16 @@ def run() -> dict[str, Any]:
         timeout=BOUND,
         env=env,
     )
-    assert ran.returncode == 0, ran.stderr[-3000:]
     # A token and a principal's sent form are base64url of JSON, which
-    # starts eyJ; neither may reach the output, nor may a credential.
+    # starts eyJ; neither may reach the output, nor may a credential. Checked
+    # before a failure prints the output.
     for said in (ran.stdout, ran.stderr):
         assert "eyJ" not in said
         assert "Bearer" not in said
+    assert ran.returncode == 0, ran.stderr[-3000:]
     *cases, last = (json.loads(line) for line in ran.stdout.splitlines())
     records = {case.pop("name"): case for case in cases}
-    return {"cases": records, "leaks": last["leaks"], "logged": last["logged"]}
+    return {"cases": records, **last}
 
 
 def case(run: dict[str, Any], name: str) -> dict[str, Any]:
@@ -149,10 +150,10 @@ def test_secrets_principals_and_keys_are_recorded_as_positions_only(
     assert run["logged"] > 0
 
 
-def test_the_process_is_given_no_secret_in_argv() -> None:
-    # The command is fixed: the child generates its own signing secret.
-    assert COMMAND[-1] == "from tests.conformance.routing import child; child.main()"
-    assert len(COMMAND) == 5
+def test_the_process_is_given_no_secret_in_argv(run: dict[str, Any]) -> None:
+    # What the child received: Python's own "-c" and nothing else. It
+    # generates its signing secret itself.
+    assert run["argv"] == ["-c"]
 
 
 # Under single (ADR 0031 Decision 1).

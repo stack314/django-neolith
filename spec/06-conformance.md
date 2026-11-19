@@ -36,7 +36,7 @@ Every case of the suite has a name and an entry in a case file under [`conforman
 
 - **Contract.** One call, made over the in-process and the HTTP transport, with the outcomes compared (CNF-1), against the reference provider: [`contract-parity.json`](conformance/cases/contract-parity.json), [`contract-values.json`](conformance/cases/contract-values.json), [`contract-errors.json`](conformance/cases/contract-errors.json), [`contract-deadlines.json`](conformance/cases/contract-deadlines.json) and [`contract-context.json`](conformance/cases/contract-context.json).
 - **Wire.** The HTTP transport alone, against bytes [03](03-http-transport.md) fixes: the implementation's provider driven by the suite's own caller, and its connector driven against the suite's own scripted provider: [`wire-provider.json`](conformance/cases/wire-provider.json) and [`wire-connector.json`](conformance/cases/wire-connector.json).
-- **Routing.** A host configured with one or more remote providers per contract version, against the suite's scripted providers, each of which answers every request in one fixed way and records the requests it receives: [`routing.json`](conformance/cases/routing.json).
+- **Routing.** A host configured with one or more remote providers per contract version, against the suite's scripted providers, each of which refuses every connection or answers every request in one fixed way, and records the requests it receives: [`routing.json`](conformance/cases/routing.json).
 - **Lifecycle.** Hosts that stop before they serve, one app that boots alone, and Drain: [`lifecycle.json`](conformance/cases/lifecycle.json).
 
 ## Reference contract
