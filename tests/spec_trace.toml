@@ -3,7 +3,7 @@
 
 # Documents whose must-level requirements need a citing test. The pull request
 # of the roadmap step that implements a document adds its number here.
-enforce = ["01", "02", "03", "05"]
+enforce = ["01", "02", "03", "05", "06"]
 
 # Must-level requirements that no test in this implementation verifies, each
 # with the reason: what verifies it instead, or the roadmap step that will test

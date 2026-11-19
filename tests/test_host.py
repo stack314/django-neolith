@@ -911,6 +911,7 @@ except Exception as error:
 """
 
 
+@pytest.mark.conformance_case("lifecycle_an_unsatisfied_requirement_stops_the_host")
 @pytest.mark.spec("APP-1", "APP-8")
 def test_a_host_with_an_unsatisfied_requirement_fails_to_start(
     write_app: WriteApp,
@@ -928,6 +929,7 @@ def test_a_host_with_an_unsatisfied_requirement_fails_to_start(
     )
 
 
+@pytest.mark.conformance_case("lifecycle_a_missing_action_stops_the_host")
 @pytest.mark.spec("APP-1", "APP-11")
 def test_a_host_whose_implementation_misses_an_action_fails_to_start(
     write_app: WriteApp,

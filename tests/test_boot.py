@@ -481,6 +481,7 @@ def _handler(
     return [line.split("|") for line in printed.splitlines()]
 
 
+@pytest.mark.conformance_case("lifecycle_a_database_with_no_schema_stops_boot")
 @pytest.mark.spec("APP-1", "APP-31")
 def test_boot_stops_a_handler_and_keeps_its_refusal(tmp_path: Path) -> None:
     """The second handler is refused alike, though the database now exists:
@@ -509,6 +510,7 @@ def test_boot_passes_on_a_current_schema(tmp_path: Path) -> None:
     assert _handler(tmp_path)[:2] == [["1", "built"], ["2", "built"]]
 
 
+@pytest.mark.conformance_case("lifecycle_a_pending_migration_stops_boot")
 @pytest.mark.spec("APP-33", "APP-1")
 def test_a_pending_migration_stops_a_handler(tmp_path: Path) -> None:
     record(tmp_path / "fresh.sqlite3", [("fresh", "0001_initial")])

@@ -600,6 +600,7 @@ def test_a_settings_module_that_cannot_be_found_is_refused(site: Site) -> None:
     )
 
 
+@pytest.mark.conformance_case("lifecycle_refused_settings_stop_the_host")
 @pytest.mark.spec("APP-16")
 @pytest.mark.parametrize("command", ["run", "migrate"])
 def test_a_default_database_is_refused_with_the_other_settings_refusals(
@@ -640,6 +641,7 @@ def test_the_environment_s_settings_module_is_ignored(site: Site) -> None:
 # The phases, in order.
 
 
+@pytest.mark.conformance_case("lifecycle_a_refusing_phase_stops_the_host")
 @pytest.mark.spec("APP-1", "APP-38")
 @pytest.mark.parametrize(
     ("apps", "refusal", "later"),
@@ -681,6 +683,7 @@ def test_a_phase_that_refuses_stops_the_host_before_the_next(
     assert "neolith: serving" not in printed
 
 
+@pytest.mark.conformance_case("lifecycle_the_host_never_changes_a_schema")
 @pytest.mark.spec("APP-33", "APP-46")
 def test_a_host_never_changes_a_schema_itself(site: Site) -> None:
     """Neither a missing file nor a file whose app is not migrated is
@@ -703,6 +706,7 @@ def test_a_host_never_changes_a_schema_itself(site: Site) -> None:
     assert site.database("desk").read_bytes() == before
 
 
+@pytest.mark.conformance_case("lifecycle_an_address_in_use_stops_the_host")
 @pytest.mark.spec("APP-1")
 def test_an_address_in_use_stops_the_host(site: Site) -> None:
     site.deployer()
@@ -722,6 +726,7 @@ def test_an_address_in_use_stops_the_host(site: Site) -> None:
 # One app, alone, on SQLite (spec 06, item 5).
 
 
+@pytest.mark.conformance_case("lifecycle_one_app_boots_alone")
 @pytest.mark.spec("APP-23", "APP-38", "APP-43")
 @pytest.mark.parametrize("bind", ["127.0.0.1:0", "[::1]:0"], ids=["ipv4", "ipv6"])
 def test_one_app_boots_alone_on_sqlite_and_stops(
@@ -760,6 +765,7 @@ def test_one_app_boots_alone_on_sqlite_and_stops(
 # Drain.
 
 
+@pytest.mark.conformance_case("lifecycle_drain_lets_requests_in_flight_finish")
 @pytest.mark.spec("APP-39", "APP-40", "APP-41", "APP-43")
 @pytest.mark.parametrize(
     "number", [signal.SIGTERM, signal.SIGINT], ids=["SIGTERM", "SIGINT"]
@@ -960,6 +966,7 @@ def test_a_cut_request_that_writes_without_end_still_exits_1(
             process.stdout.close()
 
 
+@pytest.mark.conformance_case("lifecycle_a_second_signal_stops_at_once")
 @pytest.mark.spec("APP-44", "APP-45")
 def test_a_second_signal_stops_at_once(
     site: Site, served: Callable[..., Served]
