@@ -1,0 +1,82 @@
+[
+  {
+    "name": "wire_connector_writes_the_request_spec_03_fixes",
+    "part": "wire",
+    "state": "A host whose app reference_caller requires reference.v1 and holds a shared-secret key for it. The calls for reference.v1 go over HTTP to a provider on a loopback address that answers each request with the bytes the case gives, and records the request.",
+    "procedure": "1. From an explicit root of reference_caller with the principal of spec 03's example and a timeout of 10 seconds, call deposit twice with account \"aé\" and amount 5.\n2. The provider answers each with 200 and {\"total\":5}.",
+    "expected": "Two requests, each with: the line POST /reference/v1/deposit HTTP/1.1; Host the provider's host and port; Accept-Encoding identity; Content-Type application/json; a Content-Length equal to the body's length and no Transfer-Encoding; a body whose JSON value is the request; an Authorization Bearer token valid under spec 03's rules for reference_caller and reference.v1; Neolith-Principal equal to spec 03's example header; and a Neolith-Timeout in its form, above 8000 and at most 10000. Their Idempotency-Key values are two different strings of 22 base64url characters, quoted, and their traceparent values are of version 00 with one trace identifier.",
+    "requirements": [
+      "HTTP-3",
+      "TRN-2",
+      "TRN-30",
+      "TRN-31",
+      "TRN-33"
+    ]
+  },
+  {
+    "name": "wire_connector_reads_a_reply",
+    "part": "wire",
+    "state": "A host whose app reference_caller requires reference.v1 and holds a shared-secret key for it. The calls for reference.v1 go over HTTP to a provider on a loopback address that answers each request with the bytes the case gives, and records the request.",
+    "procedure": "1. Call deposit; the provider answers 200 with {\"total\":7}.\n2. Call accept; the provider answers 204 with no body.",
+    "expected": "Step 1 returns a Balance whose total is 7. Step 2 returns no reply.",
+    "requirements": [
+      "HTTP-19",
+      "TRN-12"
+    ]
+  },
+  {
+    "name": "wire_connector_success_that_is_no_reply_is_internal",
+    "part": "wire",
+    "state": "A host whose app reference_caller requires reference.v1 and holds a shared-secret key for it. The calls for reference.v1 go over HTTP to a provider on a loopback address that answers each request with the bytes the case gives, and records the request.",
+    "procedure": "1. Call accept; the provider answers 200 with {} and with null.\n2. Call deposit; the provider answers 204; 201, 206 or 299 with {\"total\":1}; 200 with an empty body, an HTML body, {\"total\":\"seven\"}, {} or a neolith error body.\n3. Call accept; the provider answers 202 with an empty body.",
+    "expected": "Each call fails with internal.",
+    "requirements": [
+      "HTTP-19",
+      "TRN-18"
+    ]
+  },
+  {
+    "name": "wire_connector_reply_gets_the_receive_check",
+    "part": "wire",
+    "state": "A host whose app reference_caller requires reference.v1 and holds a shared-secret key for it. The calls for reference.v1 go over HTTP to a provider on a loopback address that answers each request with the bytes the case gives, and records the request.",
+    "procedure": "1. Call deposit; the provider answers 200 with {\"total\":1} plus one of: the member total twice, a lone surrogate, a number past a double, NaN, 300 levels of nesting, or a byte that is not UTF-8 after the object.",
+    "expected": "Each call fails with internal.",
+    "requirements": [
+      "HTTP-19",
+      "CON-42",
+      "TRN-18"
+    ]
+  },
+  {
+    "name": "wire_connector_failure_without_an_error_body_is_unavailable",
+    "part": "wire",
+    "state": "A host whose app reference_caller requires reference.v1 and holds a shared-secret key for it. The calls for reference.v1 go over HTTP to a provider on a loopback address that answers each request with the bytes the case gives, and records the request.",
+    "procedure": "1. Call deposit; the provider answers in turn: 404 with no body and with an HTML body; 302 and 301; 503 with text; 500 with a JSON object without kind and with an array; 400 with a kind that is a number, null, or given twice; a body whose data holds a byte that is not UTF-8; a body without kind; a JSON string; a body starting with a byte that is not UTF-8; 100000 levels of nesting; and 304 with no body.",
+    "expected": "Each call fails with unavailable, with the message the provider at <origin> answered <status> without a neolith error body, and one WARNING line that names the trace.",
+    "requirements": [
+      "HTTP-19",
+      "TRN-3"
+    ]
+  },
+  {
+    "name": "wire_connector_takes_the_kind_from_the_body",
+    "part": "wire",
+    "state": "A host whose app reference_caller requires reference.v1 and holds a shared-secret key for it. The calls for reference.v1 go over HTTP to a provider on a loopback address that answers each request with the bytes the case gives, and records the request.",
+    "procedure": "1. Call refuse; the provider answers each of 400, 404, 409, 418, 422, 500, 503, 504 and 302 with a neolith error body of each of not_found, internal, timeout, unavailable and permission_denied, with the message said.\n2. Call refuse; the provider answers 422 with {\"kind\":\"gone\",\"message\":\"m\",\"data\":{\"reason\":\"r\"}}, and again with that body spaced out and its members in another order.",
+    "expected": "Each call of step 1 fails with the body's kind, the message said and no detail. Each call of step 2 fails with gone and a Gone detail whose reason is r.",
+    "requirements": [
+      "HTTP-19"
+    ]
+  },
+  {
+    "name": "wire_connector_error_body_it_cannot_read_is_internal",
+    "part": "wire",
+    "state": "A host whose app reference_caller requires reference.v1 and holds a shared-secret key for it. The calls for reference.v1 go over HTTP to a provider on a loopback address that answers each request with the bytes the case gives, and records the request.",
+    "procedure": "1. Call refuse; the provider answers 422 with a neolith error body that cannot be read against the contract: an unknown kind whose data is null, an array, a string, a number, holds 2^53 or nests 40 levels; gone without data, with null, or with a reason that is a number; a standard kind with data; a kind or message outside spec 01's forms; a body without message, with a message that is not a string, or with another member; and a body that is not I-JSON.",
+    "expected": "Each call fails with internal, whose message says the cause is logged under a trace, and the cause is logged.",
+    "requirements": [
+      "CON-49",
+      "HTTP-19"
+    ]
+  }
+]
