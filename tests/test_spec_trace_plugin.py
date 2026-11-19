@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import subprocess
 import sys
+from importlib import metadata
 from pathlib import Path
 
 import pytest
@@ -13,6 +15,10 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 ARGS = ("-p", "scripts.spec_trace_plugin", "-p", "no:django", "-p", "no:cacheprovider")
+INI = (
+    "[pytest]\nmarkers =\n    spec(*ids): requirement IDs\n"
+    "    conformance_case(name): a conformance case\n"
+)
 
 
 Tests = dict[str, dict[str, object]]
@@ -20,11 +26,12 @@ Tests = dict[str, dict[str, object]]
 
 def run(pytester: pytest.Pytester, source: str, *args: str) -> Tests:
     """Run ``source`` as a test module and return the report's tests."""
-    pytester.makeini("[pytest]\nmarkers =\n    spec(*ids): requirement IDs\n")
+    pytester.makeini(INI)
     pytester.makepyfile(test_example=source)
     pytester.runpytest(*ARGS, "--spec-report=report.json", *args)
     report = json.loads((pytester.path / "report.json").read_text())
-    assert report["format"] == 1
+    assert report.keys() == {"format", "environment", "tests"}
+    assert report["format"] == 2
     tests: Tests = report["tests"]
     return tests
 
@@ -321,3 +328,213 @@ def test_the_option_works_when_the_report_already_exists(
         assert json.loads(report.read_text())["tests"] == {
             "tests/test_cited.py::test_it": {"ids": ["CON-1"], "outcome": "passed"}
         }
+
+
+# Format 2: the environment, the conformance case and the transport outcomes
+# (ADR 0032, the admitted set and Decision 9)
+
+
+def _version(name: str) -> str | None:
+    try:
+        return metadata.version(name)
+    except metadata.PackageNotFoundError:
+        return None
+
+
+def test_the_report_says_where_it_ran(pytester: pytest.Pytester) -> None:
+    pytester.makeini(INI)
+    pytester.makepyfile("def test_it(): pass\n")
+    pytester.runpytest(*ARGS, "--spec-report=report.json")
+    report = json.loads((pytester.path / "report.json").read_text())
+    assert report["environment"] == {
+        "python": platform.python_version(),
+        "architecture": platform.machine(),
+        "packages": {
+            "django-neolith": _version("django-neolith"),
+            "Django": _version("Django"),
+        },
+    }
+    assert report["environment"]["packages"]["Django"] is not None
+
+
+def test_the_conformance_case_is_recorded(pytester: pytest.Pytester) -> None:
+    tests = run(
+        pytester,
+        """
+import pytest
+
+@pytest.mark.conformance_case("echo_round_trips")
+@pytest.mark.spec("CON-1")
+def test_cited(): pass
+
+@pytest.mark.conformance_case("echo_round_trips")
+def test_cites_nothing(): pass
+
+@pytest.mark.conformance_case("deselected_case")
+def test_dropped(): pass
+
+class TestCases:
+    pytestmark = pytest.mark.conformance_case("on_the_class")
+
+    @pytest.mark.conformance_case("on_the_class")
+    @pytest.mark.parametrize("n", [1, 2])
+    def test_param(self, n): pass
+
+def test_plain(): pass
+""",
+        "-k",
+        "not dropped",
+    )
+    ids = {name.split("::", 1)[1]: entry for name, entry in tests.items()}
+    assert ids == {
+        "test_cited": {
+            "ids": ["CON-1"],
+            "outcome": "passed",
+            "case": "echo_round_trips",
+        },
+        "test_cites_nothing": {
+            "ids": [],
+            "outcome": "passed",
+            "case": "echo_round_trips",
+        },
+        "test_dropped": {"ids": [], "outcome": "not run", "case": "deselected_case"},
+        "TestCases::test_param[1]": {
+            "ids": [],
+            "outcome": "passed",
+            "case": "on_the_class",
+        },
+        "TestCases::test_param[2]": {
+            "ids": [],
+            "outcome": "passed",
+            "case": "on_the_class",
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("markers", "message"),
+    [
+        ("@pytest.mark.conformance_case()", "takes one case name as a string"),
+        ("@pytest.mark.conformance_case(1)", "takes one case name as a string"),
+        ("@pytest.mark.conformance_case('a', 'b')", "takes one case name as a string"),
+        ("@pytest.mark.conformance_case(name='a')", "takes one case name as a string"),
+        (
+            "@pytest.mark.conformance_case('a')\n@pytest.mark.conformance_case('b')",
+            "a test runs one conformance case, not a, b",
+        ),
+    ],
+)
+def test_conformance_case_arguments_must_be_one_name(
+    pytester: pytest.Pytester, markers: str, message: str
+) -> None:
+    pytester.makeini(INI)
+    pytester.makepyfile(f"import pytest\n\n{markers}\ndef test_it(): pass\n")
+    result = pytester.runpytest(*ARGS, "--spec-report=report.json")
+    assert result.ret == pytest.ExitCode.USAGE_ERROR
+    result.stderr.fnmatch_lines([f"*test_it: *{message}*"])
+
+
+SAME = {"in-process": "same", "http": "same"}
+DIFFERENT = {"in-process": "replied 1", "http": "replied 2"}
+
+
+@pytest.mark.parametrize(
+    ("recorded", "outcome", "transport_outcomes"),
+    [
+        ([SAME], "passed", SAME),
+        ([DIFFERENT], "passed", DIFFERENT),
+        ([{}], "error", None),
+        ([{"http": 1}], "error", None),
+        ([{"in-process": "same", "http": 1}], "error", None),
+        ([{1: "same"}], "error", None),
+        ([["same"]], "error", None),
+        ([SAME, SAME], "error", None),
+    ],
+)
+def test_transport_outcomes_are_carried(
+    pytester: pytest.Pytester,
+    recorded: list[object],
+    outcome: str,
+    transport_outcomes: dict[str, str] | None,
+) -> None:
+    # As over_both does: a fixture's teardown records them on the test. A
+    # record that is not one map of names to strings is an error.
+    source = (
+        "import pytest\n\n"
+        "@pytest.fixture\n"
+        "def record(request):\n"
+        "    yield\n"
+        f"    for value in {recorded!r}:\n"
+        "        request.node.user_properties.append(('transport_outcomes', value))\n"
+        "\n"
+        "@pytest.mark.spec('CON-1')\n"
+        "def test_it(record): pass\n"
+    )
+    (entry,) = run(pytester, source).values()
+    expected: dict[str, object] = {"ids": ["CON-1"], "outcome": outcome}
+    if transport_outcomes is not None:
+        expected["transport_outcomes"] = transport_outcomes
+    assert entry == expected
+
+
+def test_a_failing_case_keeps_its_transport_outcomes(
+    pytester: pytest.Pytester,
+) -> None:
+    source = (
+        "import pytest\n\n"
+        "@pytest.fixture\n"
+        "def record(request):\n"
+        "    yield\n"
+        "    value = {'in-process': 'replied 1', 'http': 'raised X'}\n"
+        "    request.node.user_properties.append(('transport_outcomes', value))\n"
+        "\n"
+        "@pytest.mark.spec('CON-1')\n"
+        "def test_it(record): assert False\n"
+    )
+    (entry,) = run(pytester, source).values()
+    assert entry == {
+        "ids": ["CON-1"],
+        "outcome": "failed",
+        "transport_outcomes": {"in-process": "replied 1", "http": "raised X"},
+    }
+
+
+def test_other_properties_and_earlier_phases_are_not_transport_outcomes(
+    pytester: pytest.Pytester,
+) -> None:
+    # Only a property named transport_outcomes counts, and only as the
+    # teardown report has it: a value the call phase saw is not kept beside
+    # a later error.
+    source = (
+        "import pytest\n\n"
+        "@pytest.fixture\n"
+        "def record(request):\n"
+        "    yield\n"
+        "    props = request.node.user_properties\n"
+        "    props.append(('transport_outcomes', {'http': 'x'}))\n"
+        "\n"
+        "@pytest.mark.spec('CON-1')\n"
+        "def test_other(record_property):\n"
+        "    record_property('duration', 1)\n"
+        "\n"
+        "@pytest.mark.spec('CON-1')\n"
+        "def test_twice(request, record):\n"
+        "    props = request.node.user_properties\n"
+        "    props.append(('transport_outcomes', {'http': 'y'}))\n"
+    )
+    tests = {
+        name.split("::", 1)[1]: entry for name, entry in run(pytester, source).items()
+    }
+    assert tests == {
+        "test_other": {"ids": ["CON-1"], "outcome": "passed"},
+        "test_twice": {"ids": ["CON-1"], "outcome": "error"},
+    }
+
+
+def test_a_report_path_of_another_kind_is_refused(pytester: pytest.Pytester) -> None:
+    pytester.makeini(INI)
+    pytester.makepyfile("def test_it(): pass\n")
+    os.mkfifo(pytester.path / "report.json")
+    result = pytester.runpytest(*ARGS, "--spec-report=report.json")
+    assert result.ret == pytest.ExitCode.USAGE_ERROR
+    result.stderr.fnmatch_lines(["*--spec-report cannot write *: not a regular file*"])

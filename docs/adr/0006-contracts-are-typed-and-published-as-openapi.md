@@ -25,4 +25,4 @@ Follows principle 11 (*specification over implementation*).
 - Non-Django services can dock as detached peers by implementing the spec.
 - Other transports project the same types into their own schema (see [0014](0014-pluggable-connector-transports.md)).
 - Standard-library dataclasses are not supported in 0.1. Pydantic v2 validates them through `TypeAdapter`, so adding them later is cheap if adopters ask.
-- Endpoint framework choice: see [0011](0011-django-ninja-for-contract-endpoints.md).
+- Endpoint framework choice: see [0011](0011-the-host-serves-contract-endpoints-itself.md).

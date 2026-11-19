@@ -61,25 +61,52 @@ A *connector* is what calling code holds to call one contract version. It runs t
 
 **TRN-17.** A connector with the `single` policy MUST NOT send a call more than once, or to any provider but its one.
 
+**TRN-65.** A transport MUST NOT send a call again on its own; retrying is the connector's alone (TRN-8). A call counts as sent once the network has accepted any byte of its request. A first write on a reused connection that the network refuses before it accepts any byte is therefore not a send, and the transport can write the call on a new connection instead, within the same deadline.
+
 **TRN-18.** A reply that its provider cannot send under TRN-9 to TRN-11 and TRN-15, or that the caller cannot read under TRN-12, MUST reach the caller as `internal`. That includes a reply to an action whose reply is empty, and a missing reply to one whose reply is not.
 
 ## Providers and routing
 
-A connector holds an ordered set of providers for a contract version. Each provider names a transport and the configuration that transport needs.
+A connector holds an ordered set of providers for a contract version. Each provider names a transport and the configuration that transport needs. A **routing policy** chooses which providers the connector tries for each call, and in what order. Spec 0.1 defines two:
 
-A **routing policy** chooses the provider for each call. Defined policies:
+- `single`: one provider;
+- `local-first`: two or more providers, tried in order: the provider in the caller's own host first, when there is one, then the others in the order the host's configuration lists them.
 
-- `single`: exactly one provider; required in 0.1;
-- `local-first`: prefer an in-process provider, and fall back to the others under the fallback rule below; required in 0.1;
-- `remote-first`: the reverse;
-- `weighted`: distribute by configured weights;
-- `explicit`: chosen by a function of the call context.
+A later version may define others, such as `remote-first`, a weighted choice, or a choice made from the call context.
+
+An *attempt* is one provider's part in a call. A connector *moves* a call when it starts an attempt to the next provider after an attempt that failed.
+
+A host learns of a provider in two ways: from its own apps, one of which may provide the contract version, and from its configuration, which may name a *remote provider* for it, reached over a network transport.
+
+**TRN-66.** Under the `single` policy, a host MUST choose each contract version's one provider before it serves: the app of the host that provides it, when there is one, and otherwise the remote provider its configuration names for it.
+
+~~**TRN-67.** A host MUST stop before it serves when its configuration names a remote provider for a contract version that none of its apps requires, or, under the `single` policy, for one that one of its apps provides.~~ Withdrawn in spec 0.1: restated for every routing policy as TRN-75.
+
+**TRN-75.** A host MUST stop before it serves when its configuration names a remote provider for a contract version that none of its apps requires, or that one of its apps provides.
+
+An app of the host answers every call to the contract versions it provides, and an in-process call never ends with `unavailable`, so a remote provider listed beside it would never be called.
 
 ~~**TRN-7.** Fallback after a failed call MUST happen only for idempotent actions and only on `unavailable` or `timeout`.~~ Withdrawn in spec 0.1: `timeout` leaves the outcome unknown, so it is no longer grounds for fallback (ADR 0017).
 
 **TRN-8.** A retry or a fallback after a failed call MUST happen only for an idempotent action, only on `unavailable`, and only within the call's deadline.
 
-Decision records: [0014](../docs/adr/0014-pluggable-connector-transports.md), [0016](../docs/adr/0016-an-app-may-run-attached-and-detached-at-once.md).
+**TRN-68.** Under `local-first`, a connector MUST try a call's providers in the policy's order, starting from the first.
+
+**TRN-69.** A connector MUST try each entry of the policy's order at most once for one call.
+
+**TRN-70.** A connector MUST NOT start another attempt of a call whose budget, read before that attempt starts, is less than 1 ms.
+
+**TRN-71.** Every attempt of one call MUST carry the same principal, trace identifier, `tracestate` and idempotency key.
+
+**TRN-72.** When a connector does not move a call after an attempt, the call MUST end with that attempt's outcome, subject to TRN-38 and TRN-74. A next attempt that is not started because the budget is under 1 ms (TRN-70) so leaves the call with its last attempt's `unavailable`. This comes before TRN-28, which governs a call's first attempt.
+
+**TRN-73.** Over a network, when a call that has a deadline can still move after an attempt (its action is idempotent and an entry of the policy's order is left after this one), a connector MUST end that attempt with `unavailable` if it has no connection ready within its share of the time left: that time divided by the entries left, this one included, and at least 2 seconds. When less than 2 seconds are left, the share is all of it, and the deadline ends the phase as TRN-64 says.
+
+**TRN-74.** A call that has moved MUST NOT end with a `timeout` that says it was not sent, since an earlier attempt may have run its action. This comes before TRN-28, TRN-64 and [03](03-http-transport.md)'s HTTP-17, which say a call is not sent when its budget or its deadline ends before its request is written, and before TRN-38's rule that a `timeout` a transport produced is passed on as it is.
+
+So `timeout`, whose outcome is unknown, never moves a call, and neither does an error a provider's host delivered of another kind, such as `unauthenticated` for a credential it refused. A call refused before it is sent is refused for every provider alike. A non-idempotent call makes one attempt, under every policy.
+
+Decision records: [0014](../docs/adr/0014-pluggable-connector-transports.md), [0031](../docs/adr/0031-a-contract-version-is-routed-by-single-unless-local-first-is-named.md).
 
 ## The call context across calls
 
@@ -166,6 +193,8 @@ The deadline crosses as a *budget*: the time that remains when the call is sent,
 **TRN-29.** A budget above 9999999999 ms MUST count as 9999999999, in every mode.
 
 **TRN-38.** A caller MUST NOT receive a reply or an error that comes back after the call's deadline, as the caller's own clock holds it: the call fails with `timeout`, in every mode. Over a network the caller stops waiting at its deadline. In-process the connector checks the caller's deadline when the outcome is back, since the provider's side counts its deadline from the budget when the call arrived (TRN-36), which can be later. A `timeout` that a transport or a provider's host produced is passed on as it is. This comes before what TRN-18, CON-28, CON-48 or CON-49 would have the caller receive.
+
+**TRN-64.** Over a network, a caller MUST stop waiting for a call at its deadline in every phase of the call: while it resolves the provider's name, connects, secures the connection, writes the request and reads the response. Each blocking step gets only the time left when it starts, so a provider that sends its response a little at a time cannot hold the caller past its deadline. A call whose deadline passes before the caller has a connection ready and the call's budget read fails as one not sent (TRN-28); from then on, as one whose action might have run.
 
 **TRN-30.** A call MUST carry its parent's principal, trace identifier and `tracestate`, unchanged.
 

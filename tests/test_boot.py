@@ -481,6 +481,7 @@ def _handler(
     return [line.split("|") for line in printed.splitlines()]
 
 
+@pytest.mark.conformance_case("lifecycle_a_database_with_no_schema_stops_boot")
 @pytest.mark.spec("APP-1", "APP-31")
 def test_boot_stops_a_handler_and_keeps_its_refusal(tmp_path: Path) -> None:
     """The second handler is refused alike, though the database now exists:
@@ -509,6 +510,7 @@ def test_boot_passes_on_a_current_schema(tmp_path: Path) -> None:
     assert _handler(tmp_path)[:2] == [["1", "built"], ["2", "built"]]
 
 
+@pytest.mark.conformance_case("lifecycle_a_pending_migration_stops_boot")
 @pytest.mark.spec("APP-33", "APP-1")
 def test_a_pending_migration_stops_a_handler(tmp_path: Path) -> None:
     record(tmp_path / "fresh.sqlite3", [("fresh", "0001_initial")])
@@ -614,7 +616,12 @@ def test_boot_warns_about_an_admin_class_the_urlconf_registered() -> None:
     printed = in_built_host(
         _ADMIN,
         host_apps.HOSTED,
-        {"NEOLITH": host_apps.NEOLITH, "ROOT_URLCONF": "tests.boot_urls"},
+        {
+            "NEOLITH": host_apps.NEOLITH,
+            "ROOT_URLCONF": "tests.boot_urls",
+            # Its apps are called in-process only (ADR 0027).
+            "SILENCED_SYSTEM_CHECKS": ["neolith.W004"],
+        },
     )
     assert printed.splitlines() == [
         "set-up 0",
@@ -1031,7 +1038,10 @@ def test_each_admin_registration_is_warned_once_or_silenced(
                 "UNDECLARED_APPS": ["django.contrib.contenttypes", "tests.boot_admin"],
             },
             "ROOT_URLCONF": "tests.boot_urls",
-            "SILENCED_SYSTEM_CHECKS": ["neolith.W001"] if silenced else [],
+            # Its apps are called in-process only (ADR 0027).
+            "SILENCED_SYSTEM_CHECKS": ["neolith.W001", "neolith.W004"]
+            if silenced
+            else ["neolith.W004"],
         },
     )
     at_set_up, at_boot = json.loads(printed.splitlines()[-1])

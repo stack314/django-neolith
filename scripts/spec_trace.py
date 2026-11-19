@@ -41,41 +41,153 @@ It always reports a problem, and exits 1, when:
   document whose number or area is missing from or repeated in the table in
   spec/README.md;
 - ``tests/spec_trace.toml`` cannot be read, has an unknown key, enforces a
-  document that does not exist, or has a ``[not-tested]`` entry that is not a
-  live, must-level requirement with a reason.
+  document that does not exist, has a ``[not-tested]`` entry that is not a
+  live, must-level requirement with a reason, or a ``[not-implemented]``
+  entry that is not a live SHOULD- or MAY-level requirement with a reason;
+- spec 06 has more than one heading *Requirements that bind others*, or one
+  without exactly one table under it (before the next heading) with an
+  ``ID`` and a ``Binds`` column, once each, or a row whose ``ID`` cell is
+  not one live must-level requirement ID (bare or in backticks), is
+  repeated, or has an empty ``Binds`` cell. Without the heading the list is
+  empty;
+- a file it reads (spec/, the settings, the case files, the report, the
+  files the suite's hash reads) is missing where it is required, is not a
+  regular file, cannot be read, or is not UTF-8 where it is text. Every file
+  goes through one reader, so a pipe never hangs the check. Only the
+  settings, the reference document and ``spec/conformance/cases/`` (which
+  then hashes as empty) may be absent. A folder under spec/ that cannot be
+  listed, and a link to a folder there, are problems too;
+- ``tests/spec_trace.toml`` is not valid TOML;
+- ``spec/conformance/cases/`` holds anything but files named
+  ``<part>.json`` or ``<part>-<topic>.json``, where ``<part>`` is
+  ``contract``, ``wire``, ``routing`` or ``lifecycle`` and ``<topic>`` is
+  ``[a-z][a-z0-9]*``;
+- a case file is not UTF-8 JSON holding an array of objects, each with
+  exactly the members ``name`` (``[a-z][a-z0-9_]*``), ``part`` (the file's
+  ``<part>``), ``state``, ``procedure``, ``expected`` (strings) and
+  ``requirements`` (a non-empty list of distinct live requirement IDs), each
+  given once. Messages count the cases of a file from 1;
+- a case name is listed twice, in one case file or in two (ADR 0032, the
+  admitted set and Decision 7).
 
 With ``--report``, it also reports a test that cites an unknown or withdrawn
-ID, and a ``[not-tested]`` entry for a requirement a passing test covers. For
-the enforced documents (``enforce`` in the settings, plus ``--enforce``),
-every must-level requirement (MUST, MUST NOT, REQUIRED) needs a passing test
-that cites it, or a ``[not-tested]`` entry. Enforcing without ``--report`` is
-a problem, so the gate cannot be skipped by leaving the report out.
+ID, a ``[not-tested]`` or ``[not-implemented]`` entry for a requirement a
+passing test covers, a test whose ``conformance_case`` names a case no case
+file lists or that does not cite every ID its case lists, and a listed case
+that no test in the report runs. For the enforced documents (``enforce`` in
+the settings, plus ``--enforce``), every must-level requirement (MUST, MUST
+NOT, REQUIRED) needs a passing test that cites it, or a ``[not-tested]``
+entry. Enforcing without ``--report`` is a problem, so the gate cannot be
+skipped by leaving the report out. The report must be format 2, as the plugin
+writes it; any other member or value, or a member given twice, is a
+problem, and a report with an entry
+the checker cannot read counts no test at all, since that test may have
+failed. Whatever the checker refuses takes no effect: a refused
+``[not-tested]`` or ``[not-implemented]`` entry gives no status, and a refused
+row of spec 06's table binds no one.
+
+The conformance run
+-------------------
+
+With ``--report`` and ``--conformance PATH``, it writes the conformance run
+(ADR 0032, Decision 9) to PATH, a JSON object with exactly these members:
+
+- ``format``: ``1``;
+- ``spec``: the specification version in the *Status* line of
+  ``spec/README.md``, such as ``"0.1"``;
+- ``suite``: ``{"cases", "reference", "tests"}``, each a SHA-256 in hex.
+  ``reference`` is the hash of ``spec/conformance/reference.v1.openapi.json``,
+  or ``null`` while it does not exist. ``cases`` is over every file under
+  ``spec/conformance/cases/``, and ``tests`` over every file under ``tests/``
+  apart from ``__pycache__`` directories, following links (a directory
+  reached by two names is read under both; a link to a directory that holds
+  it, a link that leads nowhere or loops, and anything that is neither a
+  file nor a directory are problems): for each file, in the byte order of its path
+  from the repository root, written with ``/``, the hash takes the path's
+  bytes as the file system gives them (UTF-8 for a name that is UTF-8), a
+  NUL byte, its size in bytes in decimal, a NUL byte and its bytes. A hash
+  that cannot be computed, as when a file or directory cannot be read, is
+  ``null`` and a problem;
+- ``implementation``: ``{"name": "django-neolith", "version"}``, and
+  ``environment``, both from the report;
+- ``requirements``: for each live requirement ID of every level, in the
+  specification's order, ``{"document", "level", "status", "tests"}``, with a
+  ``reason`` for the statuses ``not-tested`` and ``not-implemented``.
+  ``document`` is its document's number, ``level`` ``MUST``, ``SHOULD`` or
+  ``MAY``, and ``tests`` the tests that cite it, ``{"test", "outcome"}`` and
+  their ``transport_outcomes`` when the report has them. ``status`` is the
+  first of these that applies: ``failed`` (a citing test failed or errored),
+  ``passed`` (a passing test cites it), ``not-applicable`` (spec 06 lists it
+  as binding others, whatever ``[not-tested]`` holds for it), ``not-tested``,
+  ``not-implemented``, ``uncovered``;
+- ``conforms``: true exactly when no requirement is ``failed``, and every
+  must-level requirement of every document that the table in
+  ``spec/README.md`` marks ``yes`` in its ``In <version>`` column is
+  ``passed`` or ``not-applicable``.
+
+The command prints why a run does not conform: each requirement that keeps
+``conforms`` false, with its status. It refuses ``--conformance`` without
+``--report``, a value with no file name, and a path it cannot write; it
+empties PATH before reading anything, and writes the run only when the report
+was read and the check found no problem, so a run that stops or that rests on
+a refused input leaves PATH empty.
+
+``spec/README.md`` has one *Status* line, whose version comes first, after at
+most one word (``- **Status:** draft 0.1.``). Exactly one table has a ``#``
+or an ``In <version>`` column; it has both, once each, its ``#`` cells name
+every document in spec/ once, and each cell of the version's column says
+``yes``, ``no`` or ``outline only``. Anything else is a problem, and the run
+does not conform.
 
 Usage::
 
     python -m pytest --spec-report=spec-report.json
     python scripts/spec_trace.py --report spec-report.json
+    python scripts/spec_trace.py --report spec-report.json --conformance run.json
     python scripts/spec_trace.py              # the specification only
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
+import stat
 import sys
 import tomllib
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from markdown_it import MarkdownIt
 from markdown_it.token import Token
 
 ROOT = Path(__file__).resolve().parent.parent
 SETTINGS = "tests/spec_trace.toml"
-REPORT_FORMAT = 1
+REPORT_FORMAT = 2
+RUN_FORMAT = 1
+# What the plugin records for a test, and the members of its report.
+_OUTCOMES = ("passed", "skipped", "xfailed", "xpassed", "failed", "error", "not run")
+_FAILED = ("failed", "error")
+_REPORT_MEMBERS = {"format", "environment", "tests"}
+_ENVIRONMENT_MEMBERS = {"python", "architecture", "packages"}
+_PACKAGES = {"django-neolith", "Django"}
+_ENTRY_MEMBERS = {"ids", "outcome", "case", "transport_outcomes"}
+# The conformance suite's files under spec/ (ADR 0032).
+CASES = "conformance/cases"
+REFERENCE = "conformance/reference.v1.openapi.json"
+_PARTS = ("contract", "wire", "routing", "lifecycle")
+_CASE_FILE = re.compile(rf"({'|'.join(_PARTS)})(?:-[a-z][a-z0-9]*)?\.json")
+_CASE_NAME = re.compile(r"[a-z][a-z0-9_]*")
+_CASE_MEMBERS = ("name", "part", "state", "procedure", "expected", "requirements")
+_BINDS_OTHERS = "Requirements that bind others"
+_IN_VERSION = {"yes": True, "no": False, "outline only": False}
+_STATUS_LINE = re.compile(r"^\s*-\s*\*\*Status:\*\*(.*)$", re.MULTILINE)
+# The version comes first, after at most one word: " draft 0.1." or " 0.1".
+_VERSION = re.compile(r"\s+(?:[A-Za-z]+\s+)?(\d+\.\d+)(?:[.,;]?(?:\s|$))")
 
 # RFC 2119 keywords. Longer phrases come first so "MUST NOT" is one match.
 _NORMATIVE = re.compile(
@@ -106,7 +218,7 @@ _WITHDRAWN = re.compile(r"Withdrawn in spec \d+\.\d+: \S")
 _SENTENCE_BREAK = re.compile(r"(?<=[.!?;])\s+")
 _DOCUMENT = re.compile(r"(\d{2})-[a-z0-9-]+\.md")
 _AREA_ROW = re.compile(r"\|\s*(\d{2})\s*\|.*\|\s*`([A-Z]{2,5})`\s*\|\s*$")
-_SETTINGS_KEYS = {"enforce", "not-tested"}
+_SETTINGS_KEYS = {"enforce", "not-tested", "not-implemented"}
 # CommonMark, plus the GFM tables and strikethrough the specification uses.
 _MARKDOWN = MarkdownIt("commonmark").enable(["table", "strikethrough"])
 
@@ -127,18 +239,134 @@ class Citation:
     outcome: str
 
 
+@dataclass(frozen=True)
+class Ran:
+    """One test's entry in the report."""
+
+    ids: tuple[str, ...]
+    outcome: str
+    case: str | None = None
+    transport_outcomes: dict[str, str] | None = None
+
+
+@dataclass(frozen=True)
+class Case:
+    """One case of a case file."""
+
+    name: str
+    file: str
+    requirements: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _Row:
+    """A row of spec 06's table of requirements that bind others."""
+
+    document: str
+    line: int
+    rid: str
+
+
 @dataclass
 class Trace:
     requirements: dict[str, Requirement] = field(default_factory=dict)
     citations: list[Citation] = field(default_factory=list)
     not_tested: dict[str, str] = field(default_factory=dict)
+    not_implemented: dict[str, str] = field(default_factory=dict)
     documents: set[str] = field(default_factory=set)
     measured: bool = False
     problems: list[str] = field(default_factory=list)
+    tests: dict[str, Ran] = field(default_factory=dict)
+    environment: dict[str, Any] | None = None
+    cases: dict[str, Case] = field(default_factory=dict)
+    binds_others: set[str] = field(default_factory=set)
+    rows: list[_Row] = field(default_factory=list)
+    run: dict[str, Any] | None = None
+    # Why the run does not conform: "<ID> <status>[: <reason>]".
+    nonconforming: list[str] = field(default_factory=list)
 
     def covering(self, rid: str) -> list[Citation]:
         """Passing tests that cite ``rid``."""
         return [c for c in self.citations if c.rid == rid and c.outcome == "passed"]
+
+
+def _shown(value: object) -> str:
+    """A value from an input file, as JSON and cut to a readable length."""
+    try:
+        text = json.dumps(value, ensure_ascii=True)
+    except (TypeError, ValueError, RecursionError):
+        text = type(value).__name__
+    return text if len(text) <= 40 else text[:37] + "..."
+
+
+# Reading files: every file the checker reads goes through these two, so
+# whatever is missing, of another kind or unreadable is a problem, never a
+# crash, a hang (a pipe) or a silent default.
+
+
+def _reason(error: Exception) -> str:
+    if isinstance(error, OSError):
+        return str(error.strerror or error)
+    return str(error)
+
+
+def _read_file(
+    path: Path, where: str, problems: list[str], *, absent: bool = False
+) -> bytes | None:
+    """The bytes of the regular file at ``path``; None, with the problem
+    ``<where>: <reason>``, for anything else.
+
+    With ``absent``, a path where nothing is (not even a link) is None with
+    no problem.
+    """
+    try:
+        try:
+            mode = path.stat().st_mode
+        except FileNotFoundError:
+            if absent and not os.path.lexists(path):
+                return None
+            raise
+        if not stat.S_ISREG(mode):
+            problems.append(f"{where}: not a regular file")
+            return None
+        return path.read_bytes()
+    except OSError as error:
+        problems.append(f"{where}: {_reason(error)}")
+        return None
+
+
+def _read_text(
+    path: Path, where: str, problems: list[str], *, absent: bool = False
+) -> str | None:
+    """As ``_read_file``, decoded as UTF-8."""
+    data = _read_file(path, where, problems, absent=absent)
+    if data is None:
+        return None
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as error:
+        problems.append(f"{where}: {error}")
+        return None
+
+
+def _directory(path: Path, where: str, problems: list[str]) -> bool | None:
+    """True if ``path`` is a directory, None if nothing is there; False, with
+    a problem, for anything else.
+    """
+    try:
+        try:
+            mode = path.stat().st_mode
+        except FileNotFoundError:
+            if not os.path.lexists(path):
+                return None
+            raise
+    except OSError as error:
+        problems.append(f"{where}: {_reason(error)}")
+        return False
+    if not stat.S_ISDIR(mode):
+        problems.append(f"{where}: not a directory")
+        return False
+    return True
 
 
 # Reading the specification
@@ -147,7 +375,9 @@ class Trace:
 def read_areas(readme: Path, trace: Trace | None = None) -> dict[str, str]:
     """Map document numbers to ID areas, from the table in spec/README.md."""
     areas: dict[str, str] = {}
-    for line in readme.read_text(encoding="utf-8").splitlines():
+    problems = trace.problems if trace is not None else []
+    text = _read_text(readme, "README.md: cannot be read", problems)
+    for line in (text or "").splitlines():
         match = _AREA_ROW.match(line)
         if not match:
             continue
@@ -437,11 +667,38 @@ class _DocumentReader:
         )
 
 
+def _listed(spec_dir: Path, trace: Trace) -> list[Path]:
+    """Every file and folder under ``spec_dir``, in order of path.
+
+    A folder that cannot be listed and a link to a folder are problems,
+    labelled by their path from ``spec_dir`` (``spec`` for the folder
+    itself): ``rglob`` would skip both without a word.
+    """
+
+    def label(path: str) -> str:
+        name = Path(path).relative_to(spec_dir).as_posix()
+        return "spec" if name == "." else name
+
+    def refused(error: OSError) -> None:
+        where = label(error.filename) if error.filename else "spec"
+        trace.problems.append(f"{where}: cannot be read: {_reason(error)}")
+
+    paths: list[Path] = []
+    for directory, folders, files in os.walk(spec_dir, onerror=refused):
+        for folder in list(folders):
+            path = os.path.join(directory, folder)
+            if os.path.islink(path):
+                trace.problems.append(f"{label(path)}: a link to a folder")
+                folders.remove(folder)
+        paths.extend(Path(directory, name) for name in [*folders, *files])
+    return sorted(paths)
+
+
 def read_spec(spec_dir: Path, trace: Trace) -> None:
     """Collect requirements from every numbered document in ``spec_dir``."""
     areas = read_areas(spec_dir / "README.md", trace)
-    for path in sorted(spec_dir.rglob("*")):
-        if path.suffix.lower() not in (".md", ".markdown") or not path.is_file():
+    for path in _listed(spec_dir, trace):
+        if path.suffix.lower() not in (".md", ".markdown"):
             continue
         name = path.relative_to(spec_dir).as_posix()
         if name == "README.md":
@@ -461,7 +718,252 @@ def read_spec(spec_dir: Path, trace: Trace) -> None:
         if area is None:
             trace.problems.append(f"{name}: no ID area in the table in spec/README.md")
             continue
-        _DocumentReader(name, area, trace).read(path.read_text(encoding="utf-8"))
+        text = _read_text(path, f"{name}: cannot be read", trace.problems)
+        if text is None:
+            continue
+        _DocumentReader(name, area, trace).read(text)
+        if number == "06":
+            _read_binds_others(name, text, trace)
+
+
+def _cells(tokens: list[Token], start: int, close: str) -> tuple[list[str], int]:
+    """The inline text of each cell from ``start`` up to the ``close`` token."""
+    cells: list[str] = []
+    index = start
+    while tokens[index].type != close:
+        if tokens[index].type == "inline":
+            cells.append(tokens[index].content.strip())
+        index += 1
+    return cells, index
+
+
+def _table(
+    tokens: list[Token], start: int
+) -> tuple[list[str], list[tuple[int, list[str]]]]:
+    """The header cells and the (line, cells) of each body row of the table
+    that opens at ``start``.
+    """
+    header: list[str] = []
+    rows: list[tuple[int, list[str]]] = []
+    index = start
+    while tokens[index].type != "table_close":
+        token = tokens[index]
+        if token.type == "thead_open":
+            header, index = _cells(tokens, index, "thead_close")
+        elif token.type == "tr_open":
+            cells, index = _cells(tokens, index, "tr_close")
+            rows.append((_line(token), cells))
+        index += 1
+    return header, rows
+
+
+def _column(header: list[str], name: str) -> int | None:
+    """The index of the one column called ``name``; None if there is not one."""
+    return header.index(name) if header.count(name) == 1 else None
+
+
+def _read_binds_others(name: str, text: str, trace: Trace) -> None:
+    """Collect the rows of spec 06's table of requirements that bind others.
+
+    Whether each ID is a live must-level requirement is checked once every
+    document has been read.
+    """
+    tokens = _MARKDOWN.parse(text)
+    headings = [
+        index
+        for index, token in enumerate(tokens)
+        if token.type == "heading_open"
+        and tokens[index + 1].content.strip() == _BINDS_OTHERS
+    ]
+    where = f'under "{_BINDS_OTHERS}"'
+    for extra in headings[1:]:
+        trace.problems.append(
+            f'{name}:{_line(tokens[extra])}: a second heading "{_BINDS_OTHERS}"'
+        )
+    if not headings:
+        return
+    heading = headings[0]
+    line = _line(tokens[heading])
+    index = heading + 3  # past the heading's inline and close tokens
+    while index < len(tokens) and tokens[index].type not in (
+        "table_open",
+        "heading_open",
+    ):
+        index += 1
+    if index == len(tokens) or tokens[index].type != "table_open":
+        trace.problems.append(f"{name}:{line}: no table {where}")
+        return
+    table = index
+    header, rows = _table(tokens, table)
+    while index < len(tokens) and tokens[index].type != "heading_open":
+        if index > table and tokens[index].type == "table_open":
+            trace.problems.append(
+                f"{name}:{_line(tokens[index])}: a second table {where}"
+            )
+            return
+        index += 1
+    id_column, binds_column = _column(header, "ID"), _column(header, "Binds")
+    if id_column is None or binds_column is None:
+        trace.problems.append(
+            f"{name}:{_line(tokens[table])}: the table {where} needs the columns "
+            "ID and Binds, once each"
+        )
+        return
+    seen: set[str] = set()
+    for row_line, cells in rows:
+        cells += [""] * (len(header) - len(cells))
+        cell = cells[id_column]
+        rid = cell[1:-1] if len(cell) > 2 and cell[0] == cell[-1] == "`" else cell
+        if not _WELL_FORMED.fullmatch(rid):
+            trace.problems.append(
+                f"{name}:{row_line}: {_shown(cell)} {where} is not a requirement ID"
+            )
+            continue
+        if rid in seen:
+            trace.problems.append(f"{name}:{row_line}: {rid} is listed twice {where}")
+            continue
+        seen.add(rid)
+        if not cells[binds_column]:
+            trace.problems.append(
+                f"{name}:{row_line}: {rid} {where} does not say whom it binds"
+            )
+            continue
+        trace.rows.append(_Row(name, row_line, rid))
+
+
+def read_cases(spec_dir: Path, trace: Trace) -> None:
+    """Read and check the case files in ``spec/conformance/cases/``."""
+    folder = spec_dir / CASES
+    if not _directory(folder, f"{CASES}: cannot be read", trace.problems):
+        return
+    try:
+        paths = sorted(folder.iterdir())
+    except OSError as error:
+        trace.problems.append(f"{CASES}: cannot be read: {_reason(error)}")
+        return
+    for path in paths:
+        label = f"{CASES}/{path.name}"
+        match = _CASE_FILE.fullmatch(path.name)
+        if match is None:
+            trace.problems.append(
+                f"{label}: a case file is named <part>.json or <part>-<topic>.json, "
+                f"where <part> is {', '.join(_PARTS[:-1])} or {_PARTS[-1]}"
+            )
+            continue
+        _read_case_file(label, match.group(1), path, trace)
+
+
+class _Members(dict[str, Any]):
+    """A JSON object that remembers the members it was given twice."""
+
+    repeated: list[str]
+
+
+def _members(pairs: list[tuple[str, Any]]) -> _Members:
+    members = _Members()
+    members.repeated = []
+    for key, value in pairs:
+        if key in members:
+            members.repeated.append(key)
+        members[key] = value
+    return members
+
+
+def _once(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """A JSON object in which no member is given twice."""
+    members = dict(pairs)
+    if len(members) < len(pairs):
+        repeated = sorted(k for k in members if [p[0] for p in pairs].count(k) > 1)
+        raise ValueError(f"{_shown(repeated[0])} is given twice in one object")
+    return members
+
+
+def _read_case_file(label: str, part: str, path: Path, trace: Trace) -> None:
+    text = _read_text(path, f"{label}: cannot be read", trace.problems)
+    if text is None:
+        return
+    try:
+        cases = json.loads(text, object_pairs_hook=_members)
+    except (ValueError, RecursionError) as error:
+        trace.problems.append(f"{label}: cannot be read: {error}")
+        return
+    if not isinstance(cases, list):
+        trace.problems.append(f"{label}: is not a JSON array of cases")
+        return
+    for number, case in enumerate(cases, start=1):
+        _read_case(_CaseProblems(trace, label, number), part, case)
+
+
+@dataclass(frozen=True)
+class _CaseProblems:
+    trace: Trace
+    file: str
+    number: int  # counted from 1
+
+    @property
+    def where(self) -> str:
+        return f"{self.file}: case {self.number}"
+
+    def __call__(self, member: str, reason: str) -> None:
+        self.trace.problems.append(f"{self.where}: {member}: {reason}")
+
+
+def _read_case(problem: _CaseProblems, part: str, case: object) -> None:
+    """Check one case of a case file, and list it under its name."""
+    trace = problem.trace
+    if not isinstance(case, _Members):
+        trace.problems.append(f"{problem.where}: is not an object")
+        return
+    for member in dict.fromkeys(case.repeated):
+        problem(member if member in _CASE_MEMBERS else _shown(member), "is given twice")
+    for member in sorted(case.keys() - set(_CASE_MEMBERS)):
+        problem(_shown(member), "is not a member of a case")
+    for member in _CASE_MEMBERS:
+        if member not in case:
+            problem(member, "is missing")
+    name = case.get("name")
+    if "name" in case and not (isinstance(name, str) and _CASE_NAME.fullmatch(name)):
+        problem("name", f"{_shown(name)} is not [a-z][a-z0-9_]*")
+        name = None
+    if "part" in case and case["part"] != part:
+        problem("part", f"{_shown(case['part'])} is not {part}, the file's part")
+    for member in ("state", "procedure", "expected"):
+        if member in case and not isinstance(case[member], str):
+            problem(member, "is not a string")
+    requirements = (
+        _case_requirements(case["requirements"], problem)
+        if "requirements" in case
+        else ()
+    )
+    if not isinstance(name, str):
+        return
+    label = problem.file
+    first = trace.cases.get(name)
+    if first is None:
+        trace.cases[name] = Case(name, label, requirements)
+    elif first.file == label:
+        trace.problems.append(f"{name}: listed twice in {label}")
+    else:
+        trace.problems.append(f"{name}: listed in {first.file} and {label}")
+
+
+def _case_requirements(value: object, problem: _CaseProblems) -> tuple[str, ...]:
+    """The live IDs a case lists; a problem for anything else."""
+    if not isinstance(value, list) or not value:
+        problem("requirements", "is not a non-empty list of requirement IDs")
+        return ()
+    ids: list[str] = []
+    for rid in value:
+        requirement = (
+            problem.trace.requirements.get(rid) if isinstance(rid, str) else None
+        )
+        if requirement is None or requirement.withdrawn:
+            problem("requirements", f"{_shown(rid)} is not a live requirement")
+        elif rid in ids:
+            problem("requirements", f"{rid} is listed twice")
+        else:
+            ids.append(rid)
+    return tuple(ids)
 
 
 # Settings, the test report and cross-checks
@@ -469,11 +971,12 @@ def read_spec(spec_dir: Path, trace: Trace) -> None:
 
 def read_settings(path: Path, trace: Trace) -> list[str]:
     """Read ``tests/spec_trace.toml``: the enforced documents and [not-tested]."""
-    if not path.is_file():
-        return []
+    text = _read_text(path, f"{SETTINGS}: cannot be read", trace.problems, absent=True)
+    if text is None:
+        return []  # absent, or a problem
     try:
-        settings = tomllib.loads(path.read_text(encoding="utf-8"))
-    except tomllib.TOMLDecodeError as error:
+        settings = tomllib.loads(text)
+    except (ValueError, RecursionError) as error:
         trace.problems.append(f"{SETTINGS}: {error}")
         return []
     for key in sorted(settings.keys() - _SETTINGS_KEYS):
@@ -491,38 +994,125 @@ def read_settings(path: Path, trace: Trace) -> list[str]:
             trace.problems.append(f"{SETTINGS}: [not-tested] {rid} needs a reason")
         else:
             trace.not_tested[rid] = reason
+    not_implemented = settings.get("not-implemented", {})
+    if not isinstance(not_implemented, dict):
+        trace.problems.append(f"{SETTINGS}: [not-implemented] must be a table")
+        not_implemented = {}
+    for rid, reason in not_implemented.items():
+        if not isinstance(reason, str) or not reason.strip():
+            trace.problems.append(
+                f"{SETTINGS}: [not-implemented] {rid}: needs a reason"
+            )
+        else:
+            trace.not_implemented[rid] = reason
     return enforce
+
+
+def _environment(value: object) -> dict[str, Any] | None:
+    """The report's ``environment``, or None if it is not as the plugin writes it."""
+    if not isinstance(value, dict) or value.keys() != _ENVIRONMENT_MEMBERS:
+        return None
+    packages = value["packages"]
+    if (
+        not isinstance(value["python"], str)
+        or not isinstance(value["architecture"], str)
+        or not isinstance(packages, dict)
+        or packages.keys() != _PACKAGES
+        or not all(v is None or isinstance(v, str) for v in packages.values())
+    ):
+        return None
+    return value
+
+
+def _ran(entry: object) -> Ran | None:
+    """A test's entry, or None if it is not as the plugin writes it."""
+    if not isinstance(entry, dict) or not (
+        {"ids", "outcome"} <= entry.keys() <= _ENTRY_MEMBERS
+    ):
+        return None
+    ids, outcome = entry["ids"], entry["outcome"]
+    case = entry.get("case")
+    outcomes = entry.get("transport_outcomes")
+    if (
+        not isinstance(ids, list)
+        or not all(isinstance(rid, str) for rid in ids)
+        or outcome not in _OUTCOMES
+        or ("case" in entry and not isinstance(case, str))
+        or (
+            "transport_outcomes" in entry
+            and not (
+                isinstance(outcomes, dict)
+                and outcomes
+                and all(isinstance(v, str) for v in outcomes.values())
+            )
+        )
+    ):
+        return None
+    return Ran(tuple(ids), outcome, case, outcomes)
 
 
 def read_report(path: Path, trace: Trace) -> None:
     """Read the report the pytest plugin wrote."""
     where = f"report {path.name}"
+    text = _read_text(path, f"{where}: cannot be read", trace.problems)
+    if text is None:
+        return
     try:
-        report = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as error:
+        report = json.loads(text, object_pairs_hook=_once)
+    except (ValueError, RecursionError) as error:
         trace.problems.append(f"{where}: cannot be read: {error}")
         return
-    if not isinstance(report, dict) or report.get("format") != REPORT_FORMAT:
+    if not isinstance(report, dict):
         trace.problems.append(f"{where}: not a format {REPORT_FORMAT} spec report")
         return
+    number = report.get("format")
+    if type(number) is not int or number != REPORT_FORMAT:
+        trace.problems.append(
+            f"{path}: report format {_shown(number)}; "
+            f"this checker reads {REPORT_FORMAT}"
+        )
+        return
+    environment = _environment(report.get("environment"))
     tests = report.get("tests")
-    if not isinstance(tests, dict):
+    if (
+        report.keys() != _REPORT_MEMBERS
+        or environment is None
+        or not isinstance(tests, dict)
+    ):
         trace.problems.append(f"{where}: not a format {REPORT_FORMAT} spec report")
         return
+    read: dict[str, Ran] = {}
     for test, entry in tests.items():
-        ids = entry.get("ids") if isinstance(entry, dict) else None
-        outcome = entry.get("outcome") if isinstance(entry, dict) else None
-        if not isinstance(ids, list) or not isinstance(outcome, str):
+        ran = _ran(entry)
+        if ran is None:
             trace.problems.append(f"{where}: malformed entry for {test}")
-            continue
-        trace.citations.extend(Citation(str(rid), test, outcome) for rid in ids)
+        else:
+            read[test] = ran
+    if len(read) < len(tests):
+        # A test the checker cannot read may have failed: nothing is counted.
+        return
+    trace.environment = environment
+    trace.tests = read
+    for test, ran in read.items():
+        trace.citations.extend(Citation(rid, test, ran.outcome) for rid in ran.ids)
     trace.measured = True
 
 
-def check(root: Path, enforce: Sequence[str] = (), report: Path | None = None) -> Trace:
-    """Check spec/ and the settings under ``root``, and coverage from ``report``."""
+def check(
+    root: Path,
+    enforce: Sequence[str] = (),
+    report: Path | None = None,
+    *,
+    conformance: bool = False,
+) -> Trace:
+    """Check spec/ and the settings under ``root``, and coverage from ``report``.
+
+    With ``conformance``, also build the conformance run into ``trace.run``
+    once the report has been read.
+    """
     trace = Trace()
     read_spec(root / "spec", trace)
+    read_cases(root / "spec", trace)
     enforced: set[str] = set()
     for number in [*read_settings(root / SETTINGS, trace), *enforce]:
         if number in trace.documents:
@@ -532,6 +1122,15 @@ def check(root: Path, enforce: Sequence[str] = (), report: Path | None = None) -
                 f"enforce: {number!r} is not the two-digit number of a document "
                 "in spec/"
             )
+    for row in trace.rows:
+        requirement = trace.requirements.get(row.rid)
+        if requirement is None or requirement.withdrawn or requirement.level != "MUST":
+            trace.problems.append(
+                f'{row.document}:{row.line}: {row.rid} under "{_BINDS_OTHERS}" is '
+                "not a live must-level requirement"
+            )
+        else:
+            trace.binds_others.add(row.rid)
     if report is not None:
         read_report(report, trace)
     elif enforced:
@@ -549,6 +1148,7 @@ def check(root: Path, enforce: Sequence[str] = (), report: Path | None = None) -
             trace.problems.append(
                 f"{citation.test}: cites withdrawn requirement {citation.rid}"
             )
+    refused: list[tuple[dict[str, str], str]] = []
     for rid in trace.not_tested:
         requirement = trace.requirements.get(rid)
         if requirement is None or requirement.withdrawn:
@@ -560,7 +1160,27 @@ def check(root: Path, enforce: Sequence[str] = (), report: Path | None = None) -
         else:
             continue
         trace.problems.append(f"{SETTINGS}: [not-tested] {rid} {reason}")
+        refused.append((trace.not_tested, rid))
+    for rid in trace.not_implemented:
+        requirement = trace.requirements.get(rid)
+        if requirement is None or requirement.withdrawn:
+            reason = "is not a live requirement"
+        elif requirement.level == "MUST":
+            reason = (
+                "is a MUST; only SHOULD and MAY requirements may be left unimplemented"
+            )
+        elif trace.covering(rid):
+            reason = "is covered by a passing test; remove the entry"
+        else:
+            continue
+        trace.problems.append(f"{SETTINGS}: [not-implemented] {rid}: {reason}")
+        refused.append((trace.not_implemented, rid))
+    # A refused entry gives no status in the run; the other table's entry for
+    # the same ID stands on its own.
+    for table, rid in refused:
+        del table[rid]
     if not trace.measured:
+        _once_each(trace)
         return trace
     for requirement in trace.requirements.values():
         if (
@@ -574,7 +1194,280 @@ def check(root: Path, enforce: Sequence[str] = (), report: Path | None = None) -
                 f"{requirement.document}:{requirement.line}: {requirement.rid} "
                 "is must-level and no passing test cites it"
             )
+    _check_markers(trace)
+    if conformance:
+        trace.run = conformance_run(root, trace)
+    _once_each(trace)
     return trace
+
+
+def _once_each(trace: Trace) -> None:
+    """Report each problem once: a file read twice is refused twice."""
+    trace.problems[:] = list(dict.fromkeys(trace.problems))
+
+
+def _check_markers(trace: Trace) -> None:
+    """Hold the ``conformance_case`` markers and the case files in step."""
+    run: set[str] = set()
+    for test, ran in trace.tests.items():
+        if ran.case is None:
+            continue
+        case = trace.cases.get(ran.case)
+        if case is None:
+            name = ran.case if _CASE_NAME.fullmatch(ran.case) else _shown(ran.case)
+            trace.problems.append(f"{test}: case {name} is not listed")
+            continue
+        run.add(case.name)
+        for rid in case.requirements:
+            if rid not in ran.ids:
+                trace.problems.append(
+                    f"{test}: case {case.name} lists {rid}, which the test does "
+                    "not cite"
+                )
+    for name in trace.cases:
+        if name not in run:
+            trace.problems.append(f"case {name}: no test runs it")
+
+
+# The conformance run
+
+
+def _digest(root: Path, folder: Path, problems: list[str]) -> str | None:
+    """SHA-256 over each file under ``folder``: its path from ``root``, its
+    size and its bytes.
+
+    None, with a problem, if a file or a directory cannot be read.
+    """
+    files = _files(root, folder, problems)
+    if files is None:
+        return None
+    digest = hashlib.sha256()
+    named = sorted(
+        (os.fsencode(path.relative_to(root).as_posix()), path) for path in files
+    )
+    for name, path in named:
+        shown = name.decode("utf-8", "backslashreplace")
+        data = _read_file(path, f"{shown}: {_HASH}", problems)
+        if data is None:
+            return None
+        digest.update(name + b"\0" + str(len(data)).encode() + b"\0")
+        digest.update(data)
+    return digest.hexdigest()
+
+
+_HASH = "cannot be read for the suite's hash"
+
+
+def _files(root: Path, folder: Path, problems: list[str]) -> list[Path] | None:
+    """Every file under ``folder``, apart from ``__pycache__`` directories;
+    None, with a problem, if anything in it cannot be read as a file or a
+    directory.
+
+    Links are followed, so a directory reached by two names is read under
+    both. A link to a directory that holds it, a link that leads nowhere or
+    loops, and anything that is neither a file nor a directory (a pipe, a
+    socket) are problems: the hash would otherwise depend on what the walk
+    chose to skip.
+    """
+    found: list[Path] = []
+
+    def problem(path: Path, reason: str) -> bool:
+        name = path.relative_to(root).as_posix()
+        shown = os.fsencode(name).decode("utf-8", "backslashreplace")
+        problems.append(f"{shown}: {_HASH}: {reason}")
+        return False
+
+    def visit(directory: Path, ancestors: frozenset[str]) -> bool:
+        try:
+            with os.scandir(directory) as listing:
+                entries = list(listing)
+        except OSError as error:
+            return problem(directory, str(error.strerror or error))
+        for entry in entries:
+            path = Path(entry.path)
+            try:
+                is_directory, is_file = entry.is_dir(), entry.is_file()
+            except OSError as error:
+                return problem(path, str(error.strerror or error))
+            if is_directory:
+                if entry.name == "__pycache__":
+                    continue
+                real = os.path.realpath(path)
+                if real in ancestors:
+                    return problem(path, "a link to a directory that holds it")
+                if not visit(path, ancestors | {real}):
+                    return False
+            elif is_file:
+                found.append(path)
+            elif os.path.lexists(path):
+                return problem(path, "neither a file nor a directory")
+        return True
+
+    shown = folder.relative_to(root).as_posix()
+    present = _directory(folder, f"{shown}: {_HASH}", problems)
+    if present is None:
+        return []
+    if not present:
+        return None
+    return found if visit(folder, frozenset({os.path.realpath(folder)})) else None
+
+
+def suite(root: Path, problems: list[str] | None = None) -> dict[str, str | None]:
+    """The hashes that name the suite a run passed.
+
+    A hash that cannot be computed is None, with a problem.
+    """
+    problems = [] if problems is None else problems
+    path = root / "spec" / REFERENCE
+    data = _read_file(path, f"spec/{REFERENCE}: {_HASH}", problems, absent=True)
+    reference = None if data is None else hashlib.sha256(data).hexdigest()
+    tests: str | None = None
+    if os.path.lexists(root / "tests"):
+        tests = _digest(root, root / "tests", problems)
+    else:
+        problems.append(f"tests: {_HASH}: missing; the report came from a suite there")
+    return {
+        "cases": _digest(root, root / "spec" / CASES, problems),
+        "reference": reference,
+        "tests": tests,
+    }
+
+
+def read_version(readme: Path, trace: Trace) -> tuple[str | None, set[str] | None]:
+    """The specification version in the README's *Status* line, and the
+    documents its table marks as part of that version; None for what cannot
+    be read, which is a problem.
+
+    The README has one *Status* line, whose version comes first, after at most
+    one word ("draft 0.1."). Exactly one table has a ``#`` and an
+    ``In <version>`` column, each once; its ``#`` cells name every document
+    in spec/ once, and each cell of the version's column says ``yes``, ``no``
+    or ``outline only``.
+    """
+    text = _read_text(readme, "README.md: cannot be read", trace.problems)
+    if text is None:
+        return None, None
+    lines = _STATUS_LINE.findall(text)
+    version = _VERSION.match(lines[0]) if len(lines) == 1 else None
+    if version is not None and {
+        found.group(0) for found in re.finditer(r"\b\d+\.\d+\b", lines[0])
+    } != {version.group(1)}:
+        version = None  # "draft 0.1 or 0.2": two versions
+    if version is None:
+        trace.problems.append(
+            "README.md: one Status line must name the specification version, "
+            'as "- **Status:** draft 0.1."'
+        )
+        return None, None
+    column = f"In {version.group(1)}"
+    tokens = _MARKDOWN.parse(text)
+    tables = []
+    for index, token in enumerate(tokens):
+        if token.type == "table_open":
+            header, rows = _table(tokens, index)
+            if "#" in header or column in header:
+                tables.append((_line(token), header, rows))
+    if len(tables) != 1:
+        trace.problems.append(
+            f'README.md: {len(tables)} tables have a "#" or an "{column}" column; '
+            "one table of documents has both"
+        )
+        return version.group(1), None
+    line, header, rows = tables[0]
+    number, marked = _column(header, "#"), _column(header, column)
+    if number is None or marked is None:
+        trace.problems.append(
+            f'README.md:{line}: the table of documents needs a "#" and an '
+            f'"{column}" column, once each'
+        )
+        return version.group(1), None
+    documents: set[str] | None = set()
+    seen: list[str] = []
+    for row_line, cells in rows:
+        cells += [""] * (len(header) - len(cells))
+        seen.append(cells[number])
+        value = cells[marked]
+        if value not in _IN_VERSION:
+            trace.problems.append(
+                f"README.md:{row_line}: {_shown(value)} in the {column} column; "
+                "write yes, no or outline only"
+            )
+            documents = None
+        elif _IN_VERSION[value] and documents is not None:
+            documents.add(cells[number])
+    if sorted(seen) != sorted(trace.documents):
+        trace.problems.append(
+            f'README.md:{line}: the "#" column names '
+            f"{', '.join(_shown(cell) for cell in sorted(seen)) or 'nothing'}; "
+            f"spec/ holds {', '.join(sorted(trace.documents))}, each once"
+        )
+        documents = None
+    return version.group(1), documents
+
+
+def status(trace: Trace, rid: str) -> tuple[str, str | None]:
+    """A requirement's status in the run, and the reason it carries, if any."""
+    outcomes = {c.outcome for c in trace.citations if c.rid == rid}
+    if outcomes & set(_FAILED):
+        return "failed", None
+    if "passed" in outcomes:
+        return "passed", None
+    if rid in trace.binds_others:
+        return "not-applicable", None
+    if rid in trace.not_tested:
+        return "not-tested", trace.not_tested[rid]
+    if rid in trace.not_implemented:
+        return "not-implemented", trace.not_implemented[rid]
+    return "uncovered", None
+
+
+def conformance_run(root: Path, trace: Trace) -> dict[str, Any]:
+    """The conformance run of a measured trace (ADR 0032, Decision 9)."""
+    version, in_version = read_version(root / "spec" / "README.md", trace)
+    environment = trace.environment or {}
+    citing: dict[str, list[dict[str, Any]]] = {}
+    for test, ran in sorted(trace.tests.items()):
+        for rid in dict.fromkeys(ran.ids):
+            entry: dict[str, Any] = {"test": test, "outcome": ran.outcome}
+            if ran.transport_outcomes is not None:
+                entry["transport_outcomes"] = ran.transport_outcomes
+            citing.setdefault(rid, []).append(entry)
+    requirements: dict[str, dict[str, Any]] = {}
+    if in_version is None:
+        trace.nonconforming.append("the specification's version or documents")
+    for requirement in trace.requirements.values():
+        if requirement.withdrawn:
+            continue
+        state, reason = status(trace, requirement.rid)
+        number = requirement.document[:2]
+        record: dict[str, Any] = {
+            "document": number,
+            "level": requirement.level,
+            "status": state,
+        }
+        if reason is not None:
+            record["reason"] = reason
+        record["tests"] = citing.get(requirement.rid, [])
+        requirements[requirement.rid] = record
+        if state == "failed" or (
+            requirement.level == "MUST"
+            and (in_version is None or number in in_version)
+            and state not in ("passed", "not-applicable")
+        ):
+            note = f": {reason}" if reason is not None else ""
+            trace.nonconforming.append(f"{requirement.rid} {state}{note}")
+    return {
+        "format": RUN_FORMAT,
+        "spec": version,
+        "suite": suite(root, trace.problems),
+        "implementation": {
+            "name": "django-neolith",
+            "version": environment.get("packages", {}).get("django-neolith"),
+        },
+        "environment": environment,
+        "requirements": requirements,
+        "conforms": not trace.nonconforming,
+    }
 
 
 def render(trace: Trace) -> str:
@@ -598,6 +1491,9 @@ def render(trace: Trace) -> str:
         f"{len(live)} requirements, {covered}, "
         f"{len(trace.not_tested)} marked not tested, {len(trace.problems)} problems"
     )
+    if trace.run is not None:
+        lines.append(f"conformance run: conforms {str(trace.run['conforms']).lower()}")
+        lines.extend(f"does not conform: {why}" for why in trace.nonconforming)
     lines.extend(f"problem: {problem}" for problem in trace.problems)
     return "\n".join(lines)
 
@@ -622,11 +1518,49 @@ def main(argv: Sequence[str] | None = None) -> int:
         metavar="NN",
         help="also enforce coverage for these document numbers",
     )
+    parser.add_argument(
+        "--conformance",
+        metavar="PATH",
+        help="write the conformance run here (needs --report)",
+    )
     parser.add_argument("--root", type=Path, default=ROOT, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
-    trace = check(args.root, args.enforce, args.report)
-    print(render(trace))
+    run_path: Path | None = None
+    if args.conformance is not None:
+        if args.report is None:
+            parser.error("--conformance needs --report")
+        run_path = _emptied(parser, args.conformance)
+    trace = check(
+        args.root, args.enforce, args.report, conformance=run_path is not None
+    )
+    if run_path is not None and trace.run is not None and not trace.problems:
+        try:
+            run_path.write_text(
+                json.dumps(trace.run, indent=1) + "\n", encoding="utf-8"
+            )
+        except OSError as error:
+            parser.error(
+                f"--conformance cannot write {run_path}: {error.strerror or error}"
+            )
+    # Test ids and file names come from outside; a lone surrogate in one is
+    # printed escaped.
+    print(render(trace).encode("utf-8", "backslashreplace").decode("utf-8"))
     return 1 if trace.problems else 0
+
+
+def _emptied(parser: argparse.ArgumentParser, value: str) -> Path:
+    """The run's absolute path, emptied, as the plugin empties its report."""
+    expanded = os.path.expanduser(os.path.expandvars(value))
+    if os.path.basename(expanded) in ("", ".", ".."):
+        parser.error(f"--conformance needs a file path, not {value!r}")
+    path = Path(expanded).absolute()
+    try:
+        if os.path.lexists(path) and not stat.S_ISREG(path.stat().st_mode):
+            parser.error(f"--conformance cannot write {path}: not a regular file")
+        path.write_text("", encoding="utf-8")
+    except OSError as error:
+        parser.error(f"--conformance cannot write {path}: {error.strerror or error}")
+    return path
 
 
 if __name__ == "__main__":

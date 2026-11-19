@@ -19,6 +19,14 @@ response whose request's principal was looked for varies on the request
 headers the backends declare in ``request_inputs``. The host trusts that
 declaration: a backend that reads a header it does not declare gives
 responses a shared cache may serve to another user.
+
+A principal backend never takes a principal from a ``neolith-`` header such
+as ``Neolith-Principal``: on an ordinary page anyone can send one. The host
+reads that header only on a contract call, from a calling app the
+contract's allow-list admits, and warns (``neolith.W005``) about a backend
+that declares a ``neolith-`` header. ``NEOLITH["CALLER_BACKENDS"]``
+(``neolith.callers``) is the other kind of backend: it names which app makes
+a contract call over HTTP.
 """
 
 import abc
@@ -31,6 +39,7 @@ from django.core.exceptions import ImproperlyConfigured
 from django.http import HttpRequest
 from django.utils.functional import SimpleLazyObject
 
+from neolith import _naming
 from neolith._context import Principal
 
 __all__ = ["DjangoUserBackend", "PrincipalBackend"]
@@ -48,7 +57,8 @@ class PrincipalBackend(abc.ABC):
     keyword arguments, and serves every request from every thread, so it
     keeps no state of one request on itself. A subclass defines
     ``resolve``, sets ``request_inputs``, and overrides ``aresolve`` when it
-    has an async path of its own.
+    has an async path of its own. It never takes a principal from a
+    ``neolith-`` header, which anyone can send on an ordinary page.
 
     Attributes:
         request_inputs: The request headers the backend reads, as a tuple of
@@ -68,8 +78,10 @@ class PrincipalBackend(abc.ABC):
         Called when the request's first call is synchronous, or when Django
         runs the principal middleware in sync mode. Raise to refuse: every
         call from the request then fails with ``internal``, and the host
-        logs the cause. It may be called more than once for one request and
-        gives the same answer each time.
+        logs the cause, at ``WARNING`` for ``neolith.CredentialRefused``,
+        which says the backend recognized a credential and refuses it, and
+        at ``ERROR`` for anything else. It may be called more than once for
+        one request and gives the same answer each time.
 
         Args:
             request: The request.
@@ -214,14 +226,14 @@ class DjangoUserBackend(PrincipalBackend):
         model = self._model
         if not isinstance(user, model):
             raise TypeError(
-                f"the authenticated user is a {user.__class__.__qualname__}, not an "
+                f"the authenticated user is a {_naming.type_name(user)}, not an "
                 f"instance of the user model {model._meta.label}"
             )
         key = user.pk
         if type(key) is int or type(key) is uuid.UUID:
             return Principal(self._issuer, str(key))
         raise TypeError(
-            f"the user's key is a {type(key).__qualname__}, not exactly an int "
+            f"the user's key is a {_naming.type_name(key)}, not exactly an int "
             "or a UUID"
         )
 
@@ -264,7 +276,7 @@ def key_problem(model: type) -> str | None:
         else ""
     )
     return (
-        f"the user model {model._meta.label}'s key is a {kind.__qualname__}"  # type: ignore[attr-defined]
+        f"the user model {model._meta.label}'s key is a {_naming.qualname(kind)}"  # type: ignore[attr-defined]
         f"{inherited}; the subject is the key, which is an {_ADMITTED_KEYS}, "
         "or a subclass of one"
     )

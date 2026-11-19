@@ -10,7 +10,6 @@ author wrote, so a lazy object in a class body is never evaluated.
 """
 
 import enum
-import inspect
 import re
 from dataclasses import dataclass
 from typing import Any, ClassVar, Final, final
@@ -19,6 +18,7 @@ from django.apps import AppConfig
 from django.apps import apps as global_apps
 from django.core.exceptions import ImproperlyConfigured
 
+from neolith import _naming
 from neolith._contracts import _SEGMENT, Contract, ContractDefinitionError
 from neolith._frozen import once
 
@@ -64,10 +64,14 @@ _EXAMPLES: Final = {
 
 
 class DeclarationError(ImproperlyConfigured):
-    """An app's declaration is outside the admitted form (spec 05, ADR 0021).
+    """An app's declaration, or Resolve, refuses the hosted apps (spec 05).
 
-    The message holds one line per refusal, sorted. Each line names the app
-    and the field.
+    A declaration is outside the admitted form (ADR 0021), or Resolve
+    refuses what the hosted apps and ``NEOLITH`` name. The message holds one
+    line per refusal, sorted. Each line names the app and the field, or the
+    place of a ``connect()``, or, for Resolve, the part of ``NEOLITH`` it
+    read, such as ``NEOLITH["REMOTE_PROVIDERS"]`` (ADR 0014) or
+    ``NEOLITH["ROUTING_POLICIES"]`` (ADR 0031).
     """
 
 
@@ -203,7 +207,7 @@ def declaration_of(config: object) -> Declaration | None:
     """
     if not issubclass(type(config), type):
         return None
-    found = vars(config).get(_SNAPSHOT_ATTR)
+    found = _naming.entry(_naming.namespace(config), _SNAPSHOT_ATTR)
     if type(found) is not Declaration or found.config is not config:
         return None
     return found
@@ -253,7 +257,12 @@ class NeolithAppConfig(AppConfig):
             app on its own. ``False`` on this class and on a base class;
             ``True`` on a declaring class unless its own body sets it.
         provides: The contracts the app provides, one ``Provided`` each.
-        requires: The contract classes the app calls.
+        requires: The contract classes the app calls. The host finds each
+            one's provider: the app of the host that provides it, or the
+            remote providers the deployer lists for it in
+            ``NEOLITH["REMOTE_PROVIDERS"]``: one under ``single``, or two or
+            more, tried in order, when ``NEOLITH["ROUTING_POLICIES"]`` names
+            ``local-first`` for it.
         resources: The kinds of resource the app needs; ``"database"`` is
             the one kind admitted.
         batteries: The Django apps the app relies on, each by its dotted
@@ -282,7 +291,9 @@ class NeolithAppConfig(AppConfig):
         if snapshot is None:
             cls.default = False
             return
-        if "default" not in vars(cls):
+        # Every key of the class's own body is exactly a str, or it was
+        # refused above.
+        if "default" not in _naming.namespace(cls):
             cls.default = True
         setattr(cls, _SNAPSHOT_ATTR, snapshot)
 
@@ -314,8 +325,28 @@ class NeolithAppConfig(AppConfig):
                 "name and label in its own body"
             )
         refusals: list[str] = []
+        # As getattr_static finds them, the instance first, but each class is
+        # read through type's own descriptors, never through its metaclass.
+        held = [_naming.namespace(klass) for klass in _naming.mro(config)]
+        own = _naming.instance_dict(self)
+        if own is None:
+            # Fail closed: its own name and label cannot be read without
+            # running what the class holds as __dict__.
+            refusals.append(
+                f"app {snapshot.label}: the app config's own attributes cannot "
+                "be read, as its class holds __dict__; remove it"
+            )
+        else:
+            held.insert(0, own)
         for attribute, declared in (("name", snapshot.name), ("label", snapshot.label)):
-            found = inspect.getattr_static(self, attribute, _MISSING)
+            found = next(
+                (
+                    v
+                    for h in held
+                    if (v := _naming.entry(h, attribute, _MISSING)) is not _MISSING
+                ),
+                _MISSING,
+            )
             if type(found) is not str or found != declared:
                 refusals.append(
                     f"app {snapshot.label}: {attribute}: the app config has "
@@ -335,27 +366,42 @@ class NeolithAppConfig(AppConfig):
 
 def _check(cls: type[NeolithAppConfig]) -> tuple[list[str], Declaration | None]:
     """Check a new subclass; return its refusals and, if it declares, its snapshot."""
-    extras = [k for k in cls.__mro__ if k not in NeolithAppConfig.__mro__]
+    # Classes are read through type's own descriptors and compared by
+    # identity, and a name is looked up only in a body whose keys are each
+    # exactly a str, so that no code of the classes, or of their keys, runs.
+    ours = _naming.mro(NeolithAppConfig)
+    extras = [k for k in _naming.mro(cls) if not _naming.one_of(k, ours)]
     refusals: list[str] = []
-    checked: set[type] = set()
+    checked: set[int] = set()
     for parent in extras[1:]:
-        if _SNAPSHOT_ATTR in vars(parent):
+        if _naming.holds(_naming.namespace(parent), _SNAPSHOT_ATTR):
             refusals.append(
                 f"it extends {_class_name(parent)}, which holds a declaration; "
                 "a declaration cannot be extended or relabelled"
             )
             # The parent's own classes were checked when it was defined.
-            checked.update(parent.__mro__)
-    extras = [k for k in extras if k not in checked]
+            checked.update(map(id, _naming.mro(parent)))
+    extras = [k for k in extras if id(k) not in checked]
+    bodies: dict[int, dict[str, Any]] = {}
+    for klass in extras:
+        body: dict[str, Any] = {}
+        for key, value in _naming.namespace(klass).items():
+            if type(key) is str:
+                body[key] = value
+        if len(body) != len(_naming.namespace(klass)):
+            refusals.append(
+                f"{_class_name(klass)} has an attribute whose name is not exactly a str"
+            )
+        bodies[id(klass)] = body
 
-    own = dict(vars(cls))
+    own = bodies[id(cls)]
     declares = "name" in own
     # A part of the declaration written in a base class or a mixin is refused
     # for where it is, and its value is checked all the same, so that moving
     # it shows no new refusal.
     written: dict[str, Any] = {}
     for klass in extras:
-        body = own if klass is cls else dict(vars(klass))
+        body = bodies[id(klass)]
         whole = klass is cls and declares
         for attribute in body:
             if attribute.startswith("_"):
@@ -473,7 +519,7 @@ def _read(value: object) -> tuple[str, tuple[Any, ...] | None]:
         return "tuple", value  # type: ignore[return-value]  # judged by type()
     if kind is str or issubclass(kind, type) or kind is Provided:
         return "entry", (value,)
-    if kind in _BUILTIN_CONTAINERS:
+    if _naming.one_of(kind, _BUILTIN_CONTAINERS):
         return "other", tuple(value)  # type: ignore[arg-type]  # as above
     return "other", None
 
@@ -760,8 +806,7 @@ def _clip(text: str) -> str:
 
 
 def _class_name(klass: type) -> str:
-    name = f"{klass.__module__}.{klass.__qualname__}"
-    return name if len(name) <= 2 * _SHOWN else f"{name[: 2 * _SHOWN]}..."
+    return _naming.full_name(klass, 2 * _SHOWN + 3)
 
 
 def _show(value: object) -> str:
@@ -781,5 +826,6 @@ def _show(value: object) -> str:
         return f"the class {_class_name(shown)}"
     if kind is tuple and not value:
         return "()"
-    name = kind.__qualname__ if kind.__module__ == "builtins" else _class_name(kind)
+    builtin = _naming.module(kind) == "builtins"
+    name = _naming.qualname(kind) if builtin else _class_name(kind)
     return f"{'an' if name[:1] in 'aeiou' else 'a'} {name}"

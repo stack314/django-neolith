@@ -13,6 +13,7 @@ from neolith._contracts import (
 from neolith._declaration import DeclarationError, NeolithAppConfig, Provided
 from neolith._forms import Binary, Decimal128, Duration
 from neolith._host import Connector, command_scope, connect
+from neolith.callers import CredentialRefused
 
 __all__ = [
     "Action",
@@ -22,6 +23,7 @@ __all__ = [
     "Contract",
     "ContractDefinitionError",
     "ContractError",
+    "CredentialRefused",
     "Decimal128",
     "DeclarationError",
     "Duration",
@@ -37,4 +39,4 @@ __all__ = [
     "implements",
 ]
 
-__version__ = "0.1.0a2"
+__version__ = "0.1.0a3"

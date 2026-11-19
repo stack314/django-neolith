@@ -7,6 +7,11 @@ the request's JSON text and the context to a transport, which returns the
 reply's JSON text or raises a ``Failure``: the error's kind, message and
 detail as JSON text. With the ``single`` routing policy a connector has one
 provider and never sends a call twice: it never retries and never falls back.
+With ``local-first`` it holds two or more transports in order, and moves a
+call to the next only when an attempt ends with ``unavailable``, the action
+is idempotent and at least 1 ms of the call's budget is left (ADR 0031). Every
+attempt carries the same context; a call that ends with ``timeout`` after a
+move says that the action might have run.
 
 The in-process transport runs the provider's action in the caller's thread, in
 a copy of the caller's context, so that what it sets in a context variable
@@ -19,7 +24,8 @@ reads the request text with the declared request type, so the action gets a new
 value, and writes the reply with the declared reply type; the connector reads
 that text back, so caller and provider never share an object (ADR 0007).
 
-The deadline crosses as a budget and is counted from when the call arrives. It
+The deadline crosses as a budget, which each transport reads from the call's
+deadline when it sends the call, and is counted from when the call arrives. It
 is checked before the request is read and again when the action's outcome is
 ready to return; an outcome that is late is discarded, and the call fails with
 ``timeout``. The action is never interrupted (ADR 0008 Decision 2). The
@@ -37,7 +43,9 @@ end it, however it re-raises it, gets ``internal`` too.
 
 The connector reads an error the way it reads a reply: a declared kind's
 detail with its record, an unknown kind's detail as an untyped map, and
-anything it cannot read as ``internal``.
+anything it cannot read as ``internal``. Text that a transport received from
+a network gets the network receive check first (ADR 0007 Decision 3), as the
+transport's ``receiver`` says.
 """
 
 import contextlib
@@ -48,13 +56,13 @@ import json
 import logging
 import types
 import typing
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, NoReturn, Protocol, final
 
 from pydantic import BaseModel
 
-from neolith import _context
-from neolith._context import Sent
+from neolith import _context, _naming
+from neolith._context import Arrived, Principal, Sent
 from neolith._contracts import (
     _STANDARD_KINDS,
     Action,
@@ -64,9 +72,9 @@ from neolith._contracts import (
     mark_received,
     untyped_problem,
 )
-from neolith._crossing import check_request, codec
+from neolith._crossing import Receiver, Refusal, _interchange, check_request, codec
 
-__all__ = ["Connector", "Failure", "InProcess", "Transport"]
+__all__ = ["Connector", "Failure", "InProcess", "Provider", "Transport"]
 
 _log = logging.getLogger("neolith")
 
@@ -76,6 +84,9 @@ _NOT_RUN = "the deadline passed before the action was run"
 _LATE = "the deadline passed before the call ended; the action might have run"
 # Kinds that only hosts and transports produce, never an action.
 _TRANSPORT_KINDS = frozenset({"unavailable", "timeout"})
+# The least share of the time left that an attempt which can still move gets
+# to connect, in seconds (ADR 0031 Decision 5, after ADR 0028's per address).
+SHARE_FLOOR = 2.0
 
 
 @final
@@ -91,6 +102,16 @@ class Failure(Exception):
         self.kind = kind
         self.message = message
         self.detail = detail
+
+
+def no_calling_app(identity: str) -> str:
+    """The refusal of a call to ``identity`` that has no calling app, the
+    same over every transport (TRN-42, ADR 0027 Decision 9).
+    """
+    return (
+        f"a call to {identity} has no calling app; a call is made from a "
+        "scope that belongs to an app"
+    )
 
 
 def internal_message(trace_id: str) -> str:
@@ -112,7 +133,15 @@ class Transport(Protocol):
     and returns the reply's JSON text, or ``None`` for an action whose reply
     is empty. Every outcome of the call that is not a reply is a ``Failure``;
     an action of another contract is a ``TypeError``, a mistake in the code
-    that called it.
+    that called it. ``receiver`` says where the text it returns comes from,
+    which decides how the connector reads it.
+
+    A transport that a connector routes among others (``local-first``) also
+    takes ``connect_by=``: a time on this host's clock by which it must have
+    a connection ready, or end the attempt with ``unavailable`` (ADR 0031
+    Decision 5). The connector passes it only when the attempt's share of
+    the connect phase applies, so a transport used alone need not take it;
+    one that carries no connection, as the in-process one, ignores it.
     """
 
     @property
@@ -120,8 +149,27 @@ class Transport(Protocol):
         """The contract version whose calls this transport carries."""
         ...
 
+    @property
+    def receiver(self) -> Receiver:
+        """Where the reply's and an error's text come from."""
+        ...
+
     def call(self, action: Action, request: bytes, context: Sent) -> bytes | None:
         """Carry the call and return the reply's text."""
+        ...
+
+
+class _Bounded(Transport, Protocol):
+    """A transport that takes ``connect_by=``, as one routed among others."""
+
+    def call(
+        self,
+        action: Action,
+        request: bytes,
+        context: Sent,
+        connect_by: float | None = None,
+    ) -> bytes | None:
+        """Carry the call, with a connection ready by ``connect_by``."""
         ...
 
 
@@ -135,22 +183,17 @@ class _Ended(enum.Enum):
 def _untyped(detail: bytes) -> dict[str, Any]:
     """Read an unknown kind's detail as an untyped map (spec 01, CON-30).
 
-    UTF-8 only, a member name at most once in each map, and no number JSON
-    cannot hold; the bounds are checked by ``untyped_problem``.
+    The text is read as a network receiver reads it (CON-42), its nesting
+    judged before the json module reads it: UTF-8 only, a member name at most
+    once in each object, no lone surrogate and no number outside the range of
+    a double. It is a JSON object, within the bounds ``untyped_problem``
+    checks.
     """
-
-    def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
-        found = dict(items)
-        if len(found) != len(items):
-            raise ValueError("a member name occurs twice in one map")
-        return found
-
-    def refuse(constant: str) -> NoReturn:
-        raise ValueError(f"{constant} is not a JSON number")
-
-    value = json.loads(
-        detail.decode("utf-8"), object_pairs_hook=pairs, parse_constant=refuse
-    )
+    value, broken, _ = _interchange(detail)
+    if broken is not None:
+        raise ValueError(f"the detail {broken}")
+    if type(value) is not dict:
+        raise ValueError("the detail is not a JSON object")
     problem = untyped_problem(value)
     if problem is not None:
         raise ValueError(f"the detail is not an untyped map: {problem}")
@@ -178,9 +221,9 @@ def _report(message: str, error: BaseException) -> None:
         _log.error(message, exc_info=error)
 
 
-@final
-class InProcess:
-    """The in-process transport to one implementation of a contract.
+class Provider:
+    """The provider's side of every transport, for one implementation of a
+    contract (ADR 0011 Decision 3).
 
     ``app`` names the app the implementation belongs to, which is the caller
     of the calls its actions make, and ``requires`` the identities that app's
@@ -190,11 +233,11 @@ class InProcess:
     declaration; left out, they fail closed: an action of no app, which every
     call it makes is refused from, and an empty list.
 
-    The provider's side first checks the calling app (ADR 0017 Decision 9,
-    steps 1 and 2): a call from no app fails with ``unauthenticated``, and
-    one that carries a principal from an app the list does not name with
-    ``permission_denied``, before the deadline is checked or the request
-    read, so the action never runs.
+    Each transport runs the provider's first three steps (ADR 0017 Decision
+    9) itself, with ``_refusal`` for the first two, and hands the rest to
+    ``serve``: the deadline, the request's receive check, the action in a
+    scope of its own, the rules on what an action may deliver (ADR 0008),
+    and the deadline again once the action has ended.
     """
 
     __slots__ = (
@@ -223,7 +266,7 @@ class InProcess:
         cls = type(implementation)
         contract._check_implementation(cls)
         if app is not None and type(app) is not str:
-            raise TypeError(f"an app is named by a str, not {type(app).__qualname__}")
+            raise TypeError(f"an app is named by a str, not {_naming.type_name(app)}")
         self._requires = _context.requires_option(requires)
         try:
             self._allowed = frozenset(_context.names(principal_from, "app names"))
@@ -233,9 +276,7 @@ class InProcess:
         # instance, or a __getattr__, never stands in for an action.
         self._functions: Mapping[str, Callable[..., object]] = types.MappingProxyType(
             {
-                name: typing.cast(
-                    "Callable[..., object]", inspect.getattr_static(cls, name)
-                )
+                name: typing.cast("Callable[..., object]", _naming.find(cls, name))
                 for name in contract.actions
             }
         )
@@ -255,30 +296,70 @@ class InProcess:
         """The contract version the implementation provides."""
         return self._contract
 
-    def call(self, action: Action, request: bytes, context: Sent) -> bytes | None:
-        """Run the action in the caller's thread and return the reply's text.
+    def _refusal(self, caller: str | None, asserts: bool) -> Failure | None:
+        """The provider's checks of the calling app, steps 1 and 2, or
+        ``None`` when the call passes them.
 
-        An action of another contract is a ``TypeError``: a connector never
-        passes one, since it is built for this transport's contract.
+        ``caller`` is the calling app, which a network transport has
+        authenticated and the in-process one is told: the app the call's
+        parent scope belongs to. ``asserts`` says whether the call carries a
+        principal, which is judged by its presence alone, whatever it holds.
         """
-        arrived = _context.now()
+        identity = self._contract.identity
+        if caller is None:
+            return Failure("unauthenticated", no_calling_app(identity))
+        if asserts and caller not in self._allowed:
+            return Failure(
+                "permission_denied",
+                f"app {caller} may not assert a principal on a call to {identity}: "
+                "the contract's allow-list does not name it",
+            )
+        return None
+
+    def serve(
+        self, action: Action, request: bytes, arrived: Arrived, receiver: Receiver
+    ) -> bytes | None:
+        """Run the provider's steps from the deadline on, and return the
+        reply's text, or ``None`` for an empty reply.
+
+        ``arrived`` is the call's context once the transport has run the
+        first three steps, and ``receiver`` says where the request's text
+        comes from. Text from a network gets the network receive check, and
+        text it refuses fails with ``invalid_argument``, before the action
+        runs; in-process the text has passed the sender's check, so text
+        that cannot be read is a failure of the host. Every outcome that is
+        not a reply is a ``Failure``; an action of another contract is a
+        ``TypeError``.
+        """
         if self._contract.actions.get(action.name) is not action:
             raise TypeError(
                 f"{self._contract.identity} has no action {action.name!r} of "
                 "this declaration"
             )
-        if type(context) is not Sent:
+        if type(arrived) is not Arrived:
             raise TypeError(
-                f"a call's context is sent as Sent, not {type(context).__qualname__}"
+                "a call is served from its context as it arrived, not "
+                f"{_naming.type_name(arrived)}"
             )
-        # The calling app comes first: a call it refuses is refused before
-        # anything else is read, and its action never runs.
-        refusal = self._refusal(context)
-        if refusal is not None:
-            raise refusal
-        # The budget is counted from when the call arrived (spec 03).
-        deadline = None if context.budget is None else arrived + context.budget / 1000
-        outcome = self._serve(action, request, context, deadline)
+        if type(receiver) is not Receiver:
+            raise TypeError(
+                f"a call's receiver is a Receiver, not {_naming.type_name(receiver)}"
+            )
+        outcome = self._serve(action, request, arrived, receiver)
+        if isinstance(outcome, Failure):
+            raise outcome
+        return self._finish(action, arrived, outcome)
+
+    def _finish(
+        self,
+        action: Action,
+        arrived: Arrived,
+        outcome: bytes | tuple[str, str, bytes | None] | _Ended | None,
+    ) -> bytes | None:
+        """Check the deadline again, now the outcome is ready, and return the
+        reply's text or raise the ``Failure`` the outcome is.
+        """
+        deadline = arrived.deadline
         if outcome is _Ended.EXPIRED:
             raise Failure("timeout", _NOT_RUN)
         if deadline is not None and _context.now() >= deadline:
@@ -292,62 +373,59 @@ class InProcess:
                         self._contract.identity,
                         action.name,
                         outcome[0],
-                        context.trace_id,
+                        arrived.trace_id,
                     )
             raise Failure("timeout", _LATE)
         if outcome is _Ended.FAILED:
-            raise Failure("internal", internal_message(context.trace_id))
+            raise Failure("internal", internal_message(arrived.trace_id))
         if isinstance(outcome, tuple):
             raise Failure(*outcome)
         return outcome
 
-    def _refusal(self, context: Sent) -> Failure | None:
-        """The provider's checks of the calling app, or ``None`` when it passes.
-
-        In-process the calling app is not authenticated but known: the app
-        the call's parent scope belongs to. A principal is judged by its
-        presence alone, whatever its form holds.
-        """
-        identity = self._contract.identity
-        caller = context.caller
-        if caller is None:
-            return Failure(
-                "unauthenticated",
-                f"a call to {identity} has no calling app; a call is made from a "
-                "scope that belongs to an app",
-            )
-        if context.principal is not None and caller not in self._allowed:
-            return Failure(
-                "permission_denied",
-                f"app {caller} may not assert a principal on a call to {identity}: "
-                "the contract's allow-list does not name it",
-            )
-        return None
+    def _failed(self, action: Action, trace_id: str, failure: BaseException) -> None:
+        """Log a failure of the provider, never raising."""
+        _report(
+            f"{self._contract.identity}, action {action.name!r}: the provider "
+            f"failed (trace {trace_id})",
+            failure,
+        )
 
     def _serve(
-        self, action: Action, request: bytes, context: Sent, deadline: float | None
-    ) -> bytes | tuple[str, str, bytes | None] | _Ended | None:
+        self, action: Action, request: bytes, arrived: Arrived, receiver: Receiver
+    ) -> bytes | tuple[str, str, bytes | None] | _Ended | Failure | None:
         """Read the request, run the action and write its reply, or the error
         it delivers as kind, message and detail text.
 
         The steps follow the provider's order (ADR 0017 Decision 9): the
-        context, the deadline, the request, then the action, in a scope that
-        closes when the action ends. Never raises an ``Exception``: a failure
-        is logged and returned as ``FAILED``, so that once this returns, no
-        frame holds the provider's values.
+        deadline, the request, then the action, in a scope that closes when
+        the action ends. A request a network receiver refuses is returned as
+        its ``Failure``. Never raises an ``Exception``: a failure is logged
+        and returned as ``FAILED``, so that once this returns, no frame holds
+        the provider's values.
         """
+        failure: BaseException
         try:
-            scope = _context.received(context, deadline, self._app, self._requires)
+            scope = _context.received(arrived, self._app, self._requires)
         except Exception as error:  # a failure of the host, whatever it is
-            failure: BaseException = error
+            failure = error
         else:
-            if deadline is not None and _context.now() >= deadline:
+            if arrived.deadline is not None and _context.now() >= arrived.deadline:
                 return _Ended.EXPIRED
+            refused: str | None = None
+            value: BaseModel | None = None
+            reading = codec(self._contract, action.request)
             try:
-                value = codec(self._contract, action.request).read(request)
+                if receiver is Receiver.NETWORK:
+                    value = reading.receive(request, "the request")
+                else:
+                    value = reading.read(request)
+            except Refusal as error:
+                refused = str(error)
             except Exception as error:
                 failure = error
-            else:
+            if refused is not None:
+                return Failure("invalid_argument", refused)
+            if value is not None:
                 try:
                     # In a copy of the caller's context, so that what the
                     # action sets in a context variable, and the scope it runs
@@ -374,11 +452,7 @@ class InProcess:
                         failure = error
         # Logged outside the handler, so a failing log does not chain to it,
         # then dropped, so its traceback does not keep the provider's frames.
-        _report(
-            f"{self._contract.identity}, action {action.name!r}: the provider "
-            f"failed (trace {context.trace_id})",
-            failure,
-        )
+        self._failed(action, arrived.trace_id, failure)
         del failure
         return _Ended.FAILED
 
@@ -400,7 +474,7 @@ class InProcess:
         if action.reply is None:
             if reply is not None:
                 raise TypeError(
-                    f"the reply is {type(reply).__qualname__}, but the action's "
+                    f"the reply is {_naming.type_name(reply)}, but the action's "
                     "reply is empty"
                 )
             return None
@@ -429,8 +503,138 @@ class InProcess:
 
 
 @final
+class InProcess(Provider):
+    """The in-process transport to one implementation of a contract.
+
+    It is the provider's side (``Provider``), called in the caller's thread.
+    Its arguments are the provider side's.
+
+    The provider's side first checks the calling app (ADR 0017 Decision 9,
+    steps 1 and 2): a call from no app fails with ``unauthenticated``, and
+    one that carries a principal from an app the list does not name with
+    ``permission_denied``, before the deadline is checked or the request
+    read, so the action never runs.
+    """
+
+    __slots__ = ()
+
+    #: The reply's text was written by a sender's check in this process.
+    receiver = Receiver.IN_PROCESS
+
+    def call(
+        self,
+        action: Action,
+        request: bytes,
+        context: Sent,
+        connect_by: float | None = None,
+    ) -> bytes | None:
+        """Run the action in the caller's thread and return the reply's text.
+
+        An action of another contract is a ``TypeError``: a connector never
+        passes one, since it is built for this transport's contract.
+        ``connect_by`` is ignored: an in-process call opens no connection.
+        """
+        arrived = _context.now()
+        if self._contract.actions.get(action.name) is not action:
+            raise TypeError(
+                f"{self._contract.identity} has no action {action.name!r} of "
+                "this declaration"
+            )
+        if type(context) is not Sent:
+            raise TypeError(
+                f"a call's context is sent as Sent, not {_naming.type_name(context)}"
+            )
+        # The calling app comes first: a call it refuses is refused before
+        # anything else is read, and its action never runs.
+        refusal = self._refusal(context.caller, context.principal is not None)
+        if refusal is not None:
+            raise refusal
+        caller = typing.cast(str, context.caller)
+        # The budget is read as the call is dispatched, and the deadline
+        # counted from it, from when the call arrived (spec 03). On the
+        # caller's own clock, it is never later than the caller's deadline.
+        budget = _context.budget(context.deadline, arrived)
+        deadline = (
+            None
+            if budget is None or context.deadline is None
+            else min(arrived + budget / 1000, context.deadline)
+        )
+        # Step 3. The principal's form has passed the caller's check, so one
+        # that cannot be read is a failure of this host, not of the call.
+        problem: Exception | None = None
+        principal: Principal | None = None
+        try:
+            if context.principal is not None:
+                principal = _context.read_principal(context.principal)
+        except Exception as error:
+            problem = error
+        incoming = Arrived(
+            principal=principal,
+            trace_id=context.trace_id,
+            tracestate=context.tracestate,
+            deadline=deadline,
+            idempotency_key=context.idempotency_key,
+            caller=caller,
+        )
+        if problem is not None:
+            self._failed(action, context.trace_id, problem)
+            del problem
+            return self._finish(action, incoming, _Ended.FAILED)
+        return self.serve(action, request, incoming, Receiver.IN_PROCESS)
+
+
+@final
+class _Route:
+    """One entry of a connector's order: its transport, whether its text
+    comes from a network, and where it is, for the log.
+    """
+
+    __slots__ = ("network", "transport", "where")
+
+    def __init__(self, transport: Transport, network: bool, where: str) -> None:
+        self.transport = transport
+        self.network = network
+        self.where = where
+
+
+def _takes_connect_by(transport: Transport) -> bool:
+    """Whether the transport's ``call`` takes ``connect_by=`` by keyword."""
+    try:
+        parameters = inspect.signature(transport.call).parameters
+    except (TypeError, ValueError):
+        return False
+    found = parameters.get("connect_by")
+    if found is not None:
+        return found.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        )
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values())
+
+
+def _where(transport: Transport, receiver: Receiver) -> str:
+    """Where a provider is, as the routing log names it: in this host, or
+    at its origin, a remote provider's admitted url.
+    """
+    if receiver is Receiver.IN_PROCESS:
+        return "in this host"
+    origin: object = None
+    with contextlib.suppress(Exception):
+        origin = getattr(transport, "origin", None)
+    return f"at {origin}" if type(origin) is str else "at an origin it does not name"
+
+
+@final
 class Connector:
-    """Calls the actions of one contract version through one transport.
+    """Calls the actions of one contract version through its transports.
+
+    One transport is the ``single`` policy: one attempt per call. Two or
+    more are the ``local-first`` policy's order, the provider in the host
+    first when there is one (ADR 0031): each call starts at the first and
+    moves to the next only when an attempt ends with ``unavailable``, the
+    action is idempotent and at least 1 ms of the call's budget is left, and
+    it tries each at most once. Each transport of an order takes
+    ``connect_by=`` (``Transport``).
 
     Each action of the contract is an attribute taking one request, by
     position or by the name the declaration gives it, and returning the
@@ -450,17 +654,40 @@ class Connector:
     connector, so nothing else of the transport's crosses.
     """
 
-    __slots__ = ("_contract", "_parameters", "_transport")
+    __slots__ = ("_contract", "_parameters", "_routes")
 
-    def __init__(self, declaration: type[Any], transport: Transport) -> None:
+    def __init__(
+        self, declaration: type[Any], transport: Transport, *more: Transport
+    ) -> None:
         contract = Contract.of(declaration)
-        if transport.contract is not contract:
-            raise TypeError(
-                f"the transport carries calls of {transport.contract.identity}, "
-                f"not of {contract.identity}"
+        transports = (transport, *more)
+        routes: list[_Route] = []
+        for index, each in enumerate(transports):
+            which = "the transport" if not more else f"transport {index}"
+            if each.contract is not contract:
+                raise TypeError(
+                    f"{which} carries calls of {each.contract.identity}, "
+                    f"not of {contract.identity}"
+                )
+            receiver = each.receiver
+            if type(receiver) is not Receiver:
+                kind = _naming.type_name(receiver)
+                raise TypeError(f"a transport's receiver is a Receiver, not {kind}")
+            if any(each is earlier for earlier in transports[:index]):
+                raise ValueError(
+                    f"{which} is listed before; a call tries each provider once"
+                )
+            if more and not _takes_connect_by(each):
+                raise TypeError(
+                    f"{which} takes no connect_by=, which a transport routed "
+                    "among others takes"
+                )
+            # Text from a network gets the network receive check (ADR 0007).
+            routes.append(
+                _Route(each, receiver is Receiver.NETWORK, _where(each, receiver))
             )
         self._contract = contract
-        self._transport = transport
+        self._routes: Sequence[_Route] = tuple(routes)
         # The name each action's declaration gives its request, which a call
         # may pass it by, as it could to the declared method.
         self._parameters = types.MappingProxyType(
@@ -469,13 +696,18 @@ class Connector:
                     inspect.signature(
                         typing.cast(
                             Callable[..., object],
-                            inspect.getattr_static(declaration, name),
+                            _naming.find(declaration, name),
                         )
                     ).parameters
                 )[1]
                 for name in contract.actions
             }
         )
+
+    @property
+    def _transport(self) -> Transport:
+        """The first transport of the order: under ``single``, the one."""
+        return self._routes[0].transport
 
     def __getattr__(self, name: str) -> Callable[..., BaseModel | None]:
         # Only reached for a name the instance does not have; a private name
@@ -588,16 +820,21 @@ class Connector:
             principal=principal,
             trace_id=trace_id,
             tracestate=scope.held.tracestate,
-            budget=budget,
+            deadline=deadline,
             idempotency_key=key,
             caller=caller,
         )
-        outcome = self._carry(action, text, sent)
+        outcome, moved = self._route(action, text, sent)
         # The caller's own deadline, on its own clock: over a network it
         # stops waiting then, so whatever comes back later is discarded here
-        # too. A timeout the transport gave says where the deadline passed.
+        # too. A timeout the transport gave says where the deadline passed,
+        # unless the call has moved: an earlier attempt may have run the
+        # action, so the call cannot say it was not sent.
         late = deadline is not None and _context.now() >= deadline
         if isinstance(outcome, ContractError):
+            if outcome.kind == "timeout" and moved:
+                del outcome
+                raise _received("timeout", _LATE)
             if not late or outcome.kind == "timeout":
                 raise outcome
             with contextlib.suppress(Exception):
@@ -614,21 +851,132 @@ class Connector:
         del outcome
         raise _received("timeout", _LATE)
 
-    def _carry(
+    def _route(
         self, action: Action, text: bytes, sent: Sent
+    ) -> tuple[BaseModel | ContractError | None, bool]:
+        """Make the call's attempts in the policy's order, and return the
+        outcome of the last and whether the call moved.
+
+        A call moves to the next entry only when its attempt ended with
+        ``unavailable``, the action is idempotent and the budget, read now,
+        is at least 1 ms (TRN-8). Otherwise it ends with that attempt's
+        outcome. Every attempt carries the same ``Sent``.
+        """
+        routes = self._routes
+        count = len(routes)
+        deadline = sent.deadline
+        index = 0
+        while True:
+            route = routes[index]
+            outcome = self._carry(
+                route, action, text, sent, self._connect_by(action, index, deadline)
+            )
+            if (
+                index + 1 == count
+                or not isinstance(outcome, ContractError)
+                or outcome.kind != "unavailable"
+            ):
+                return outcome, index > 0
+            following = routes[index + 1]
+            if not action.idempotent:
+                self._log(
+                    "%s, action %r: provider %d of %d %s was unavailable, and %s "
+                    "is not idempotent, so the call is not moved to provider %d "
+                    "(trace %s)",
+                    self._contract.identity,
+                    action.name,
+                    index + 1,
+                    count,
+                    route.where,
+                    action.name,
+                    index + 2,
+                    sent.trace_id,
+                )
+                return outcome, index > 0
+            budget = _context.budget(deadline, _context.now())
+            if budget is not None and budget < 1:
+                self._log(
+                    "%s, action %r: provider %d of %d %s was unavailable, and the "
+                    "call's deadline left under 1 ms to try provider %d %s "
+                    "(trace %s)",
+                    self._contract.identity,
+                    action.name,
+                    index + 1,
+                    count,
+                    route.where,
+                    index + 2,
+                    following.where,
+                    sent.trace_id,
+                )
+                return outcome, index > 0
+            self._log(
+                "%s, action %r: provider %d of %d %s was unavailable, and %s is "
+                "idempotent; trying provider %d %s with %s (trace %s)",
+                self._contract.identity,
+                action.name,
+                index + 1,
+                count,
+                route.where,
+                action.name,
+                index + 2,
+                following.where,
+                "no deadline" if budget is None else f"{budget} ms left",
+                sent.trace_id,
+            )
+            del outcome
+            index += 1
+
+    def _connect_by(
+        self, action: Action, index: int, deadline: float | None
+    ) -> float | None:
+        """The time by which the attempt to entry ``index`` must have a
+        connection ready, or ``None`` when no share applies.
+
+        An attempt that can still move (the action is idempotent and an entry
+        is left after this one) gets its share of the time left: that time
+        divided by the entries left, this one included, at least
+        ``SHARE_FLOOR`` seconds. When that is all the time left, the deadline
+        bounds the phase alone. A call with no deadline gets no share.
+        """
+        left_entries = len(self._routes) - index
+        if deadline is None or left_entries == 1 or not action.idempotent:
+            return None
+        current = _context.now()
+        left = deadline - current
+        share = max(left / left_entries, SHARE_FLOOR)
+        return current + share if share < left else None
+
+    def _log(self, message: str, *args: object) -> None:
+        """Log a routing decision at ``INFO``, never raising."""
+        with contextlib.suppress(Exception):
+            _log.info(message, *args)
+
+    def _carry(
+        self,
+        route: _Route,
+        action: Action,
+        text: bytes,
+        sent: Sent,
+        connect_by: float | None,
     ) -> BaseModel | ContractError | None:
-        """Send the call and return its reply, or the error the caller gets.
+        """Send one attempt and return its reply, or the error the caller gets.
 
         Never raises an ``Exception``, so the error the caller gets is built
         here, from the kind, message and detail text alone.
         """
         what = "the transport failed"
         try:
-            reply = self._transport.call(action, text, sent)
+            if connect_by is None:
+                reply = route.transport.call(action, text, sent)
+            else:
+                bounded = typing.cast("_Bounded", route.transport)
+                reply = bounded.call(action, text, sent, connect_by=connect_by)
         except Failure as failed:
             try:
                 return mark(
-                    self._error(action, failed.kind, failed.message, failed.detail)
+                    self._error(
+                        route, action, failed.kind, failed.message, failed.detail
+                    )
                 )
             except Exception as error:
                 failure: BaseException = error
@@ -637,7 +985,7 @@ class Connector:
             failure = error
         else:
             try:
-                return self._read(action, reply)
+                return self._read(route, action, reply)
             except Exception as error:
                 failure = error
                 what = "the reply could not be read"
@@ -650,7 +998,12 @@ class Connector:
         return _received("internal", internal_message(sent.trace_id))
 
     def _error(
-        self, action: Action, kind: object, message: object, detail: object
+        self,
+        route: _Route,
+        action: Action,
+        kind: object,
+        message: object,
+        detail: object,
     ) -> ContractError:
         """The error a caller gets for one that arrived; raises when it cannot
         be read against the contract.
@@ -658,7 +1011,7 @@ class Connector:
         if type(kind) is not str or type(message) is not str:
             raise TypeError("an error's kind and message are text")
         if detail is not None and type(detail) is not bytes:
-            raise TypeError(f"an error's detail is {type(detail).__qualname__}")
+            raise TypeError(f"an error's detail is {_naming.type_name(detail)}")
         if kind in _STANDARD_KINDS:
             if detail is not None:
                 raise ValueError(f"a {kind!r} error arrived with a detail")
@@ -668,7 +1021,9 @@ class Connector:
             if detail is None:
                 raise ValueError(f"a {kind!r} error arrived without its detail")
             return ContractError(
-                kind, message, codec(self._contract, record).read(detail)
+                kind,
+                message,
+                self._received(route, record, detail, "the error's detail"),
             )
         # A kind this version of the contract does not declare for the action
         # (CON-28): a later version may have added it, even if another action
@@ -677,11 +1032,23 @@ class Connector:
             kind, message, None if detail is None else _untyped(detail)
         )
 
-    def _read(self, action: Action, reply: object) -> BaseModel | None:
+    def _read(self, route: _Route, action: Action, reply: object) -> BaseModel | None:
         if action.reply is None:
             if reply is not None:
                 raise TypeError("a reply arrived for an action whose reply is empty")
             return None
         if type(reply) is not bytes:
-            raise TypeError(f"the reply is {type(reply).__qualname__}, not text")
-        return codec(self._contract, action.reply).read(reply)
+            raise TypeError(f"the reply is {_naming.type_name(reply)}, not text")
+        return self._received(route, action.reply, reply, "the reply")
+
+    def _received[R: BaseModel](
+        self, route: _Route, record: type[R], text: bytes, subject: str
+    ) -> R:
+        """Read text that arrived with ``record``: from a network, after the
+        network receive check, whose ``Refusal`` the caller gets as
+        ``internal``; in-process, with the validator alone.
+        """
+        reading = codec(self._contract, record)
+        if route.network:
+            return reading.receive(text, subject)
+        return reading.read(text)

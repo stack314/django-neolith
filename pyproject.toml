@@ -48,6 +48,9 @@ Changelog = "https://github.com/stack314/django-neolith/blob/main/CHANGELOG.md"
 # property test (spec 01, CON-16). Test only.
 # griffe: tests/test_api_docs.py reads the public API's docstrings with it.
 # Test only; pinned so its reading of a docstring cannot drift.
+# trustme: the HTTP client's TLS tests make a test authority at run time, so no
+# key is committed (ADR 0028 Decision 9). Test only; pinned so the
+# certificates it issues cannot drift.
 test = [
     "pytest>=8.4",
     "pytest-django>=4.11",
@@ -60,6 +63,7 @@ test = [
     # this to check "date-time" and otherwise skips it silently.
     "rfc3339-validator>=0.1.4",
     "griffe==2.4.1",
+    "trustme==1.2.1",
 ]
 # sphinx, myst-parser and pydata-sphinx-theme: the documentation site, built
 # by scripts/docs.py (ADR 0024). Sphinx 9.2 needs Python 3.13, so on an older
@@ -125,7 +129,11 @@ DJANGO_SETTINGS_MODULE = "tests.settings"
 django_find_project = false
 pythonpath = ["."]
 # ADR 0018: a test cites the requirements it verifies; scripts/spec_trace.py checks the IDs.
-markers = ["spec(*ids): requirement IDs from spec/ that this test verifies"]
+# ADR 0032: a conformance test names the case it runs, from spec/conformance/cases/.
+markers = [
+    "spec(*ids): requirement IDs from spec/ that this test verifies",
+    "conformance_case(name): the conformance case, from spec/conformance/cases/, that this test runs",
+]
 # ADR 0012: deprecations are errors. Django's RemovedInDjango*Warning classes
 # subclass DeprecationWarning or PendingDeprecationWarning, so they are covered.
 # A filter for a third-party warning names the package and the upstream issue.

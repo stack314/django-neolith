@@ -9,6 +9,7 @@ Django's middleware chain are in ``test_request_principal.py``.
 
 import asyncio
 import dataclasses
+import logging
 import threading
 import time
 import uuid
@@ -29,7 +30,7 @@ from django.test.utils import isolate_apps
 from hypothesis import given
 from hypothesis import strategies as st
 
-from neolith import Principal, _checks, _principal
+from neolith import CredentialRefused, Principal, _checks, _principal
 from neolith._context import principal_form, read_principal
 from neolith._principal import Built, Resolution, build, search, shape_problems
 from neolith.middleware import afinish, finish
@@ -37,6 +38,7 @@ from neolith.principals import DjangoUserBackend, PrincipalBackend, key_problem
 from neolith.principals import order_problems as user_order_problems
 from tests import host_apps
 from tests.hosting import in_built_host
+from tests.test_caller_backends import hostile_refusals
 
 SETTING = 'NEOLITH["PRINCIPAL_BACKENDS"]'
 HERE = "tests.test_principal_backends"
@@ -111,6 +113,28 @@ class SyncAresolve(PrincipalBackend):
         return None
 
     def aresolve(self, request: HttpRequest) -> Principal | None:  # type: ignore[override]
+        return None
+
+
+class StaticAresolve(PrincipalBackend):
+    request_inputs = ()
+
+    def resolve(self, request: HttpRequest) -> Principal | None:
+        return None
+
+    @staticmethod
+    async def aresolve(request: HttpRequest) -> Principal | None:
+        return None
+
+
+class ClassAresolve(PrincipalBackend):
+    request_inputs = ()
+
+    def resolve(self, request: HttpRequest) -> Principal | None:
+        return None
+
+    @classmethod
+    async def aresolve(cls, request: HttpRequest) -> Principal | None:
         return None
 
 
@@ -320,6 +344,17 @@ def test_a_backend_set_up_cannot_build_is_refused_naming_its_entry(
     assert len(problems) == 1
     assert problems[0].startswith(f"{SETTING}[0] ({given['BACKEND']}): ")
     assert message in problems[0]
+
+
+@pytest.mark.spec("APP-16")
+@pytest.mark.parametrize("backend", [StaticAresolve, ClassAresolve])
+def test_an_aresolve_that_is_a_static_or_class_method_builds(
+    backend: type[PrincipalBackend],
+) -> None:
+    """The coroutine function is read from under the staticmethod or classmethod."""
+    found, problems = build([entry(f"{HERE}.{backend.__name__}")])
+    assert problems == []
+    assert type(found[0].backend) is backend
 
 
 @pytest.mark.spec("APP-16")
@@ -546,6 +581,51 @@ def test_a_failure_is_recorded_once_and_logged_with_the_trace(
     message = logged[0].getMessage()
     assert "0" * 31 + "1" in message
     assert f"{SETTING}[0] ({HERE}.Fixed): resolve raised RuntimeError: down" in message
+
+
+@pytest.mark.spec("APP-54")
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_a_refused_credential_fails_with_internal_and_is_logged_at_warning(
+    mode: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A backend that raises ``CredentialRefused`` fails the root as any
+    failure does, and the host logs it at WARNING, with its message alone
+    (ADR 0027 Decision 7, 0023 Open question 4)."""
+    refusing = Fixed(answer=CredentialRefused("the session was revoked"))
+    held = resolution(refusing)
+    read = held.form if mode == "sync" else async_to_sync(held.aform)
+    with pytest.raises(ValueError, match="could not be resolved"):
+        read()
+    logged = [r for r in caplog.records if r.name == "neolith.host"]
+    method = "resolve" if mode == "sync" else "aresolve"
+    assert [(r.levelno, r.getMessage(), r.exc_info) for r in logged] == [
+        (
+            logging.WARNING,
+            f"request root (trace {'0' * 31}1): {SETTING}[0] ({HERE}.Fixed): "
+            f"{method} refused the credential: the session was revoked",
+            None,
+        )
+    ]
+
+
+@pytest.mark.spec("APP-54")
+@pytest.mark.parametrize("make", hostile_refusals())
+def test_a_refusal_whose_message_is_not_exactly_a_str_is_still_recorded(
+    make: Callable[[], CredentialRefused], caplog: pytest.LogCaptureFixture
+) -> None:
+    """The message is backend code's value: one that is not exactly a str
+    is named by fixed text, and the root still fails with ``internal``."""
+    held = resolution(Fixed(answer=make()))
+    with pytest.raises(ValueError, match="could not be resolved"):
+        held.form()
+    logged = [r for r in caplog.records if r.name == "neolith.host"]
+    assert [(r.levelno, r.getMessage()) for r in logged] == [
+        (
+            logging.WARNING,
+            f"request root (trace {'0' * 31}1): {SETTING}[0] ({HERE}.Fixed): "
+            "resolve refused the credential: a refusal whose message cannot be read",
+        )
+    ]
 
 
 @pytest.mark.spec("APP-54")

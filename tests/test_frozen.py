@@ -28,14 +28,19 @@ from pydantic import BaseModel
 
 import neolith
 from neolith import Action, CallContext, ContractError, Principal, Provided
-from neolith._context import Sent
+from neolith._caller import Built as CallerBuilt
+from neolith._caller import Callers, Findings
+from neolith._context import Arrived, Sent
 from neolith._contracts import _FrozenList, _FrozenMap
 from neolith._declaration import Declaration, Provision
+from neolith._endpoint import Endpoints, Route
 from neolith._forms import _Form
 from neolith._frozen import once
 from neolith._host import Connector, Host
+from neolith._http import Origin, Response
 from neolith._principal import Built
 from neolith._server import _Request
+from neolith.callers import CallerBackend
 from neolith.principals import PrincipalBackend
 
 
@@ -66,7 +71,14 @@ class _Backend(PrincipalBackend):
         return None
 
 
+class _Caller(CallerBackend):
+    def authenticate(self, request: object, contract: str) -> None:
+        return None
+
+
 _EVIL = Built(9, "evil.Evil", _Backend(), ("x",))
+_EVIL_CALLERS = Callers((CallerBuilt(9, "evil.Evil", _Caller()),))
+_EVIL_ENDPOINTS = Endpoints(("/evil/v1/",), {}, b"evil")
 _ALICE = Principal("https://id.example", "alice", {"role": "admin"})
 _CASES: dict[type, Case] = {
     Principal: Case(
@@ -79,9 +91,24 @@ _CASES: dict[type, Case] = {
         state=[None, "f" * 32, "e" * 16, "x=1", None, None, None, "s2"],
     ),
     Sent: Case(
-        lambda: Sent(None, "a" * 32, "", 1000, "k", "shop"),
+        lambda: Sent(None, "a" * 32, "", 1000.0, "k", "shop"),
         ((b"p", "f" * 32, "x=1", None, "other", "admin"), {}),
         state=[b"p", "f" * 32, "x=1", None, "other", "admin"],
+    ),
+    Arrived: Case(
+        lambda: Arrived(_ALICE, "a" * 32, "", 5.0, "k", "shop"),
+        ((None, "f" * 32, "x=1", None, None, "other"), {}),
+        state=[None, "f" * 32, "x=1", None, None, "other"],
+    ),
+    Origin: Case(
+        lambda: Origin.parse("https://inventory.test:8443"),
+        (("http://evil.test", "http", "evil.test", 80, "evil.test"), {}),
+        state=["http://evil.test", "http", "evil.test", 80, "evil.test"],
+    ),
+    Response: Case(
+        lambda: Response(200, b"{}"),
+        ((500, b"evil"), {}),
+        state=[500, b"evil"],
     ),
     Action: Case(
         lambda: Action("ask", True, Ask, Told),
@@ -104,8 +131,56 @@ _CASES: dict[type, Case] = {
     ),
     Host: Case(
         lambda: Host(frozenset({"shop.v1"}), {}, {"shop": ()}),
-        ((frozenset(), {}, {}, None, frozenset({"w"}), (_EVIL,), ("x",)), {}),
-        state=[frozenset(), {}, {}, None, frozenset({"w"}), (_EVIL,), ("x",)],
+        (
+            (
+                frozenset(),
+                {},
+                {},
+                None,
+                frozenset({"w"}),
+                (_EVIL,),
+                ("x",),
+                _EVIL_CALLERS,
+                _EVIL_ENDPOINTS,
+            ),
+            {},
+        ),
+        state=[
+            frozenset(),
+            {},
+            {},
+            None,
+            frozenset({"w"}),
+            (_EVIL,),
+            ("x",),
+            _EVIL_CALLERS,
+            _EVIL_ENDPOINTS,
+        ],
+    ),
+    Endpoints: Case(
+        lambda: Endpoints(("/shop/v1/",), {}, b"{}"),
+        ((("/evil/v1/",), {"/evil/v1/x": None}, b"evil"), {}),
+        state=[("/evil/v1/",), {"/evil/v1/x": None}, b"evil"],
+    ),
+    Route: Case(
+        lambda: Route("shop.v1", Action("ask", True, Ask, Told), None),  # type: ignore[arg-type]
+        (("evil.v1", Action("tell", False, Told, None), None), {}),
+        state=["evil.v1", Action("tell", False, Told, None), None],
+    ),
+    CallerBuilt: Case(
+        lambda: CallerBuilt(0, "shop.Backend", _Caller()),
+        ((1, "evil.Evil", _Caller()), {}),
+        state=[1, "evil.Evil", _Caller()],
+    ),
+    Callers: Case(
+        lambda: Callers(),
+        (((CallerBuilt(1, "evil.Evil", _Caller()),), ()), {}),
+        state=[(CallerBuilt(1, "evil.Evil", _Caller()),), ()],
+    ),
+    Findings: Case(
+        lambda: Findings(("refused",), (), "x"),
+        ((("evil",), ("w",), None), {}),
+        state=[("evil",), ("w",), None],
     ),
     Built: Case(
         lambda: Built(0, "shop.Backend", _Backend(), ("cookie",)),

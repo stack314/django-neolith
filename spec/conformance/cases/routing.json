@@ -1,0 +1,231 @@
+[
+  {
+    "name": "routing_single_one_attempt",
+    "part": "routing",
+    "state": "A host whose one app, routing_caller, requires the test contract routing_single_one_attempt.v1, whose actions are get (idempotent) and put (not idempotent), each taking and returning a record with one integer field n, and holds a shared-secret key to sign its calls. The host's settings list U as the remote providers of routing_single_one_attempt.v1, in that order, and leave it out of the routing policies, so it is routed by single. Each provider is bound on a loopback address; every one but R listens and records every request it receives: U answers 503 with no neolith error body.",
+    "procedure": "1. From a root of routing_caller that holds a principal, a tracestate and a timeout of 10 seconds, call get with {\"n\":1}.",
+    "expected": "The call fails with unavailable. U receives exactly one request, and no request is sent again.",
+    "requirements": [
+      "TRN-17",
+      "APP-63"
+    ]
+  },
+  {
+    "name": "routing_single_refused",
+    "part": "routing",
+    "state": "A host whose one app, routing_caller, requires the test contract routing_single_refused.v1, whose actions are get (idempotent) and put (not idempotent), each taking and returning a record with one integer field n, and holds a shared-secret key to sign its calls. The host's settings list R as the remote providers of routing_single_refused.v1, in that order, and leave it out of the routing policies, so it is routed by single. Each provider is bound on a loopback address; every one but R listens and records every request it receives: R is a socket bound on a loopback address that never listens, so a connection to it is refused.",
+    "procedure": "1. From a root of routing_caller that holds a principal, a tracestate and a timeout of 10 seconds, call get with {\"n\":1}.",
+    "expected": "The call fails with unavailable. No provider receives a request.",
+    "requirements": [
+      "TRN-17",
+      "APP-63"
+    ]
+  },
+  {
+    "name": "routing_moves_on_503",
+    "part": "routing",
+    "state": "A host whose one app, routing_caller, requires the test contract routing_moves_on_503.v1, whose actions are get (idempotent) and put (not idempotent), each taking and returning a record with one integer field n, and holds a shared-secret key to sign its calls. The host's settings list U, then B as the remote providers of routing_moves_on_503.v1, in that order, and name local-first for it. Each provider is bound on a loopback address; every one but R listens and records every request it receives: U answers 503 with no neolith error body; B answers 200 with the reply {\"n\":7}.",
+    "procedure": "1. From a root of routing_caller that holds a principal, a tracestate and a timeout of 10 seconds, call get with {\"n\":1}.\n2. The host's clock stands still at a whole number of seconds from before the root opens; U moves it by 5 ms after it reads its request and before it answers. The caller's own wait for each answer is not shortened by the move.",
+    "expected": "The call returns B's reply, {\"n\":7}. U receives one request, then B one. The two carry the same Idempotency-Key, Neolith-Principal, trace identifier in traceparent and tracestate, a different span identifier in traceparent, and an Authorization token minted for each attempt. B's Neolith-Timeout is 5 less than U's.",
+    "requirements": [
+      "TRN-8",
+      "TRN-68",
+      "TRN-71"
+    ]
+  },
+  {
+    "name": "routing_moves_on_refused_connection",
+    "part": "routing",
+    "state": "A host whose one app, routing_caller, requires the test contract routing_moves_on_refused_connection.v1, whose actions are get (idempotent) and put (not idempotent), each taking and returning a record with one integer field n, and holds a shared-secret key to sign its calls. The host's settings list R, then B as the remote providers of routing_moves_on_refused_connection.v1, in that order, and name local-first for it. Each provider is bound on a loopback address; every one but R listens and records every request it receives: R is a socket bound on a loopback address that never listens, so a connection to it is refused; B answers 200 with the reply {\"n\":7}.",
+    "procedure": "1. From a root of routing_caller that holds a principal, a tracestate and a timeout of 10 seconds, call get with {\"n\":1}.",
+    "expected": "The call returns B's reply, {\"n\":7}. B receives one request.",
+    "requirements": [
+      "TRN-8",
+      "TRN-68"
+    ]
+  },
+  {
+    "name": "routing_moves_on_unavailable_body",
+    "part": "routing",
+    "state": "A host whose one app, routing_caller, requires the test contract routing_moves_on_unavailable_body.v1, whose actions are get (idempotent) and put (not idempotent), each taking and returning a record with one integer field n, and holds a shared-secret key to sign its calls. The host's settings list N, then B as the remote providers of routing_moves_on_unavailable_body.v1, in that order, and name local-first for it. Each provider is bound on a loopback address; every one but R listens and records every request it receives: N answers 503 with a neolith error body of kind unavailable; B answers 200 with the reply {\"n\":7}.",
+    "procedure": "1. From a root of routing_caller that holds a principal, a tracestate and a timeout of 10 seconds, call get with {\"n\":1}.",
+    "expected": "The call returns B's reply, {\"n\":7}. N receives one request, then B one.",
+    "requirements": [
+      "TRN-8"
+    ]
+  },
+  {
+    "name": "routing_moves_on_reset_after_read",
+    "part": "routing",
+    "state": "A host whose one app, routing_caller, requires the test contract routing_moves_on_reset_after_read.v1, whose actions are get (idempotent) and put (not idempotent), each taking and returning a record with one integer field n, and holds a shared-secret key to sign its calls. The host's settings list X, then B as the remote providers of routing_moves_on_reset_after_read.v1, in that order, and name local-first for it. Each provider is bound on a loopback address; every one but R listens and records every request it receives: X reads the whole request, then resets the connection; B answers 200 with the reply {\"n\":7}.",
+    "procedure": "1. From a root of routing_caller that holds a principal, a tracestate and a timeout of 10 seconds, call get with {\"n\":1}.",
+    "expected": "The call returns B's reply, {\"n\":7}. X receives one request, then B one with the same Idempotency-Key.",
+    "requirements": [
+      "TRN-8",
+      "TRN-71"
+    ]
+  },
+  {
+    "name": "routing_put_stays_after_503",
+    "part": "routing",
+    "state": "A host whose one app, routing_caller, requires the test contract routing_put_stays_after_503.v1, whose actions are get (idempotent) and put (not idempotent), each taking and returning a record with one integer field n, and holds a shared-secret key to sign its calls. The host's settings list U, then B as the remote providers of routing_put_stays_after_503.v1, in that order, and name local-first for it. Each provider is bound on a loopback address; every one but R listens and records every request it receives: U answers 503 with no neolith error body; B answers 200 with the reply {\"n\":7}.",
+    "procedure": "1. From a root of routing_caller that holds a principal, a tracestate and a timeout of 10 seconds, call put with {\"n\":1}.",
+    "expected": "The call fails with unavailable. U receives one request, and B none.",
+    "requirements": [
+      "CON-4",
+      "TRN-8"
+    ]
+  },
+  {
+    "name": "routing_put_stays_after_refused_connection",
+    "part": "routing",
+    "state": "A host whose one app, routing_caller, requires the test contract routing_put_stays_after_refused_connection.v1, whose actions are get (idempotent) and put (not idempotent), each taking and returning a record with one integer field n, and holds a shared-secret key to sign its calls. The host's settings list R, then B as the remote providers of routing_put_stays_after_refused_connection.v1, in that order, and name local-first for it. Each provider is bound on a loopback address; every one but R listens and records every request it receives: R is a socket bound on a loopback address that never listens, so a connection to it is refused; B answers 200 with the reply {\"n\":7}.",
+    "procedure": "1. From a root of routing_caller that holds a principal, a tracestate and a timeout of 10 seconds, call put with {\"n\":1}.",
+    "expected": "The call fails with unavailable. B receives no request.",
+    "requirements": [
+      "CON-4",
+      "TRN-8"
+    ]
+  },
+  {
+    "name": "routing_put_stays_after_reset_after_read",
+    "part": "routing",
+    "state": "A host whose one app, routing_caller, requires the test contract routing_put_stays_after_reset_after_read.v1, whose actions are get (idempotent) and put (not idempotent), each taking and returning a record with one integer field n, and holds a shared-secret key to sign its calls. The host's settings list X, then B as the remote providers of routing_put_stays_after_reset_after_read.v1, in that order, and name local-first for it. Each provider is bound on a loopback address; every one but R listens and records every request it receives: X reads the whole request, then resets the connection; B answers 200 with the reply {\"n\":7}.",
+    "procedure": "1. From a root of routing_caller that holds a principal, a tracestate and a timeout of 10 seconds, call put with {\"n\":1}.",
+    "expected": "The call fails with unavailable. X receives one request, and B none.",
+    "requirements": [
+      "CON-4",
+      "TRN-8"
+    ]
+  },
+  {
+    "name": "routing_stays_on_timeout",
+    "part": "routing",
+    "state": "A host whose one app, routing_caller, requires the test contract routing_stays_on_timeout.v1, whose actions are get (idempotent) and put (not idempotent), each taking and returning a record with one integer field n, and holds a shared-secret key to sign its calls. The host's settings list E, then B as the remote providers of routing_stays_on_timeout.v1, in that order, and name local-first for it. Each provider is bound on a loopback address; every one but R listens and records every request it receives: E answers 504 with the neolith error body {\"kind\":\"timeout\",\"message\":\"the scripted provider answers timeout\"}; B answers 200 with the reply {\"n\":7}.",
+    "procedure": "1. From a root of routing_caller that holds a principal, a tracestate and a timeout of 10 seconds, call get with {\"n\":1}.",
+    "expected": "The call fails with timeout, with E's message, as E gave it. E receives one request, and B none.",
+    "requirements": [
+      "TRN-8",
+      "TRN-72"
+    ]
+  },
+  {
+    "name": "routing_stays_on_unauthenticated",
+    "part": "routing",
+    "state": "A host whose one app, routing_caller, requires the test contract routing_stays_on_unauthenticated.v1, whose actions are get (idempotent) and put (not idempotent), each taking and returning a record with one integer field n, and holds a shared-secret key to sign its calls. The host's settings list E, then B as the remote providers of routing_stays_on_unauthenticated.v1, in that order, and name local-first for it. Each provider is bound on a loopback address; every one but R listens and records every request it receives: E answers 401 with the neolith error body {\"kind\":\"unauthenticated\",\"message\":\"the scripted provider answers unauthenticated\"}; B answers 200 with the reply {\"n\":7}.",
+    "procedure": "1. From a root of routing_caller that holds a principal, a tracestate and a timeout of 10 seconds, call get with {\"n\":1}.",
+    "expected": "The call fails with unauthenticated, with E's message, as E gave it. E receives one request, and B none.",
+    "requirements": [
+      "TRN-8",
+      "TRN-72"
+    ]
+  },
+  {
+    "name": "routing_stays_on_permission_denied",
+    "part": "routing",
+    "state": "A host whose one app, routing_caller, requires the test contract routing_stays_on_permission_denied.v1, whose actions are get (idempotent) and put (not idempotent), each taking and returning a record with one integer field n, and holds a shared-secret key to sign its calls. The host's settings list E, then B as the remote providers of routing_stays_on_permission_denied.v1, in that order, and name local-first for it. Each provider is bound on a loopback address; every one but R listens and records every request it receives: E answers 403 with the neolith error body {\"kind\":\"permission_denied\",\"message\":\"the scripted provider answers permission_denied\"}; B answers 200 with the reply {\"n\":7}.",
+    "procedure": "1. From a root of routing_caller that holds a principal, a tracestate and a timeout of 10 seconds, call get with {\"n\":1}.",
+    "expected": "The call fails with permission_denied, with E's message, as E gave it. E receives one request, and B none.",
+    "requirements": [
+      "TRN-8",
+      "TRN-72"
+    ]
+  },
+  {
+    "name": "routing_stays_on_conflict",
+    "part": "routing",
+    "state": "A host whose one app, routing_caller, requires the test contract routing_stays_on_conflict.v1, whose actions are get (idempotent) and put (not idempotent), each taking and returning a record with one integer field n, and holds a shared-secret key to sign its calls. The host's settings list E, then B as the remote providers of routing_stays_on_conflict.v1, in that order, and name local-first for it. Each provider is bound on a loopback address; every one but R listens and records every request it receives: E answers 409 with the neolith error body {\"kind\":\"conflict\",\"message\":\"the scripted provider answers conflict\"}; B answers 200 with the reply {\"n\":7}.",
+    "procedure": "1. From a root of routing_caller that holds a principal, a tracestate and a timeout of 10 seconds, call get with {\"n\":1}.",
+    "expected": "The call fails with conflict, with E's message, as E gave it. E receives one request, and B none.",
+    "requirements": [
+      "TRN-8",
+      "TRN-72"
+    ]
+  },
+  {
+    "name": "routing_stays_on_internal",
+    "part": "routing",
+    "state": "A host whose one app, routing_caller, requires the test contract routing_stays_on_internal.v1, whose actions are get (idempotent) and put (not idempotent), each taking and returning a record with one integer field n, and holds a shared-secret key to sign its calls. The host's settings list E, then B as the remote providers of routing_stays_on_internal.v1, in that order, and name local-first for it. Each provider is bound on a loopback address; every one but R listens and records every request it receives: E answers 500 with the neolith error body {\"kind\":\"internal\",\"message\":\"the scripted provider answers internal\"}; B answers 200 with the reply {\"n\":7}.",
+    "procedure": "1. From a root of routing_caller that holds a principal, a tracestate and a timeout of 10 seconds, call get with {\"n\":1}.",
+    "expected": "The call fails with internal, with E's message, as E gave it. E receives one request, and B none.",
+    "requirements": [
+      "TRN-8",
+      "TRN-72"
+    ]
+  },
+  {
+    "name": "routing_stays_on_declared_kind",
+    "part": "routing",
+    "state": "A host whose one app, routing_caller, requires the test contract routing_stays_on_declared_kind.v1, whose actions are get (idempotent, declaring the kind gone with a detail of one string field reason) and put (not idempotent), each taking and returning a record with one integer field n, and holds a shared-secret key to sign its calls. The host's settings list E, then B as the remote providers of routing_stays_on_declared_kind.v1, in that order, and name local-first for it. Each provider is bound on a loopback address; every one but R listens and records every request it receives: E answers 422 with the neolith error body {\"kind\":\"gone\",\"message\":\"the scripted provider answers gone\",\"data\":{\"reason\":\"the scripted provider says gone\"}}; B answers 200 with the reply {\"n\":7}.",
+    "procedure": "1. From a root of routing_caller that holds a principal, a tracestate and a timeout of 10 seconds, call get with {\"n\":1}.",
+    "expected": "The call fails with gone, with E's message and detail, as E gave them. E receives one request, and B none.",
+    "requirements": [
+      "TRN-8",
+      "TRN-72"
+    ]
+  },
+  {
+    "name": "routing_invalid_reply_stays",
+    "part": "routing",
+    "state": "A host whose one app, routing_caller, requires the test contract routing_invalid_reply_stays.v1, whose actions are get (idempotent) and put (not idempotent), each taking and returning a record with one integer field n, and holds a shared-secret key to sign its calls. The host's settings list V, then B as the remote providers of routing_invalid_reply_stays.v1, in that order, and name local-first for it. Each provider is bound on a loopback address; every one but R listens and records every request it receives: V answers 200 with {\"n\":\"seven\"}, which is not a valid reply; B answers 200 with the reply {\"n\":7}.",
+    "procedure": "1. From a root of routing_caller that holds a principal, a tracestate and a timeout of 10 seconds, call get with {\"n\":1}.",
+    "expected": "The call fails with internal. V receives one request, and B none.",
+    "requirements": [
+      "TRN-8",
+      "TRN-18"
+    ]
+  },
+  {
+    "name": "routing_silent_provider_times_out",
+    "part": "routing",
+    "state": "A host whose one app, routing_caller, requires the test contract routing_silent_provider_times_out.v1, whose actions are get (idempotent) and put (not idempotent), each taking and returning a record with one integer field n, and holds a shared-secret key to sign its calls. The host's settings list S, then B as the remote providers of routing_silent_provider_times_out.v1, in that order, and name local-first for it. Each provider is bound on a loopback address; every one but R listens and records every request it receives: S reads the request and never answers; B answers 200 with the reply {\"n\":7}.",
+    "procedure": "1. From a root of routing_caller that holds a principal, a tracestate and a timeout of 500 ms, call get with {\"n\":1}.",
+    "expected": "The call fails with timeout once its deadline passes. S receives one request, and B none.",
+    "requirements": [
+      "TRN-8",
+      "TRN-38"
+    ]
+  },
+  {
+    "name": "routing_no_time_left_ends_unavailable",
+    "part": "routing",
+    "state": "A host whose one app, routing_caller, requires the test contract routing_no_time_left_ends_unavailable.v1, whose actions are get (idempotent) and put (not idempotent), each taking and returning a record with one integer field n, and holds a shared-secret key to sign its calls. The host's settings list U, then B as the remote providers of routing_no_time_left_ends_unavailable.v1, in that order, and name local-first for it. Each provider is bound on a loopback address; every one but R listens and records every request it receives: U answers 503 with no neolith error body; B answers 200 with the reply {\"n\":7}.",
+    "procedure": "1. From a root of routing_caller that holds a principal, a tracestate and a timeout of 10 seconds, call get with {\"n\":1}.\n2. The host's clock stands still at a whole number of seconds from before the root opens; U moves it into the last millisecond before the call's deadline, so that under 1 ms is left and the deadline has not passed, after it reads its request and before it answers. The caller's own wait for U's answer is not shortened by the move.",
+    "expected": "The call fails with unavailable. U receives one request, and B none.",
+    "requirements": [
+      "TRN-70",
+      "TRN-72"
+    ]
+  },
+  {
+    "name": "routing_last_entry_unavailable",
+    "part": "routing",
+    "state": "A host whose one app, routing_caller, requires the test contract routing_last_entry_unavailable.v1, whose actions are get (idempotent) and put (not idempotent), each taking and returning a record with one integer field n, and holds a shared-secret key to sign its calls. The host's settings list U, then D as the remote providers of routing_last_entry_unavailable.v1, in that order, and name local-first for it. Each provider is bound on a loopback address; every one but R listens and records every request it receives: U answers 503 with no neolith error body; D answers 503 with no neolith error body, as U does.",
+    "procedure": "1. From a root of routing_caller that holds a principal, a tracestate and a timeout of 10 seconds, call get with {\"n\":1}.",
+    "expected": "The call fails with unavailable, D's. U receives one request, then D one.",
+    "requirements": [
+      "TRN-69",
+      "TRN-72"
+    ]
+  },
+  {
+    "name": "routing_moves_with_no_deadline",
+    "part": "routing",
+    "state": "A host whose one app, routing_caller, requires the test contract routing_moves_with_no_deadline.v1, whose actions are get (idempotent) and put (not idempotent), each taking and returning a record with one integer field n, and holds a shared-secret key to sign its calls. The host's settings list U, then B as the remote providers of routing_moves_with_no_deadline.v1, in that order, and name local-first for it. Each provider is bound on a loopback address; every one but R listens and records every request it receives: U answers 503 with no neolith error body; B answers 200 with the reply {\"n\":7}.",
+    "procedure": "1. From a root of routing_caller that holds a principal, a tracestate and no deadline, call get with {\"n\":1}.",
+    "expected": "The call returns B's reply, {\"n\":7}. U receives one request, then B one, and neither carries Neolith-Timeout.",
+    "requirements": [
+      "TRN-8"
+    ]
+  },
+  {
+    "name": "routing_each_call_starts_first",
+    "part": "routing",
+    "state": "A host whose one app, routing_caller, requires the test contract routing_each_call_starts_first.v1, whose actions are get (idempotent) and put (not idempotent), each taking and returning a record with one integer field n, and holds a shared-secret key to sign its calls. The host's settings list U, then B as the remote providers of routing_each_call_starts_first.v1, in that order, and name local-first for it. Each provider is bound on a loopback address; every one but R listens and records every request it receives: U answers 503 with no neolith error body; B answers 200 with the reply {\"n\":7}.",
+    "procedure": "1. From a root of routing_caller that holds a principal, a tracestate and a timeout of 10 seconds, call get with {\"n\":1}.\n2. Do step 1 again, in a new root.",
+    "expected": "Each call returns B's reply, {\"n\":7}. U receives two requests, each before its call's request to B: U, B, U, B. Each call's two requests carry one Idempotency-Key, and the two calls' keys differ.",
+    "requirements": [
+      "TRN-68"
+    ]
+  }
+]

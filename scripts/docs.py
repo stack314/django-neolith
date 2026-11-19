@@ -33,7 +33,10 @@ it, and inside the repository must sit under ``build/``.
 
 A staged page that holds an email address is a problem, and is left out.
 
-**Build** runs Sphinx with ``-W -n --keep-going`` and reports each warning.
+**Build** runs Sphinx with ``-W -n --keep-going`` and reports each warning,
+then copies each file of ``mirror_files``, the reference document and the
+case files of ``spec/conformance/``, to the same path in the HTML, byte for
+byte.
 The extension ``docs/site/_ext/neolith_docs.py`` anchors requirements, links
 and checks citations, refuses raw HTML in pages the site writes, and records
 each ``{planned}`` block in ``planned.json``.
@@ -68,6 +71,7 @@ import inspect
 import io
 import json
 import math
+import os
 import posixpath
 import re
 import shutil
@@ -79,7 +83,8 @@ import urllib.request
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from typing import Final
 
 from markdown_it import MarkdownIt
 from markdown_it.common.utils import unescapeAll
@@ -116,10 +121,12 @@ API_GROUPS: dict[str, tuple[str, str, tuple[str, ...]]] = {
     ),
     "errors": (
         "Errors",
-        "The exceptions neolith raises.",
+        "The exceptions neolith raises, and the one a backend raises to refuse "
+        "a credential (ADR 0027).",
         (
             "ContractError",
             "ContractDefinitionError",
+            "CredentialRefused",
             "DeclarationError",
             "UsageError",
         ),
@@ -227,6 +234,161 @@ def mirror_table(root: Path) -> dict[str, str]:
     for path in sorted((root / "docs" / "adr").glob("[0-9][0-9][0-9][0-9]-*.md")):
         table[f"docs/adr/{path.name}"] = f"adr/{path.name}"
     return table
+
+
+def mirror_files(root: Path) -> dict[str, str]:
+    """Map each file the site serves as it is to its path in the HTML.
+
+    These are the files under ``spec/conformance/``, the reference document
+    and the case files (ADR 0032 Decisions 3 and 7), each at the same path,
+    beside the specification's pages. Every entry is listed, a symbolic link
+    or a file that is not JSON among them, so ``copy_files`` can refuse it; a
+    symbolic link is listed and never followed, and when ``spec`` or
+    ``spec/conformance`` is one, it is the only entry.
+
+    Args:
+        root: The repository root.
+
+    Returns:
+        Repository paths (POSIX, relative to ``root``) to paths in the HTML.
+    """
+    base = root / "spec" / "conformance"
+    for above in (base.parent, base):
+        if above.is_symlink():
+            rel = above.relative_to(root).as_posix()
+            return {rel: rel}
+    table: dict[str, str] = {}
+    for directory, folders, files in os.walk(base, followlinks=False):
+        for name in folders + files:
+            path = Path(directory) / name
+            if name in files or path.is_symlink():
+                rel = path.relative_to(root).as_posix()
+                table[rel] = rel
+    return dict(sorted(table.items()))
+
+
+# The integers every JSON reader holds exactly (RFC 7493, section 2.2).
+_EXACT_INTEGER: Final = 2**53 - 1
+
+
+def _strict_json(text: str) -> object:
+    """Read I-JSON text (RFC 7493), refusing anything else.
+
+    Refused: a repeated member name (section 2.3), so no member's value is
+    dropped before it is checked; a string or member name holding a
+    surrogate or a noncharacter (section 2.1); and a number no double holds:
+    ``NaN``, ``Infinity``, a number that reads as infinite, such as
+    ``1e400``, and an integer outside +/-(2**53 - 1) (section 2.2).
+
+    Raises:
+        ValueError: The text is not such JSON.
+    """
+
+    def pairs(found: list[tuple[str, object]]) -> dict[str, object]:
+        names = [name for name, _ in found]
+        if len(set(names)) != len(names):
+            raise ValueError("a member name is repeated")
+        return dict(found)
+
+    def constant(name: str) -> object:
+        raise ValueError(f"{name} is not JSON")
+
+    def number(written: str) -> float:
+        value = float(written)
+        if not math.isfinite(value):
+            raise ValueError(f"{written} is outside the range of a double")
+        return value
+
+    def integer(written: str) -> int:
+        value = int(written)
+        if abs(value) > _EXACT_INTEGER:
+            raise ValueError("an integer is outside +/-(2**53 - 1)")
+        return value
+
+    value = json.loads(
+        text,
+        object_pairs_hook=pairs,
+        parse_constant=constant,
+        parse_float=number,
+        parse_int=integer,
+    )
+    for string in _json_strings(value):
+        for character in string:
+            point = ord(character)
+            if (
+                0xD800 <= point <= 0xDFFF
+                or 0xFDD0 <= point <= 0xFDEF
+                or point & 0xFFFE == 0xFFFE
+            ):
+                raise ValueError(f"U+{point:04X} is a surrogate or a noncharacter")
+    return value
+
+
+def _json_strings(value: object) -> Iterator[str]:
+    """Every string a JSON value holds, its object keys among them."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield key
+            yield from _json_strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _json_strings(item)
+
+
+def _copy_problem(root: Path, repo_path: str) -> tuple[str | None, bytes]:
+    """Why a file of ``mirror_files`` is not copied, or ``None``, and its bytes."""
+    path = root
+    for part in PurePosixPath(repo_path).parts:
+        path = path / part
+        if path.is_symlink():
+            return "a symbolic link", b""
+    source = root / repo_path
+    if not source.is_file():
+        return "not a file", b""
+    if source.suffix != ".json":
+        return "not a JSON file", b""
+    raw = source.read_bytes()
+    try:
+        text = raw.decode("utf-8")
+        strings = [text, *_json_strings(_strict_json(text))]
+    except ValueError:
+        return "not I-JSON text in UTF-8", b""
+    if any(_EMAIL.search(string) for string in strings):
+        return "holds an email address", b""
+    if _secrets(strings, seen=False):
+        return "holds something shaped like a secret", b""
+    return None, raw
+
+
+def copy_files(root: Path, html: Path) -> list[str]:
+    """Copy each file of ``mirror_files`` into ``html``, byte for byte.
+
+    A file is not copied, and is a problem, when it or a folder above it in
+    the repository is a symbolic link, when it is not a file whose name ends
+    in ``.json`` and that holds I-JSON text in UTF-8, as ``_strict_json``
+    reads it, or when its text or a
+    string it holds, as a JSON reader decodes it, holds an email address or
+    a known token form. So the site serves no file from outside the
+    repository, and none that staging or the HTML check would refuse.
+
+    Returns:
+        One line per file that is not copied.
+    """
+    problems: list[str] = []
+    for repo_path, site_path in mirror_files(root).items():
+        try:
+            problem, raw = _copy_problem(root, repo_path)
+            if problem is not None:
+                problems.append(f"{repo_path}: {problem}; it is not copied")
+                continue
+            target = html / site_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(raw)
+        except Exception as error:  # reported, and the rest copied
+            problems.append(f"{repo_path}: cannot be copied: {error!r}")
+    return problems
 
 
 @dataclass
@@ -867,6 +1029,10 @@ def build(
     problems.extend(said)
     if status and not said:
         problems.append(f"Sphinx failed with status {status}:\n{output.getvalue()}")
+    try:
+        problems.extend(copy_files(root, html))
+    except Exception as error:  # reported with what came before
+        problems.append(f"the files of spec/conformance/ cannot be copied: {error!r}")
     return Result(html, problems)
 
 

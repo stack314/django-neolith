@@ -50,7 +50,29 @@ MIDDLEWARE = [
 ]
 ROOT_URLCONF = "tests.run_apps.desk.urls"
 USE_TZ = True
+# Its apps are called in-process only, with no caller backend (ADR 0027).
+SILENCED_SYSTEM_CHECKS = ["neolith.W004"]
 NEOLITH = {neolith!r}
+"""
+
+
+# The command line, with the deployer's module imported through importlib's
+# LazyLoader, so that its code runs when it is first read, not imported.
+_LAZY = """\
+import importlib.abc, importlib.machinery, importlib.util, sys
+
+class Lazy(importlib.abc.MetaPathFinder):
+    def find_spec(self, name, path, target=None):
+        if name != "deployer":
+            return None
+        spec = importlib.machinery.PathFinder.find_spec(name, path)
+        if spec is not None and spec.loader is not None:
+            spec.loader = importlib.util.LazyLoader(spec.loader)
+        return spec
+
+sys.meta_path.insert(0, Lazy())
+from neolith._cli import main
+sys.exit(main(sys.argv[1:]))
 """
 
 
@@ -88,10 +110,11 @@ class Site:
         }
 
     def neolith(
-        self, *arguments: str, env: dict[str, str] | None = None
+        self, *arguments: str, env: dict[str, str] | None = None, lazy: bool = False
     ) -> subprocess.CompletedProcess[str]:
+        entry = ["-c", _LAZY] if lazy else ["-m", "neolith"]
         return subprocess.run(  # noqa: S603
-            [sys.executable, "-W", "error", "-m", "neolith", *arguments],
+            [sys.executable, "-W", "error", *entry, *arguments],
             capture_output=True,
             text=True,
             check=False,
@@ -542,11 +565,12 @@ def test_the_package_installs_one_console_script() -> None:
     ],
     ids=["calls the builder", "reads a setting", "configures", "raises"],
 )
+@pytest.mark.parametrize("lazy", [False, True], ids=["imported", "lazily imported"])
 def test_a_settings_module_of_the_wrong_kind_is_refused(
-    site: Site, command: str, below: str, message: str
+    site: Site, command: str, below: str, message: str, lazy: bool
 ) -> None:
     site.deployer(below=below)
-    ran = site.neolith(command, DESK, "--settings", "deployer")
+    ran = site.neolith(command, DESK, "--settings", "deployer", lazy=lazy)
     assert ran.returncode == 1, ran.stderr
     assert message in ran.stderr.splitlines()[0] + ran.stderr, ran.stderr
     assert not site.database("desk").exists()
@@ -576,6 +600,7 @@ def test_a_settings_module_that_cannot_be_found_is_refused(site: Site) -> None:
     )
 
 
+@pytest.mark.conformance_case("lifecycle_refused_settings_stop_the_host")
 @pytest.mark.spec("APP-16")
 @pytest.mark.parametrize("command", ["run", "migrate"])
 def test_a_default_database_is_refused_with_the_other_settings_refusals(
@@ -616,6 +641,7 @@ def test_the_environment_s_settings_module_is_ignored(site: Site) -> None:
 # The phases, in order.
 
 
+@pytest.mark.conformance_case("lifecycle_a_refusing_phase_stops_the_host")
 @pytest.mark.spec("APP-1", "APP-38")
 @pytest.mark.parametrize(
     ("apps", "refusal", "later"),
@@ -657,6 +683,7 @@ def test_a_phase_that_refuses_stops_the_host_before_the_next(
     assert "neolith: serving" not in printed
 
 
+@pytest.mark.conformance_case("lifecycle_the_host_never_changes_a_schema")
 @pytest.mark.spec("APP-33", "APP-46")
 def test_a_host_never_changes_a_schema_itself(site: Site) -> None:
     """Neither a missing file nor a file whose app is not migrated is
@@ -679,6 +706,7 @@ def test_a_host_never_changes_a_schema_itself(site: Site) -> None:
     assert site.database("desk").read_bytes() == before
 
 
+@pytest.mark.conformance_case("lifecycle_an_address_in_use_stops_the_host")
 @pytest.mark.spec("APP-1")
 def test_an_address_in_use_stops_the_host(site: Site) -> None:
     site.deployer()
@@ -698,6 +726,7 @@ def test_an_address_in_use_stops_the_host(site: Site) -> None:
 # One app, alone, on SQLite (spec 06, item 5).
 
 
+@pytest.mark.conformance_case("lifecycle_one_app_boots_alone")
 @pytest.mark.spec("APP-23", "APP-38", "APP-43")
 @pytest.mark.parametrize("bind", ["127.0.0.1:0", "[::1]:0"], ids=["ipv4", "ipv6"])
 def test_one_app_boots_alone_on_sqlite_and_stops(
@@ -736,6 +765,7 @@ def test_one_app_boots_alone_on_sqlite_and_stops(
 # Drain.
 
 
+@pytest.mark.conformance_case("lifecycle_drain_lets_requests_in_flight_finish")
 @pytest.mark.spec("APP-39", "APP-40", "APP-41", "APP-43")
 @pytest.mark.parametrize(
     "number", [signal.SIGTERM, signal.SIGINT], ids=["SIGTERM", "SIGINT"]
@@ -936,6 +966,7 @@ def test_a_cut_request_that_writes_without_end_still_exits_1(
             process.stdout.close()
 
 
+@pytest.mark.conformance_case("lifecycle_a_second_signal_stops_at_once")
 @pytest.mark.spec("APP-44", "APP-45")
 def test_a_second_signal_stops_at_once(
     site: Site, served: Callable[..., Served]
@@ -1096,6 +1127,60 @@ def test_a_request_that_ends_before_drain_leaves_its_connection_open() -> None:
     assert handler.open()
     assert table.drain() == 0
     assert handler.shut()
+
+
+def test_the_open_count_holds_every_open_connection_until_it_closes() -> None:
+    # A connection counts from when it opens, before its request line is
+    # read, while a request is in flight and between requests, until it
+    # closes; one refused during Drain never counts.
+    table = _server.Connections()
+    first, second = _Handler(), _Handler()
+    assert table.open_count() == 0
+    assert table.opened(first)
+    assert table.in_flight() == []
+    assert table.open_count() == 1
+    assert table.opened(second)
+    assert table.begin(second, LINE)
+    assert table.open_count() == 2
+    assert table.ended(second) is False
+    assert table.open_count() == 2
+    table.closed(second)
+    assert table.open_count() == 1
+    table.closed(second)
+    assert table.open_count() == 1
+    assert table.drain() == 0
+    assert not table.opened(_Handler())
+    assert table.open_count() == 1
+    table.closed(first)
+    assert table.open_count() == 0
+
+
+def _answer(environ: dict[str, Any], start: Callable[..., object]) -> list[bytes]:
+    start("200 OK", [("Content-Type", "text/plain"), ("Content-Length", "2")])
+    return [b"ok"]
+
+
+def test_a_connection_is_served_without_nagle_s_delay() -> None:
+    # The status line, the header fields and the body are written apart, so
+    # with Nagle's algorithm on, each response after a connection's first
+    # would wait for the client's delayed acknowledgement.
+    server = _server.listen("127.0.0.1", 0, ipv6=False)
+    server.set_app(_answer)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        client = http.client.HTTPConnection("127.0.0.1", server.server_address[1])
+        for _ in range(2):
+            client.request("GET", "/")
+            assert client.getresponse().read() == b"ok"
+        (handler,) = server.connections._open
+        nodelay = handler.connection.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY)
+        assert nodelay != 0
+        client.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(10)
 
 
 @pytest.mark.spec("APP-44")

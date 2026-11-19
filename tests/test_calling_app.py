@@ -6,6 +6,11 @@ call from no app with ``unauthenticated``, and a principal from a calling app
 not on the contract's allow-list with ``permission_denied``, before it checks
 the deadline or reads the request (ADR 0017 Decisions 6 and 9, ADR 0010
 Decision 7). Time is a clock the tests set, never a sleep.
+
+These tests stay outside the contract suite (CONTRIBUTING T2): they check the
+host's own apps, what each app's declaration requires and which calling app a
+scope names, on the in-process transport with a clock the tests set, not what
+a contract's semantics are over every transport.
 """
 
 import itertools
@@ -34,6 +39,7 @@ from neolith import (
 from neolith._connector import Connector, Failure, InProcess
 from neolith._context import Sent
 from neolith._contracts import Action
+from neolith._crossing import Receiver
 from neolith._declaration import declaration_of
 from neolith._host import _current
 from tests import host_apps
@@ -294,7 +300,7 @@ def _sent(**changes: Any) -> Sent:  # noqa: ANN401
         "principal": None,
         "trace_id": "0af7651916cd43dd8448eb211c80319c",
         "tracestate": "",
-        "budget": None,
+        "deadline": None,
         "idempotency_key": "parent-key",
         "caller": "shop",
     }
@@ -307,7 +313,7 @@ def _sent(**changes: Any) -> Sent:  # noqa: ANN401
 # does not read. Each arrives alone and with the others.
 _LATER: dict[str, dict[str, Any]] = {
     "principal": {"principal": b"\xff not a principal"},
-    "deadline": {"budget": 0},
+    "deadline": {"deadline": 1000.0},
     "request": {},
 }
 
@@ -435,6 +441,7 @@ class _LateRefusal:
 
     def __init__(self, inner: InProcess, clock: Clock) -> None:
         self.contract = inner.contract
+        self.receiver = Receiver.IN_PROCESS
         self._inner = inner
         self._clock = clock
 
@@ -574,7 +581,7 @@ def test_each_hosted_transport_holds_exactly_its_apps_declaration() -> None:
                     contract.identity for contract in declaration.requires
                 )
                 checked.append(identity)
-    assert sorted(checked) == ["couriers.v3", "stock.v1"]
+    assert sorted(checked) == ["couriers.v3", "reference.v1", "stock.v1"]
 
 
 @pytest.mark.spec("TRN-43")

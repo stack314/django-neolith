@@ -36,7 +36,7 @@ from django.core.management.base import CommandError
 from django.db import connections
 from django.db.migrations.executor import MigrationExecutor
 
-from neolith import _boot, _databases
+from neolith import _boot, _databases, _naming
 from neolith._declaration import declaration_of
 
 __all__ = ["check", "migrate", "refused"]
@@ -46,13 +46,7 @@ _HOST: Final = "neolith"
 
 
 def _cause(error: BaseException) -> str:
-    try:
-        text = str(error)
-    except Exception:
-        text = "<the message cannot be read>"
-    if len(text) > _SHOWN:
-        text = f"{text[:_SHOWN]}..."
-    return f"{type(error).__qualname__}: {text}"
+    return _naming.cause(error, _SHOWN + 3)
 
 
 def _labels() -> tuple[list[str], list[str]]:

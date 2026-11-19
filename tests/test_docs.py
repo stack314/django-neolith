@@ -127,6 +127,133 @@ def test_the_mirror_table_holds_every_spec_document_and_record() -> None:
     assert "CODE_OF_CONDUCT.md" not in table
 
 
+def test_every_file_of_spec_conformance_is_mirrored_at_its_own_path() -> None:
+    files = docs.mirror_files(ROOT)
+    on_disk = sorted(
+        path.relative_to(ROOT).as_posix()
+        for path in (ROOT / "spec" / "conformance").rglob("*")
+        if path.is_file()
+    )
+    assert "spec/conformance/reference.v1.openapi.json" in on_disk
+    assert list(files) == on_disk
+    assert all(site == repo for repo, site in files.items())
+
+
+def test_the_files_are_copied_byte_for_byte_and_only_json(tmp_path: Path) -> None:
+    root, html = tmp_path / "root", tmp_path / "html"
+    base = root / "spec" / "conformance"
+    (base / "cases").mkdir(parents=True)
+    # The nearest admitted files: escapes, non-ASCII text, an "@" that is no
+    # address, a nested folder, and one name in several objects.
+    admitted = {
+        "spec/conformance/reference.v1.openapi.json": (
+            b'{"a": "\\u00e9\xc3\xa9", "pattern": "^[^@]+$"}\n'
+        ),
+        # One member name in two objects is no repetition; the largest double
+        # and exact integer, a surrogate pair and U+FFFD are I-JSON.
+        "spec/conformance/cases/contract.json": (
+            b'[{"a": 1}, {"a": {"a": 2}}, 1.7976931348623157e+308, -9007199254740991,'
+            b' "\\ud83d\\ude00", "\xef\xbf\xbd"]'
+        ),
+    }
+    for name, raw in admitted.items():
+        (root / name).write_bytes(raw)
+    refused = {
+        "notes.md": (b"# Notes\n", "not a JSON file"),
+        "broken.json": (b"{", "not I-JSON text in UTF-8"),
+        "latin.json": (b'"\xe9"', "not I-JSON text in UTF-8"),
+        "repeated.json": (
+            b'{"by": "a\\u0040example.org", "by": "x"}',
+            "not I-JSON text in UTF-8",
+        ),
+        "nested.json": (
+            b'[{"a": 1, "b": {"c": 1, "c": 2}}]',
+            "not I-JSON text in UTF-8",
+        ),
+        "nan.json": (b'{"n": NaN}', "not I-JSON text in UTF-8"),
+        "infinity.json": (b"[-Infinity]", "not I-JSON text in UTF-8"),
+        "huge.json": (b"[1e400]", "not I-JSON text in UTF-8"),
+        "tiny.json": (b"[-1e400]", "not I-JSON text in UTF-8"),
+        "inexact.json": (b"[9007199254740992]", "not I-JSON text in UTF-8"),
+        "surrogate.json": (b'["\\ud800"]', "not I-JSON text in UTF-8"),
+        "surrogate-key.json": (b'{"\\udfff": 1}', "not I-JSON text in UTF-8"),
+        "noncharacter.json": ('["\uffff"]'.encode(), "not I-JSON text in UTF-8"),
+        "noncharacter-escaped.json": (b'["\\ufdd0"]', "not I-JSON text in UTF-8"),
+        "plane.json": ('{"k": "\U0010fffe"}'.encode(), "not I-JSON text in UTF-8"),
+        "bom.json": (b"\xef\xbb\xbf[]", "not I-JSON text in UTF-8"),
+        "mail.json": (b'{"by": "a@example.org"}', "holds an email address"),
+        "escaped.json": (
+            b'{"by": "a\\u0040example.org"}',
+            "holds an email address",
+        ),
+        "key.json": (
+            b'{"a\\u0040example.org": 1}',
+            "holds an email address",
+        ),
+        "token.json": (
+            b'["ghp_' + b"a" * 36 + b'"]',
+            "holds something shaped like a secret",
+        ),
+        "escaped-token.json": (
+            b'{"t": "gh\\u0070_' + b"a" * 36 + b'"}',
+            "holds something shaped like a secret",
+        ),
+    }
+    for name, (raw, _) in refused.items():
+        (base / name).write_bytes(raw)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.json").write_text("{}", "utf-8")
+    (base / "linked.json").symlink_to(outside / "secret.json")
+    (base / "folder").symlink_to(outside)
+    (base / "dangling.json").symlink_to(tmp_path / "missing.json")
+    problems = docs.copy_files(root, html)
+    expected = {
+        f"spec/conformance/{name}: {why}; it is not copied"
+        for name, (_, why) in refused.items()
+    } | {
+        f"spec/conformance/{name}: a symbolic link; it is not copied"
+        for name in ("linked.json", "folder", "dangling.json")
+    }
+    assert sorted(problems) == sorted(expected)
+    copied = sorted(
+        path.relative_to(html).as_posix() for path in html.rglob("*") if path.is_file()
+    )
+    assert copied == sorted(admitted)
+    for name, raw in admitted.items():
+        assert (html / name).read_bytes() == raw
+
+
+@pytest.mark.parametrize("linked", ["spec", "spec/conformance"])
+def test_a_linked_folder_above_the_files_is_never_followed(
+    tmp_path: Path, linked: str
+) -> None:
+    root, html, outside = tmp_path / "root", tmp_path / "html", tmp_path / "outside"
+    (outside / "conformance").mkdir(parents=True)
+    (outside / "conformance" / "secret.json").write_text("{}", "utf-8")
+    (root / linked).parent.mkdir(parents=True, exist_ok=True)
+    (root / linked).symlink_to(outside if linked == "spec" else outside / "conformance")
+    assert docs.mirror_files(root) == {linked: linked}
+    assert docs.copy_files(root, html) == [
+        f"{linked}: a symbolic link; it is not copied"
+    ]
+    assert not html.exists()
+
+
+def test_a_build_copies_the_files_of_spec_conformance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def run(argv: list[str]) -> int:
+        Path(argv[-1]).mkdir(parents=True)
+        return 0
+
+    _fake_sphinx(monkeypatch, run)
+    result = docs.build(ROOT, tmp_path)
+    assert result.problems == ["inventory problem"]
+    for repo_path, site_path in docs.mirror_files(ROOT).items():
+        assert (result.path / site_path).read_bytes() == (ROOT / repo_path).read_bytes()
+
+
 @pytest.mark.parametrize(
     ("source", "written", "staged"),
     [
@@ -1584,6 +1711,8 @@ def test_the_site_builds_and_passes_every_check(tmp_path: Path) -> None:
     (ident,) = record["concepts/index.html"]
     assert f'class="admonition planned" id="{ident}"' in read("concepts")
     assert 'href="../spec/00-overview/#ovr-5"' in read("concepts")
+    for repo_path, site_path in docs.mirror_files(docs.ROOT).items():
+        assert (built / site_path).read_bytes() == (ROOT / repo_path).read_bytes()
 
 
 # Each entry: a page, or a patch run before the build, and what must be said.

@@ -27,11 +27,12 @@ from typing import Any
 from wsgiref.util import setup_testing_defaults
 
 import pytest
+from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.core.handlers import base
 from django.core.handlers.asgi import ASGIHandler
 from django.core.handlers.wsgi import WSGIHandler
-from django.test import override_settings
+from django.test import RequestFactory, override_settings
 
 from neolith import _context
 from neolith.middleware import RootMiddleware
@@ -345,7 +346,7 @@ def test_a_request_root_has_the_host_s_request_deadline(
     ``NEOLITH``, and Django loads the apps of an override before it applies
     the override's settings, so ``NEOLITH`` is overridden first."""
     request_site.SEEN.clear()
-    with override_settings(NEOLITH={**host_apps.SERVED, **neolith}), _site():
+    with override_settings(NEOLITH={**settings.NEOLITH, **neolith}), _site():
         assert serve(mode, "/page/").body == b"as web"
     assert courier_services.CONTEXTS[-1].deadline == deadline
     request_site.HELD.clear()
@@ -552,10 +553,10 @@ def test_a_signal_to_stop_from_the_chain_closes_the_root_and_goes_on(
         return respond(request)
 
     with pytest.raises(stop):
-        RootMiddleware(respond)(object())  # type: ignore[arg-type]
+        RootMiddleware(respond)(RequestFactory().get("/page/"))
     middleware = RootMiddleware(arespond)
     with pytest.raises(stop):
-        asyncio.run(middleware(object()))  # type: ignore[arg-type]
+        asyncio.run(middleware(RequestFactory().get("/page/")))  # type: ignore[arg-type]
     assert len(held) == 2
     assert all(held_one.run(_context._CURRENT.get).closed for held_one in held)  # type: ignore[union-attr]
     assert _context._CURRENT.get() is None
@@ -979,7 +980,7 @@ def test_the_middleware_leaves_no_root_behind_in_its_caller(site: None) -> None:
         assert middleware._REQUEST.get() is not None
         return None
 
-    RootMiddleware(respond)(object())  # type: ignore[arg-type]
+    RootMiddleware(respond)(RequestFactory().get("/page/"))
     assert middleware._REQUEST.get() is None
     assert _context._CURRENT.get() is None
 

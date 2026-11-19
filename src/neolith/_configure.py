@@ -16,7 +16,11 @@ does not run:
    no label the host reserves, no battery that is a hosted app or
    ``neolith``.
 3. **Resolve.** ADR 0021's function, whose refusals are one
-   ``DeclarationError``.
+   ``DeclarationError``, with the remote providers that the deployer's
+   ``NEOLITH["REMOTE_PROVIDERS"]`` names (ADR 0014) and the routing
+   policies ``NEOLITH["ROUTING_POLICIES"]`` names (ADR 0031). Resolve reads
+   ``NEOLITH``, so its refusals come with every problem found there, or
+   with the refusal of settings that are not a ``dict``.
 4. **Configure.** The deployer's mapping, row by row.
 
 ``settings_problems`` is the same Configure, run at the first set-up on the
@@ -25,14 +29,14 @@ settings Django holds (``neolith.E005``).
 """
 
 from collections.abc import Iterable, Sequence
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from django.apps import AppConfig
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.db.utils import ConnectionHandler
 
-from neolith import _checks, _databases
+from neolith import _checks, _databases, _naming
 from neolith._declaration import Declaration, DeclarationError, declaration_of
 
 __all__ = [
@@ -68,7 +72,7 @@ class EarlyRead(ImproperlyConfigured):
 
 
 def _type(value: object) -> str:
-    return type(value).__qualname__
+    return _naming.type_name(value)
 
 
 def _shown(text: str) -> str:
@@ -76,11 +80,7 @@ def _shown(text: str) -> str:
 
 
 def _cause(error: BaseException) -> str:
-    try:
-        text = str(error)
-    except Exception:
-        text = "<the message cannot be read>"
-    return f"{type(error).__qualname__}: {_shown(text)}"
+    return _naming.cause(error, _SHOWN + 3)
 
 
 def _refuse(problems: list[str]) -> None:
@@ -99,7 +99,9 @@ def configure(
 
     Raises:
         DeclarationError: A hosted app's declaration is refused when its
-            class is defined, or Resolve refuses the hosted apps.
+            class is defined, or Resolve refuses the hosted apps, the
+            remote providers or the routing policies, with any problem of
+            ``NEOLITH``.
         ImproperlyConfigured: Any other row of the builder's table refuses
             its input.
     """
@@ -111,7 +113,25 @@ def configure(
     declarations = [declaration for _, declaration in pairs]
     from neolith._host import resolve
 
-    _, refusals = resolve(declarations)
+    settings_given: dict[object, object] | None = (
+        deployer if type(deployer) is dict else None
+    )
+    neolith = (
+        None
+        if settings_given is None
+        else _naming.entry(settings_given, "NEOLITH", _checks.MISSING)
+    )
+    _, refusals = resolve(
+        declarations, _checks.remote_identities(neolith), _checks.routed(neolith)
+    )
+    if refusals:
+        # Resolve reads NEOLITH, so a requirement it finds unmet may come
+        # from a problem there, or from settings that are not a dict: those
+        # are reported with its refusals.
+        if settings_given is None:
+            refusals.append(_not_settings(deployer))
+        else:
+            refusals += _checks.neolith_problems(neolith, declarations)
     if refusals:
         raise DeclarationError("\n".join(sorted(refusals)))
     names, problems = _names(deployer)
@@ -172,7 +192,7 @@ def _read(path: str) -> Declaration | str:
     if declaration is None:
         return f"{where}: has no declaration"
     if declaration.name != path:
-        if path == f"{cls.__module__}.{cls.__qualname__}":
+        if path == _naming.full_name(cls, None):
             return f"{where}: name the app's package, not its config class"
         return (
             f"{where}: its declaration names {_shown(declaration.name)}; name the "
@@ -218,9 +238,7 @@ def _names(deployer: object) -> tuple[dict[str, Any], list[str]]:
     a ``str``, which Configure reports with its other refusals.
     """
     if type(deployer) is not dict:
-        raise ImproperlyConfigured(
-            f"settings: expected a dict of setting names, got {_type(deployer)}"
-        )
+        raise ImproperlyConfigured(_not_settings(deployer))
     entries: dict[object, object] = deployer
     problems = [
         f"settings: a setting name is a str, got {_type(name)}"
@@ -233,6 +251,10 @@ def _names(deployer: object) -> tuple[dict[str, Any], list[str]]:
         if type(name) is str and name.isupper()
     }
     return names, problems
+
+
+def _not_settings(deployer: object) -> str:
+    return f"settings: expected a dict of setting names, got {_type(deployer)}"
 
 
 def _deployer_problems(
@@ -298,7 +320,9 @@ def settings_problems(configs: Iterable[AppConfig]) -> list[str]:
     sides, as ``ConnectionHandler.configure_settings`` fills them, by every
     key at every depth: the keys Django fills in are equal on both sides
     (ADR 0022 fact 11), and any other key added after the builder is
-    refused. A ``NEOLITH`` that its own check refuses is reported there and
+    refused. A difference inside it is named by its path, and neither value
+    is shown: an alias holds connection settings, a password among them
+    (K9). A ``NEOLITH`` that its own check refuses is reported there and
     not here.
     """
     hosted = _checks.hosted_declarations(list(configs))
@@ -345,12 +369,20 @@ def _filled(databases: dict[str, Any]) -> dict[str, Any]:
 def databases_difference(found: object, built: dict[str, Any]) -> str | None:
     """The first difference between ``DATABASES`` and what the host builds,
     with Django's defaults filled into both, or ``None``.
+
+    No value under an alias is shown, on either side (K9). An error raised
+    while the defaults are filled in is named by its class alone, since its
+    message may quote a value.
     """
     if found is _checks.MISSING:
         return "it is absent"
     if type(found) is not dict:
         return f"it is a {_type(found)}, the host builds a dict"
     entries: dict[object, object] = found
+    # Before any key is looked up, so that no key's own __eq__ runs.
+    for alias in entries:
+        if type(alias) is not str:
+            return f"alias {_repr(alias)} is not one the host builds"
     missing = [alias for alias in built if alias not in entries]
     if missing:
         return f"alias {missing[0]!r} is missing"
@@ -360,15 +392,12 @@ def databases_difference(found: object, built: dict[str, Any]) -> str | None:
     try:
         have = _filled(found)
     except Exception as error:
-        return f"it cannot be read as Django reads it: {_cause(error)}"
+        return f"it cannot be read as Django reads it: {_type(error)}"
     return _difference(have, _filled(built), whole=True)
 
 
 def _repr(value: object) -> str:
-    try:
-        return _shown(repr(value))
-    except Exception:
-        return f"a value of type {_type(value)}"
+    return _naming.shown(value, _SHOWN + 3)
 
 
 def _difference(
@@ -377,12 +406,22 @@ def _difference(
     """The first difference between a setting and what the host builds, or
     ``None``. A mapping the host built is compared by its own keys only,
     unless ``whole``, when a key on either side alone is a difference.
+
+    A value inside a mapping is named by its path, ``where``, and is never
+    shown, on either side: the mapping the host builds is ``DATABASES``,
+    whose values are connection settings (K9). An entry of a list that is
+    the setting itself, an app or a router, is shown.
     """
     if found is _checks.MISSING:
         return "it is absent"
     if type(expected) is dict:
-        if not isinstance(found, dict):
+        if not _naming.is_a(found, dict):
             return f"{where or 'it'} is a {_type(found)}, the host builds a dict"
+        found = cast("dict[Any, Any]", found)
+        # Before any key is looked up, so that no key's own code runs.
+        for key in found:
+            if type(key) is not str:
+                return f"{where}[{_repr(key)}] is not one the host builds"
         own: dict[str, Any] = expected
         if not where:
             extra = [k for k in found if k not in own]
@@ -409,14 +448,30 @@ def _difference(
         items: list[object] = found
         for index, (have, want) in enumerate(zip(items, expected, strict=False)):
             if type(have) is not type(want) or have != want:
+                if where:
+                    return _inside(f"{where}[{index}]", have, want)
                 return f"entry {index} is {_repr(have)}, the host builds {want!r}"
         if len(items) != len(expected):
-            return f"it has {len(items)} entries, the host builds {len(expected)}"
+            return (
+                f"{where or 'it'} has {len(items)} entries, the host builds "
+                f"{len(expected)}"
+            )
         return None
     try:
         same = type(found) is type(expected) and found == expected
     except Exception:
         same = False
     if not same:
-        return f"{where} is {_repr(found)}, the host builds {_repr(expected)}"
+        if where:
+            return _inside(where, found, expected)
+        return "it is not the value the host builds"
     return None
+
+
+def _inside(where: str, found: object, expected: object) -> str:
+    """A difference at ``where``, inside a mapping the host builds. A value
+    that differs only in type names the two types, never the values.
+    """
+    if type(found) is not type(expected):
+        return f"{where} is a {_type(found)}, the host builds a {_type(expected)}"
+    return f"{where} is not the value the host builds"

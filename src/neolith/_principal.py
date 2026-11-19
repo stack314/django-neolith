@@ -29,6 +29,7 @@ import keyword
 import logging
 import re
 import threading
+import types
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any, Final, final
@@ -37,8 +38,10 @@ from django.core.exceptions import ImproperlyConfigured
 from django.http import HttpRequest
 from django.utils.module_loading import import_string
 
+from neolith import _naming
 from neolith._context import Principal, principal_form
 from neolith._frozen import once
+from neolith.callers import CredentialRefused
 from neolith.principals import PrincipalBackend
 
 __all__ = [
@@ -46,6 +49,7 @@ __all__ = [
     "PRINCIPAL_MIDDLEWARE",
     "Built",
     "Failed",
+    "Refused",
     "Resolution",
     "asearch",
     "build",
@@ -70,7 +74,7 @@ _CACHE: Final = "django.middleware.cache.UpdateCacheMiddleware"
 
 
 def _type(value: object) -> str:
-    return type(value).__qualname__
+    return _naming.type_name(value)
 
 
 def _shown(value: object) -> str:
@@ -85,13 +89,23 @@ def _cause(error: BaseException, *, bounded: bool = True) -> str:
     """An error's class and message, bounded unless ``bounded`` is false,
     never raising.
     """
-    try:
-        text = f"{_type(error)}: {error}"
-    except Exception:
-        text = _type(error)
+    text = _naming.cause(error, None)
     if not bounded or len(text) <= 2 * _SHOWN:
         return text
     return f"{text[: 2 * _SHOWN - 3]}..."
+
+
+def _bounded(error: CredentialRefused) -> str:
+    """A refusal's message, bounded, never raising: exactly a ``str``, or
+    a fixed text when the backend's exception holds anything else.
+    """
+    try:
+        text = error.message
+    except Exception:
+        text = None
+    if type(text) is not str:
+        return "a refusal whose message cannot be read"
+    return text if len(text) <= 2 * _SHOWN else f"{text[: 2 * _SHOWN - 3]}..."
 
 
 def _dotted(path: str) -> bool:
@@ -103,8 +117,14 @@ def _dotted(path: str) -> bool:
     )
 
 
-def shape_problems(value: object) -> list[str]:
-    """Judge the shape of ``NEOLITH["PRINCIPAL_BACKENDS"]``, importing nothing.
+def shape_problems(
+    value: object,
+    setting: str = SETTING,
+    example: str = "neolith.principals.DjangoUserBackend",
+) -> list[str]:
+    """Judge the shape of ``NEOLITH["PRINCIPAL_BACKENDS"]``, or of another
+    ``setting`` in the same entry form, such as ``CALLER_BACKENDS`` (ADR
+    0027), importing nothing.
 
     The value is a ``list`` of one or more entries, each a ``dict`` with
     exactly the keys ``BACKEND``, a dotted path, and ``OPTIONS``, a ``dict``
@@ -112,13 +132,13 @@ def shape_problems(value: object) -> list[str]:
     found is returned.
     """
     if type(value) is not list:
-        return [f"{SETTING}: expected a list of backends, got {_type(value)}"]
+        return [f"{setting}: expected a list of backends, got {_type(value)}"]
     entries: list[object] = value
     if not entries:
-        return [f"{SETTING}: is empty; leave the key out for no backend"]
+        return [f"{setting}: is empty; leave the key out for no backend"]
     problems: list[str] = []
     for position, entry in enumerate(entries):
-        where = f"{SETTING}[{position}]"
+        where = f"{setting}[{position}]"
         if type(entry) is not dict:
             problems.append(
                 f"{where}: expected a dict with exactly the keys BACKEND and "
@@ -140,7 +160,7 @@ def shape_problems(value: object) -> list[str]:
         if type(backend) is not str or not _dotted(backend):
             problems.append(
                 f"{where}: BACKEND {_shown(backend)} is not a dotted path, such as "
-                "'neolith.principals.DjangoUserBackend'"
+                f"{example!r}"
             )
         if type(options) is not dict:
             problems.append(f"{where}: OPTIONS: expected a dict, got {_type(options)}")
@@ -179,12 +199,14 @@ def _inputs_problems(value: object) -> list[str]:
     if type(value) is not tuple:
         return [f"request_inputs is a {_type(value)}, not a tuple of header names"]
     names: tuple[object, ...] = value
-    if names == _ANY and type(names[0]) is str:
+    # Each name is judged by type() before it is compared, so that no
+    # name's own __eq__ runs.
+    if len(names) == 1 and type(names[0]) is str and names == _ANY:
         return []
     problems: list[str] = []
     for name in names:
         if type(name) is not str or not _HEADER.fullmatch(name):
-            extra = " ('*' stands alone)" if name == "*" else ""
+            extra = " ('*' stands alone)" if type(name) is str and name == "*" else ""
             problem = (
                 f"request_inputs holds {_shown(name)}, which is not a header name "
                 f"in lower case{extra}; the form is ('authorization', 'cookie'), "
@@ -203,6 +225,20 @@ def _inputs_problems(value: object) -> list[str]:
         shown = ", ".join(_shown(name) for name in twice)
         problems.append(f"request_inputs names a header twice: {shown}")
     return problems
+
+
+_FLAGS: Final[Any] = type.__dict__["__flags__"]
+
+
+def _function(cls: type, name: str) -> object:
+    """The function a backend class holds as ``name``, its own or inherited,
+    unwrapped from a staticmethod or classmethod, or None; read through
+    type's own descriptors, so its metaclass runs no code.
+    """
+    held = _naming.find(cls, name)
+    if type(held) is staticmethod or type(held) is classmethod:
+        held = held.__func__
+    return held if type(held) is types.FunctionType else None
 
 
 def build(value: list[dict[str, Any]]) -> tuple[tuple[Built, ...], list[str]]:
@@ -229,18 +265,27 @@ def build(value: list[dict[str, Any]]) -> tuple[tuple[Built, ...], list[str]]:
                 f"subclass of {_BASE}"
             )
             continue
-        if found is PrincipalBackend or not issubclass(found, PrincipalBackend):
+        # The class is judged through type's own descriptors and by
+        # identity: issubclass against an ABC hashes it, and getattr asks
+        # its metaclass.
+        if found is PrincipalBackend or not _naming.derives(found, PrincipalBackend):
             problems.append(
                 f"{where}: is not a subclass of {_BASE}; a backend subclasses it"
             )
             continue
         own: list[str] = []
-        if inspect.isabstract(found):
-            missing = ", ".join(sorted(getattr(found, "__abstractmethods__", ())))
+        if _FLAGS.__get__(found) & inspect.TPFLAGS_IS_ABSTRACT:
+            held = _naming.find(found, "__abstractmethods__", ())
+            abstract = (
+                [name for name in held if type(name) is str]
+                if type(held) is frozenset
+                else []
+            )
+            missing = ", ".join(sorted(abstract))
             own.append(f"{where}: is abstract; it does not define {missing}")
-        if inspect.iscoroutinefunction(getattr(found, "resolve", None)):
+        if inspect.iscoroutinefunction(_function(found, "resolve")):
             own.append(f"{where}: resolve is a coroutine function; it is a plain one")
-        if not inspect.iscoroutinefunction(getattr(found, "aresolve", None)):
+        if not inspect.iscoroutinefunction(_function(found, "aresolve")):
             own.append(f"{where}: aresolve is not a coroutine function")
         if own:
             problems.extend(own)
@@ -251,7 +296,7 @@ def build(value: list[dict[str, Any]]) -> tuple[tuple[Built, ...], list[str]]:
             names = ", ".join(sorted(options)) or "none"
             # A backend's own refusal lists every problem it found (ADR 0023
             # Decision 10), so it is kept whole; any other cause is bounded.
-            cause = _cause(error, bounded=not isinstance(error, ImproperlyConfigured))
+            cause = _cause(error, bounded=not _naming.is_a(error, ImproperlyConfigured))
             problems.append(
                 f"{where}: the constructor raised, with the options {names}: {cause}"
             )
@@ -334,7 +379,18 @@ def cache_problems(middleware: object) -> list[str]:
 
 
 class Failed(Exception):
-    """A failure to resolve a request's principal; its message is logged."""
+    """A failure to resolve a request's principal; its message is logged,
+    at ``WARNING`` when a backend refused a credential and ``ERROR``
+    otherwise (ADR 0027 Decision 7).
+    """
+
+    refused = False
+
+
+class Refused(Failed):
+    """A backend raised ``neolith.CredentialRefused``."""
+
+    refused = True
 
 
 def _asked(built: Built, method: str, found: object) -> Principal | None:
@@ -372,6 +428,10 @@ def search(
     for built in backends:
         try:
             found = built.backend.resolve(request)
+        except CredentialRefused as error:
+            raise Refused(
+                f"{built.where}: resolve refused the credential: {_bounded(error)}"
+            ) from None
         except Exception as error:
             raise Failed(f"{built.where}: resolve raised {_cause(error)}") from error
         principal = _asked(built, "resolve", found)
@@ -389,6 +449,10 @@ async def asearch(
     for built in backends:
         try:
             found = await built.backend.aresolve(request)
+        except CredentialRefused as error:
+            raise Refused(
+                f"{built.where}: aresolve refused the credential: {_bounded(error)}"
+            ) from None
         except Exception as error:
             raise Failed(f"{built.where}: aresolve raised {_cause(error)}") from error
         principal = _asked(built, "aresolve", found)
@@ -486,19 +550,26 @@ class Resolution:
 
     def _record(self, outcome: _Outcome, cause: BaseException | None) -> _Outcome:
         """Write ``outcome`` unless one is written; return the one written.
-        Hold the lock. A failure is logged when it is written.
+        Hold the lock. A failure is logged when it is written: a refused
+        credential at ``WARNING`` with its message alone, anything else at
+        ``ERROR`` with its cause.
         """
         if self._outcome is None:
             self._outcome = outcome
             if outcome[1] is not None:
                 with contextlib.suppress(Exception):
-                    _log.error(
-                        "request root (trace %s): %s",
-                        self.trace_id,
-                        outcome[1],
-                        exc_info=cause,
-                        stack_info=cause is None,
-                    )
+                    if type(cause) is Refused:
+                        _log.warning(
+                            "request root (trace %s): %s", self.trace_id, outcome[1]
+                        )
+                    else:
+                        _log.error(
+                            "request root (trace %s): %s",
+                            self.trace_id,
+                            outcome[1],
+                            exc_info=cause,
+                            stack_info=cause is None,
+                        )
         return self._outcome
 
     def _begin(self) -> tuple[_Outcome | None, HttpRequest | None]:

@@ -1,6 +1,10 @@
-# Django host notes: request roots
+# Django host notes
 
-These notes are django-neolith's implementation documentation, not part of any decision. They record how the host meets the request-root rules of [ADR 0017](adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md) Decision 4 on Django 5.2, and the edge cases found in review. The conformance cases at the end are in the test plan of roadmap step 4 (#11). Where these notes and ADR 0017 differ, the record governs.
+These notes are django-neolith's implementation documentation, not part of any decision. They record how the host meets the request-root rules of [ADR 0017](adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md) Decision 4 on Django 5.2, and how it serves and makes calls over HTTP under [ADR 0011](adr/0011-the-host-serves-contract-endpoints-itself.md), [ADR 0014](adr/0014-pluggable-connector-transports.md), [ADR 0027](adr/0027-a-caller-backend-names-the-calling-app-over-http.md) and [ADR 0028](adr/0028-the-http-transport-uses-the-standard-library-only.md), with the edge cases found in review. Where these notes and a record differ, the record governs.
+
+## Request roots
+
+The conformance cases at the end of this section are in the test plan of roadmap step 4 (#11).
 
 **Middleware.** The host ships two middleware classes. Both are sync- and async-capable, and Django runs each in the mode of the handler inside it: under ASGI that is async, unless a sync-only middleware follows in `MIDDLEWARE`, in which case Django runs them in sync mode behind `sync_to_async` (`core/handlers/base.py`, `load_middleware`). They behave the same in both modes. A class that is missing or out of order stops the host at startup (K2); [ADR 0022](adr/0022-the-app-host-builds-settings-and-checks-before-it-serves.md) puts that check at set-up and in each class's constructor.
 - **The root middleware** is placed outermost, and listed once: its constructor also resolves the other entries, which Django has already imported, and refuses the class under a second path. It opens the root when the request starts and keeps a reference to it; a request that arrives while the host is not set up is refused. Closing always goes through that reference, because on ASGI the middleware runs inside a task with its own copy of the context, so nothing outside it could find the root through the variable.
@@ -47,3 +51,135 @@ So an error view that calls a contract opens its own scope (ADR 0017 Decision 4)
 **Sync and async views.** A sync view under ASGI runs through `sync_to_async`, and an async view under WSGI through `async_to_sync`. Both carry context variables across the switch. Thread-sensitive mode shares one thread, but each call runs in its own copy of the context, so roots do not leak between requests.
 
 **Conformance cases for the Django host** (on WSGI and ASGI, with a sync and an async view): A connector call made from a `StreamingHttpResponse` body while the server iterates it succeeds, with both a sync and an async iterator; a call held over until after the response is closed fails; on ASGI, a client disconnect during a streamed body closes the root; on ASGI, a streaming 4xx response whose client disconnects before the body is sent has its root closed by the backstop once the wrapper is collected (the test forces a collection); a `FileResponse` keeps `file_to_stream`, and its root is closed when the middleware returns; and a call from another middleware's request phase, before `process_view`, is refused. The caller is tested too: an admin action registered in one app's `admin.py` calls a contract with that app as the caller, not `django.contrib.admin`; an admin action on a `ModelAdmin` subclass in a project-level module has no caller and is refused, and `neolith check` warns about it; a page that makes no connector call gets no `Vary` from the host and does not evaluate `request.user`, while a streamed body whose first connector call happens during iteration gets a `Vary` that names the backend's request inputs (`Cookie` and `Authorization` for the Django-user backend) and its principal resolved before the response is returned; an async view that calls `alogout` and then a contract calls with no principal, not as the user who logged out; two concurrent first calls share one principal and one trace identifier; a view from another installed app calls as that app; and an error view rendered for an unresolved URL has no caller.
+
+## The HTTP transport
+
+A host serves the contracts its apps provide over HTTP, and calls a contract no hosted app provides over HTTP to the providers `NEOLITH["REMOTE_PROVIDERS"]` lists for it. Spec 03 fixes what crosses the wire; these notes say what a deployer configures and what to expect.
+
+### Serving: the paths the host owns
+
+**Owned paths.** The host owns every path under the prefix `/<name>/v<N>/` of each contract version it provides, and every path under `/.well-known/neolith/`, for every method. The root middleware answers them itself, ahead of the rest of `MIDDLEWARE`, so the deployer writes no URL pattern and keeps `ROOT_URLCONF` ([ADR 0011](adr/0011-the-host-serves-contract-endpoints-itself.md) Decision 2). An owned path that names no action gets 404 with an empty body, which a neolith caller reports as `unavailable`. A path under a version this host does not provide reaches the deployer's URLs as any other path does. The host serves at the root of its origin: a host under a `SCRIPT_NAME` prefix serves no contract path in 0.1.
+
+**What still applies, and what does not.** The deployer's middleware does not run for a contract call: HSTS, request logging and metrics middleware among it, and `ATOMIC_REQUESTS` does not wrap an action, which opens a transaction on its own app's alias when it needs one. `ALLOWED_HOSTS` and `SECURE_SSL_REDIRECT` keep their meaning, because the host reads them itself: a `Host` outside `ALLOWED_HOSTS` gets Django's 400, and with `SECURE_SSL_REDIRECT` a call over plain HTTP fails with `invalid_argument`. `DATA_UPLOAD_MAX_MEMORY_SIZE` is the body limit: a call whose `Content-Length` is above it fails with `invalid_argument` before the body is read.
+
+**`neolith.W003`.** When the host boots, it resolves each contract path and each provided prefix against `ROOT_URLCONF`, and warns about each one a URL pattern matches: the host answers that path, and the pattern is never reached there. A deployer URL deeper under an owned prefix is shadowed too, without a warning. Silence the warning in `SILENCED_SYSTEM_CHECKS` when the shadowing is meant, as for a catch-all pattern that serves a single-page app.
+
+**Decoded paths.** A path is compared after the server's percent-decoding, as Django routes it, so `/inventory%2Fv1/res%65rve` is the contract path `/inventory/v1/reserve`. A proxy or firewall rule for an owned path matches the decoded path; a rule written against raw paths can miss a spelling of it.
+
+**The body under ASGI.** Under WSGI, the host refuses a call that is not authenticated, or whose `Content-Length` is too large, without reading its body. Under ASGI, Django receives the whole body before any middleware runs, so the body of a call the host then refuses has already arrived, spooled to disk past `FILE_UPLOAD_MAX_MEMORY_SIZE`. The host still neither parses nor validates it. The bound on what arrives belongs to the ASGI server or the proxy in front of it, such as nginx's `client_max_body_size`.
+
+**Concurrency under ASGI.** A sync action runs through `sync_to_async(thread_sensitive=True)`, as Django runs a sync view. Django opens a thread-sensitive context per request, so each call runs on a thread of its own and calls run concurrently, as under a threaded WSGI server.
+
+**Response logging.** The host logs each response on a contract path once, on the `neolith.calls` logger, with the contract version, the action, the status, the kind and the trace identifier, and never the request: `INFO` for a reply and a declared kind, `WARNING` for every other kind except `internal`. It marks the response logged, so Django's `log_response` adds no `django.request` line, and no error mail carries the request's `META`. The cause of an `internal` is logged once at `ERROR` on `django.neolith`, a child of `django`, so Django's default logging mails it to `ADMINS` when `DEBUG` is false, as it does a failing view, without the request; `timeout` and `unavailable` are never mailed. On contract paths the host also sets the request's exception reporter filter to one that hides every `HTTP_NEOLITH_` key, whatever `DEBUG` says, so the end user's principal never reaches a report made with the request.
+
+**Calls with no deadline.** A provider's host has no maximum budget of its own in 0.1. A call that arrives without `Neolith-Timeout` has no deadline, so a slow or hung action holds a worker for as long as it runs. Under ASGI, a caller that disconnects cancels the request's task while the action runs on in its thread.
+
+### Serving: the calling app
+
+**Caller backends.** `NEOLITH["CALLER_BACKENDS"]` names which app makes each call that arrives over HTTP ([ADR 0027](adr/0027-a-caller-backend-names-the-calling-app-over-http.md)); `NEOLITH["PRINCIPAL_BACKENDS"]` names on whose behalf a Django request acts. The two keys have the same entry form and are not interchangeable. A host that provides contracts and lists no caller backend accepts no call over HTTP, and `neolith.W004` says so at set-up. A backend's author keeps credentials out of every output: the message of `CredentialRefused` reaches the caller as it is, so it is fixed text, and nothing the backend logs or raises holds a credential. `aauthenticate` runs `authenticate` through `sync_to_async` by default, one thread hop per call; a backend that does no I/O overrides it to run inline. Over HTTP the backends' keys also say who may call at all: in-process a hosted app may call any contract its declaration requires, while over HTTP an app the provider's host holds no key for gets `unauthenticated`, which no set-up check on the caller's side can see.
+
+**The shared-secret backend is for development.** `neolith.callers.SharedSecretBackend` checks spec 03's token with keys from its `OPTIONS`, and `NEOLITH["SIGNING_SECRETS"]` holds each hosted app's key for the calls it sends. `manage.py check --deploy` warns about it (`neolith.W006`), because of what it costs:
+- every provider that accepts an app holds that app's secret and can sign as it;
+- a token is a bearer token, not bound to its request: one seen on the network can be replayed, with any principal and any body, for 2 minutes when the two clocks agree and for up to 3 minutes at the 60-second difference spec 03 allows;
+- an app the allow-list admits can assert any principal.
+Send calls over TLS, which is the job of the server or the proxy in front of the host, not of the host. A secret is never printed by the host, but `diffsettings`, and any code that prints `settings.NEOLITH`, prints every setting as it is.
+
+**Keep `Authorization` for the host.** A call whose `Authorization` header is removed before Django sees it fails with `unauthenticated`, with a message that names that cause. Deployments that remove it or claim it:
+- mod_wsgi passes `Authorization` to the application only with `WSGIPassAuthorization On`;
+- a platform, gateway or mesh that authenticates with `Authorization` on the same port, such as Cloud Run IAM, an API gateway or an Istio `RequestAuthentication`, consumes or replaces it. Keep the gateway's own credential off `Authorization` on contract paths, as Cloud Run's `X-Serverless-Authorization` allows.
+
+**The principal and `tracestate`.** The host reads `Neolith-Principal` only once the calling app is authenticated and admitted by the contract version's allow-list. It ignores every `Neolith-` header spec 03 does not name. It passes on a `tracestate` of at most 512 characters, which is its maximum: a longer one is shortened by whole entries, and one that is not a valid list is dropped.
+
+### Calling: remote providers
+
+**`NEOLITH["REMOTE_PROVIDERS"]`** maps a contract identity to a list of entries, one per provider: one entry under the `single` routing policy, or two or more under `local-first` (below). Each entry's `BACKEND` is the transport, `"neolith.transports.HTTPTransport"`, and its `OPTIONS["url"]` is the provider host's origin, written exactly as its origin serializes ([ADR 0014](adr/0014-pluggable-connector-transports.md)):
+
+```python
+NEOLITH = {
+    "REMOTE_PROVIDERS": {
+        "inventory.v1": [
+            {
+                "BACKEND": "neolith.transports.HTTPTransport",
+                "OPTIONS": {"url": "https://inventory.internal.example"},
+            }
+        ],
+    },
+    "SIGNING_SECRETS": {"orders": {"KEY_ID": "orders-1", "SECRET": ORDERS_KEY}},
+}
+```
+
+`HTTPTransport` is a name for this setting, not a class to build or subclass. A hosted app that requires the contract needs a signing key, or set-up stops. The host reads `settings.NEOLITH` only, so a url kept in the environment is read in the settings module. Plain `http` to anything but `localhost` or a loopback address gets `neolith.W002`, which names the entry by its index in the list.
+
+**`ALLOWED_HOSTS` on the provider.** A call's `Host` is the url's host and port, as written. The provider's host answers a `Host` outside its `ALLOWED_HOSTS` with Django's 400, which the caller reports as `unavailable`, so the provider lists the name its callers use.
+
+**Boot never contacts a provider.** A host serves while a remote provider is down, or its url names the wrong host; that shows at the first call, as `unavailable`. A caller whose contract package is newer than its provider's, within one major version, gets `unavailable` for an action the provider does not have yet, since the provider answers that path with 404.
+
+**Calls with no deadline.** A call waits for its provider until its deadline. With no deadline, a call to a provider that is alive but never answers waits indefinitely: TCP keepalive finds only a host or a path that has gone. Commands and background roots have no deadline unless given a timeout, so background work that calls a remote provider opens its root with `command_scope(app, timeout=...)`, and a deployer keeps a request deadline set (`NEOLITH["REQUEST_DEADLINE"]`). An unreachable provider fails within 10 seconds with `unavailable`, also on a call with no deadline. A call's token lives 60 seconds from just before its request is written, and the provider accepts it until 60 seconds after it expires, on its own clock, so a request that waits more than about 2 minutes before the provider authenticates it, queued behind a proxy or with its body still arriving, fails with `unauthenticated` ([ADR 0033](adr/0033-eight-points-of-the-http-transport-settled-for-0-1.md) Decision 2); a deadline under 2 minutes ends such a call first, with `timeout`.
+
+**Calls from async code.** The connector is synchronous. A call made in a thread whose event loop is running blocks the loop until it ends, over HTTP as in-process. Async code calls a connector through `asgiref.sync.sync_to_async`, whose default `thread_sensitive=True` runs the calls of one request one after another, each up to its deadline, so an `asyncio.gather` over remote calls does not run them in parallel.
+
+**Private certificate authorities.** The client verifies a provider's certificate against the system's trust store, with `VERIFY_X509_STRICT` on every supported Python, and cannot be told to skip it ([ADR 0028](adr/0028-the-http-transport-uses-the-standard-library-only.md) Decision 6). A provider behind a private authority needs that authority in the system store, or in `SSL_CERT_FILE` or `SSL_CERT_DIR` for the process. Strict verification asks the authority to follow RFC 5280, on Python 3.12 too: its certificate carries `basicConstraints` marked critical, a `keyUsage` with `keyCertSign` and a subject key identifier, and every certificate it issues carries an authority key identifier. On macOS with a python.org build, the system store may be empty until the build's `Install Certificates.command` is run. `SSLKEYLOGFILE` has no effect on these calls. Over `https`, a response with neither `Content-Length` nor chunked framing ends only on the provider's TLS `close_notify`, which Python's own `SSLSocket.close()` does not send; a response the server frames is not affected.
+
+**No outbound proxy.** The client reads no proxy variable and follows no redirect, so a deployer behind a mandatory outbound proxy cannot reach a remote provider in 0.1.
+
+**What a call costs.** The client keeps a pool per provider origin: up to 10 idle connections, each kept 1 second, reused newest first. A connection opened for a call that finds none idle costs a name resolution on a thread, a TCP handshake and, for `https`, a TLS handshake; above 10 concurrent calls, the connections beyond 10 are closed after each use. Measured with the caller and the provider in one process over loopback, served by `neolith run`'s server, on a 4-core arm64 machine with 4 GB of memory and Python 3.13 (median of 300 calls of a one-field action):
+
+| Call | `http` | `https` |
+|---|---|---|
+| In-process | 0.12 ms | 0.12 ms |
+| On a pooled connection | 1.2 ms | 1.4 ms |
+| On a new connection | 2.1 ms (2.5 ms to `localhost`) | 16 ms |
+
+Both ends of the TLS handshake ran on the one machine, so a caller alone pays less of the 16 ms. A caller that calls one provider less than once a second finds no idle connection and pays the new-connection cost on nearly every call.
+
+**Development servers.** `neolith run` answers without Nagle's delay. Django's `runserver` and its test live server write a response's head and body in separate writes with Nagle's algorithm on, so each call after a connection's first waits for the caller's delayed acknowledgement: about 44 ms per pooled call on the machine above, against 1.2 ms under `neolith run`. They also keep the first of a repeated `Content-Type` or `Content-Length`, which `neolith run` refuses.
+
+### Calling: routing among providers
+
+**`NEOLITH["ROUTING_POLICIES"]`** names a routing policy per contract identity ([ADR 0031](adr/0031-a-contract-version-is-routed-by-single-unless-local-first-is-named.md)). An identity left out is routed by `single`: its one provider, the app of the host that provides it or else its one remote entry, with one attempt per call. A step 5 settings module, with one entry per identity and no `ROUTING_POLICIES`, is routed as before. `"local-first"` is the one value to write. It orders two or more remote entries, tried in the order listed:
+
+```python
+NEOLITH = {
+    "ROUTING_POLICIES": {"inventory.v1": "local-first"},
+    "REMOTE_PROVIDERS": {
+        "inventory.v1": [
+            {
+                "BACKEND": "neolith.transports.HTTPTransport",
+                "OPTIONS": {"url": "https://inventory-a.internal.example"},
+            },
+            {
+                "BACKEND": "neolith.transports.HTTPTransport",
+                "OPTIONS": {"url": "https://inventory-b.internal.example"},
+            },
+        ],
+    },
+    "SIGNING_SECRETS": {"orders": {"KEY_ID": "orders-1", "SECRET": ORDERS_KEY}},
+}
+```
+
+The policy and the length of the list state one fact twice. A list of urls reads as load balancing in most proxies, so the policy is written out, and a second url added by mistake stops the host rather than turning on failover. Set-up stops when the two disagree, or the settings are otherwise outside the form: two or more entries without `local-first`, `local-first` with one entry, one url listed twice in a list, `"single"` written as a value (leave the identity out), any other policy name, and an identity named that no hosted app requires or that an app of the host provides. No refusal prints a url or a policy value it refused. `ROUTING_POLICIES` cannot change under `override_settings`.
+
+**When a call moves.** Each call starts at the first entry; nothing is remembered between calls. A call moves to the next entry only when its attempt ended with `unavailable`, the action is declared idempotent, an entry is left, and at least 1 ms of the call's deadline is left. It tries each entry at most once.
+
+| The attempt ended with | Moves to the next entry? |
+|---|---|
+| `unavailable`: the name did not resolve; the connection was refused or reset; the TLS handshake failed or the certificate did not verify; no connection within the attempt's share of the time (below); a reset or close after the request left; a response outside the admitted HTTP forms; a status other than success without a neolith error body, such as a proxy's `502` or `503`, or a `404` from a provider on an older contract version; a neolith error body of kind `unavailable` | Only for an idempotent action |
+| `timeout` | Never: the outcome is unknown, and the deadline has passed |
+| `unauthenticated`, `permission_denied`, `invalid_argument`, `not_found`, `conflict`, `internal`, or a kind the action declares | Never: the provider answered, or its answer could not be read after it may have run |
+| A refusal before sending, such as a call with no calling app or from an app with no signing key | Never: every provider would refuse it alike |
+
+A call that is not moved ends with that attempt's outcome. When less than 1 ms is left for the next entry, it ends with the last attempt's `unavailable`. A `timeout` after a move always says that the action might have run. Every attempt carries the same principal, trace identifier, `tracestate` and idempotency key; each gets its own token, span and budget. An action that should fail over is declared idempotent and keeps that promise for a repeated key (spec 01, CON-5): two providers of one app share its database, and a call moved after its request left may have run once already.
+
+**No remote entry beside an app of the host.** An identity that an app of the host provides takes no remote entry, under any policy. The app answers every call to it, and an in-process call never ends with `unavailable`, so a remote entry would never be called. An app runs attached and detached at once across hosts instead: the host that holds it attached calls it in-process and also serves it over HTTP; the app runs detached in a host of its own; and every other host lists both under `local-first`, in the order it prefers. A migration is a change of that order in the other hosts' settings, then the removal of the app from the first host.
+
+**What a provider that is down costs.** Every call tries the first entry first. One that refuses connections or whose name does not resolve costs about one round trip. One that drops packets holds the connect phase for the attempt's share of the time left: that time divided by the entries left, this one included, at least 2 seconds, and never more than the 10 second connect cap. With the default 30 second request deadline and two entries, the first gets 10 seconds (the cap, under its 15 second share) and the second the remaining 20. With three entries and the first two silent, each of the two costs 10 seconds and the third gets the last 10. A call with 8 seconds left and two entries gives the first 4 seconds. The last entry, a non-idempotent call and a call with no deadline get no share; a silent entry then costs up to the 10 second cap, or the rest of the deadline when that is less. A non-idempotent call makes one attempt and fails with `unavailable`, or with `timeout` when its deadline comes first. A provider that accepts a call and never answers holds it until the deadline, and the next entry is not tried.
+
+**Rolling restarts and overload.** A non-idempotent call that races the first provider's Drain on a kept-alive connection, or meets the refused connections of a provider that is draining, fails with `unavailable` and does not move; an idempotent one moves. A first provider that answers `unavailable` because it is overloaded sends all of its idempotent traffic to the second at once, with nothing to slow it down, so the second needs room for both. Every entry accepts the calling app's key and lists the url's host in its `ALLOWED_HOSTS`. One that does not answers `unauthenticated`, which never moves, or Django's `400`, which is `unavailable`. A credential missing at the second provider shows only when the first fails, so check each provider once when it is added.
+
+**Log lines.** The HTTP transport logs a `WARNING` for most attempts that end with `unavailable`; a neolith error body of kind `unavailable` is logged by the provider's host instead. Under `local-first` the connector adds one `INFO` line on the `neolith` logger for each routing decision after an attempt that ended with `unavailable`:
+
+- moved: `inventory.v1, action 'level': provider 1 of 2 at https://inventory-a.internal.example was unavailable, and level is idempotent; trying provider 2 at https://inventory-b.internal.example with 4980 ms left (trace <trace>)`, or `with no deadline`;
+- not moved, the action is not idempotent: `... was unavailable, and reserve is not idempotent, so the call is not moved to provider 2 (trace <trace>)`;
+- not moved, no time left: `... was unavailable, and the call's deadline left under 1 ms to try provider 2 at <origin> (trace <trace>)`.
+
+A call whose first attempt succeeds, a call whose last entry fails, and every call under `single` log nothing new. No line holds a key, a token, a principal, `tracestate` or a refused value; the trace identifier ties a call's lines together.

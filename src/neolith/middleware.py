@@ -7,7 +7,12 @@ every middleware a principal backend reads: with the Django-user backend,
 after ``SessionMiddleware`` and ``AuthenticationMiddleware``; with any
 backend, after Django's ``UpdateCacheMiddleware``.
 
-The root middleware. For each request it opens a root, with the host's
+The root middleware. A request on a path the host owns, under a provided
+contract version's ``/<name>/v<N>/`` or under ``/.well-known/neolith/``, it
+answers itself, and never hands it to the rest of the chain or opens a root
+for it: the provider side opens the call's own scope
+(``neolith._endpoint``; ADR 0011 Decision 2). For each other request it
+opens a root, with the host's
 request deadline (``NEOLITH["REQUEST_DEADLINE"]``, 30 seconds when absent,
 none when ``None``) counted from when the request reaches it. The root
 belongs to no app until the view is resolved; then it belongs to the app
@@ -37,7 +42,7 @@ from django.http import FileResponse, HttpRequest, StreamingHttpResponse
 from django.http.response import HttpResponseBase
 from django.utils.cache import patch_vary_headers
 
-from neolith import _boot, _checks, _context, _host, _principal
+from neolith import _boot, _checks, _context, _endpoint, _host, _principal
 from neolith._serving import label_of
 
 __all__ = ["PrincipalMiddleware", "RootMiddleware"]
@@ -64,7 +69,8 @@ _NO_HOST: Final = (
 
 @final
 class RootMiddleware:
-    """Open, bind and close the root of each request.
+    """Answer each request on a path the host owns, and open, bind and
+    close the root of every other request.
 
     Django runs it in the mode of the handler inside it, sync or async, and
     it behaves the same in both. Its constructor refuses a ``MIDDLEWARE``
@@ -109,9 +115,12 @@ class RootMiddleware:
     def __call__(
         self, request: HttpRequest
     ) -> HttpResponseBase | Awaitable[HttpResponseBase]:
-        """Serve one request inside its root."""
+        """Answer a request on an owned path, or serve one inside its root."""
         if self._async:
             return self._acall(request)
+        host = _host._current()
+        if host is not None and host.endpoints.owns(request.path):
+            return _endpoint.answer(request, host.endpoints, host.callers.backends)
         scope, tokens = _open()
         handed = False
         try:
@@ -123,6 +132,11 @@ class RootMiddleware:
             _leave(scope, tokens, handed)
 
     async def _acall(self, request: HttpRequest) -> HttpResponseBase:
+        host = _host._current()
+        if host is not None and host.endpoints.owns(request.path):
+            return await _endpoint.aanswer(
+                request, host.endpoints, host.callers.backends
+            )
         scope, tokens = _open()
         handed = False
         try:
@@ -460,7 +474,7 @@ def _resolution(scope: _context.Scope | None) -> _principal.Resolution | None:
     """The root's resolution for the response phase, or ``None``. A root
     that was never bound, or is bound to no app the host holds, has none:
     a call from it has no calling app or is a usage error at any time
-    (spec 02, TRN-56 and TRN-58), so the response phase has nothing to
+    (spec 02, TRN-39, TRN-56 and TRN-58), so the response phase has nothing to
     search, mark or vary for it.
     """
     resolution = None if scope is None else scope.resolution

@@ -32,13 +32,14 @@ from typing import Annotated, Any, NoReturn, Protocol, final, overload
 
 from pydantic import BaseModel
 
+from neolith import _naming
 from neolith._context import CallContext
 from neolith._crossing import Codec
 from neolith._frozen import once
+from neolith._naming import shown
 from neolith._portable import (
     Portable,
     json_value_problem,
-    shown,
     text_problem,
 )
 
@@ -102,6 +103,7 @@ _UNTYPED_SIZE = 10_000
 
 _CONTRACT_ATTR = "__neolith_contract__"
 _ACTION_ATTR = "__neolith_action__"
+_BASES = type.__dict__["__bases__"]
 _UNIONS: tuple[object, ...] = (typing.Union, types.UnionType)
 _DIALECT = "https://json-schema.org/draft/2020-12/schema"
 
@@ -212,7 +214,7 @@ def _private_copy(value: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
             if size > _UNTYPED_SIZE:
                 return top, f"it holds more than {_UNTYPED_SIZE} values"
             kind = type(item)
-            if kind not in containers:
+            if not _naming.one_of(kind, containers):
                 continue
             copied = dict.copy(item) if issubclass(kind, dict) else list.copy(item)
             container[slot] = copied
@@ -350,7 +352,7 @@ class ContractError(Exception):
             )
         if type(message) is not str:
             raise TypeError(
-                f"a contract error's message is a str, not {type(message).__name__}"
+                f"a contract error's message is a str, not {_naming.type_name(message)}"
             )
         problem = text_problem(message)
         if problem is not None:
@@ -369,7 +371,7 @@ class ContractError(Exception):
                     f"values, but {problem}"
                 )
             data = typing.cast(_FrozenMap, _freeze(copied))
-        elif issubclass(type(data), BaseModel):
+        elif _naming.derives(type(data), BaseModel):
             # Held as given. Whether its value travels within CON-30 (CON-31)
             # depends on the value, so the provider's host checks it as it
             # sends the error (step 3); a valid record never fails here.
@@ -522,12 +524,14 @@ class Contract:
             ContractDefinitionError: If ``declaration`` is not a class marked
                 with ``@contract``.
         """
+        # Read by type() and type's own descriptor, never the object's own
+        # attributes, so no code of the object runs before it is refused.
         found = (
-            vars(declaration).get(_CONTRACT_ATTR)
-            if inspect.isclass(declaration)
+            _naming.entry(_naming.namespace(declaration), _CONTRACT_ATTR)
+            if issubclass(type(declaration), type)
             else None
         )
-        if not isinstance(found, Contract):
+        if type(found) is not Contract:
             raise ContractDefinitionError(
                 f"{_name(declaration)} is not a contract; mark the class with "
                 '@contract("<name>.v<N>")'
@@ -562,45 +566,51 @@ class Contract:
         step that raises adds one problem for itself: the problems found
         before it stay, and the steps after it run.
         """
-        where = f"{self.identity}, implementation {_qualname(impl)}"
+        where = f"{self.identity}, implementation {_naming.qualname(impl)}"
         problems: list[str] = []
         own: list[type] = []
         try:
             own = [
                 klass
-                for klass in impl.__mro__
-                if klass is not object and _CONTRACT_ATTR not in vars(klass)
+                for klass in _naming.mro(impl)
+                if klass is not object
+                and not _naming.holds(_naming.namespace(klass), _CONTRACT_ATTR)
             ]
-        except Exception as error:  # an __mro__ or __dict__ it cannot read
-            problems.append(f"{where}: its classes cannot be read ({_cause(error)})")
+        except Exception as error:  # an __mro__ it cannot read
+            problems.append(
+                f"{where}: its classes cannot be read ({_naming.cause(error, None)})"
+            )
         for klass in own:
             try:
                 self._marks(where, klass, problems)
             except Exception as error:
                 problems.append(
-                    f"{where}: {_qualname(klass)} cannot be read ({_cause(error)})"
+                    f"{where}: {_naming.qualname(klass)} cannot be read "
+                    f"({_naming.cause(error, None)})"
                 )
         for name, item in self._actions.items():
             try:
                 self._action_problems(where, impl, name, item, problems)
             except Exception as error:
                 problems.append(
-                    f"{where}: action {name!r} cannot be read ({_cause(error)})"
+                    f"{where}: action {name!r} cannot be read "
+                    f"({_naming.cause(error, None)})"
                 )
         for klass in own:
             try:
                 self._public_methods(where, klass, problems)
             except Exception as error:
                 problems.append(
-                    f"{where}: {_qualname(klass)} cannot be read ({_cause(error)})"
+                    f"{where}: {_naming.qualname(klass)} cannot be read "
+                    f"({_naming.cause(error, None)})"
                 )
         return problems
 
     def _marks(self, where: str, klass: type, problems: list[str]) -> None:
-        for attr, value in vars(klass).items():
+        for attr, value in _naming.namespace(klass).items():
             if _carries_mark(value):
                 problems.append(
-                    f"{where}: {attr!r} is marked with @action; the contract "
+                    f"{where}: {shown(attr)} is marked with @action; the contract "
                     "declares each action, its idempotency and its error "
                     "kinds, so implementation methods are not marked"
                 )
@@ -614,7 +624,7 @@ class Contract:
         problems: list[str],
     ) -> None:
         """Add the problems of one action; may raise, keeping what it added."""
-        member = inspect.getattr_static(impl, name, None)
+        member = _naming.find(impl, name)
         # A declaration's own method, inherited from this contract or another
         # one, is a stub, not an implementation.
         if member is None or _carries_mark(member):
@@ -625,7 +635,7 @@ class Contract:
             problems.append(
                 f"{where}: action {name!r} must be an instance method taking "
                 "(self, request) or (self, request, ctx: CallContext), not "
-                f"a {type(member).__name__}"
+                f"a {_naming.type_name(member)}"
             )
             # Only a function has the signature the checks below read.
             return
@@ -652,8 +662,10 @@ class Contract:
             )
 
     def _public_methods(self, where: str, klass: type, problems: list[str]) -> None:
-        for attr, value in vars(klass).items():
-            if attr.startswith("_") or attr in self._actions:
+        for attr, value in _naming.namespace(klass).items():
+            # A name that is not exactly a str is read by no lookup, so it
+            # is no method of the instance's.
+            if type(attr) is not str or attr.startswith("_") or attr in self._actions:
                 continue
             if _is_method(value):
                 problems.append(
@@ -684,21 +696,33 @@ def contract[T](identity: str, /) -> Callable[[type[T]], type[T]]:
             names breaks spec 01.
     """
     _parse_identity(identity)
+    # A str subclass is copied to its text, so that none of its code runs
+    # where the identity is written into a message.
+    identity = str.__str__(identity)
 
     def decorate(declaration: type[T]) -> type[T]:
-        if not inspect.isclass(declaration):
+        if not issubclass(type(declaration), type):
             raise ContractDefinitionError(
                 f"{identity}: @contract decorates a class, not {_name(declaration)}"
             )
-        if _CONTRACT_ATTR in vars(declaration):
+        namespace = _naming.namespace(declaration)
+        # Before any name is looked up, so that no key's own __eq__ runs.
+        if any(type(key) is not str for key in namespace):
             raise ContractDefinitionError(
-                f"{identity}: {declaration.__qualname__} is already the contract "
+                f"{identity}: {_naming.qualname(declaration)} has an attribute "
+                "whose name is not exactly a str"
+            )
+        if _CONTRACT_ATTR in namespace:
+            raise ContractDefinitionError(
+                f"{identity}: {_naming.qualname(declaration)} is already the contract "
                 f"{Contract.of(declaration).identity}"
             )
-        if declaration.__bases__ != (Protocol,):
+        bases = _BASES.__get__(declaration)
+        # By identity: == would run the base's metaclass __eq__.
+        if len(bases) != 1 or bases[0] is not Protocol:
             raise ContractDefinitionError(
                 f"{identity}: declare the contract as "
-                f"class {declaration.__name__}(Protocol), with no other base"
+                f"class {_naming.name(declaration)}(Protocol), with no other base"
             )
         portable = Portable(ContractDefinitionError)
         actions: dict[str, Action] = {}
@@ -714,15 +738,19 @@ def contract[T](identity: str, /) -> Callable[[type[T]], type[T]]:
                 except TypeError as error:
                     raise portable.fail(str(error)) from error
 
-        for attr, value in vars(declaration).items():
+        for attr, value in namespace.items():
             marked = (
-                vars(value).get(_ACTION_ATTR) if inspect.isfunction(value) else None
+                # safe read: an exact function's own dict.
+                _naming.entry(vars(value), _ACTION_ATTR)
+                if type(value) is types.FunctionType
+                else None
             )
             if marked is None:
                 if attr.startswith("_"):
                     continue
                 raise ContractDefinitionError(
-                    f"{identity}: {declaration.__qualname__}.{attr} is not an action; "
+                    f"{identity}: {_naming.qualname(declaration)}.{attr} is not an "
+                    "action; "
                     "a contract declares only methods marked with @action"
                 )
             if not _ACTION_NAME.fullmatch(attr):
@@ -740,7 +768,7 @@ def contract[T](identity: str, /) -> Callable[[type[T]], type[T]]:
             )
             if reply_type is not None:
                 capture(reply_type)
-            idempotent, declared = marked
+            idempotent, declared = typing.cast("tuple[bool, object]", marked)
             where = f"{identity}, action {attr!r}"
             errors: dict[str, type[BaseModel]] = {}
             error_refs: dict[str, dict[str, str]] = {}
@@ -750,7 +778,7 @@ def contract[T](identity: str, /) -> Callable[[type[T]], type[T]]:
                 capture(errors[kind])
                 if _nests_deeper(portable.defs, error_refs[kind], _UNTYPED_DEPTH):
                     raise portable.fail(
-                        f"detail record {errors[kind].__name__} can nest maps and "
+                        f"detail record {_naming.name(errors[kind])} can nest maps and "
                         f"lists more than {_UNTYPED_DEPTH} levels deep, so a caller "
                         "that does not know the kind could not hold it untyped; "
                         "a recursive record always can"
@@ -832,20 +860,28 @@ def action(
     """
     if type(idempotent) is not bool:
         raise ContractDefinitionError(
-            f"@action(idempotent=...) takes True or False, not {idempotent!r}"
+            "@action(idempotent=...) takes True or False, not "
+            f"{_naming.shown(idempotent)}"
         )
 
     def mark[F](method: F) -> F:
-        if not inspect.isfunction(method):
+        if type(method) is not types.FunctionType:
             raise ContractDefinitionError(
                 f"@action marks a function defined in a contract, not {_name(method)}"
             )
-        if _ACTION_ATTR in vars(method):
+        own = vars(method)  # safe read: an exact function's own dict
+        # Before any name is looked up, so that no key's own __eq__ runs.
+        if any(type(key) is not str for key in own):
             raise ContractDefinitionError(
-                f"{method.__qualname__} is marked with @action twice; mark it "
+                f"@action marks {_naming.qualname(method)}, which has an "
+                "attribute whose name is not exactly a str"
+            )
+        if _ACTION_ATTR in own:
+            raise ContractDefinitionError(
+                f"{_naming.qualname(method)} is marked with @action twice; mark it "
                 "once, as @action(idempotent=..., errors=...)"
             )
-        vars(method)[_ACTION_ATTR] = (idempotent, errors)
+        own[_ACTION_ATTR] = (idempotent, errors)
         return method
 
     return mark if function is None else mark(function)
@@ -876,7 +912,7 @@ def implements[T](declaration: type[Any], /) -> Callable[[type[T]], type[T]]:
     spec = Contract.of(declaration)
 
     def decorate(impl: type[T]) -> type[T]:
-        if not inspect.isclass(impl):
+        if not issubclass(type(impl), type):
             raise ContractDefinitionError(
                 f"{spec.identity}: @implements decorates a class, not {_name(impl)}"
             )
@@ -961,7 +997,8 @@ def _carries_mark(value: object) -> bool:
         seen.add(id(item))
         kind = type(item)
         if kind is types.FunctionType:
-            if _ACTION_ATTR in vars(item):
+            # safe read: a function's own dict, through FunctionType's slot.
+            if _naming.holds(vars(item), _ACTION_ATTR):
                 return True
         elif issubclass(kind, staticmethod | classmethod):
             pending.append(typing.cast(Any, item).__func__)
@@ -975,7 +1012,13 @@ def _carries_mark(value: object) -> bool:
             | functools.cached_property,
         ):
             pending.append(typing.cast(Any, item).func)
-        wrapped = inspect.getattr_static(item, "__wrapped__", None)
+        # As getattr_static finds it, the instance's own dict first, then its
+        # class, each class read through type's own descriptors.
+        holder = item if issubclass(kind, type) else kind
+        own = None if holder is item else _naming.instance_dict(item)
+        wrapped = None if own is None else _naming.entry(own, "__wrapped__")
+        if wrapped is None:
+            wrapped = _naming.find(holder, "__wrapped__")
         if wrapped is not None:
             pending.append(wrapped)
     return False
@@ -1024,10 +1067,13 @@ def _nests_deeper(
 
 
 def _parse_identity(identity: object) -> tuple[str, int]:
-    match = _IDENTITY.fullmatch(identity) if isinstance(identity, str) else None
+    # Judged by type(): isinstance would read the object's own __class__.
+    is_text = issubclass(type(identity), str)
+    match = _IDENTITY.fullmatch(typing.cast(str, identity)) if is_text else None
     if match is None:
         raise ContractDefinitionError(
-            f"{identity!r} is not a contract identity: write <name>.v<N>, where "
+            f"{_naming.shown(identity)} is not a contract identity: write "
+            "<name>.v<N>, where "
             "<name> is dot-separated segments of lowercase ASCII letters, digits "
             "and underscores, each starting with a letter, and <N> is a positive "
             "integer, for example 'inventory.v1'"
@@ -1092,9 +1138,15 @@ def _signature(
         signature = inspect.signature(function)
     except Exception as error:  # a __signature__ or __wrapped__ it cannot read
         raise ContractDefinitionError(
-            f"{where}: cannot read its signature ({_cause(error)})"
+            f"{where}: cannot read its signature ({_naming.cause(error, None)})"
         ) from error
     parameters = list(signature.parameters.values())
+    # Before any name is compared, looked up or shown, so that no name's own
+    # code runs: a __signature__ the author set may name them with anything.
+    if any(type(p.name) is not str for p in parameters):
+        raise ContractDefinitionError(
+            f"{where}: a parameter's name is not exactly a str"
+        )
     if len(parameters) not in ((2,) if declared else (2, 3)) or any(
         p.kind is not inspect.Parameter.POSITIONAL_OR_KEYWORD
         or p.default is not inspect.Parameter.empty
@@ -1103,7 +1155,7 @@ def _signature(
         raise ContractDefinitionError(
             f"{where}: an action takes exactly (self, request)"
             + ("" if declared else " or (self, request, ctx: CallContext)")
-            + f", not {signature}"
+            + f", not {_naming.text(signature, None)}"
         )
     if declared and parameters[1].name in _RESERVED_PARAMETERS:
         raise ContractDefinitionError(
@@ -1120,8 +1172,12 @@ def _signature(
         ) from error
     except Exception as error:  # a malformed string annotation, such as "R["
         raise ContractDefinitionError(
-            f"{where}: cannot read its annotations ({_cause(error)})"
+            f"{where}: cannot read its annotations ({_naming.cause(error, None)})"
         ) from error
+    if any(type(key) is not str for key in hints):
+        raise ContractDefinitionError(
+            f"{where}: an annotation's name is not exactly a str"
+        )
     request = hints.get(parameters[1].name)
     if request is None:
         raise ContractDefinitionError(f"{where}: annotate its request type")
@@ -1141,9 +1197,18 @@ def _signature(
 
 
 def _name(annotation: object) -> str:
-    """Name a type for an error message, without module paths."""
+    """Name a type for an error message, without module paths; never raising."""
+    try:
+        return _named(annotation)
+    except Exception:  # typing's own reads, such as __eq__, may run its code
+        return _naming.shown(annotation)
+
+
+def _named(annotation: object) -> str:
     if annotation is None or annotation is type(None):
         return "None"
+    if issubclass(type(annotation), type):
+        return _naming.qualname(annotation)
     origin, arguments = typing.get_origin(annotation), typing.get_args(annotation)
     if origin in _UNIONS:
         return " | ".join(_name(a) for a in arguments)
@@ -1151,27 +1216,4 @@ def _name(annotation: object) -> str:
         return _name(arguments[0])
     if origin is not None and arguments:
         return f"{_name(origin)}[{', '.join(_name(a) for a in arguments)}]"
-    if inspect.isclass(annotation):
-        return _qualname(annotation)
-    try:
-        return repr(annotation)
-    except Exception:  # a repr that raises still names the value's type
-        return f"<{type(annotation).__name__}>"
-
-
-def _qualname(cls: type) -> str:
-    """A class's own qualified name, read statically, never raising."""
-    try:
-        found = type.__dict__["__qualname__"].__get__(cls)
-    except Exception:
-        found = None
-    return found if type(found) is str else "<a class>"
-
-
-def _cause(error: BaseException) -> str:
-    """An error's class and message, never raising."""
-    try:
-        text = str(error)
-    except Exception:
-        text = "<the message cannot be read>"
-    return f"{type(error).__name__}: {text}"
+    return _naming.shown(annotation)

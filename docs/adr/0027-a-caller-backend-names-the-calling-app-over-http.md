@@ -1,6 +1,7 @@
 # 0027. On an HTTP call, a caller backend names the calling app from a shared-secret token, and the principal header is read only after the allow-list admits that app
 
-- **Status:** Proposed
+- **Status:** Accepted
+- **Accepted:** 2026-11-18
 - **Date:** 2026-11-18
 
 ## Context
@@ -135,7 +136,7 @@ raise neolith.CredentialRefused(message)                     ; "mine, and refuse
 
 - constructed once per set-up, with its `OPTIONS` as keyword arguments, shared by every thread;
 - `authenticate(self, request, contract)`, a plain function, where `request` is Django's `HttpRequest` and `contract` the identity in the request path, such as `inventory.v1`;
-- `aauthenticate`, which by default runs `authenticate` through asgiref's `sync_to_async`, as 0023's `aresolve` does. That default is thread-sensitive. Django opens one thread-sensitive context per ASGI request ([0011](0011-django-ninja-for-contract-endpoints.md), as amended for step 5), so the backend runs on the request's own thread: each call pays one thread hop, and calls of different requests do not wait for each other. The documentation says so: a backend with no I/O overrides `aauthenticate` to run inline, and a backend that does I/O overrides it with a native async version;
+- `aauthenticate`, which by default runs `authenticate` through asgiref's `sync_to_async`, as 0023's `aresolve` does. That default is thread-sensitive. Django opens one thread-sensitive context per ASGI request ([0011](0011-the-host-serves-contract-endpoints-itself.md), as amended for step 5), so the backend runs on the request's own thread: each call pays one thread hop, and calls of different requests do not wait for each other. The documentation says so: a backend with no I/O overrides `aauthenticate` to run inline, and a backend that does I/O overrides it with a native async version;
 - it returns the calling app's name, or `None` to abstain; it raises `CredentialRefused` to refuse (Decision 7).
 
 The host calls the backends of `NEOLITH["CALLER_BACKENDS"]` in order, and the first that does not abstain decides (0010 Decision 6). Everything after the calling app is named is the host's, not the backend's: the allow-list (Decision 5), the principal header, the context headers (Decision 6), the deadline and the request. So no backend can widen what a principal header admits, and every backend gets the same refusals.
@@ -157,7 +158,7 @@ The cost: 0010's word "backend" now names two settings, `PRINCIPAL_BACKENDS` and
 
 `SharedSecretBackend` implements spec 03's recognition and validity rules exactly, with `hmac`, `hashlib`, `base64` and `json` from the standard library, and the strict JSON reader the host already has for principals: `read_principal`'s hooks and the checks it makes after decoding (Context, point 8), so spec 03's whole I-JSON rule holds: no duplicate member name, no lone surrogate, no `NaN` or infinity, and integers within ±(2^53 − 1) with no fraction or exponent. Base64url is decoded by a function that first matches the text against `1*b64char`, then decodes and re-encodes to confirm zero unused bits, since `base64.urlsafe_b64decode` alone admits `+`, `/` and line breaks (Context, point 7).
 
-**Recognition.** `Authorization` absent, another scheme, or a first part that does not decode, under spec 03's encoding rules and that I-JSON rule, to a JSON object whose `typ` is `neolith+jwt` or `application/neolith+jwt` (ignoring ASCII case): abstain (spec 03). So a first part with a duplicate `typ`, or a lone surrogate in `kid`, abstains, and a later backend can try the credential.
+**Recognition.** `Authorization` absent, another scheme, or a first part that does not decode, under spec 03's encoding rules and that I-JSON rule, to a JSON object whose `typ` is `neolith+jwt` or `application/neolith+jwt` (ignoring ASCII case): abstain (spec 03). So a first part with a duplicate `typ`, or a lone surrogate in `kid`, abstains, and a later backend can try the credential. A first part nested deeper than the host's JSON reader admits (RFC 8259, section 9, lets a parser limit nesting) counts as one that does not decode, so the backend abstains on it; this changes no valid token, whose first part is three string members with no nesting.
 
 **The checks, in this order**, each failure a `CredentialRefused` with the text shown, so the caller sees `unauthenticated`:
 
@@ -382,7 +383,7 @@ Follows principles 5 (*same semantics over same mechanics*), 6 (*visible failure
 
 ## Assumptions about the other step 5 records
 
-Three other records are proposed for step 5: [0011](0011-django-ninja-for-contract-endpoints.md) and [0014](0014-pluggable-connector-transports.md), both amended, and 0028, the HTTP client. None is Accepted. This record does not decide their questions; it assumes the following, and changes if they decide otherwise.
+Three other records are proposed for step 5: [0011](0011-the-host-serves-contract-endpoints-itself.md) and [0014](0014-pluggable-connector-transports.md), both amended, and 0028, the HTTP client. None is Accepted. This record does not decide their questions; it assumes the following, and changes if they decide otherwise.
 
 - **A1. Provider endpoints (0011).** The host's endpoint layer serves each contract path itself, runs the steps of Decision 5 before it parses or validates the body, whatever serves the path, and uses no library's own authentication hook. It records the call's arrival when it is entered, before the first backend runs (Decision 1). It renders every failure as spec 03's error body (0008 Decision 8). The deployer's middleware, CSRF's included, does not run on a contract path, which suits a credential that a browser never attaches on its own, as Stripe's Django guidance exempts its webhook view from CSRF; it sends no CORS headers. It logs each contract response itself and marks it logged, so `log_response` adds no line (Decision 8). The well-known paths (OpenAPI, health) are not contract paths, so they are not authenticated (0010 Decision 7).
 - **A2. HTTP client (0028).** The client sends the headers of Decision 9 and none of its own credentials or cookies, and does not follow redirects on a contract call, so a token never reaches another origin, as Stripe treats a redirect as a failed delivery.

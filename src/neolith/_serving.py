@@ -46,14 +46,16 @@ from django.apps import apps as global_apps
 from django.db.models.options import Options
 from django.views.generic.base import View
 
+from neolith import _naming
 from neolith._declaration import declaration_of
 
 __all__ = ["admin_code", "label_of"]
 
 # A function's code, read through the slot of the function type itself, so
 # no hook of the author's runs.
+# safe read: FunctionType's own slots.
 _CODE: Final[Any] = vars(types.FunctionType)["__code__"]
-_GLOBALS: Final[Any] = vars(types.FunctionType)["__globals__"]
+_GLOBALS: Final[Any] = vars(types.FunctionType)["__globals__"]  # safe read: ditto
 # The code of the function View.as_view builds: the only Django function
 # whose view_class is its own.
 _AS_VIEW: Final = _CODE.__get__(View.as_view())
@@ -99,7 +101,7 @@ def _project(module: object) -> bool:
 
 
 def _class_module(klass: type) -> object:
-    return vars(klass).get("__module__")
+    return _naming.entry(_naming.namespace(klass), "__module__")
 
 
 def _globals_name(function: types.FunctionType) -> object:
@@ -138,23 +140,26 @@ def admin_code(admin: object) -> tuple[str | None, str | None]:
     ``code`` is ``None``, and ``label`` is the app whose model the admin
     shows, or ``None`` when that model's app is not installed.
     """
-    for klass in type(admin).__mro__:
+    for klass in _naming.mro(type(admin)):
         module = _class_module(klass)
         if _hosted(module):
             return _app(module), f"{_name(klass)}: admin class"
         if _project(module):
             return None, f"{_name(klass)}: admin class"
-    model = vars(admin).get("model")
-    meta = vars(model).get("_meta") if issubclass(type(model), type) else None
+    model = _naming.entry(_naming.instance_dict(admin) or {}, "model")
+    meta = (
+        _naming.entry(_naming.namespace(model), "_meta")
+        if issubclass(type(model), type)
+        else None
+    )
     label = meta.app_label if type(meta) is Options else None
     installed = type(label) is str and label in global_apps.app_configs
     return (label if installed else None), None
 
 
 def _name(klass: type) -> str:
-    """``<module>.<qualname>`` of a class, read through ``type``'s own slot."""
-    qualname = type.__dict__["__qualname__"].__get__(klass)
-    return f"{_class_module(klass)}.{qualname}"
+    """``<module>.<qualname>`` of a class, read through ``type``'s own slots."""
+    return _naming.full_name(klass, None)
 
 
 def label_of(view: object, _depth: int = 0, _ran: bool = False) -> str | None:
@@ -177,7 +182,7 @@ def label_of(view: object, _depth: int = 0, _ran: bool = False) -> str | None:
     if kind is not types.FunctionType:
         return _app(_class_module(kind))
     function: types.FunctionType = view  # type: ignore[assignment]
-    attributes = vars(function)
+    attributes = vars(function)  # safe read: an exact function's own dict
     link = attributes.get("__wrapped__")
     if _app_code(function):
         # An app's code: what it wraps, when that runs a hosted app's code.

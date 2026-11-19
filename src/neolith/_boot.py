@@ -3,8 +3,11 @@
 The root middleware's constructor calls ``boot()`` after checking its own
 place. Boot runs once per process: it checks that ``ROOT_URLCONF`` is set and
 imports, runs ``neolith.W001`` again now that the URLconf's modules are
-loaded, warning about each admin that set-up did not warn about, and reads
-every schema (``schema_messages``). Each check runs whatever the others
+loaded, warning about each admin that set-up did not warn about, warns
+(``neolith.W003``) about each contract path and provided prefix that a URL
+pattern of ``ROOT_URLCONF`` also matches, since the host answers it first
+(``shadow_messages``; ADR 0011 Decision 2), and reads every schema
+(``schema_messages``). Each check runs whatever the others
 found, and every refusal is reported together. The outcome is kept, a
 refusal included, whatever ends the run, so a later handler gets the same
 answer without a second read, and concurrent constructions share one run
@@ -63,8 +66,9 @@ from django.db.migrations.executor import MigrationExecutor
 from django.db.migrations.loader import MigrationLoader
 from django.db.migrations.recorder import MigrationRecorder
 from django.db.utils import load_backend
+from django.urls import resolve
 
-from neolith import _checks, _compat, _databases
+from neolith import _checks, _compat, _databases, _naming
 from neolith._context import UsageError
 from neolith._declaration import declaration_of
 
@@ -73,6 +77,7 @@ __all__ = [
     "boot_for_tests",
     "code_messages",
     "schema_messages",
+    "shadow_messages",
     "state_messages",
 ]
 
@@ -110,13 +115,7 @@ _kept: _Kept | None = None
 
 
 def _cause(error: BaseException) -> str:
-    try:
-        text = str(error)
-    except Exception:
-        text = "<the message cannot be read>"
-    if len(text) > _SHOWN:
-        text = f"{text[:_SHOWN]}..."
-    return f"{type(error).__qualname__}: {text}"
+    return _naming.cause(error, _SHOWN + 3)
 
 
 def boot() -> None:
@@ -198,6 +197,8 @@ def _run(*, schema: bool) -> str | None:
     """
     problems = _urlconf_problems()
     _warn_again()
+    if not problems:
+        _warn_shadowed()
     found = schema_messages() if schema else []
     errors = sorted(f"({m.id}) {m.msg}" for m in found if m.level >= checks.ERROR)
     lines = sorted(problems) + errors
@@ -219,7 +220,7 @@ def _urlconf_problems() -> list[str]:
         ]
     if type(value) is not str:
         return [
-            f"settings: ROOT_URLCONF: expected a str, got {type(value).__qualname__}"
+            f"settings: ROOT_URLCONF: expected a str, got {_naming.type_name(value)}"
         ]
     shown = value if len(value) <= _SHOWN else f"{value[:_SHOWN]}..."
     try:
@@ -239,6 +240,51 @@ def _warn_again() -> None:
     logged = host.warned if host is not None else frozenset()
     for message in _checks.admin_check():
         if message.msg in logged or message.is_silenced():
+            continue
+        with contextlib.suppress(Exception):
+            _log.warning("(%s) %s", message.id, message.msg)
+
+
+def shadow_messages() -> list[checks.CheckMessage]:
+    """``neolith.W003``: one warning for each contract path and each
+    provided prefix ``/<name>/v<N>/`` that a URL pattern of ``ROOT_URLCONF``
+    matches. The host answers every such path itself, so that pattern is
+    never reached for it. A deployer URL deeper under an owned prefix is
+    not seen: only these paths are resolved, once each.
+    """
+    from neolith._host import _current
+
+    host = _current()
+    if host is None:
+        return []
+    found: list[checks.CheckMessage] = []
+    for identity, path in host.endpoints.shadowable():
+        try:
+            match = resolve(path)
+        except Exception:  # noqa: S112  # unresolved, or a URLconf that fails there
+            continue
+        route = match.route or match.view_name or "<unnamed>"
+        found.append(
+            checks.Warning(
+                f"{identity}: the host answers {path} itself, so the URL "
+                f"pattern {_shown(route)!r} of ROOT_URLCONF, which matches it, "
+                "is never reached for that path",
+                hint="move the pattern off the contract's prefix, or silence "
+                "neolith.W003 if the shadowing is meant, as for a catch-all",
+                id="neolith.W003",
+            )
+        )
+    return found
+
+
+def _shown(text: str) -> str:
+    return text if len(text) <= _SHOWN else f"{text[:_SHOWN]}..."
+
+
+def _warn_shadowed() -> None:
+    """Log each ``neolith.W003`` that is not silenced."""
+    for message in shadow_messages():
+        if message.is_silenced():
             continue
         with contextlib.suppress(Exception):
             _log.warning("(%s) %s", message.id, message.msg)
@@ -674,7 +720,8 @@ def _state(
     if not path or not os.path.isfile(path) or os.path.getsize(path) == 0:
         messages.append(
             checks.Error(
-                f"database {alias}: no database at {path or repr(name)}; {_NO_FILE}",
+                f"database {alias}: no database at "
+                f"{path or _naming.shown(name)}; {_NO_FILE}",
                 id="neolith.E018",
             )
         )

@@ -5,6 +5,10 @@ for a hosted app, with no principal and no deadline unless given, and a fresh
 trace (ADR 0022 Decision 8, ADR 0017 Decision 4). It closes on exit, however
 the block ends, and is used once. Time is a clock the tests set, never a
 sleep.
+
+These tests stay outside the contract suite (CONTRIBUTING T2): they check the
+host's own scope for its apps, how it opens, closes and refuses a use, not
+what a contract's semantics are over every transport.
 """
 
 import asyncio
@@ -45,7 +49,9 @@ from tests.test_host import WriteApp, _apps_module
 from tests.test_host import write_app as write_app
 
 ALICE = Principal("https://id.example", "alice")
-HOSTED = "couriers, stock, web"
+# The labels of the test host's apps, as a refusal lists them: each app's
+# label is the last part of its name, and the list is sorted.
+HOSTED = ", ".join(sorted(name.rpartition(".")[2] for name in host_apps.HOSTED))
 
 couriers = connect("couriers.v3")
 stock = connect("stock.v1")

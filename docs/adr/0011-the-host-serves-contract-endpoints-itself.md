@@ -1,6 +1,8 @@
 # 0011. The host serves contract endpoints itself, from its root middleware, with no web framework
 
-- **Status:** Proposed
+- **Status:** Accepted
+- Narrowed by [0033](0033-eight-points-of-the-http-transport-settled-for-0-1.md) (Decisions 3, 4, 5 and 8)
+- **Accepted:** 2026-11-18
 - **Date:** 2026-11-03; amended 2026-11-18 for roadmap step 5 (#12)
 
 ## Context
@@ -117,7 +119,7 @@ The in-process transport and the HTTP endpoint share the provider side from 0017
 Fact 4's details become the shared side's interface. It takes from the transport:
 
 - the deadline, already counted from when the call arrived: in-process, when `call` is entered; over HTTP, when the endpoint is entered, before the first caller backend runs and before any thread hop (TRN-36, 0027 Decision 1). Under ASGI the server has already received the body by then (Consequences);
-- the idempotency key, or none, since a call that arrives over HTTP without `Idempotency-Key` has no key (spec 03), so `Sent.idempotency_key` becomes optional;
+- the idempotency key, or none, since a call that arrives over HTTP without `Idempotency-Key` has no key (spec 03), so the context the shared side takes holds an optional key, where `Sent.idempotency_key` is a `str`;
 - the principal the transport has already read, so a malformed `Neolith-Principal` is the endpoint's `invalid_argument` at row 6, never `internal`;
 - the receiver kind, which turns on the network receive check of 0007 Decision 3: CON-42 on the body's text, the description check and CON-40, before the declared type's validator reads the same text.
 

@@ -15,7 +15,10 @@ it is raised. It builds the principal backends of
 build for ``neolith.E019``. Then it runs the host's system checks, those tagged
 ``neolith`` (``neolith._checks``): every error among them is raised in one
 ``ImproperlyConfigured``, whatever ``SILENCED_SYSTEM_CHECKS`` says, and each
-warning is logged. A set-up that passes publishes its table, with the
+warning is logged. It then builds the paths the host answers itself and
+the OpenAPI document of the provided contracts (``neolith._endpoint``); a
+document that cannot be built is a fault of neolith, which stops set-up. A
+set-up that passes publishes its table, with the
 request deadline read from ``NEOLITH``, on the ``neolith`` app config that
 ran it, so the table and the implementation instances belong to
 that set-up: a later set-up in the same process builds its own, and when an
@@ -24,9 +27,10 @@ that set-up: a later set-up in the same process builds its own, and when an
 State the host owns (CONTRIBUTING K6), all of it guarded by one lock:
 
 - the identities that ``connect()`` was asked for before a table existed,
-  with the file and line of each ``connect()``, which set-up checks,
-  dropping those its table knows; an unknown one stays, so the next set-up
-  reports it again;
+  with the file and line of each ``connect()``, each tied to the apps whose
+  loading step asked from it; a set-up checks those tied to an app it
+  installs, and only a set-up that passes drops them, so an unknown one stays
+  and the next set-up that installs its app reports it again (ADR 0029);
 - the hosted apps of the first set-up that passed, since a process hosts one
   set of apps (ADR 0022 Decision 5);
 - the ``NEOLITH`` that first set-up checked, without ``REQUEST_DEADLINE``,
@@ -47,12 +51,15 @@ import contextvars
 import dataclasses
 import importlib
 import inspect
+import itertools
 import logging
+import sys
 import threading
 import types
-from collections.abc import Callable, Mapping, Sequence
+import weakref
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Final, NoReturn, final
+from typing import Any, Final, NoReturn, cast, final
 
 from django.apps import AppConfig
 from django.apps import apps as global_apps
@@ -63,16 +70,26 @@ from django.core.exceptions import ImproperlyConfigured
 from django.core.signals import setting_changed
 from pydantic import BaseModel
 
-from neolith import _checks, _configure, _context, _principal
+from neolith import (
+    _caller,
+    _checks,
+    _configure,
+    _context,
+    _endpoint,
+    _http,
+    _http_transport,
+    _naming,
+    _principal,
+)
 from neolith._connector import Connector as Bound
 from neolith._connector import InProcess
 from neolith._context import Principal, UsageError
 from neolith._contracts import _IDENTITY, Contract
+from neolith._declaration import _SHOWN as _CLIPPED
 from neolith._declaration import (
     Declaration,
     DeclarationError,
     Provision,
-    _clip,
     _show,
     declaration_of,
 )
@@ -84,6 +101,9 @@ _log = logging.getLogger("neolith.host")
 
 _LABEL: Final = "neolith"
 _HOST_ATTR: Final = "_neolith_host"
+_LOADER_ATTR: Final = "_neolith_loader"
+# The code of Django's Apps.populate, whose frame names the app loading.
+_POPULATE: Final = Apps.populate.__code__
 
 
 @final
@@ -105,12 +125,34 @@ class Host:
     # union of their request inputs, which a response varies on.
     principals: tuple[_principal.Built, ...] = ()
     vary: tuple[str, ...] = ()
+    # The caller backends and signing keys set-up built (ADR 0027).
+    callers: _caller.Callers = _caller.NO_CALLERS
+    # The paths the host answers itself, and the OpenAPI document's bytes,
+    # built from the provided contracts (ADR 0011 Decisions 2 and 7).
+    endpoints: _endpoint.Endpoints = _endpoint.NO_ENDPOINTS
 
 
 _LOCK: Final = threading.Lock()
 # The identities connect() was asked for before a table existed: each with
-# the places it was asked from, which only the message reads.
-_RECORDED: dict[str, dict[str, None]] = {}
+# the places it was asked from, which only the message reads, and for each
+# place what it is tied to: an app's name or config class path, a key of
+# _PENDING until the next set-up names it, or None for no app, which every
+# set-up checks.
+_RECORDED: dict[str, dict[str, dict[str | None, None]]] = {}
+# The requests made while Django imported an entry of INSTALLED_APPS, before
+# that entry's config existed, which the next set-up ties (_name_pending):
+# for each, the module that asked if it asked as it was imported, the entry,
+# a copy of the load's entries, and the dict of app configs the load fills,
+# one per entry in order, which outlives the load even when it stops before
+# its set-up.
+_PENDING: dict[
+    str, tuple[str | None, str, tuple[object, ...], dict[str, AppConfig]]
+] = {}
+_PENDING_KEYS: Final = itertools.count()
+# The names of the apps installed at any set-up of this process.
+_ONCE_INSTALLED: set[str] = set()
+# The app whose implementation Validate imports and builds now, if any.
+_VALIDATING: Final = contextvars.ContextVar[str | None]("_VALIDATING", default=None)
 # The hosted apps of the first set-up that passed: label to config class.
 _first: Mapping[str, type[AppConfig]] | None = None
 # The NEOLITH the first set-up checked, without REQUEST_DEADLINE.
@@ -128,6 +170,11 @@ class HostConfig(AppConfig):
     label = _LABEL
     default = True
     verbose_name = "neolith"
+
+    def __init__(self, app_name: str, app_module: types.ModuleType | None) -> None:
+        super().__init__(app_name, app_module)
+        # Django creates the config in the thread that loads the registry.
+        setattr(self, _LOADER_ATTR, threading.get_ident())
 
     def ready(self) -> None:
         _checks.register()
@@ -158,7 +205,9 @@ def _table() -> tuple[Host | None, bool]:
       calls wait for; with none, no set-up has passed, and ``connect()``
       records. A later set-up's own load reaches this case for a module
       imported before neolith's app is created, so that ``connect()`` is
-      checked against the table the set-up would restore.
+      checked against the table the set-up would restore. ``connect()``
+      from a thread other than the one loading a later set-up is checked
+      against that table too (``_restored_elsewhere``).
     """
     config = global_apps.app_configs.get(_LABEL)
     host = _host_of(config)
@@ -173,10 +222,31 @@ def _table() -> tuple[Host | None, bool]:
     return None, False
 
 
+def _restored_elsewhere() -> Host | None:
+    """While another thread loads a later set-up: the table Django restores
+    when that set-up ends, if any.
+
+    A ``connect()`` from this thread then is not caused by that set-up's
+    loading, so it is checked at once against the table this thread's calls
+    run on, as it is outside any loading, instead of being recorded.
+    """
+    config = global_apps.app_configs.get(_LABEL)
+    if type(config) is not HostConfig:
+        return None
+    # safe read: a HostConfig of neolith's
+    if vars(config).get(_LOADER_ATTR) == threading.get_ident():
+        return None
+    for stored in reversed(global_apps.stored_app_configs):
+        found = stored.get(_LABEL)
+        if found is not None:
+            return _host_of(found)
+    return None
+
+
 def _host_of(config: object) -> Host | None:
     if type(config) is not HostConfig:
         return None
-    host = vars(config).get(_HOST_ATTR)
+    host = vars(config).get(_HOST_ATTR)  # safe read: a HostConfig of neolith's
     return host if type(host) is Host else None
 
 
@@ -196,6 +266,7 @@ def set_up(config: AppConfig) -> None:
     # Built once per set-up, after app loading; what is refused is recorded
     # for neolith.E019, which the checks below report (ADR 0023 Decision 10).
     principals = _principals(config)
+    callers = _caller.set_up(config, principals)
     # Run outside the lock, which a check must never need; judged inside it,
     # after Resolve and Validate, so their refusals come first.
     found = checks.run_checks(tags=[_checks.TAG])
@@ -209,14 +280,15 @@ def set_up(config: AppConfig) -> None:
             for problem in _configure.settings_problems(configs)
         ]
     with _LOCK:
-        for identity, places in sorted(_RECORDED.items()):
+        _name_pending(list(configs))
+        _ONCE_INSTALLED.update(c.name for c in configs)
+        installed = frozenset(c.name for c in configs) | {
+            _naming.full_name(type(c), None) for c in configs
+        }
+        checked = _checked_by(installed)
+        for identity, places in sorted(checked.items()):
             if identity not in host.known:
                 refusals.extend(_unknown_at(identity, place, host) for place in places)
-        # This set-up has checked every record. Those its table knows are
-        # done with, whatever it decides below; an unknown one stays, so a
-        # later set-up reports it again.
-        for identity in [i for i in _RECORDED if i in host.known]:
-            del _RECORDED[identity]
         if refusals:
             _refuse(DeclarationError("\n".join(sorted(refusals))))
         if _first is not None and _first != hosted:
@@ -236,14 +308,222 @@ def set_up(config: AppConfig) -> None:
         warned = frozenset(
             m.msg for m in found if m.level == checks.WARNING and not m.is_silenced()
         )
+        try:
+            endpoints = _endpoint.table(host.connectors)
+        except ImproperlyConfigured as error:
+            _refuse(error)
         published = dataclasses.replace(
             host,
+            connectors=_remote(config, host.connectors, configs, callers),
             request_deadline=deadline,
             warned=warned,
             principals=principals,
             vary=_principal.vary_of(principals),
+            callers=callers,
+            endpoints=endpoints,
         )
+        # Only a set-up that passes is done with the places it checked, all
+        # of which its table knows. A refused one drops none, whatever its
+        # table knew, so the next set-up of the same apps reports an unknown
+        # identity again (ADR 0029).
+        for identity, places in checked.items():
+            for place in places:
+                loads = _RECORDED[identity][place]
+                # Its tie to the apps below its module goes with it: this
+                # set-up checked the request that tie stands for.
+                for app in [
+                    a
+                    for a in loads
+                    if _tied(a, installed) or (a is not None and a.startswith("\1"))
+                ]:
+                    del loads[app]
+                if not loads:
+                    del _RECORDED[identity][place]
+            if not _RECORDED[identity]:
+                del _RECORDED[identity]
         setattr(config, _HOST_ATTR, published)
+
+
+def _checked_by(installed: frozenset[str]) -> dict[str, list[str]]:
+    """The places of each record that a set-up installing ``installed``
+    checks: ``installed`` holds each app's name and its config class's path.
+
+    A place is checked when an app this set-up installs asked from it during
+    its loading step, or when it was asked from outside any app's loading
+    step. A place only other apps asked from, such as one an override added
+    and the first apps restored after it do not install, is left for a
+    set-up that installs one of them (ADR 0029).
+    """
+    checked: dict[str, list[str]] = {}
+    for identity, places in _RECORDED.items():
+        for place, loads in places.items():
+            if any(_tied(app, installed) for app in loads):
+                checked.setdefault(identity, []).append(place)
+    return checked
+
+
+def _ties(module: str, at_import: bool) -> set[str | None]:
+    """What a request from a ``connect()`` in ``module`` is tied to, made now
+    in this thread; ``at_import`` when it runs at the module's top level, as
+    the module is imported.
+
+    The request belongs to the app whose loading step runs: the app whose
+    implementation Validate imports and builds, or else the app the frame of
+    Django's ``Apps.populate`` is at, which is the app whose models are
+    imported or whose ``ready()`` runs, or the entry of ``INSTALLED_APPS``
+    being imported, which ``_name_pending`` ties at the next set-up. Python
+    imports a module once, so a request made as a module is imported also
+    belongs to the module's own app, or to no app (``_module_ties``). The
+    same at Django 5.2 and 6.1.
+    """
+    validating = _VALIDATING.get()
+    loading = None if validating is not None else _populating()
+    if validating is not None:
+        ties: set[str | None] = {validating}
+    elif loading is None:
+        return {None}
+    elif global_apps.apps_ready:
+        found = loading.get("app_config")
+        ties = {cast(AppConfig, found).name if _naming.is_a(found, AppConfig) else None}
+    else:
+        entry = loading.get("entry")
+        entries = loading.get("installed_apps")
+        if _naming.is_a(entry, AppConfig):
+            ties = {cast(AppConfig, entry).name}
+        # Django loads an entry of a str subclass as its text.
+        # Its real type, not its __class__: str.__str__ reads it below, and a
+        # proxy that only claims to be a str is left to no app.
+        elif _naming.derives(type(entry), str) and isinstance(entries, (list, tuple)):
+            key = f"\0{next(_PENDING_KEYS)}"
+            _PENDING[key] = (
+                module if at_import else None,
+                cast(str, entry),
+                tuple(entries),
+                global_apps.app_configs,
+            )
+            return {key}
+        else:
+            return {None}
+    if at_import:
+        ties |= _module_ties(module, list(global_apps.app_configs.values()))
+    return ties
+
+
+def _below(importing: tuple[str, ...]) -> set[str | None]:
+    """A tie to every app at or below each module whose import was under way
+    when a request was made: Python imports every package above a module it
+    imports, so such an app's loading imports those modules again in a fresh
+    process, and the request with them.
+    """
+    return {f"\1{module}" for module in importing}
+
+
+def _tied(tie: str | None, installed: frozenset[str]) -> bool:
+    """Whether a set-up that installs ``installed``, its apps' names and
+    config class paths, checks ``tie``.
+    """
+    if tie is None:
+        return True
+    if tie.startswith("\1"):
+        return any(_within(key, tie[1:]) for key in installed)
+    return tie in installed
+
+
+def _module_ties(module: str, *loads: Sequence[AppConfig]) -> set[str | None]:
+    """What a request made as ``module`` was imported belongs to besides the
+    app whose loading imported it: the app Django's own rule finds for the
+    module among the configs of ``loads``, in turn; nothing more when the
+    module lies in an app installed at an earlier set-up but not found here;
+    else no app, so that every set-up checks it (ADR 0029).
+    """
+    if not module:
+        return {None}
+    for configs in loads:
+        found = _containing(module, configs)
+        if found is not None:
+            return {found.name}
+    if any(_within(module, app) for app in _ONCE_INSTALLED):
+        return set()
+    return {None}
+
+
+def _containing(module: str, configs: Sequence[AppConfig]) -> AppConfig | None:
+    """The config whose ``name`` is the longest that ``module`` lies in, as
+    Django's ``Apps.get_containing_app_config`` finds it.
+    """
+    found = [c for c in configs if _within(module, c.name)]
+    return max(found, key=lambda c: len(c.name), default=None)
+
+
+def _within(module: str, package: str) -> bool:
+    return module == package or module.startswith(f"{package}.")
+
+
+def _config_key(config: AppConfig) -> str:
+    """How a tie names a config made from an entry: its class, which every
+    spelling of the entry makes, since an app's name would also match the app
+    a config with another name points at, installed alone. Django's own
+    ``AppConfig`` is shared by many apps, so its apps go by name.
+    """
+    kind = type(config)
+    if kind is AppConfig:
+        return config.name
+    return _naming.full_name(kind, None)
+
+
+def _name_pending(configs: Sequence[AppConfig]) -> None:
+    """Tie each request made while an entry of ``INSTALLED_APPS`` was
+    imported, now that its load has made the configs it could; ``configs``
+    are this set-up's.
+
+    A request belongs to the config its entry made, or to no app when the
+    load stopped at that entry. A request made as a module was imported also
+    belongs to that config when the module is the entry's own (the entry, or
+    the module that defines the entry's class) or lies below it, which keeps
+    a config whose ``name`` points elsewhere; otherwise to what
+    ``_module_ties`` finds among that load's configs, then this set-up's.
+    """
+    named: dict[str, set[str | None]] = {}
+    for key, (module, entry, entries, made) in _PENDING.items():
+        loaded = list(made.values())
+        # By identity: an entry's own __eq__ never runs (#100), and the copy
+        # of the entries holds the same objects.
+        at = next((i for i, e in enumerate(entries) if e is entry), len(loaded))
+        config = loaded[at] if at < len(loaded) else None
+        own: str | None = None if config is None else _config_key(config)
+        ties: set[str | None] = {own}
+        text = str.__str__(entry)
+        home = text if text in sys.modules else text.rpartition(".")[0]
+        if module is not None and (own is None or not _within(module, home)):
+            ties |= _module_ties(module, loaded, configs)
+        named[key] = ties
+    _PENDING.clear()
+    for places in _RECORDED.values():
+        for place, held in places.items():
+            if any(tie in named for tie in held if tie is not None):
+                tied: dict[str | None, None] = {}
+                for tie in held:
+                    tied.update(
+                        dict.fromkeys(
+                            named[tie] if tie is not None and tie in named else {tie}
+                        )
+                    )
+                places[place] = tied
+
+
+def _populating() -> Mapping[str, object] | None:
+    """The local variables of ``Apps.populate`` for Django's global registry,
+    if this thread runs it.
+    """
+    frame = inspect.currentframe()
+    try:
+        while frame is not None:
+            if frame.f_code is _POPULATE and frame.f_locals.get("self") is global_apps:
+                return frame.f_locals
+            frame = frame.f_back
+        return None
+    finally:
+        del frame
 
 
 def _principals(config: AppConfig) -> tuple[_principal.Built, ...]:
@@ -254,11 +534,54 @@ def _principals(config: AppConfig) -> tuple[_principal.Built, ...]:
     built: tuple[_principal.Built, ...] = ()
     neolith = getattr(settings, "NEOLITH", None)
     if type(neolith) is dict:
-        value = neolith.get(_principal.KEY)
+        # Looked up among exact str keys only: a key's own __eq__ never runs.
+        value: Any = _naming.entry(neolith, _principal.KEY)
         if value is not None and not _principal.shape_problems(value):
             built, refusals = _principal.build(value)
     setattr(config, _checks.PRINCIPAL_REFUSALS, tuple(refusals))
     return built
+
+
+def _remote(
+    config: AppConfig,
+    connectors: Mapping[str, Bound],
+    configs: Iterable[AppConfig],
+    callers: _caller.Callers,
+) -> Mapping[str, Bound]:
+    """``connectors`` with a connector over HTTP for each contract version
+    ``settings.NEOLITH`` lists remote providers for, which set-up's checks
+    have passed: one transport per entry, in the order listed (ADR 0014
+    Decision 2, ADR 0031 Decision 2). Under ``single`` that is the one
+    remote provider; under ``local-first``, the order the connector walks.
+    Resolve has refused a remote provider for a contract an app of the host
+    provides. The transports share one pool per origin and open nothing
+    until a call.
+
+    The pools belong to the set-up that ``config`` ran, and close when the
+    config is gone, such as when Django drops the registry of an override
+    that set the host up again, or when the process exits.
+    """
+    urls = _checks.remote_urls(getattr(settings, "NEOLITH", {}))
+    if not urls:
+        return connectors
+    required = {
+        contract.identity: contract
+        for declaration in _checks.hosted_declarations(configs)
+        for contract in declaration.requires
+    }
+    pools = _http.Pools()
+    chosen = dict(connectors)
+    for identity, listed in urls.items():
+        declaration = required[identity].declaration
+        transports = [
+            _http_transport.HTTPTransport(
+                declaration, pools.pool(_http.Origin.parse(url)), callers
+            )
+            for url in listed
+        ]
+        chosen.setdefault(identity, Bound(declaration, *transports))
+    weakref.finalize(config, pools.close)
+    return types.MappingProxyType(chosen)
 
 
 def _setting_changed(
@@ -378,19 +701,38 @@ def build(registry: Apps) -> tuple[Host, list[str]]:
 
     Returns the table and every refusal; the table is used only when there is
     none. Every check runs whatever the others found, so one refusal hides
-    none behind it.
+    none behind it. Resolve reads the remote providers and the routing
+    policies that ``settings.NEOLITH`` names; when it refuses, every problem of
+    ``NEOLITH``, and each app that requires a remote provider's contract
+    with no signing key, comes with its refusals. Set-up adds the remote
+    providers' transports to the table once its checks have passed
+    (``_remote``).
     """
     hosted = [
         (config, found)
         for config in registry.get_app_configs()
         if (found := declaration_of(type(config))) is not None
     ]
-    contracts, refusals = resolve([declaration for _, declaration in hosted])
+    neolith = getattr(settings, "NEOLITH", _checks.MISSING)
+    declarations = [declaration for _, declaration in hosted]
+    contracts, refusals = resolve(
+        declarations, _checks.remote_identities(neolith), _checks.routed(neolith)
+    )
+    if refusals:
+        # Resolve reads NEOLITH, so a requirement it finds unmet may come
+        # from a problem there: those, and its remote providers' callers
+        # that have no signing key, are reported with its refusals.
+        refusals += _checks.neolith_problems(neolith, declarations)
+        refusals += _checks.unsigned_problems(neolith, declarations)
     connectors: dict[str, Bound] = {}
     for config, declaration in hosted:
         for provision in declaration.provides:
             try:
-                instance = validate(registry, config, provision, refusals)
+                validating = _VALIDATING.set(config.name)
+                try:
+                    instance = validate(registry, config, provision, refusals)
+                finally:
+                    _VALIDATING.reset(validating)
             except Exception as error:  # a read validate() did not foresee
                 refusals.append(
                     f"app {config.label}: provides: {provision.contract.identity}: "
@@ -432,12 +774,23 @@ def build(registry: Apps) -> tuple[Host, list[str]]:
 
 def resolve(
     declarations: Sequence[Declaration],
+    remote: Collection[str] = (),
+    routed: Mapping[str, int | None] | None = None,
 ) -> tuple[dict[str, Contract], list[str]]:
     """Resolve: the contracts the host knows by identity, and the refusals.
 
     Each identity keeps the first class named for it, in the order of the
     declarations; a later app that names another class with that identity,
-    or provides it again, is refused naming the first.
+    or provides it again, is refused naming the first. A requirement is
+    met by the app that provides it or by a remote provider, one of the
+    identities ``remote`` names; a remote identity that no app requires, or
+    that an app provides, is refused under every policy (ADR 0014, the
+    Resolve rows, as ADR 0031 words them). ``routed`` maps each identity
+    ``NEOLITH["ROUTING_POLICIES"]`` names to its number of remote entries
+    under ``local-first``, or ``None`` for a value its own row refuses: one
+    that no app requires or that an app provides is refused, and one under
+    ``local-first`` with exactly one entry; one with none is left to the
+    refusal of the requirement it leaves unmet (ADR 0031, the Resolve rows).
     """
     refusals: list[str] = []
     named: dict[str, tuple[Contract, str]] = {}
@@ -463,20 +816,52 @@ def resolve(
                     f"app {app}: provides: {identity} is provided by app "
                     f"{provider} too; in a host, one app provides a contract"
                 )
+    required = {c.identity for d in declarations for c in d.requires}
+    for identity in sorted(remote):
+        if identity not in required:
+            refusals.append(
+                f"{_checks.REMOTE}: {identity} is required by no hosted app; remove it"
+            )
+        if identity in providers:
+            refusals.append(
+                f"{_checks.REMOTE}: {identity} is provided by app "
+                f"{providers[identity]} in this host, which answers every call "
+                "to it; an in-process call never ends with unavailable, so a "
+                "remote provider listed beside it would never be called; remove "
+                "the entry"
+            )
+    counts = routed or {}
+    for identity in sorted(counts):
+        if identity not in required:
+            refusals.append(
+                f"{_checks.ROUTING}: {identity} is required by no hosted app; remove it"
+            )
+        if identity in providers:
+            refusals.append(
+                f"{_checks.ROUTING}: {identity} is provided by app "
+                f"{providers[identity]} in this host, which is its one provider; "
+                "remove it"
+            )
+        if counts[identity] == 1:
+            refusals.append(
+                f"{_checks.ROUTING}: {identity} has one entry in {_checks.REMOTE}, "
+                f"and {_checks.LOCAL_FIRST} orders two or more; remove it, since "
+                "one provider is routed by single"
+            )
     for declaration in declarations:
         for contract in declaration.requires:
-            if contract.identity not in providers:
+            if contract.identity not in providers and contract.identity not in remote:
                 refusals.append(
                     f"app {declaration.label}: requires: {contract.identity} has "
-                    "no provider; no app of this host provides it, so install "
-                    "the app that does"
+                    "no provider; no app of this host provides it and "
+                    f"{_checks.REMOTE} has no entry for it"
                 )
     return {identity: found for identity, (found, _) in named.items()}, refusals
 
 
 def _class(contract: Contract) -> str:
     declaration = contract.declaration
-    return f"{declaration.__module__}.{declaration.__qualname__}"
+    return _naming.full_name(declaration, None)
 
 
 def validate(
@@ -514,19 +899,21 @@ def validate(
         return None
     try:
         module = importlib.import_module(module_name)
+        # A lazily imported module runs its code as it is read, so it is
+        # read here, as the import is.
+        held = _naming.module_dict(module)
     except Exception as error:
         refusals.append(f"{where} does not import: {_cause(error)}")
         _log_cause(where, error)
         # Nothing of the implementation can be read.
         return None
-    try:
-        found = vars(module).get(attribute, _NOTHING)
-    except Exception as error:  # what the import left has no names to read
+    if held is None:
         refusals.append(
             f"{where} does not import: {_long(module_name)} is not a module "
-            f"whose names can be read ({_cause(error)})"
+            f"whose names can be read (it is a {_naming.type_name(module)})"
         )
         return None
+    found: Any = _naming.entry(held, attribute, _NOTHING)
     if found is _NOTHING:
         refusals.append(
             f"{where} does not import: {_long(module_name)} defines no "
@@ -541,8 +928,8 @@ def validate(
     cls: type[Any] = found
     problem = False
     # Read statically: a metaclass cannot answer for the class.
-    own_module = vars(cls).get("__module__")
-    own_name: str = type.__dict__["__qualname__"].__get__(cls)
+    own_module = _naming.module(cls)
+    own_name = _naming.qualname(cls, None)
     # Only a class proven to be the app's own is built.
     foreign = True
     if type(own_module) is not str:
@@ -609,7 +996,7 @@ def _declared_with(
     config: AppConfig, module: str, where: str, refusals: list[str]
 ) -> bool:
     """Refuse a class in a module that is read with the declaration."""
-    declared_in = vars(type(config)).get("__module__")
+    declared_in = _naming.module(type(config))
     if module not in (config.name, declared_in):
         return False
     refusals.append(
@@ -634,11 +1021,7 @@ def _quoted(text: str) -> str:
 
 def _cause(error: Exception) -> str:
     """An error's class and message, bounded, never raising."""
-    try:
-        text = str(error)
-    except Exception:
-        text = "<the message cannot be read>"
-    return f"{type(error).__qualname__}: {_clip(text)}"
+    return _naming.cause(error, _CLIPPED + 3)
 
 
 def _log_cause(where: str, error: Exception) -> None:
@@ -676,7 +1059,7 @@ def connect(identity: str, /) -> "Connector":
     if type(identity) is not str:
         raise TypeError(
             f"connect() takes a contract identity as a str, not "
-            f"{type(identity).__qualname__}"
+            f"{_naming.type_name(identity)}"
         )
     if not _IDENTITY.fullmatch(identity):
         raise ValueError(
@@ -686,7 +1069,11 @@ def connect(identity: str, /) -> "Connector":
     with _LOCK:
         host, _ = _table()
         if host is None:
-            _RECORDED.setdefault(identity, {})[_place()] = None
+            host = _restored_elsewhere()
+        if host is None:
+            where, module, at_import, importing = _place()
+            place = _RECORDED.setdefault(identity, {}).setdefault(where, {})
+            place.update(dict.fromkeys(_ties(module, at_import) | _below(importing)))
         elif identity not in host.known:
             raise UsageError(
                 f"connect({_quoted(identity)}): no app of this host provides or "
@@ -695,14 +1082,32 @@ def connect(identity: str, /) -> "Connector":
     return Connector._made(identity)
 
 
-def _place() -> str:
-    """The file and line of the ``connect()`` call, for the message only."""
+def _place() -> tuple[str, str, bool, tuple[str, ...]]:
+    """The file and line of the ``connect()`` call, for the message only; the
+    name of its module, or ``""``; whether it runs as the module is imported,
+    at the module's top level; and the modules whose import is under way in
+    the loading step that asked, read from the frames between the call and
+    ``Apps.populate``, or none when no load runs.
+    """
     frame = inspect.currentframe()
     try:
         caller = None if frame is None or frame.f_back is None else frame.f_back.f_back
         if caller is None:
-            return "an unknown place"
-        return f"{caller.f_code.co_filename}:{caller.f_lineno}"
+            return "an unknown place", "", False, ()
+        module = caller.f_globals.get("__name__")
+        importing: list[str] = []
+        step: types.FrameType | None = caller
+        while step is not None and step.f_code is not _POPULATE:
+            name = step.f_globals.get("__name__")
+            if step.f_code.co_name == "<module>" and type(name) is str:
+                importing.append(name)
+            step = step.f_back
+        return (
+            f"{caller.f_code.co_filename}:{caller.f_lineno}",
+            module if type(module) is str else "",
+            caller.f_code.co_name == "<module>",
+            tuple(importing) if step is not None else (),
+        )
     finally:
         del frame
 
@@ -800,7 +1205,8 @@ def _connector(identity: str) -> Bound:
             "registry while an override or set_available_apps leaves it out; "
             "calls resume when that ends"
         )
-    found = host.connectors.get(identity)
+    # A test that entered over_http sends this identity's calls over HTTP.
+    found = _http_transport.seamed(identity) or host.connectors.get(identity)
     if found is None:
         # Known identities all have a provider once set-up passed; this is a
         # connector recorded in a process whose host knows other contracts.
@@ -867,11 +1273,11 @@ def command_scope(
     if type(app) is not str:
         raise TypeError(
             "command_scope() takes an app's label as a str, not "
-            f"{type(app).__qualname__}"
+            f"{_naming.type_name(app)}"
         )
     if principal is not None and type(principal) is not Principal:
         raise TypeError(
-            f"principal= takes a Principal, not {type(principal).__qualname__}"
+            f"principal= takes a Principal, not {_naming.type_name(principal)}"
         )
     return _CommandScope._made(app, principal, _context.timeout_option(timeout))
 

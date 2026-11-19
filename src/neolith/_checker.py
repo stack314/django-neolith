@@ -15,18 +15,28 @@ one the check does not know is never skipped.
 Three rules of ADR 0019 that the description cannot state are added (CON-40):
 an integer is read strictly, so ``1.0`` is not one; a date or timestamp names
 a day that exists; and a timestamp's instant falls in years 0001 to 9999 in
-UTC. A number is read as the double a reader holds, as the declared type's
-validator reads it. A ``-0`` is admitted: only a sender is bound to write
+UTC. A number is held to its bounds as the reader hands it on: one written
+as an integer exactly, and also as the double the declared type's validator
+reads it as, and any other as that double. So integer text that rounds onto
+a bound, such as 2^60 + 1 against a maximum of 2^60, is refused (CON-39). A
+sender writes an integer only where a double equals it (TRN-11), and any
+other number as a double's shortest form, so its text compares as the
+double it was written from. A ``-0`` is admitted: only a sender is bound to write
 ``0`` (CON-35), and it converts the value before it writes the text.
 """
 
+import json
 import math
-from collections.abc import Mapping
+import operator
+import sys
+import typing
+from collections.abc import Callable, Mapping
 from datetime import UTC, date, datetime
 from typing import Any
 
 from pydantic_core import CoreSchema, PydanticCustomError, SchemaValidator, core_schema
 
+from neolith import _naming
 from neolith._forms import (
     BYTES_PATTERN,
     DECIMAL_DIGITS_PATTERN,
@@ -56,6 +66,7 @@ _NULL = {"type": "null"}
 
 def _real(named: type) -> type:
     """The class of the datetime module that a name for it leads to."""
+    # safe read: one of neolith's own names for a datetime class.
     return next(kind for kind in named.__mro__ if kind.__module__ == "datetime")
 
 
@@ -100,7 +111,7 @@ def description_checker(defs: Mapping[str, Any], name: str) -> SchemaValidator:
         # refuses the contract, under one name.
         raise TypeError(
             f"the description of {name} is not one the description check reads "
-            f"({type(error).__name__}: {error})"
+            f"({_naming.cause(error, None)})"
         ) from error
 
 
@@ -194,14 +205,15 @@ def _typed(rest: dict[str, Any], refs: list[str]) -> CoreSchema:
             multiple_of=multiple,
         )
     if kind == "number":
-        return core_schema.float_schema(
-            strict=True,
-            allow_inf_nan=False,
-            ge=_double(rest, "minimum"),
-            le=_double(rest, "maximum"),
-            gt=_double(rest, "exclusiveMinimum"),
-            lt=_double(rest, "exclusiveMaximum"),
-        )
+        bounds = _Bounds(rest)
+        number = core_schema.float_schema(strict=True, allow_inf_nan=False)
+        if bounds.within_the_form:
+            # A finite double is within the form's range, and so is the
+            # double integer text reads as; integer text past the largest
+            # double is refused before this check (CON-42), and no sender
+            # writes it (TRN-11). So such a number needs no check of its own.
+            return number
+        return core_schema.no_info_before_validator_function(bounds.check, number)
     if kind == "boolean":
         return core_schema.bool_schema(strict=True)
     raise TypeError(f"type {kind!r} is not read")
@@ -295,6 +307,70 @@ def _double(rest: dict[str, Any], keyword: str) -> float | None:
     if type(value) is int and float(value) == value:
         return float(value)
     raise TypeError(f"{keyword} {value!r} is not a number a double holds")
+
+
+# Each bound keyword of a number: the error a value outside it gives, the
+# words of its message, and whether a value meets it.
+_BOUNDS: tuple[tuple[str, str, str, Callable[[float, float], bool]], ...] = (
+    ("minimum", "greater_than_equal", "greater than or equal to", operator.ge),
+    ("exclusiveMinimum", "greater_than", "greater than", operator.gt),
+    ("maximum", "less_than_equal", "less than or equal to", operator.le),
+    ("exclusiveMaximum", "less_than", "less than", operator.lt),
+)
+
+
+# The bounds every number's description states: the range of its form.
+_FORM_BOUNDS = {"minimum": -sys.float_info.max, "maximum": sys.float_info.max}
+
+
+class _Bounds:
+    """The bounds of a number, which check each value the reader hands on.
+
+    The JSON reader hands on a number written as an integer as an ``int``,
+    exactly, whatever its size, and any other as the double it reads as, as
+    Python's own JSON reader does. An ``int`` meets a bound when its exact
+    value does, compared with the bound's double exactly, and so does the
+    double it reads as, since that is what the declared type's validator
+    holds. A refusal shows the bound as the description writes it.
+    """
+
+    __slots__ = ("_bounds", "within_the_form")
+
+    def __init__(self, rest: dict[str, Any]) -> None:
+        """Take each bound keyword from ``rest``."""
+        self._bounds: list[tuple[str, str, Callable[[float, float], bool], float]] = []
+        self.within_the_form = True
+        for keyword, error, words, meets in _BOUNDS:
+            written = rest.get(keyword)
+            bound = _double(rest, keyword)
+            if bound is None:
+                continue
+            message = f"Input should be {words} {json.dumps(written)}"
+            self._bounds.append((error, message, meets, bound))
+            if _FORM_BOUNDS.get(keyword) != bound:
+                self.within_the_form = False
+
+    def check(self, value: object) -> object:
+        """Refuse a number outside a bound, and pass anything else on
+        unchanged, for the number's own check to read.
+        """
+        kind = type(value)
+        exact: float | int
+        double: float | int
+        if kind is int:
+            exact = typing.cast(int, value)
+            try:
+                double = float(exact)
+            except OverflowError:  # past every double: its exact value is
+                double = exact
+        elif kind is float and math.isfinite(typing.cast(float, value)):
+            exact = double = typing.cast(float, value)
+        else:
+            return value
+        for error, message, meets, bound in self._bounds:
+            if not (meets(exact, bound) and meets(double, bound)):
+                raise PydanticCustomError(error, message)
+        return value
 
 
 def _existing_day(text: str) -> str:

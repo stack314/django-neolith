@@ -36,6 +36,8 @@ from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, NoReturn, final
 
+from neolith import _naming
+from neolith._crossing import _DEPTH, _deeper_than
 from neolith._frozen import once
 from neolith._jcs import canonical, canonical_text
 from neolith._portable import SAFE_INTEGER_MAX, text_problem
@@ -131,9 +133,9 @@ class Principal:
     ) -> None:
         if type(issuer) is not str or type(subject) is not str:
             raise TypeError("a principal's issuer and subject are each a str")
-        if claims is not None and not isinstance(claims, Mapping):
+        if claims is not None and not _naming.is_a(claims, Mapping):
             raise TypeError(
-                f"a principal's claims are a mapping, not {type(claims).__qualname__}"
+                f"a principal's claims are a mapping, not {_naming.type_name(claims)}"
             )
         held: dict[str, _Claim] = {}
         # Each container is copied once and the copy is checked, so a change
@@ -142,20 +144,20 @@ class Principal:
         for name, value in given.items():
             if type(name) is not str:
                 raise TypeError(
-                    f"a claim's name is a str, not {type(name).__qualname__}"
+                    f"a claim's name is a str, not {_naming.type_name(name)}"
                 )
-            if type(value) in (str, int, bool):
+            if _naming.one_of(type(value), (str, int, bool)):
                 held[name] = typing.cast("str | int | bool", value)
                 continue
             items = (
                 tuple(typing.cast("Sequence[object]", value))
-                if type(value) in (list, tuple)
+                if _naming.one_of(type(value), (list, tuple))
                 else None
             )
             if items is None or any(type(item) is not str for item in items):
                 raise TypeError(
                     "a claim's value is a str, an int, a bool or a list of str, "
-                    f"not {type(value).__qualname__}"
+                    f"not {_naming.type_name(value)}"
                 )
             held[name] = typing.cast("tuple[str, ...]", items)
         object.__setattr__(self, "_issuer", issuer)
@@ -239,6 +241,10 @@ def read_principal(form: bytes) -> Principal:
         text = form.decode("utf-8")
     except UnicodeDecodeError:
         raise ValueError("the principal is not UTF-8 text") from None
+    # Judged before the json module reads it, which recurses on the C stack,
+    # so no thread's stack decides the outcome (#125).
+    if _deeper_than(form, _DEPTH):
+        raise ValueError("the principal is not a principal object")
     try:
         value = json.loads(
             text, object_pairs_hook=pairs, parse_float=refuse, parse_constant=refuse
@@ -390,17 +396,41 @@ class Sent:
     """A call's context as a transport carries it.
 
     These are the fields spec 03 puts in headers. ``principal`` is the sent
-    form, ``budget`` the remaining whole milliseconds, at least 1, or ``None``
+    form, ``deadline`` the call's deadline on this host's clock, or ``None``
     for a call with no deadline, and ``caller`` the calling app, which a
-    network transport authenticates and the in-process one is told.
+    network transport authenticates and the in-process one is told. Each
+    transport turns the deadline into the budget it carries with ``budget``,
+    at the moment it sends the call (ADR 0028 Decision 2).
     """
 
     principal: bytes | None
     trace_id: str
     tracestate: str
-    budget: int | None
+    deadline: float | None
     idempotency_key: str
     caller: str | None
+
+
+@final
+@once
+@dataclass(frozen=True, slots=True)
+class Arrived:
+    """A call's context as the provider's side takes it from a transport.
+
+    The transport has run the provider's first three steps (ADR 0017
+    Decision 9): it knows the calling app, has checked the allow-list and has
+    read the principal from its sent form. ``deadline`` is counted from when
+    the call arrived, on this host's clock, or ``None`` for a call with no
+    deadline, and ``idempotency_key`` is ``None`` for a call that arrived
+    without one (ADR 0011 Decision 3).
+    """
+
+    principal: Principal | None
+    trace_id: str
+    tracestate: str
+    deadline: float | None
+    idempotency_key: str | None
+    caller: str
 
 
 class Resolver(typing.Protocol):
@@ -532,19 +562,39 @@ class Scope:
         """
         current = now()
         deadline = self.held.deadline
-        remaining = None if deadline is None else deadline - current
         if timeout is not None:
-            # Taken from the timeout itself, so that a call that took no time
-            # so far has exactly its timeout left.
-            own = timeout - (current - started)
-            if remaining is None or own < remaining:
-                remaining, deadline = own, started + timeout
-        if remaining is None or deadline is None:
+            own = started + timeout
+            if deadline is None or own < deadline:
+                deadline = own
+        if deadline is None:
             return None, None
-        return (
-            min(math.floor(remaining * 1000), BUDGET_CAP),
-            min(deadline, current + BUDGET_CAP / 1000),
-        )
+        deadline = min(deadline, current + BUDGET_CAP / 1000)
+        return budget(deadline, current), deadline
+
+
+def budget(deadline: float | None, at: float) -> int | None:
+    """The budget of a call with ``deadline`` sent at ``at``, on this host's
+    clock: the most whole milliseconds that, counted from ``at``, do not pass
+    the deadline, capped at ``BUDGET_CAP``, or ``None`` for a call with no
+    deadline.
+
+    It is less than 1 once the deadline has passed, or is less than 1 ms
+    away, which a call is not sent with (TRN-28). Every transport reads a
+    call's budget with this, when it sends the call (ADR 0028 Decision 2).
+    It is judged in the deadline's own arithmetic, ``at + budget / 1000``
+    against the deadline, so a call asked for with a timeout of exactly
+    1 ms has 1 ms when no time has passed, and a deadline counted from the
+    budget where the call arrives is never later than the caller's.
+    """
+    if deadline is None:
+        return None
+    found = math.floor((deadline - at) * 1000)
+    # The product above can be one off either way at a whole millisecond.
+    while at + (found + 1) / 1000 <= deadline:
+        found += 1
+    while at + found / 1000 > deadline:
+        found -= 1
+    return min(found, BUDGET_CAP)
 
 
 _CURRENT: contextvars.ContextVar[Scope | None] = contextvars.ContextVar(
@@ -677,7 +727,7 @@ def opened(
 
 def _app(app: object) -> str | None:
     if app is not None and type(app) is not str:
-        raise TypeError(f"an app is named by a str, not {type(app).__qualname__}")
+        raise TypeError(f"an app is named by a str, not {_naming.type_name(app)}")
     return app
 
 
@@ -688,11 +738,11 @@ def names(value: object, what: str) -> tuple[str, ...]:
     names are in the message.
     """
     if type(value) is not tuple:
-        raise TypeError(f"takes a tuple of {what}, not {type(value).__qualname__}")
+        raise TypeError(f"takes a tuple of {what}, not {_naming.type_name(value)}")
     for item in typing.cast("tuple[object, ...]", value):
         if type(item) is not str:
             raise TypeError(
-                f"takes a tuple of {what}, each a str, not {type(item).__qualname__}"
+                f"takes a tuple of {what}, each a str, not {_naming.type_name(item)}"
             )
     return typing.cast("tuple[str, ...]", value)
 
@@ -717,9 +767,9 @@ def timeout_option(timeout: object) -> float | None:
     """
     if timeout is None:
         return None
-    if type(timeout) not in (int, float):
+    if not _naming.one_of(type(timeout), (int, float)):
         raise TypeError(
-            f"timeout= takes a number of seconds, not {type(timeout).__qualname__}"
+            f"timeout= takes a number of seconds, not {_naming.type_name(timeout)}"
         )
     seconds = typing.cast("int | float", timeout)
     if type(seconds) is float and not math.isfinite(seconds):
@@ -746,7 +796,7 @@ def root_fields(
     """
     if principal is not None and type(principal) is not Principal:
         raise TypeError(
-            f"principal= takes a Principal, not {type(principal).__qualname__}"
+            f"principal= takes a Principal, not {_naming.type_name(principal)}"
         )
     seconds = timeout_option(timeout)
     return {
@@ -775,27 +825,26 @@ def root(
 
 
 def received(
-    sent: Sent,
-    deadline: float | None,
+    arrived: Arrived,
     app: str | None,
     requires: frozenset[str] | None,
 ) -> contextlib.AbstractContextManager[Scope]:
     """The scope a provider's side runs an action in (ADR 0017 Decision 4).
 
-    It holds the principal read from its sent form, the caller's trace with a
-    span of its own, the call's key and caller, and ``deadline``, which the
-    transport counts from when the call arrived. ``app`` is the app the
-    provider belongs to, and ``requires`` what its declaration requires. The
-    principal is read here; the scope opens when the
-    result is entered.
+    It holds the context as the call arrived: the principal the transport
+    read, the caller's trace with a span of its own, the call's key, or none,
+    its caller, and the deadline the transport counted from when the call
+    arrived. ``app`` is the app the provider belongs to, and ``requires``
+    what its declaration requires. The scope opens when the result is
+    entered.
     """
     return opened(
-        principal=None if sent.principal is None else read_principal(sent.principal),
-        trace_id=sent.trace_id,
-        tracestate=sent.tracestate,
-        deadline=deadline,
-        idempotency_key=sent.idempotency_key,
-        caller=sent.caller,
+        principal=arrived.principal,
+        trace_id=arrived.trace_id,
+        tracestate=arrived.tracestate,
+        deadline=arrived.deadline,
+        idempotency_key=arrived.idempotency_key,
+        caller=arrived.caller,
         app=app,
         requires=requires,
     )
@@ -813,7 +862,7 @@ def parent(context: object) -> Scope:
     if context is not None:
         if type(context) is not CallContext:
             raise TypeError(
-                f"context= takes a CallContext, not {type(context).__qualname__}"
+                f"context= takes a CallContext, not {_naming.type_name(context)}"
             )
         scope_id = context.scope_id
         with _OPEN_LOCK:

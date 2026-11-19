@@ -52,6 +52,7 @@ from neolith._connector import (
 )
 from neolith._context import Scope, Sent, read_principal
 from neolith._contracts import Action, is_received
+from neolith._crossing import Receiver
 
 
 class Ask(BaseModel):
@@ -104,6 +105,7 @@ class Carrying:
 
     def __init__(self, inner: InProcess | None = None, reply: bytes = b"{}") -> None:
         self.contract = DESK
+        self.receiver = Receiver.IN_PROCESS
         self.sent: list[Sent] = []
         self.requests: list[bytes] = []
         self._inner = inner
@@ -184,12 +186,17 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
     return made
 
 
+def _budget(sent: Sent, at: float = 1000.0) -> int | None:
+    """The budget a transport reads from a call's deadline at ``at``."""
+    return _context.budget(sent.deadline, at)
+
+
 def _sent(**changes: Any) -> Sent:  # noqa: ANN401
     fields: dict[str, Any] = {
         "principal": None,
         "trace_id": "0af7651916cd43dd8448eb211c80319c",
         "tracestate": "",
-        "budget": None,
+        "deadline": None,
         "idempotency_key": "parent-key",
         "caller": "shop",
     }
@@ -252,80 +259,6 @@ def test_a_call_from_a_fresh_empty_context_is_a_usage_error() -> None:
         thread.start()
         thread.join()
         assert [type(error) for error in refused] == [neolith.UsageError]
-    assert provider.seen == []
-
-
-def _closed_scope() -> Scope:
-    with _root() as scope:
-        return cast("Scope", scope)
-
-
-def _closed_ambient() -> contextvars.Context:
-    """A copy of the context made inside a root, taken out after it closed."""
-    with _root():
-        copied = contextvars.copy_context()
-    return copied
-
-
-def _in_a_thread(call: Callable[[], object]) -> object:
-    """Run ``call`` in a thread and hand back its outcome or its error."""
-    outcome: list[object] = []
-
-    def run() -> None:
-        try:
-            outcome.append(call())
-        except BaseException as error:  # the test reads it
-            outcome.append(error)
-
-    thread = threading.Thread(target=run)
-    thread.start()
-    thread.join()
-    if isinstance(outcome[0], BaseException):
-        raise outcome[0]
-    return outcome[0]
-
-
-# Every way a connector call finds no open scope to derive its context from.
-_NO_OPEN_SCOPE: dict[str, tuple[Callable[[Any], object], str]] = {
-    "no scope": (
-        lambda c: contextvars.Context().run(c.ask, Ask()),
-        "needs a call context",
-    ),
-    "no scope, in a thread": (
-        lambda c: _in_a_thread(lambda: contextvars.Context().run(c.ask, Ask())),
-        "needs a call context",
-    ),
-    "context= naming a closed scope": (
-        lambda c: c.ask(Ask(), context=_closed_scope().context),
-        "names no open scope",
-    ),
-    "context= naming a scope this host did not issue": (
-        lambda c: c.ask(
-            Ask(),
-            context=dataclasses.replace(
-                _closed_scope().context, scope_id=secrets.token_hex(16)
-            ),
-        ),
-        "names no open scope",
-    ),
-    "a closed ambient scope copied into a context": (
-        lambda c: _closed_ambient().run(c.ask, Ask()),
-        "has ended",
-    ),
-    "a closed ambient scope copied into a thread": (
-        lambda c: _in_a_thread(lambda: _closed_ambient().run(c.ask, Ask())),
-        "has ended",
-    ),
-}
-
-
-@pytest.mark.spec("TRN-23", "TRN-25", "TRN-26", "CON-29")
-@pytest.mark.parametrize("case", list(_NO_OPEN_SCOPE))
-def test_every_call_with_no_open_scope_is_exactly_a_usage_error(case: str) -> None:
-    connector, provider, _ = _desk()
-    call, message = _NO_OPEN_SCOPE[case]
-    with _usage_error(message):
-        call(connector)
     assert provider.seen == []
 
 
@@ -464,8 +397,8 @@ def test_a_context_value_only_names_its_scope() -> None:
         assert ctx.tracestate == ""
         assert ctx.caller == "shop"
         assert ctx.deadline is not None
-        assert sent.budget is not None
-        assert sent.budget <= 30_000
+        assert sent.deadline is not None
+        assert ctx.deadline <= sent.deadline
         assert sent.idempotency_key != "chosen"
 
 
@@ -492,7 +425,7 @@ def test_a_change_forced_into_a_context_value_reaches_no_call() -> None:
     ]
     for sent in inner_carrying.sent:
         assert sent.trace_id == scope.context.trace_id
-        assert sent.budget is not None
+        assert sent.deadline is not None
 
 
 @pytest.mark.spec("TRN-26", "CON-29")
@@ -547,7 +480,7 @@ def test_the_options_go_with_a_request_passed_either_way(clock: Clock) -> None:
         assert connector.ask(request=Ask(n=2), timeout=5.5, context=None) == Told(n=2)
         assert connector.ask(Ask(n=3), timeout=None) == Told(n=3)
         assert connector.tell(Ask(n=4), timeout=1) is None
-    assert [sent.budget for sent in carrying.sent] == [5000, 5500, None, 1000]
+    assert [_budget(sent) for sent in carrying.sent] == [5000, 5500, None, 1000]
     assert provider.told == [Ask(n=4)]
 
 
@@ -571,7 +504,7 @@ def test_an_action_receives_the_context_of_the_call(clock: Clock) -> None:
     assert ctx.caller == "shop"
     assert ctx.idempotency_key == sent.idempotency_key
     # The deadline is counted from the budget when the call arrived.
-    assert sent.budget == 30_000
+    assert _budget(sent) == 30_000
     assert ctx.deadline == 1030.0
     # A scope and a span of its own, on the same trace.
     assert ctx.scope_id != scope.context.scope_id
@@ -625,7 +558,7 @@ def test_a_nested_call_carries_its_parents_context_on(clock: Clock) -> None:
     # its parent's (spec 00, TRN-27). On a clock that does not move, each call
     # is sent all its parent has left, so the provider's deadline (TRN-36) is
     # the same.
-    assert inner_carrying.sent[0].budget == 10_000
+    assert _budget(inner_carrying.sent[0]) == 10_000
     assert second.deadline == first.deadline == scope.context.deadline == 1010.0
     assert inner_carrying.sent[0].caller == "desk"
 
@@ -698,7 +631,7 @@ def test_a_calls_deadline_is_the_earlier_of_its_parents_and_its_own(
                 connector.ask(Ask(), timeout=own)
             return
         connector.ask(Ask(), timeout=own)
-    assert carrying.sent[0].budget == budget
+    assert _budget(carrying.sent[0]) == budget
     # The provider's deadline is the budget from when the call arrived.
     expected = None if budget is None else 1000.0 + budget / 1000
     assert provider.seen[0].deadline == expected
@@ -722,7 +655,9 @@ def test_a_timeout_is_counted_from_when_the_connector_is_called(
         # The checks alone use the timeout up: counted as made, never sent.
         with pytest.raises(ContractError) as raised:
             connector.ask(Ask(), timeout=0.25)
-    assert [sent.budget for sent in carrying.sent] == [1750]
+    # The budget is read where the request is sent, a quarter second after
+    # the call started.
+    assert [_budget(sent, 1000.25) for sent in carrying.sent] == [1750]
     assert raised.value.message == "the deadline passed before the call was sent"
 
 
@@ -742,10 +677,11 @@ def test_an_outcome_after_the_callers_deadline_is_discarded_by_the_caller(
         return made
 
     connector, provider, carrying = _desk(then)
-    # The clock stands at 1000 for the call's start and its budget, and half
-    # a second passes before the call arrives. The provider counts its second
-    # from arrival, so it is in time at 1001.25; the caller's deadline was
-    # 1001.
+    # The clock stands at 1000 for the call's start and the caller's budget,
+    # and half a second passes before the call arrives. The in-process
+    # transport reads the budget when it dispatches the call, so the
+    # provider's deadline is the caller's, 1001, and the outcome at 1001.25
+    # is late for both.
     clock.steps = [0, 0, 0.5]
     with (
         _root("shop") as scope,
@@ -753,8 +689,8 @@ def test_an_outcome_after_the_callers_deadline_is_discarded_by_the_caller(
         pytest.raises(ContractError) as raised,
     ):
         connector.ask(Ask(), timeout=1)
-    assert carrying.sent[0].budget == 1000
-    assert provider.seen[0].deadline == 1001.5
+    assert _budget(carrying.sent[0]) == 1000
+    assert provider.seen[0].deadline == 1001.0
     assert (raised.value.kind, raised.value.message) == ("timeout", _LATE)
     assert raised.value.data is None
     assert is_received(raised.value)
@@ -786,6 +722,7 @@ def test_an_outcome_just_inside_the_callers_deadline_is_delivered(
 def test_a_timeout_the_transport_gives_is_passed_on_as_it_is(clock: Clock) -> None:
     class Late:
         contract = DESK
+        receiver = Receiver.IN_PROCESS
 
         def call(self, action: Action, request: bytes, context: Sent) -> bytes | None:
             clock.time += 5
@@ -858,7 +795,11 @@ def test_time_that_passes_in_the_parent_comes_off_the_budget(clock: Clock) -> No
         clock.time += 0.5
         with pytest.raises(ContractError) as raised:
             connector.ask(Ask())
-    assert [sent.budget for sent in carrying.sent] == [6000, 6000, 2000, 500]
+    assert [sent.deadline for sent in carrying.sent] == [1010.0, 1010.0, 1006.0, 1010.0]
+    assert [
+        _budget(sent, at)
+        for sent, at in zip(carrying.sent, (1004, 1004, 1004, 1009.5), strict=True)
+    ] == [6000, 6000, 2000, 500]
     assert raised.value.kind == "timeout"
 
 
@@ -893,7 +834,7 @@ def test_a_call_from_a_scope_whose_deadline_has_passed_is_not_sent(
             with pytest.raises(ContractError) as raised:
                 connector.ask(Ask(), timeout=own)
             assert raised.value.kind == "timeout"
-    assert [sent.budget for sent in carrying.sent] == [1]
+    assert [_budget(sent, 1005 - 2**-9) for sent in carrying.sent] == [1]
 
 
 @pytest.mark.spec("TRN-29")
@@ -915,7 +856,7 @@ def test_a_budget_is_capped(clock: Clock, own: float, budget: int) -> None:
         connector.ask(Ask(), timeout=own)
     with _root("shop", timeout=own):
         connector.ask(Ask())
-    assert [sent.budget for sent in carrying.sent] == [budget, budget]
+    assert [_budget(sent, 0.0) for sent in carrying.sent] == [budget, budget]
     assert provider.seen[0].deadline == budget / 1000
 
 
@@ -935,7 +876,7 @@ def test_a_deadline_that_passes_before_dispatch_fails_with_timeout(
             connector.ask(Ask(), timeout=1)
     assert raised.value.kind == "timeout"
     assert raised.value.message == "the deadline passed before the action was run"
-    assert [sent.budget for sent in carrying.sent] == [1000]
+    assert [_budget(sent) for sent in carrying.sent] == [1000]
     assert provider.seen == []
     assert _context.open_scopes() == []
 
@@ -949,7 +890,7 @@ def test_the_deadline_is_checked_before_the_request_is_read(
     clock.steps = [0, 1]
     with caplog.at_level(logging.ERROR, "neolith"):
         with pytest.raises(Failure) as raised:
-            transport.call(ASK, b"not json", _sent(budget=1000))
+            transport.call(ASK, b"not json", _sent(deadline=clock.time + 1000 / 1000))
         # The step that failed is the deadline's: its message, and no failure
         # of the provider logged, since the request was never read.
         assert (raised.value.kind, raised.value.message) == (
@@ -959,7 +900,7 @@ def test_the_deadline_is_checked_before_the_request_is_read(
         assert caplog.records == []
         # In time, the same request fails the receive check instead.
         with pytest.raises(Failure) as raised:
-            transport.call(ASK, b"not json", _sent(budget=1000))
+            transport.call(ASK, b"not json", _sent(deadline=clock.time + 1000 / 1000))
         assert raised.value.kind == "internal"
         assert len(caplog.records) == 1
     assert provider.seen == []
@@ -976,14 +917,14 @@ def test_the_context_is_read_before_the_deadline_is_checked(
     with caplog.at_level(logging.ERROR, "neolith"):
         clock.steps = [0, 0.5]
         with pytest.raises(Failure) as raised:
-            transport.call(ASK, b"{}", _sent(principal=b"{}", budget=1000))
+            transport.call(ASK, b"{}", _sent(principal=b"{}", deadline=clock.time + 1))
         assert raised.value.kind == "internal"
         assert clock.reads == 2
         # With the deadline passed as well, the failure is still found first:
         # it is logged, and the call is late, not refused before it ran.
         clock.steps = [0, 5]
         with pytest.raises(Failure) as raised:
-            transport.call(ASK, b"{}", _sent(principal=b"{}", budget=1000))
+            transport.call(ASK, b"{}", _sent(principal=b"{}", deadline=clock.time + 1))
         assert (raised.value.kind, raised.value.message) == ("timeout", _LATE)
     assert len(caplog.records) == 2
     assert all("the provider failed" in r.getMessage() for r in caplog.records)
@@ -1062,7 +1003,7 @@ def test_the_transport_discards_an_outcome_after_its_deadline(
     provider = Seeing(_ending(clock, 2, ending))
     transport = _provider(provider)
     with caplog.at_level(logging.ERROR, "neolith"), pytest.raises(Failure) as raised:
-        transport.call(ASK, b"{}", _sent(budget=2000))
+        transport.call(ASK, b"{}", _sent(deadline=clock.time + 2000 / 1000))
     failed = raised.value
     assert (failed.kind, failed.message, failed.detail) == ("timeout", _LATE, None)
     assert failed.__context__ is None
@@ -1090,10 +1031,13 @@ def test_the_transport_delivers_an_outcome_just_inside_its_deadline(
     delivered = {"a standard error": "not_found", "a declared error": "gone"}
     with caplog.at_level(logging.CRITICAL, "neolith"):
         if ending == "a reply":
-            assert transport.call(ASK, b"{}", _sent(budget=2000)) == b'{"n":1}'
+            assert (
+                transport.call(ASK, b"{}", _sent(deadline=clock.time + 2000 / 1000))
+                == b'{"n":1}'
+            )
             return
         with pytest.raises(Failure) as raised:
-            transport.call(ASK, b"{}", _sent(budget=2000))
+            transport.call(ASK, b"{}", _sent(deadline=clock.time + 2000 / 1000))
     assert raised.value.kind == delivered.get(ending, "internal")
 
 
@@ -1124,7 +1068,7 @@ def test_the_providers_check_holds_where_the_callers_cannot_fire(
         pytest.raises(ContractError) as raised,
     ):
         connector.ask(Ask(), timeout=1 + 2**-11)
-    assert carrying.sent[0].budget == 1000
+    assert _budget(carrying.sent[0]) == 1000
     assert provider.seen[0].deadline == 1001.0
     assert clock.time < 1001 + 2**-11
     assert (raised.value.kind, raised.value.message) == ("timeout", _LATE)
@@ -1139,6 +1083,7 @@ class Slow:
     """A transport with no deadline check of its own, which takes a while."""
 
     contract = DESK
+    receiver = Receiver.IN_PROCESS
 
     def __init__(self, clock: Clock, takes: float, outcome: Failure | None) -> None:
         self._clock = clock
@@ -1199,10 +1144,29 @@ _ARRIVING: dict[str, tuple[Failure | bytes, str]] = {
 }
 
 
+class _Back:
+    """Passes a call on, and takes ``seconds`` to bring its outcome back."""
+
+    receiver = Receiver.IN_PROCESS
+
+    def __init__(self, inner: InProcess, clock: Clock) -> None:
+        self.contract = inner.contract
+        self.seconds = 0.0
+        self._inner = inner
+        self._clock = clock
+
+    def call(self, action: Action, request: bytes, context: Sent) -> bytes | None:
+        try:
+            return self._inner.call(action, request, context)
+        finally:
+            self._clock.time += self.seconds
+
+
 class Answering:
     """A transport with no check of its own that takes a while to answer."""
 
     contract = DESK
+    receiver = Receiver.IN_PROCESS
 
     def __init__(self, clock: Clock, takes: float, answer: Failure | bytes) -> None:
         self._clock = clock
@@ -1240,16 +1204,18 @@ def test_a_nested_error_is_timeout_once_the_callers_deadline_has_passed(
 ) -> None:
     missing: Any = Connector(Desk, Slow(clock, 0.75, Failure("not_found", "x")))
     # The action lets the error of its own call end it.
-    connector = _desk(lambda request, ctx: missing.ask(Ask()))[0]
+    provider = _provider(Seeing(lambda request, ctx: missing.ask(Ask())), app="desk")
+    back = _Back(provider, clock)
+    connector: Any = Connector(Desk, back)
     with _root("shop"), caplog.at_level(logging.ERROR, "neolith"):
         with pytest.raises(ContractError) as raised:
             connector.ask(Ask(), timeout=1)
         assert raised.value.kind == "internal"
         caplog.clear()
-        # Half a second passes before the call arrives, so the provider's
-        # side is in time at 0.75 s of its second and delivers internal, as
-        # CON-48 says; only the caller's deadline has passed.
-        clock.steps = [0, 0, 0.5]
+        # The provider's side is in time at 0.75 s of its second and delivers
+        # internal, as CON-48 says; the outcome takes half a second to come
+        # back, so only the caller's deadline has passed when it does.
+        back.seconds = 0.5
         with pytest.raises(ContractError) as raised:
             connector.ask(Ask(), timeout=1)
     assert (raised.value.kind, raised.value.message) == ("timeout", _LATE)
@@ -1550,6 +1516,7 @@ def test_a_derived_key_is_the_one_node_derives() -> None:
     # "inner.v1", the action "ask" and the requests {"n":1}, twice, and {"n":2}.
     class Keeping:
         contract = Contract.of(Inner)
+        receiver = Receiver.IN_PROCESS
         keys: list[str] = []  # noqa: RUF012
 
         def call(self, action: Action, request: bytes, context: Sent) -> bytes | None:
@@ -1723,65 +1690,24 @@ def test_the_request_is_checked_before_the_deadline(clock: Clock) -> None:
     assert carrying.sent == []
 
 
+# 3072 bytes of JSON is the 4096 bytes of base64url a sent principal may have.
 _FITS = 3072 - len(b'{"issuer":"i","subject":""}')
 
 
-@pytest.mark.spec("CON-51", "CON-46")
-@pytest.mark.parametrize(
-    "principal",
-    [
-        Principal("i", ""),
-        Principal("", "s"),
-        Principal("i", "s\ud800"),
-        Principal("i", "s", {"a": ["\udfff"]}),
-        Principal("i", "s", {"a": 2**53}),
-        Principal("i", "s" * (_FITS + 1)),
-    ],
-    ids=["empty subject", "empty issuer", "surrogate", "in a list", "integer", "4097"],
-)
-def test_a_call_whose_principal_is_not_valid_fails_at_the_caller_with_internal(
-    principal: Principal, caplog: pytest.LogCaptureFixture
-) -> None:
-    connector, provider, carrying = _desk()
-    with (
-        _root("shop", principal=principal) as scope,
-        caplog.at_level(logging.ERROR, "neolith"),
-        pytest.raises(ContractError) as raised,
-    ):
-        connector.ask(Ask())
-    trace = scope.context.trace_id
-    error = raised.value
-    # Fixed text and the trace identifier, and nothing of the cause.
-    assert (error.kind, error.message, error.data) == (
-        "internal",
-        internal_message(trace),
-        None,
-    )
-    assert error.__cause__ is None
-    assert error.__context__ is None
-    assert type(error) is ContractError
-    assert is_received(error)
-    assert carrying.sent == []
-    assert provider.seen == []
-    # The caller's host records the cause under the trace identifier.
-    (record,) = caplog.records
-    assert trace in record.getMessage()
-    assert "principal is not valid" in record.getMessage()
-    assert record.exc_info is not None
-    assert type(record.exc_info[1]) is ValueError
-
-
+# The other cases of a principal that crosses are the contract part's
+# (``tests/conformance/contract/test_context.py``); that a provider is handed
+# a copy, not the caller's object, shows only in-process.
 @pytest.mark.spec("CON-51", "TRN-30", "TRN-36")
 @pytest.mark.parametrize(
     "principal",
     [
         Principal("i", "s" * _FITS),
-        Principal("i￿", "￿", {"￿": ["￿"]}),
+        Principal("i\uffff", "\uffff", {"\uffff": ["\uffff"]}),
         Principal("i", "s", {"a": 2**53 - 1, "b": True, "c": [], "d": ""}),
     ],
     ids=["exactly 4096", "U+FFFF", "every kind of claim"],
 )
-def test_a_valid_principal_reaches_the_provider_read_from_its_sent_form(
+def test_a_provider_is_handed_a_copy_of_the_principal_read_from_its_sent_form(
     principal: Principal,
 ) -> None:
     connector, provider, carrying = _desk()
@@ -1933,7 +1859,7 @@ def test_the_context_an_action_receives_equals_the_one_its_caller_derived(
             trace_id=sent.trace_id,
             span_id="",
             tracestate=sent.tracestate,
-            deadline=None if sent.budget is None else 0.0,
+            deadline=None if sent.deadline is None else 0.0,
             idempotency_key=sent.idempotency_key,
             caller=sent.caller,
             scope_id="",
@@ -1947,28 +1873,23 @@ def test_the_context_an_action_receives_equals_the_one_its_caller_derived(
         own = owns[level]
         assert (ctx.deadline is None) == (deadlines[-1] is None and own is None)
         if ctx.deadline is not None:
-            assert sent.budget is not None
+            assert sent.deadline is not None
             # The call's deadline is the earlier of its parent's and its own
-            # timeout (TRN-27). So the budget sent is at most what the parent
-            # had left when the call was asked for, and at most the timeout,
-            # counted from no earlier than that. Exact, since it is rounded
-            # down.
+            # timeout (TRN-27), counted from when the call was asked for, so
+            # never later than either, and no earlier than the earlier of the
+            # two counted from the ask.
             earliest = []
             if deadlines[-1] is not None:
-                assert sent.budget <= (deadlines[-1] - asked[level]) * 1000
+                assert sent.deadline <= deadlines[-1]
                 earliest.append(deadlines[-1])
             if own is not None:
-                assert sent.budget <= own * 1000
+                assert sent.deadline <= entered[level] + own
                 earliest.append(asked[level] + own)
-            # And it is at least what the earlier of the two had left when
-            # the action ran, after it was sent, less the rounding down.
-            assert sent.budget > (min(earliest) - entered[level]) * 1000 - 1
-            # The provider counts the budget from when the call arrived
-            # (TRN-36), between the ask and the action, on this host's clock.
-            # So its deadline can be later than the parent's by the time the
-            # call took to arrive; TRN-38 covers the caller for that.
-            budget = sent.budget / 1000
-            assert asked[level] + budget <= ctx.deadline <= entered[level] + budget
+            assert sent.deadline >= min(earliest)
+            # The provider counts the budget, read as the call is dispatched,
+            # from when the call arrived (TRN-36), so its deadline is the
+            # caller's, rounded down to the millisecond, and never later.
+            assert sent.deadline - 0.001 - 1e-6 <= ctx.deadline <= sent.deadline + 1e-6
         deadlines.append(ctx.deadline)
     assert _context.open_scopes() == []
 

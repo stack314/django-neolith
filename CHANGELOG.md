@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.0a3] - 2026-11-19
+
+### Added
+
+- The HTTP transport (roadmap step 5, [ADR 0014](docs/adr/0014-pluggable-connector-transports.md), [ADR 0028](docs/adr/0028-the-http-transport-uses-the-standard-library-only.md)): `neolith.transports.HTTPTransport` carries a connector's calls to a provider in another host with the calling app's token and spec 03's mapping of every response. Its client runs on the standard library's sockets and TLS, with one deadline for every blocking step and no runtime dependency.
+- `NEOLITH["REMOTE_PROVIDERS"]` names the provider of a contract that another host serves. Set-up sends that contract's calls over HTTP, warns on plain `http` to a host that is not loopback (`neolith.W002`), and never contacts a remote provider before it serves.
+- Caller backends for contract calls over HTTP (spec 03, [ADR 0027](docs/adr/0027-a-caller-backend-names-the-calling-app-over-http.md)): `NEOLITH["CALLER_BACKENDS"]` with `neolith.callers.SharedSecretBackend`, signing keys in `NEOLITH["SIGNING_SECRETS"]`, `neolith.CredentialRefused`, `neolith.E021` and the warnings `neolith.W004` to `neolith.W006`.
+- The host serves contract endpoints itself, `POST /<name>/v<N>/<action>` for every provided contract version, with spec 03's checks, errors and one log line per response, the OpenAPI 3.1.2 document at `/.well-known/neolith/openapi.json` and `/.well-known/neolith/health`. Boot warns (`neolith.W003`) about a URL a contract path shadows. `RootMiddleware` answers these paths itself, so no middleware after it runs for them.
+- Routing among providers ([ADR 0031](docs/adr/0031-a-contract-version-is-routed-by-single-unless-local-first-is-named.md)): `NEOLITH["ROUTING_POLICIES"]` names `local-first` for a contract version, whose `NEOLITH["REMOTE_PROVIDERS"]` list may then hold two or more providers, tried in order. A connector moves an idempotent call to the next provider on `unavailable`, within its one deadline.
+- The conformance suite (roadmap step 6, spec 06, [ADR 0032](docs/adr/0032-the-conformance-suite-runs-each-case-once-per-transport.md)): spec 06 defines the reference contract and states CNF-1, one outcome over the in-process and HTTP transports, and CNF-2, the reference part of the served OpenAPI document. The suite checks the HTTP transport against bytes in both directions, covers routing and lifecycle cases, and is enforced by the spec trace. The docs site serves the reference contract's document under `spec/conformance/`.
+- `scripts/spec_trace.py --conformance` writes the conformance run of ADR 0032, and CI publishes one run per leg.
+
+### Fixed
+
+- An action called in-process gets its caller's deadline, never a later one; its budget is read when the call is dispatched.
+- `neolith run` answers without Nagle's delay, which held each call on a reused connection about 40 ms.
+- `neolith.E005` names a difference inside `DATABASES` by its path and no longer shows the value found or the value the host builds, so a `PASSWORD` or an `OPTIONS` entry changed after the builder is not printed.
+- A set-up refused after an override no longer forgets an unknown contract identity that `connect()` was asked for, so entering the earlier override again stops the host as it should.
+- The description check compares a number written as an integer with each bound of a number field exactly, so text such as `2**60 + 1` no longer passes `maximum: 2**60` by rounding onto it.
+- A check that refuses a value, class or error now names and judges it so that an exception from that object's own name, `repr`, `str`, `__class__`, `__eq__` or `__hash__` can no longer replace the check's own refusal.
+
 ## [0.1.0a2] - 2026-11-18
 
 ### Added
@@ -49,6 +70,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Each app's database (spec 05, [ADR 0009](docs/adr/0009-one-database-alias-per-app.md)): a hosted app that declares the `database` resource lives on its own alias, named by its label. `neolith.routers.AppRouter` keeps its models there and sends every other label to `default`, from labels alone: reads, writes and migrations go to the label's home, and relations are allowed only within one home, so two apps cannot share a transaction. Set-up refuses a hosted app with models and no `database` (`neolith.E014`) and a table name that `default`'s backend shortened (`neolith.E017`).
 - Runtime dependency on Pydantic v2 ([ADR 0006](docs/adr/0006-contracts-are-typed-and-published-as-openapi.md)).
 
-[Unreleased]: https://github.com/stack314/django-neolith/compare/v0.1.0a2...main
+[Unreleased]: https://github.com/stack314/django-neolith/compare/v0.1.0a3...main
+[0.1.0a3]: https://github.com/stack314/django-neolith/releases/tag/v0.1.0a3
 [0.1.0a2]: https://github.com/stack314/django-neolith/releases/tag/v0.1.0a2
 [0.1.0a1]: https://github.com/stack314/django-neolith/releases/tag/v0.1.0a1

@@ -94,6 +94,12 @@ The host builds its configuration from two inputs: the declarations of the apps 
 
 **APP-30.** A deployer's instruction to silence a diagnostic MUST NOT silence a refusal that stops the host.
 
+The deployer's configuration names the remote providers of each contract version that the host calls over a network, and may name a routing policy for it ([02](02-transports.md), *Providers and routing*).
+
+**APP-63.** A host MUST route a contract version by `single` unless its configuration names another routing policy for it.
+
+**APP-65.** A host MUST stop before it serves when its configuration names a routing policy that this specification does not define.
+
 ### Boot
 
 Boot reads the state of each database the host was configured with, and of each app's schema in its own database. It reads only; schema changes are the separate step of the lifecycle above.
@@ -176,6 +182,10 @@ An app's table names are the same in every host, so that the app finds its table
 
 **APP-8.** A host MUST find a provider for every contract version that one of its apps requires, before it serves.
 
+**APP-62.** A host MUST NOT refuse to serve because a remote provider cannot be reached. Resolve finds a remote provider in the host's configuration, and the host does not contact it before it serves, so a provider that is down is found by the first call to it, which fails at the caller with `unavailable`, or with `timeout` when its deadline passes first ([02](02-transports.md), TRN-3 and TRN-4).
+
+**APP-64.** A host MUST stop before it serves when its configuration lists more than one remote provider for a contract version it routes by `single`, or names `local-first` for one with fewer than two remote providers.
+
 **APP-9.** A host MUST NOT hold two apps that provide one contract version.
 
 **APP-10.** All apps of a host that name one contract version, as provided or as required, MUST name the same contract declaration of it.
@@ -194,7 +204,7 @@ Calling code asks the host for a connector by contract identity ([ADR 0003](../d
 
 **APP-15.** A connector asked for after Validate has ended, for a contract version the host does not know, MUST be refused as a mistake in the calling code when it is asked for.
 
-Decision records: [0003](../docs/adr/0003-apps-communicate-through-contracts.md), [0021](../docs/adr/0021-an-app-declares-itself-on-its-neolithappconfig.md), [0022](../docs/adr/0022-the-app-host-builds-settings-and-checks-before-it-serves.md).
+Decision records: [0003](../docs/adr/0003-apps-communicate-through-contracts.md), [0014](../docs/adr/0014-pluggable-connector-transports.md), [0021](../docs/adr/0021-an-app-declares-itself-on-its-neolithappconfig.md), [0022](../docs/adr/0022-the-app-host-builds-settings-and-checks-before-it-serves.md), [0031](../docs/adr/0031-a-contract-version-is-routed-by-single-unless-local-first-is-named.md).
 
 ### A request's principal
 

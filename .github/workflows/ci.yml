@@ -99,5 +99,14 @@ jobs:
       # ADR 0018: requirement IDs in spec/, and coverage from the tests that
       # passed in this run. Coverage is enforced per document, as listed in
       # tests/spec_trace.toml.
+      # ADR 0032 Decision 9: the same command writes this leg's conformance
+      # run, which the release runbook attaches to the GitHub release.
       - name: Spec trace
-        run: python scripts/spec_trace.py --report spec-report.json
+        run: >-
+          python scripts/spec_trace.py --report spec-report.json
+          --conformance "conformance-run-${{ matrix.python }}-django${{ matrix.django }}-${{ matrix.arch }}.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: conformance-run-${{ matrix.python }}-django${{ matrix.django }}-${{ matrix.arch }}
+          path: conformance-run-${{ matrix.python }}-django${{ matrix.django }}-${{ matrix.arch }}.json
+          if-no-files-found: error

@@ -4,6 +4,10 @@ Resolve and Validate are checked on built registries, with ``build``, so a
 test needs no host of its own. Set-up in Django's global registry runs on
 the test host (``tests.host_apps``) in this process, since a process hosts
 one set of apps, and on any other set in a fresh process.
+
+These tests stay outside the contract suite (CONTRIBUTING T2): they check the
+host's own apps, what set-up does with them, and how it refuses a mistake in
+them, not what a contract's semantics are over each transport.
 """
 
 import copy
@@ -23,8 +27,9 @@ import pytest
 from django.apps import AppConfig
 from django.apps import apps as global_apps
 from django.apps.registry import Apps
+from django.conf import settings
 from django.test.utils import isolate_apps, override_settings
-from hypothesis import given
+from hypothesis import example, given
 from hypothesis import strategies as st
 
 import neolith
@@ -165,8 +170,15 @@ def _invoices_app(write_app: WriteApp, service: str = _INVOICES) -> str:
 
 
 def _refusals(*entries: str) -> list[str]:
-    """Resolve and Validate the apps in a registry of their own."""
-    _, refusals = build(Apps(list(entries)))
+    """Resolve and Validate the apps in a registry of their own.
+
+    ``NEOLITH`` is the test host's without the signing keys of its own apps,
+    which these registries do not hold; it is changed in place, since an
+    override of ``NEOLITH`` after set-up is refused.
+    """
+    with override_settings():
+        settings.NEOLITH = host_apps.SERVED
+        _, refusals = build(Apps(list(entries)))
     return sorted(refusals)
 
 
@@ -190,9 +202,9 @@ def test_a_requirement_without_a_provider_is_refused(write_app: WriteApp) -> Non
     stock = _stock_app(write_app, requires=["Invoices", "Couriers"])
     assert _refusals(stock) == [
         f"app {stock}: requires: billing.invoices.v1 has no provider; no app of "
-        "this host provides it, so install the app that does",
+        'this host provides it and NEOLITH["REMOTE_PROVIDERS"] has no entry for it',
         f"app {stock}: requires: couriers.v3 has no provider; no app of this "
-        "host provides it, so install the app that does",
+        'host provides it and NEOLITH["REMOTE_PROVIDERS"] has no entry for it',
     ]
     # Following the advice: installing the providers admits the host.
     couriers = write_app(
@@ -239,7 +251,7 @@ def test_one_identity_with_two_contract_classes_in_a_host_is_refused(
     v2 = write_app(_apps_module(requires=["StockV2"]))
     assert _refusals(stock, v2) == [
         f"app {v2}: requires: stock.v2 has no provider; no app of this host "
-        "provides it, so install the app that does"
+        'provides it and NEOLITH["REMOTE_PROVIDERS"] has no entry for it'
     ]
 
 
@@ -379,7 +391,7 @@ def _validate_case(write_app: WriteApp, case: str) -> tuple[str, str]:
         )
         tail = (
             " does not import: {package}.services is not a module whose names can "
-            "be read (TypeError: "
+            "be read (it is a _Slots)"
         )
     elif case == "module raises":
         services = "raise RuntimeError('broken at import')\n"
@@ -786,16 +798,22 @@ def test_connect_after_set_up_refuses_an_identity_the_host_does_not_know() -> No
 
         @_HYPOTHESIS
         @given(st.from_regex(_IDENTITY, fullmatch=True))
+        @example("a" * 157 + ".v1")
+        @example("a" * 158 + ".v1")
         def check(identity: str) -> None:
-            if identity in {"stock.v1", "couriers.v3"}:
+            if identity in {"stock.v1", "couriers.v3", "reference.v1"}:
                 assert repr(connect(identity)) == f"<connector to {identity}>"
                 return
             with pytest.raises(UsageError) as raised:
                 connect(identity)
+            # The message shows the first 160 characters of a longer identity.
+            shown, quoted = identity, repr(identity)
+            if len(identity) > 160:
+                shown, quoted = identity[:160] + "...", repr(identity[:160]) + "..."
             assert str(raised.value) == (
-                f"connect({identity!r}): no app of this host provides or requires "
-                f"{identity}; it knows the contracts its apps provide or require, "
-                "which are couriers.v3, stock.v1"
+                f"connect({quoted}): no app of this host provides or requires "
+                f"{shown}; it knows the contracts its apps provide or require, "
+                "which are couriers.v3, reference.v1, stock.v1"
             )
             assert ContractError not in type(raised.value).__mro__
 
@@ -893,6 +911,7 @@ except Exception as error:
 """
 
 
+@pytest.mark.conformance_case("lifecycle_an_unsatisfied_requirement_stops_the_host")
 @pytest.mark.spec("APP-1", "APP-8")
 def test_a_host_with_an_unsatisfied_requirement_fails_to_start(
     write_app: WriteApp,
@@ -901,7 +920,7 @@ def test_a_host_with_an_unsatisfied_requirement_fails_to_start(
     printed = in_fresh_process(_SET_UP_FAILS, [stock, "neolith"])
     line = (
         f"app {stock}: requires: billing.invoices.v1 has no provider; no app of "
-        "this host provides it, so install the app that does"
+        'this host provides it and NEOLITH["REMOTE_PROVIDERS"] has no entry for it'
     )
     assert printed == (
         f"DeclarationError\n{line}\n"
@@ -910,6 +929,7 @@ def test_a_host_with_an_unsatisfied_requirement_fails_to_start(
     )
 
 
+@pytest.mark.conformance_case("lifecycle_a_missing_action_stops_the_host")
 @pytest.mark.spec("APP-1", "APP-11")
 def test_a_host_whose_implementation_misses_an_action_fails_to_start(
     write_app: WriteApp,
@@ -963,7 +983,7 @@ def test_connect_before_set_up_to_an_unknown_identity_stops_the_host(
             f"connect: 'nope.v4' at {root / 'services.py'}:13 is not a contract "
             f"this host knows; {knows}",
             f"app {unmet}: requires: couriers.v3 has no provider; no app of this "
-            "host provides it, so install the app that does",
+            'host provides it and NEOLITH["REMOTE_PROVIDERS"] has no entry for it',
         ]
     )
 
@@ -1320,8 +1340,8 @@ def test_a_message_that_cannot_be_formatted_hides_no_problem() -> None:
     problems = Contract.of(Ledger)._implementation_problems(impl)
     assert problems == [
         "ledger.v1, implementation Impl: action 'first' is missing",
-        "ledger.v1, implementation Impl: action 'second' takes <_ReprRaises>, but "
-        "ledger.v1 declares Sku",
+        "ledger.v1, implementation Impl: action 'second' takes "
+        "<_ReprRaises that cannot be shown>, but ledger.v1 declares Sku",
     ]
     # @implements names the first problem, as before set-up listed them all.
     with pytest.raises(neolith.ContractDefinitionError) as raised:
@@ -1384,7 +1404,7 @@ def test_connect_during_a_later_set_up_is_refused_in_either_phase(
     where = tmp_path / package / f"{place}.py"
     knows = (
         "it knows the contracts its apps provide or require, which are "
-        "couriers.v3, stock.v1"
+        "couriers.v3, reference.v1, stock.v1"
     )
     if place == "__init__" and before_neolith:
         # Imported before neolith's app is created in this load: checked at
@@ -1405,7 +1425,7 @@ def test_connect_during_a_later_set_up_is_refused_in_either_phase(
 
 
 @pytest.mark.spec("APP-14")
-def test_a_refused_later_set_up_leaves_no_record_its_table_knew(
+def test_a_record_from_an_app_no_longer_installed_leaves_the_first_apps_admitted(
     write_app: WriteApp,
 ) -> None:
     # Added apps whose modules connect() at import to a contract the refused
@@ -1479,6 +1499,725 @@ def test_a_retried_set_up_reports_an_unknown_identity_again(
         "DeclarationError",
         "['nope.v1']",
     ]
+
+
+@pytest.mark.spec("APP-14")
+@pytest.mark.parametrize("refused_by", ["a changed set of hosted apps", "Resolve"])
+def test_a_refused_set_up_that_knows_an_identity_keeps_its_record(
+    write_app: WriteApp, refused_by: str
+) -> None:
+    # An undeclared app asks for billing.invoices.v1, which the host does not
+    # know. A set-up that adds the app providing it knows the identity but is
+    # refused, so it must not drop the record: the next set-up without the
+    # provider still reports it.
+    asks = write_app(
+        "", models='from neolith import connect\n\nconnect("billing.invoices.v1")\n'
+    )
+    if refused_by == "Resolve":
+        provider = write_app(
+            _apps_module(
+                provides=[("Invoices", "{package}.services.InvoiceService")],
+                requires=["StockV2"],
+            ),
+            services=_INVOICES,
+        )
+    else:
+        provider = _invoices_app(write_app)
+    printed = in_built_host(
+        f"""
+        import django
+        from django.test.utils import override_settings
+
+        django.setup()
+        installed = list(settings.INSTALLED_APPS)
+        for added in ([{asks!r}], [{asks!r}, {provider!r}], [{asks!r}], []):
+            try:
+                with override_settings(INSTALLED_APPS=[*added, *installed]):
+                    print("admitted")
+            except Exception as error:
+                print(type(error).__name__)
+        """,
+        host_apps.HOSTED,
+        {"NEOLITH": host_apps.NEOLITH},
+    )
+    refused = "ImproperlyConfigured" if refused_by != "Resolve" else "DeclarationError"
+    assert printed.splitlines() == [
+        "DeclarationError",
+        refused,
+        "DeclarationError",
+        "admitted",
+    ]
+
+
+@pytest.mark.spec("APP-14")
+@pytest.mark.parametrize("asks", ["through a helper", "by a lazy import"])
+def test_a_record_belongs_to_the_app_whose_loading_asked_for_it(
+    write_app: WriteApp, asks: str
+) -> None:
+    # The connect() line is in a module of an app an earlier set-up installed,
+    # but it runs only because another app's models are loaded: the set-ups
+    # that install that other app report it, with or without the first.
+    helper = write_app(
+        "",
+        helpers="from neolith import connect\n\n\ndef ask(identity):\n"
+        "    return connect(identity)\n",
+        lazy='from neolith import connect\n\nconnect("nope.v1")\n',
+    )
+    models = (
+        f'from {helper}.helpers import ask\n\nask("nope.v1")\n'
+        if asks == "through a helper"
+        else f"import {helper}.lazy\n"
+    )
+    asker = write_app("", models=models)
+    printed = in_built_host(
+        f"""
+        import django
+        from django.test.utils import override_settings
+
+        django.setup()
+        installed = list(settings.INSTALLED_APPS)
+        for added in ([{helper!r}], [{asker!r}], [{asker!r}], [{helper!r}]):
+            try:
+                with override_settings(INSTALLED_APPS=[*added, *installed]):
+                    print("admitted")
+            except Exception as error:
+                print(type(error).__name__)
+        """,
+        host_apps.HOSTED,
+        {"NEOLITH": host_apps.NEOLITH},
+    )
+    assert printed.splitlines() == [
+        "admitted",
+        "DeclarationError",
+        "DeclarationError",
+        "admitted",
+    ]
+
+
+def _every_pair(n: int) -> list[int]:
+    """A walk over ``range(n)`` in which every ordered pair, a symbol after
+    itself included, follows once: a de Bruijn sequence of order 2.
+    """
+    a = [0] * (2 * n)
+    walk: list[int] = []
+
+    def extend(t: int, p: int) -> None:
+        if t > 2:
+            if 2 % p == 0:
+                walk.extend(a[1 : p + 1])
+            return
+        a[t] = a[t - p]
+        extend(t + 1, p)
+        for j in range(a[t - p] + 1, n):
+            a[t] = j
+            extend(t + 1, t)
+
+    extend(1, 1)
+    return [*walk, walk[0]]
+
+
+@pytest.mark.spec("APP-14")
+def test_each_set_up_after_any_override_decides_as_in_a_fresh_process(
+    write_app: WriteApp,
+) -> None:
+    # Overrides that add a superset of the app that asks for nope.v1, that
+    # app alone, a set without it, a load that stops before set-up, and none:
+    # walked so that each follows each, every set-up decides the unknown
+    # identity as a fresh process with the same apps would.
+    asks = write_app("", models=_UNDECLARED_CONNECTS)
+    other = write_app("")
+    broken = write_app("", models='raise RuntimeError("broken")\n')
+    overrides = [[asks, other], [asks], [other], [asks, broken], []]
+    fresh = ["DeclarationError", "DeclarationError", "admitted", "RuntimeError"]
+    walk = _every_pair(len(overrides))
+    assert len({*itertools.pairwise(walk)}) == len(overrides) ** 2
+    printed = in_built_host(
+        f"""
+        import django
+        from django.test.utils import override_settings
+
+        django.setup()
+        installed = list(settings.INSTALLED_APPS)
+        for added in {[overrides[i] for i in walk]!r}:
+            try:
+                with override_settings(INSTALLED_APPS=[*added, *installed]):
+                    print("admitted")
+            except Exception as error:
+                print(type(error).__name__)
+        """,
+        host_apps.HOSTED,
+        {"NEOLITH": host_apps.NEOLITH},
+    )
+    assert printed.splitlines() == [[*fresh, "admitted"][i] for i in walk]
+
+
+_PLAIN_CONFIG = """
+from django.apps import AppConfig
+
+
+class Config(AppConfig):
+    name = "{name}"
+    default = True
+"""
+
+
+@pytest.mark.spec("APP-14", "APP-15")
+@pytest.mark.parametrize(
+    "form", ["module", "config class", "re-exported class", "alias", "other name"]
+)
+def test_an_app_named_in_any_form_asks_at_import_and_is_refused(
+    write_app: WriteApp, form: str
+) -> None:
+    # The app's package asks for nope.v1 when Django imports the entry of
+    # INSTALLED_APPS, in each way an entry can name the app; a fresh set-up
+    # and an override are refused, and the first apps restored are not.
+    asks = 'from neolith import connect\n\nconnect("nope.v1")\n'
+    if form == "other name":
+        real = write_app("")
+        package = write_app(_PLAIN_CONFIG.replace("{name}", real), __init__=asks)
+        entry = package
+    else:
+        package = write_app(
+            _PLAIN_CONFIG.replace("{name}", "{package}")
+            # Django refuses a module entry whose apps module has two defaults.
+            + ("\nDefault = Config\n" if form == "alias" else ""),
+            __init__=asks
+            + ("from .apps import Config\n" if form == "re-exported class" else ""),
+        )
+        entry = {
+            "module": package,
+            "config class": f"{package}.apps.Config",
+            "re-exported class": f"{package}.Config",
+            "alias": f"{package}.apps.Default",
+        }[form]
+    neolith = {
+        **host_apps.NEOLITH,
+        "UNDECLARED_APPS": [*host_apps.NEOLITH["UNDECLARED_APPS"], entry],
+    }
+    fresh = in_built_host(
+        """
+        import django
+
+        try:
+            django.setup()
+            print("admitted")
+        except Exception as error:
+            print(type(error).__name__)
+        """,
+        host_apps.HOSTED,
+        {"NEOLITH": neolith},
+    )
+    assert fresh.splitlines() == ["DeclarationError"]
+    # Another spelling of the same app, which imports the same package.
+    # (A module entry for the alias's package would find two default configs,
+    # which Django refuses.)
+    respelt = {
+        "module": f"{package}.apps.Config",
+        "alias": f"{package}.apps.Config",
+        "other name": entry,
+    }.get(form, package)
+    # Each walk runs in a process of its own: (before, after) the first apps.
+    walks = {
+        # Django imports the entry before neolith's app is made, so connect()
+        # is refused at once against the restored table (APP-15).
+        "prepended": (
+            [([entry], []), ([], []), ([entry], [])],
+            ["UsageError", "admitted", "UsageError"],
+        ),
+        "appended": (
+            [([], [entry]), ([], []), ([], [entry])],
+            ["DeclarationError", "admitted", "DeclarationError"],
+        ),
+        "refused, then spelt another way": (
+            [([], [entry]), ([], [respelt])],
+            ["DeclarationError", "DeclarationError"],
+        ),
+        "stopped before set-up, then spelt another way": (
+            [([], [entry, "no_such_app"]), ([], [respelt])],
+            ["ModuleNotFoundError", "DeclarationError"],
+        ),
+    }
+    for walk, (overrides, decided) in walks.items():
+        printed = in_built_host(
+            f"""
+            import django
+            from django.test.utils import override_settings
+
+            django.setup()
+            installed = list(settings.INSTALLED_APPS)
+            for before, after in {overrides!r}:
+                try:
+                    with override_settings(
+                        INSTALLED_APPS=[*before, *installed, *after]
+                    ):
+                        print("admitted")
+                except Exception as error:
+                    print(type(error).__name__)
+            """,
+            host_apps.HOSTED,
+            {"NEOLITH": host_apps.NEOLITH},
+        )
+        assert printed.splitlines() == decided, walk
+
+
+def _walk(overrides: list[list[str]]) -> list[str]:
+    """What each override, the first apps then ``overrides[i]``, decides,
+    in one process."""
+    return in_built_host(
+        f"""
+        import django
+        from django.test.utils import override_settings
+
+        django.setup()
+        installed = list(settings.INSTALLED_APPS)
+        for added in {overrides!r}:
+            try:
+                with override_settings(INSTALLED_APPS=[*installed, *added]):
+                    print("admitted")
+            except Exception as error:
+                print(type(error).__name__)
+        """,
+        host_apps.HOSTED,
+        {"NEOLITH": host_apps.NEOLITH},
+    ).splitlines()
+
+
+@pytest.mark.spec("APP-14")
+def test_a_module_imported_once_is_checked_for_every_app_that_imports_it(
+    write_app: WriteApp, tmp_path: Path
+) -> None:
+    # Python imports a module once, so a later set-up whose apps import it
+    # again in a fresh process does not run its connect() line: the record
+    # has to reach that set-up anyway.
+    shared = tmp_path / f"{write_app('')}_lib"
+    shared.mkdir()
+    (shared / "__init__.py").write_text(_UNDECLARED_CONNECTS, encoding="utf-8")
+    first = write_app("", models=f"import {shared.name}\n")
+    second = write_app("", models=f"import {shared.name}\n")
+    # A module of no app stops every later set-up, as 0021 says of any
+    # module imported by the end of set-up.
+    assert _walk([[first], [second], []]) == ["DeclarationError"] * 3
+    # One app's models imported by another's: the app whose module asks.
+    owner = write_app("", models=_UNDECLARED_CONNECTS)
+    importer = write_app("", models=f"import {owner}.models\n")
+    assert _walk([[importer, owner], [owner], []]) == [
+        "DeclarationError",
+        "DeclarationError",
+        "admitted",
+    ]
+
+
+@pytest.mark.spec("APP-14")
+def test_an_entry_whose_config_has_another_name_is_not_its_named_app(
+    write_app: WriteApp,
+) -> None:
+    # The entry's package asks; the app its config names, installed alone,
+    # does not import that package, so it is admitted as in a fresh process.
+    named = write_app("")
+    entry = write_app(
+        _PLAIN_CONFIG.replace("{name}", named), __init__=_UNDECLARED_CONNECTS
+    )
+    assert _walk([[entry], [named], [entry]]) == [
+        "DeclarationError",
+        "admitted",
+        "DeclarationError",
+    ]
+
+
+@pytest.mark.spec("APP-14")
+def test_an_installed_apps_list_changed_after_a_load_names_its_own_apps(
+    write_app: WriteApp,
+) -> None:
+    # The list given to an override that stopped is changed and given again:
+    # its first load's entries still name the configs that load made.
+    asks = write_app("", __init__=_UNDECLARED_CONNECTS)
+    printed = in_built_host(
+        f"""
+        import django
+        from django.test.utils import override_settings
+
+        django.setup()
+        installed = list(settings.INSTALLED_APPS)
+        given = [*installed, {asks!r}, "no_such_app"]
+        for change in (None, [a for a in installed if "contenttypes" not in a]):
+            if change is not None:
+                given[:] = [*change, {asks!r}]
+            try:
+                with override_settings(INSTALLED_APPS=given):
+                    print("admitted")
+            except Exception as error:
+                print(type(error).__name__)
+        with override_settings(INSTALLED_APPS=installed):
+            print("the first apps are admitted")
+        """,
+        host_apps.HOSTED,
+        {"NEOLITH": host_apps.NEOLITH},
+    )
+    assert printed.splitlines() == [
+        "ModuleNotFoundError",
+        "DeclarationError",
+        "the first apps are admitted",
+    ]
+
+
+@pytest.mark.spec("APP-14")
+@pytest.mark.parametrize("spelling", ["module", "config class", "re-exported class"])
+@pytest.mark.parametrize(
+    "position",
+    [
+        "its package",
+        "beside its apps module",
+        "its parent",
+        "no app",
+        "above a nested app",
+    ],
+)
+def test_a_module_an_entry_imports_belongs_to_the_app_it_lies_in(
+    write_app: WriteApp, tmp_path: Path, position: str, spelling: str
+) -> None:
+    # A module that asks for nope.v1 as Django imports an entry, in each
+    # position against the app the entry makes, after a refused override and
+    # after one whose load stopped: the first apps restored decide as a fresh
+    # process does, except that a module of no app stops every later set-up
+    # (ADR 0029), and every spelling of the app is refused again.
+    asks = _UNDECLARED_CONNECTS
+    lib = tmp_path / f"{write_app('')}_lib"
+    lib.mkdir()
+    (lib / "__init__.py").write_text(asks, encoding="utf-8")
+    imports = {
+        "beside its apps module": "from . import contracts\n",
+        "no app": f"import {lib.name}\n",
+    }.get(position, "")
+    config = imports + _PLAIN_CONFIG.replace("{name}", "{package}")
+    reexport = "from .apps import Config\n" if spelling == "re-exported class" else ""
+    own = asks if position in ("its package", "above a nested app") else ""
+    package = write_app(config, __init__=own + reexport, contracts=asks)
+    if position == "its parent":
+        outer = write_app("", __init__=asks)
+        inner = tmp_path / outer / "inner"
+        inner.mkdir()
+        (inner / "apps.py").write_text(
+            _PLAIN_CONFIG.replace("{name}", f"{outer}.inner"), encoding="utf-8"
+        )
+        (inner / "__init__.py").write_text(reexport, encoding="utf-8")
+        package = f"{outer}.inner"
+    spelt = {
+        "module": package,
+        "config class": f"{package}.apps.Config",
+        "re-exported class": f"{package}.Config",
+    }
+    entry = spelt[spelling]
+    respelt = spelt["config class" if spelling == "module" else "module"]
+    restored = (
+        "DeclarationError" if position in ("its parent", "no app") else "admitted"
+    )
+    for first in ([entry], [entry, "no_such_app"]):
+        stopped = "DeclarationError" if len(first) == 1 else "ModuleNotFoundError"
+        assert _walk([first, [], [respelt], [entry]]) == [
+            stopped,
+            restored,
+            "DeclarationError",
+            "DeclarationError",
+        ], first
+    if position == "its parent":
+        assert _walk([[entry], [outer]]) == ["DeclarationError"] * 2
+    if position == "above a nested app":
+        # Python imports the package above an app it imports.
+        nested = tmp_path / package / "inner"
+        nested.mkdir()
+        (nested / "__init__.py").write_text("", encoding="utf-8")
+        for first in ([entry], [entry, "no_such_app"]):
+            assert _walk([first, [f"{package}.inner"]])[1] == "DeclarationError"
+
+
+@pytest.mark.spec("APP-14")
+@pytest.mark.parametrize("spelling", ["module", "config class"])
+@pytest.mark.parametrize(
+    "how",
+    [
+        "at top level",
+        "in a helper module",
+        "in a function",
+        "in a helper's function",
+        "only from its apps module",
+    ],
+)
+def test_a_request_made_while_a_package_imports_belongs_to_apps_below_it(
+    write_app: WriteApp, tmp_path: Path, how: str, spelling: str
+) -> None:
+    # An app's package asks for nope.v1 while it is imported, in each way.
+    # An app nested below it imports the package again in a fresh process,
+    # so it is refused too, unless only the app's apps module asks, which
+    # the nested app does not import.
+    function = 'from neolith import connect\n\n\ndef ask():\n    connect("nope.v1")\n'
+    init, helpers, apps = {
+        "at top level": (_UNDECLARED_CONNECTS, "", ""),
+        "in a helper module": ("from . import helpers\n", _UNDECLARED_CONNECTS, ""),
+        "in a function": (function + "\nask()\n", "", ""),
+        "in a helper's function": (
+            "from .helpers import ask\n\nask()\n",
+            function,
+            "",
+        ),
+        "only from its apps module": (
+            "",
+            _UNDECLARED_CONNECTS,
+            "from . import helpers\n",
+        ),
+    }[how]
+    package = write_app(
+        apps + _PLAIN_CONFIG.replace("{name}", "{package}"),
+        __init__=init,
+        helpers=helpers,
+    )
+    nested = tmp_path / package / "inner"
+    nested.mkdir()
+    (nested / "__init__.py").write_text("", encoding="utf-8")
+    entry = package if spelling == "module" else f"{package}.apps.Config"
+    below = "admitted" if how == "only from its apps module" else "DeclarationError"
+    for first in ([entry], [entry, "no_such_app"]):
+        stopped = "DeclarationError" if len(first) == 1 else "ModuleNotFoundError"
+        assert _walk([first, [f"{package}.inner"]]) == [stopped, below], first
+
+
+@pytest.mark.spec("APP-14")
+@pytest.mark.parametrize("module", ["models", "apps"])
+def test_a_helper_of_an_app_another_app_imports_refuses_its_own_app(
+    write_app: WriteApp, module: str
+) -> None:
+    # One app's models or apps module imports a helper of another app, which
+    # asks for nope.v1. The other app alone never imports the helper, but the
+    # host cannot see that, so it errs towards refusing (ADR 0029, the first
+    # exception); a load that stopped before its models were imported left
+    # no request from them.
+    owner = write_app("", helpers=_UNDECLARED_CONNECTS)
+    importer = write_app(
+        f"import {owner}.helpers\n" + _PLAIN_CONFIG.replace("{name}", "{package}")
+        if module == "apps"
+        else "",
+        models=f"import {owner}.helpers\n" if module == "models" else "",
+    )
+    assert _walk([[importer, owner], [owner], [importer]]) == ["DeclarationError"] * 3
+    assert _walk([[importer, "no_such_app"], [owner]]) == [
+        "ModuleNotFoundError",
+        "admitted" if module == "models" else "DeclarationError",
+    ]
+
+
+@pytest.mark.spec("APP-14")
+@pytest.mark.parametrize("owner_imports", ["apps", "models"])
+@pytest.mark.parametrize("other_imports", ["__init__", "apps", "models"])
+def test_a_helper_another_app_imports_first_is_checked_for_its_own_app(
+    write_app: WriteApp, owner_imports: str, other_imports: str
+) -> None:
+    # An app's own loading imports its helper, which asks for nope.v1, but
+    # another app listed first imports it before: a later set-up that installs
+    # the helper's app alone is refused, as in a fresh process (#94).
+    imports = "from . import helpers\n"
+    owner = write_app(
+        (imports if owner_imports == "apps" else "")
+        + _PLAIN_CONFIG.replace("{name}", "{package}"),
+        helpers=_UNDECLARED_CONNECTS,
+        models=imports if owner_imports == "models" else "",
+    )
+    other_import = f"import {owner}.helpers\n"
+    other = write_app(
+        (other_import if other_imports == "apps" else "")
+        + _PLAIN_CONFIG.replace("{name}", "{package}"),
+        __init__=other_import if other_imports == "__init__" else "",
+        models=other_import if other_imports == "models" else "",
+    )
+    assert _walk([[other, owner], [owner], [], [owner]]) == [
+        "DeclarationError",
+        "DeclarationError",
+        "admitted",
+        "DeclarationError",
+    ]
+
+
+@pytest.mark.spec("APP-14")
+def test_an_entry_never_runs_its_own_comparison(write_app: WriteApp) -> None:
+    # INSTALLED_APPS holds an AppConfig whose __eq__ raises, and a str
+    # subclass whose __eq__ and __hash__ raise, which Django loads as its
+    # text; both decide as their plain spellings do (#100). A lazy proxy of
+    # a str is no str: its request belongs to no app, so it stops every
+    # later set-up instead of breaking them.
+    good = write_app("")
+    asks = write_app(
+        _PLAIN_CONFIG.replace("{name}", "{package}"), __init__=_UNDECLARED_CONNECTS
+    )
+    other = write_app("")
+    lazily = write_app(
+        _PLAIN_CONFIG.replace("{name}", "{package}"), __init__=_UNDECLARED_CONNECTS
+    )
+    printed = in_built_host(
+        f"""
+        import importlib
+
+        import django
+        from django.apps import AppConfig
+        from django.test.utils import override_settings
+        from django.utils.functional import SimpleLazyObject
+
+
+        class Hostile(AppConfig):
+            def __eq__(self, other):
+                raise RuntimeError("own __eq__")
+
+            __hash__ = object.__hash__
+
+
+        class Spelt(str):
+            def __eq__(self, other):
+                raise RuntimeError("own __eq__")
+
+            def __hash__(self):
+                raise RuntimeError("own __hash__")
+
+
+        django.setup()
+        installed = list(settings.INSTALLED_APPS)
+        instance = Hostile({good!r}, importlib.import_module({good!r}))
+        for added in (
+            [instance, {asks!r}],
+            [Spelt({asks!r})],
+            [{other!r}],
+            [],
+            [SimpleLazyObject(lambda: {lazily!r})],
+            [{other!r}],
+            [],
+        ):
+            try:
+                with override_settings(INSTALLED_APPS=[*installed, *added]):
+                    print("admitted")
+            except Exception as error:
+                print(type(error).__name__)
+        """,
+        host_apps.HOSTED,
+        {"NEOLITH": host_apps.NEOLITH},
+    )
+    assert printed.splitlines() == [
+        "DeclarationError",
+        "DeclarationError",
+        "admitted",
+        "admitted",
+        *["DeclarationError"] * 3,
+    ]
+
+
+@pytest.mark.spec("APP-14")
+def test_a_place_two_apps_ask_from_belongs_to_both(write_app: WriteApp) -> None:
+    # One helper line asks for nope.v1 on behalf of two apps, each added by
+    # its own override: each override is refused every time it is entered.
+    helper = write_app(
+        "",
+        helpers="from neolith import connect\n\n\ndef ask(identity):\n"
+        "    return connect(identity)\n",
+    )
+    asks = f'from {helper}.helpers import ask\n\nask("nope.v1")\n'
+    first, second = write_app("", models=asks), write_app("", models=asks)
+    printed = in_built_host(
+        f"""
+        import django
+        from django.test.utils import override_settings
+
+        django.setup()
+        installed = list(settings.INSTALLED_APPS)
+        for added in ([{first!r}], [{second!r}], [{first!r}], [{second!r}], []):
+            try:
+                with override_settings(INSTALLED_APPS=[*added, *installed]):
+                    print("admitted")
+            except Exception as error:
+                print(type(error).__name__)
+        """,
+        host_apps.HOSTED,
+        {"NEOLITH": host_apps.NEOLITH},
+    )
+    assert printed.splitlines() == [*["DeclarationError"] * 4, "admitted"]
+
+
+@pytest.mark.spec("APP-14", "APP-15")
+def test_connect_from_another_thread_while_a_set_up_loads_is_checked_at_once(
+    write_app: WriteApp,
+) -> None:
+    # An app of the first set-up holds a module that asks for nope.v1 when it
+    # is first imported. Another thread imports it while an override loads:
+    # it is checked against the table that thread's calls run on, so it is
+    # refused there, and neither that override nor the first apps restored
+    # inherit it.
+    late = write_app("", lazy='from neolith import connect\n\nconnect("nope.v1")\n')
+    loading = write_app(
+        "",
+        models=f"""
+            import threading
+
+
+            def other():
+                try:
+                    import {late}.lazy
+                    print("the other thread was admitted")
+                except Exception as error:
+                    print("the other thread:", type(error).__name__)
+
+
+            thread = threading.Thread(target=other)
+            thread.start()
+            thread.join()
+            """,
+    )
+    printed = in_built_host(
+        f"""
+        import django
+        from django.test.utils import override_settings
+
+        django.setup()
+        installed = list(settings.INSTALLED_APPS)
+        for added in ([{late!r}, {loading!r}], [{late!r}]):
+            try:
+                with override_settings(INSTALLED_APPS=[*added, *installed]):
+                    print("admitted")
+            except Exception as error:
+                print(type(error).__name__)
+        """,
+        host_apps.HOSTED,
+        {"NEOLITH": host_apps.NEOLITH},
+    )
+    assert printed.splitlines() == [
+        "the other thread: UsageError",
+        "admitted",
+        "admitted",
+    ]
+
+
+@pytest.mark.spec("APP-14")
+def test_a_nested_app_added_and_refused_leaves_its_outer_app_admitted(
+    write_app: WriteApp, tmp_path: Path
+) -> None:
+    # Django finds the outer app as the one containing the nested app's
+    # modules; the record still belongs to the set-up that installed both.
+    outer = write_app("")
+    inner = tmp_path / outer / "inner"
+    inner.mkdir()
+    (inner / "__init__.py").write_text("", encoding="utf-8")
+    (inner / "models.py").write_text(_UNDECLARED_CONNECTS, encoding="utf-8")
+    printed = in_built_host(
+        f"""
+        import django
+        from django.test.utils import override_settings
+
+        django.setup()
+        installed = list(settings.INSTALLED_APPS)
+        for added in ([{outer!r}], [{outer!r}, "{outer}.inner"], [{outer!r}]):
+            try:
+                with override_settings(INSTALLED_APPS=[*added, *installed]):
+                    print("admitted")
+            except Exception as error:
+                print(type(error).__name__)
+        """,
+        host_apps.HOSTED,
+        {"NEOLITH": host_apps.NEOLITH},
+    )
+    assert printed.splitlines() == ["admitted", "DeclarationError", "admitted"]
 
 
 @pytest.mark.spec("APP-15")
