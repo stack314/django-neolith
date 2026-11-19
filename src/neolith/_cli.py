@@ -179,9 +179,10 @@ def _parser() -> argparse.ArgumentParser:
             "Set the named apps up in one host, run the host's checks that "
             "read no database, and report what each app's code and models do "
             "across an app boundary, with no database connection. Exit 1 "
-            "when the host refuses or an enforced app has an error finding, "
-            "and 2 for a mistake in the arguments or in [tool.neolith] of "
-            "pyproject.toml, or an error of the check itself."
+            "when the host refuses, an enforced app has an error finding or "
+            "an app listed as report-only has none, and 2 for a mistake in "
+            "the arguments or in [tool.neolith] of pyproject.toml, or an error "
+            "of the check itself."
         ),
         allow_abbrev=False,
     )
@@ -218,18 +219,18 @@ class _HostLog(logging.Handler):
         self.printed: set[str] = set()
 
     def emit(self, record: logging.LogRecord) -> None:
-        from neolith import _server
+        from neolith._check import say
 
         try:
             warning = record.levelno < logging.ERROR
             for line in record.getMessage().splitlines():
                 if warning:
-                    _server.say(sys.stderr, f"neolith: warning: {line}")
+                    say(sys.stderr, f"neolith: warning: {line}")
                 else:
                     self.printed.add(line)
-                    _server.say(sys.stderr, f"neolith: {line}")
+                    say(sys.stderr, f"neolith: {line}")
             if record.exc_info:
-                _server.say(
+                say(
                     sys.stderr,
                     "".join(traceback.format_exception(*record.exc_info)).rstrip(),
                 )
@@ -265,13 +266,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _report(refusal: BaseException, printed: set[str]) -> None:
-    from neolith import _server
+    from neolith._check import say
 
     for line in _naming.text(refusal, None).splitlines() or [
         _naming.type_name(refusal)
     ]:
         if line and line not in printed:
-            _server.say(sys.stderr, f"neolith: {line}")
+            say(sys.stderr, f"neolith: {line}")
 
 
 def _cause(error: BaseException) -> str:
@@ -363,11 +364,11 @@ def _migrate(arguments: argparse.Namespace) -> int:
 def _check(arguments: argparse.Namespace) -> int:
     from django.core.management import call_command
 
-    from neolith import _check, _server
+    from neolith import _check
 
     problems = _check.read_config()[1]
     for problem in problems:
-        _server.say(sys.stderr, f"neolith: {problem}")
+        _check.say(sys.stderr, f"neolith: {problem}")
     if problems:
         return 2
     with _check.guarded():

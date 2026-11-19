@@ -164,6 +164,15 @@ class Copy(models.Model):
 class Apart(models.Model):
     class Meta:
         db_table = "legacy_things"
+
+
+class Pair(models.Model):
+    content_type = models.ForeignKey(
+        "contenttypes.ContentType", on_delete=models.CASCADE, related_name="+"
+    )
+    object_id = models.IntegerField()
+    first = GenericForeignKey()
+    second = GenericForeignKey("content_type", "object_id")
 """
 
 
@@ -244,6 +253,13 @@ def test_each_relation_to_another_app_is_reported_and_none_inside_one(
             ", which the GenericForeignKey target rests on",
         ),
         relation("FromAbstract", "inherited", "a foreign key to", "shop.Item"),
+        relation(
+            "Pair",
+            "content_type",
+            "a foreign key to",
+            "contenttypes.ContentType",
+            ", which the GenericForeignKeys first, second rest on",
+        ),
         relation(
             "ShopChild", "item_ptr", "a multi-table inheritance link to", "shop.Item"
         ),
@@ -344,6 +360,26 @@ def test_records_stored_where_another_hosted_app_s_are_are_reported(
 
     class Tagger(models.Model):
         tags = models.ManyToManyField(Own, db_table="Shop_Item", related_name="+")
+
+
+    class Quoted(models.Model):
+        class Meta:
+            db_table = '"shop_item"'
+
+
+    class Backticked(models.Model):
+        class Meta:
+            db_table = "`SHOP_item`"
+
+
+    class QuotedApart(models.Model):
+        class Meta:
+            db_table = '"shop_items"'
+
+
+    class HalfQuoted(models.Model):
+        class Meta:
+            db_table = '"shop_item'
     """
     project.app("desk", models=desk)
     project.deployer("shop", "desk")
@@ -373,10 +409,62 @@ def test_records_stored_where_another_hosted_app_s_are_are_reported(
         table("desk.Upper", _at(desk, "Upper"), "SHOP_ITEM", "shop.Item"),
         table("desk.Unmanaged", _at(desk, "Unmanaged"), "shop_item", "shop.Item"),
         table("desk.Tagger_tags", _at(desk, "Tagger"), "Shop_Item", "shop.Item"),
+        table("desk.Quoted", _at(desk, "Quoted"), '"shop_item"', "shop.Item"),
+        table("desk.Backticked", _at(desk, "Backticked"), "`SHOP_item`", "shop.Item"),
+        table("shop.Item", shop_line, "shop_item", "desk.Quoted"),
+        table("shop.Item", shop_line, "shop_item", "desk.Backticked"),
         table("shop.Item", shop_line, "shop_item", "desk.Upper"),
         table("shop.Item", shop_line, "shop_item", "desk.Unmanaged"),
         table("shop.Item", shop_line, "shop_item", "desk.Tagger_tags"),
     ]
     assert sorted(ran.findings) == sorted(expected), ran.stdout + ran.stderr
     assert _summary(ran) == (len(expected), 0, 0)
+    assert ran.status == 1
+
+
+@pytest.mark.parametrize("entry", ["neolith check", "manage.py checkapps"])
+def test_a_relation_django_never_resolved_is_judged_by_its_label(
+    tmp_path: Path, entry: str
+) -> None:
+    # In a host of desk alone, auth and shop are not installed, and Django's
+    # own checks, which would refuse these, do not run under the command.
+    project = Project(tmp_path)
+    desk = """\
+    from django.conf import settings
+    from django.db import models
+
+
+    class Own(models.Model):
+        pass
+
+
+    class Lost(models.Model):
+        user = models.ForeignKey(
+            settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="+"
+        )
+        item = models.ForeignKey("shop.Item", models.CASCADE, related_name="+")
+        many = models.ManyToManyField(Own, through="shop.Link", related_name="+")
+        mine = models.ForeignKey("desk.Missing", models.CASCADE, related_name="+")
+        own = models.ForeignKey(Own, on_delete=models.CASCADE, related_name="+")
+    """
+    project.app("desk", models=desk)
+    project.deployer("desk")
+    project.settings(["desk"], neolith={"DATABASES": project.databases("desk")})
+    ran = project.check("desk") if entry == "neolith check" else project.checkapps()
+    line = _at(
+        project.root.joinpath("desk/models.py").read_text(encoding="utf-8"), "Lost"
+    )
+
+    def lost(field: str, kind: str, target: str) -> str:
+        return (
+            f"desk/models.py:{line}: neolith.E106 app desk: model desk.Lost: field "
+            f"{field} is {kind} {target}, a model of app {target.partition('.')[0]}, "
+            f"which this host does not hold; {_RELATION_HINT}"
+        )
+
+    assert ran.findings == [
+        lost("item", "a foreign key to", "shop.Item"),
+        lost("many", "a many-to-many relation through", "shop.Link"),
+        lost("user", "a foreign key to", "auth.User"),
+    ], ran.stdout + ran.stderr
     assert ran.status == 1

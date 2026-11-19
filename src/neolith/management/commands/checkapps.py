@@ -16,9 +16,10 @@ class Command(BaseCommand):
     help = (
         "Report what the hosted apps' code and models do across an app "
         "boundary, after the host's checks that read no database; open no "
-        "database connection. Exit 1 when the host refuses or an enforced app "
-        "has an error finding, and 2 for a mistake in [tool.neolith] or an "
-        "error of the check itself. Run it in a process of its own."
+        "database connection. Exit 1 when the host refuses, an enforced app has "
+        "an error finding or an app listed as report-only has none, and 2 for "
+        "a mistake in [tool.neolith] or an error of the check itself. Run it "
+        "in a process of its own."
     )
     # Django's own checks are not run first: on Django 6.1 they ask every
     # database alias's features, which can open a connection.

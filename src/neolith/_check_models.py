@@ -12,11 +12,16 @@ For each model of a hosted app ``<a>``:
   like any other, and its message names the ``GenericForeignKey``. A
   relation is read from the model's own fields, so a field inherited from
   an abstract model counts and one of a concrete parent is judged there.
-  Lazy references are resolved by Django; one that never resolved is
-  Django's own error and is not judged here.
+  Lazy references are resolved by Django. One that never resolved, such as
+  a foreign key to ``AUTH_USER_MODEL`` in a host without ``auth``, is still
+  ``"<label>.<Model>"``, and it is judged by that label: the check runs no
+  Django system check that would refuse it.
 - ``neolith.E107``: the model is a proxy of another app's model, or the
-  table of the model, or of a many-to-many table it creates, equals the
-  table of another app's model, compared without regard to ASCII case.
+  table of the model, or of a many-to-many table it creates, names the
+  table of another app's model. Names are compared as the database reads
+  them: without one pair of enclosing quotes (``"..."`` or a backtick
+  pair), which Django's backends leave as they are, and without regard to
+  ASCII case.
 
 Another app is any installed app other than ``<a>``: another hosted app, an
 app without a declaration, a contrib app such as ``auth``, and the app that
@@ -48,6 +53,9 @@ _TABLE_HINT: Final = "give the model a table name of its own"
 _ASCII_LOWER: Final = str.maketrans(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"
 )
+# The quotes a backend's quote_name leaves on a name that has them: double
+# quotes (SQLite, PostgreSQL, Oracle) and backticks (MySQL).
+_QUOTES: Final = ('"', "`")
 
 
 def findings(hosted: Mapping[str, AppConfig]) -> list[Finding]:
@@ -68,31 +76,43 @@ def findings(hosted: Mapping[str, AppConfig]) -> list[Finding]:
 
 
 def _folded(table: str) -> str:
+    """A table name as the database reads it, for comparison: one pair of
+    enclosing quotes removed, as each backend's ``quote_name`` leaves a
+    quoted name as it is, and ASCII case folded.
+    """
+    for quote in _QUOTES:
+        if len(table) > 1 and table.startswith(quote) and table.endswith(quote):
+            table = table[1:-1]
+            break
     return table.translate(_ASCII_LOWER)
 
 
 def _relations(label: str, model: type[Any]) -> list[Finding]:
     options = model._meta
-    generic = {
-        getattr(field, "ct_field", None): field.name
-        for field in options.private_fields
-        if field.is_relation and field.related_model is None
-    }
+    generic: dict[object, list[str]] = {}
+    for field in options.private_fields:
+        if field.is_relation and field.related_model is None:
+            generic.setdefault(getattr(field, "ct_field", None), []).append(
+                shown(field.name)
+            )
     found: list[Finding] = []
     for field in [*options.local_fields, *options.local_many_to_many]:
         if not field.is_relation:
             continue
+        resting = generic.get(field.name, [])
         note = ""
-        if field.name in generic:
-            note = (
-                f", which the GenericForeignKey {shown(generic[field.name])} rests on"
-            )
+        if len(resting) == 1:
+            note = f", which the GenericForeignKey {resting[0]} rests on"
+        elif resting:
+            note = f", which the GenericForeignKeys {', '.join(resting)} rest on"
         found += _across(
             label, model, field.name, _kind(field), field.remote_field.model, note
         )
         if field.many_to_many:
             through = field.remote_field.through
-            if _is_model(through) and not through._meta.auto_created:
+            if type(through) is str or (
+                _is_model(through) and not through._meta.auto_created
+            ):
                 found += _across(
                     label,
                     model,
@@ -135,15 +155,22 @@ def _across(
     target: object,
     note: str = "",
 ) -> list[Finding]:
-    if not _is_model(target):
+    if _is_model(target):
+        other: str = target._meta.app_label  # type: ignore[attr-defined]
+        named: str = target._meta.label  # type: ignore[attr-defined]
+        absent = ""
+    elif type(target) is str:
+        # Django keeps "<label>.<Model>" until the model is registered.
+        other, named = target.partition(".")[0], target
+        absent = ", which this host does not hold"
+    else:
         return []
-    other: str = target._meta.app_label  # type: ignore[attr-defined]
     if other == label:
         return []
     message = checks.Error(
         f"app {shown(label)}: model {shown(model._meta.label)}: field "
-        f"{shown(name)} is {kind} {shown(target._meta.label)}, a model of app "  # type: ignore[attr-defined]
-        f"{shown(other)}{note}",
+        f"{shown(name)} is {kind} {shown(named)}, a model of app "
+        f"{shown(other)}{absent}{note}",
         hint=_RELATION_HINT,
         obj=model,
         id="neolith.E106",

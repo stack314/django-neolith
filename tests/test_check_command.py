@@ -9,13 +9,16 @@ The shape of ``[tool.neolith]`` is also read in this process, by
 ``read_config``, from a working directory under ``tmp_path``.
 """
 
+import contextlib
+import logging
 import os
 import textwrap
+import types
 from pathlib import Path
 
 import pytest
 
-from neolith import _check
+from neolith import UsageError, _check
 from tests.checking import Project, Ran
 
 _GUARD = (
@@ -68,10 +71,16 @@ class Two(Project):
             ["shop", "desk"], neolith={"DATABASES": self.databases("shop", "desk")}
         )
 
-    def entry(self, entry: str, *options: str, cwd: Path | None = None) -> Ran:
+    def entry(
+        self,
+        entry: str,
+        *options: str,
+        cwd: Path | None = None,
+        env: dict[str, str] | None = None,
+    ) -> Ran:
         if entry == "neolith check":
-            return self.check("shop", "desk", *options, cwd=cwd)
-        return self.checkapps(*options, cwd=cwd)
+            return self.check("shop", "desk", *options, cwd=cwd, env=env)
+        return self.checkapps(*options, cwd=cwd, env=env)
 
     def no_database_file(self) -> bool:
         return not any(self.root.glob("*.sqlite3"))
@@ -229,8 +238,15 @@ def test_a_pyproject_that_is_not_a_regular_file_cannot_be_read(
     monkeypatch.chdir(tmp_path)
     labels, found = _check.read_config()
     assert labels == []
-    assert len(found) == 1
-    assert found[0].startswith("pyproject.toml: cannot be read: ")
+    if kind == "broken link":
+        assert len(found) == 1
+        assert found[0].startswith(
+            "pyproject.toml: cannot be read: FileNotFoundError: "
+        )
+    else:
+        assert found == [
+            f"pyproject.toml: cannot be read: OSError: {path} is not a regular file"
+        ]
 
 
 def test_a_pyproject_mistake_ends_neolith_check_before_the_host_is_built(
@@ -253,6 +269,17 @@ def test_a_pyproject_mistake_ends_checkapps_before_any_finding(two: Two) -> None
     ran = two.checkapps()
     assert ran.status == 2
     assert ran.errors == [f"neolith: {_LISTED}: expected a list of str"]
+    assert ran.stdout == ""
+
+
+@pytest.mark.parametrize("entry", _ENTRIES)
+def test_both_entries_judge_the_labels_only_once_the_shape_is_admitted(
+    two: Two, entry: str
+) -> None:
+    two.pyproject("[tool.neolith]\nboundary-report-only = ['ghost', 'desk', 'desk']\n")
+    ran = two.entry(entry)
+    assert ran.status == 2
+    assert ran.errors == [f"neolith: {_LISTED}: desk listed twice"]
     assert ran.stdout == ""
 
 
@@ -328,6 +355,19 @@ def test_a_host_with_no_finding_exits_0(tmp_path: Path, entry: str) -> None:
     assert ran.lines == [_CLEAN]
     assert ran.errors == []
     assert ran.status == 0
+
+
+@pytest.mark.parametrize("entry", _ENTRIES)
+def test_a_line_the_output_cannot_encode_is_printed_escaped(
+    tmp_path: Path, entry: str
+) -> None:
+    project = Two(tmp_path, note=_NOTE.replace("class Note(", "class Noté("))
+    ran = project.entry(entry, env={"PYTHONIOENCODING": "ascii"})
+    assert ran.lines == [
+        _FK.replace("desk.Note", "desk.Not\\xe9"),
+        "neolith check: 1 errors, 0 errors in report-only apps, 0 warnings",
+    ]
+    assert ran.status == 1
 
 
 @pytest.mark.parametrize("entry", _ENTRIES)
@@ -628,6 +668,29 @@ def test_the_guard_is_put_back_however_the_command_ends(two: Two) -> None:
 
 
 # The guard: the check opens no database connection.
+
+
+@pytest.mark.spec("APP-70")
+@pytest.mark.parametrize("order", ["first in, first out", "last in, first out"])
+def test_runs_that_overlap_share_the_guard_and_put_it_back_once(order: str) -> None:
+    # Two runs of the command on two threads, in either order of ending.
+    from django.db.backends.base.base import BaseDatabaseWrapper
+
+    original = vars(BaseDatabaseWrapper)["connect"]
+    handlers = list(logging.getLogger("neolith.host").handlers)
+    with contextlib.ExitStack() as first, contextlib.ExitStack() as second:
+        first.enter_context(_check._host_log())
+        first.enter_context(_check.guarded())
+        second.enter_context(_check._host_log())
+        second.enter_context(_check.guarded())
+        held = vars(BaseDatabaseWrapper)["connect"]
+        with pytest.raises(UsageError, match="check: database x: a connection"):
+            held(types.SimpleNamespace(alias="x"))
+        (first if order == "first in, first out" else second).close()
+        assert vars(BaseDatabaseWrapper)["connect"] is held
+        assert len(logging.getLogger("neolith.host").handlers) == len(handlers) + 1
+    assert vars(BaseDatabaseWrapper)["connect"] is original
+    assert logging.getLogger("neolith.host").handlers == handlers
 
 
 @pytest.mark.spec("APP-70")

@@ -26,14 +26,14 @@ check did not foresee, printed as ``neolith: check: internal error: ...``. A
 signal to stop, such as ``KeyboardInterrupt``, is not such an error and goes
 on (ADR 0030, open point 6 of #14).
 
-State the module owns (CONTRIBUTING K6): for the length of the command,
-Django's ``BaseDatabaseWrapper.connect`` is replaced on the class, for the
-whole process, by a function that raises ``neolith.UsageError``, so the
-command opens no connection (APP-70); and the host's log handler is attached
-to the ``neolith.host`` logger unless the ``neolith`` script attached it.
-Both are put back when the command ends, however it ends. The command is
-meant for a process of its own: other threads' new connections are refused
-while it runs.
+State the module owns (CONTRIBUTING K6), behind one lock: while any run of
+the command is under way, Django's ``BaseDatabaseWrapper.connect`` is
+replaced on the class, for the whole process, by a function that raises
+``neolith.UsageError``, so the command opens no connection (APP-70); and
+the host's log handler is attached to the ``neolith.host`` logger unless the
+``neolith`` script attached it. Runs share both, counted, and the last to
+end puts them back, however it ends. The command is meant for a process of
+its own: other threads' new connections are refused while it runs.
 """
 
 import contextlib
@@ -42,6 +42,7 @@ import logging
 import os
 import stat
 import sys
+import threading
 import tomllib
 import traceback
 import unicodedata
@@ -56,9 +57,26 @@ from neolith import _naming
 from neolith._context import UsageError
 from neolith._declaration import declaration_of
 
-__all__ = ["Finding", "command", "guarded", "read_config", "shown"]
+__all__ = [
+    "Finding",
+    "command",
+    "guarded",
+    "label_problems",
+    "place",
+    "read_config",
+    "say",
+    "shown",
+    "stream_writer",
+]
 
 _log = logging.getLogger("neolith.host")
+_LOCK: Final = threading.Lock()
+# The commands that hold the guard and the host's log handler now, and
+# what the first of them replaced or attached (CONTRIBUTING K6).
+_guards = 0
+_connect: object = None
+_logs = 0
+_handler: logging.Handler | None = None
 _SHOWN: Final = 300
 _PYPROJECT: Final = "pyproject.toml"
 _TABLE: Final = "[tool.neolith]"
@@ -166,9 +184,15 @@ def _load(path: str) -> dict[str, object]:
     device under that name never holds the check up.
     """
     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    try:
+        regular = stat.S_ISREG(os.fstat(descriptor).st_mode)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    if not regular:
+        os.close(descriptor)
+        raise OSError(f"{path} is not a regular file")
     with os.fdopen(descriptor, "rb") as file:
-        if not stat.S_ISREG(os.fstat(file.fileno()).st_mode):
-            raise OSError(f"{path} is not a regular file")
         return tomllib.load(file)
 
 
@@ -181,42 +205,59 @@ def label_problems(labels: Sequence[str], hosted: Sequence[str]) -> list[str]:
     ]
 
 
+def _refused(self: object) -> None:
+    """``BaseDatabaseWrapper.connect`` while a guard is held."""
+    alias = getattr(self, "alias", None)
+    raise UsageError(_GUARD.format(alias=shown(str(alias))))
+
+
 @contextlib.contextmanager
 def guarded() -> Iterator[None]:
     """Refuse every new database connection in the process while the block
-    runs, with ``neolith.UsageError``, and put Django's method back after it,
-    however it ends. Guards nest: each puts back what it found.
+    runs, with ``neolith.UsageError``. Holders share one guard: the first
+    puts it in place and the last to leave puts Django's method back,
+    however each leaves and in whatever order.
     """
+    global _guards, _connect
     from django.db.backends.base.base import BaseDatabaseWrapper
 
-    held = vars(BaseDatabaseWrapper)["connect"]
-
-    def connect(self: BaseDatabaseWrapper) -> None:
-        raise UsageError(_GUARD.format(alias=shown(str(self.alias))))
-
-    BaseDatabaseWrapper.connect = connect  # type: ignore[method-assign]
+    with _LOCK:
+        if _guards == 0:
+            _connect = vars(BaseDatabaseWrapper)["connect"]
+            BaseDatabaseWrapper.connect = _refused  # type: ignore[method-assign]
+        _guards += 1
     try:
         yield
     finally:
-        BaseDatabaseWrapper.connect = held  # type: ignore[method-assign]
+        with _LOCK:
+            _guards -= 1
+            if _guards == 0:
+                BaseDatabaseWrapper.connect = _connect  # type: ignore[method-assign,assignment]
+                _connect = None
 
 
 @contextlib.contextmanager
 def _host_log() -> Iterator[None]:
-    """Print the host's log as the ``neolith`` script prints it, unless the
-    script attached its handler already.
+    """Print the host's log as the ``neolith`` script prints it. Holders
+    share one handler, attached by the first unless the script attached
+    its own, and removed when the last leaves.
     """
+    global _logs, _handler
     from neolith._cli import _HostLog
 
-    if any(type(handler) is _HostLog for handler in _log.handlers):
-        yield
-        return
-    handler = _HostLog()
-    _log.addHandler(handler)
+    with _LOCK:
+        if _logs == 0 and not any(type(h) is _HostLog for h in _log.handlers):
+            _handler = _HostLog()
+            _log.addHandler(_handler)
+        _logs += 1
     try:
         yield
     finally:
-        _log.removeHandler(handler)
+        with _LOCK:
+            _logs -= 1
+            if _logs == 0 and _handler is not None:
+                _log.removeHandler(_handler)
+                _handler = None
 
 
 def command(write: Callable[[str], object], *, show_traceback: bool) -> int:
@@ -224,19 +265,21 @@ def command(write: Callable[[str], object], *, show_traceback: bool) -> int:
     against the hosted apps; write each finding and the summary with
     ``write``; return the exit status.
     """
-    from neolith import _server
-
     with _host_log(), guarded():
         labels, problems = read_config()
+        if not problems:
+            try:
+                problems = label_problems(labels, _hosted())
+            except Exception as error:
+                return _internal(error, show_traceback=show_traceback)
+        if problems:
+            for problem in problems:
+                say(sys.stderr, f"neolith: {problem}")
+            return 2
         try:
             hosted = _hosted()
         except Exception as error:
             return _internal(error, show_traceback=show_traceback)
-        problems += label_problems(labels, hosted)
-        if problems:
-            for problem in problems:
-                _server.say(sys.stderr, f"neolith: {problem}")
-            return 2
         try:
             refused = _boot_checks()
             findings = _boundary(hosted)
@@ -246,11 +289,9 @@ def command(write: Callable[[str], object], *, show_traceback: bool) -> int:
 
 
 def _internal(error: Exception, *, show_traceback: bool) -> int:
-    from neolith import _server
-
-    _server.say(sys.stderr, f"neolith: check: internal error: {_cause(error)}")
+    say(sys.stderr, f"neolith: check: internal error: {_cause(error)}")
     if show_traceback:
-        _server.say(sys.stderr, "".join(traceback.format_exception(error)).rstrip())
+        say(sys.stderr, "".join(traceback.format_exception(error)).rstrip())
     return 2
 
 
@@ -386,11 +427,24 @@ def place(path: str | None) -> str | None:
     return shown(os.path.relpath(whole, here) if inside else whole, sys.maxsize)
 
 
-def stream_writer(stream: TextIO | TextIOBase) -> Callable[[str], None]:
-    """A ``write`` for ``command`` that prints each line to ``stream``."""
+def say(stream: TextIO | TextIOBase | None, line: str) -> None:
+    """Write ``line`` to ``stream`` as ``neolith._server.say`` does, with
+    each character the stream's encoding cannot write as its escape, so a
+    line it cannot encode is printed rather than lost.
+    """
     from neolith import _server
 
+    encoding = getattr(stream, "encoding", None)
+    if type(encoding) is str:
+        with contextlib.suppress(LookupError):
+            line = line.encode(encoding, "backslashreplace").decode(encoding)
+    _server.say(stream, line)  # type: ignore[arg-type]
+
+
+def stream_writer(stream: TextIO | TextIOBase) -> Callable[[str], None]:
+    """A ``write`` for ``command`` that prints each line to ``stream``."""
+
     def write(line: str) -> None:
-        _server.say(stream, line)  # type: ignore[arg-type]
+        say(stream, line)
 
     return write

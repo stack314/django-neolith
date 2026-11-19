@@ -201,8 +201,15 @@ class Project:
             "PATH": os.environ.get("PATH", ""),
         }
 
-    def run(self, *arguments: str, cwd: Path | None = None) -> Ran:
-        """Run ``python <arguments>`` in the project, warnings as errors."""
+    def run(
+        self,
+        *arguments: str,
+        cwd: Path | None = None,
+        env: dict[str, str] | None = None,
+    ) -> Ran:
+        """Run ``python <arguments>`` in the project, warnings as errors, with
+        ``env`` added to the child's environment.
+        """
         ran = subprocess.run(  # noqa: S603
             [sys.executable, "-W", "error", *arguments],
             capture_output=True,
@@ -210,22 +217,36 @@ class Project:
             check=False,
             cwd=cwd or self.root,
             timeout=_WAIT,
-            env=self.env(),
+            env=self.env() | (env or {}),
         )
         return Ran(ran.returncode, ran.stdout, ran.stderr)
 
     def check(
-        self, *apps: str, settings: str = "deployer", cwd: Path | None = None
+        self,
+        *apps: str,
+        settings: str = "deployer",
+        cwd: Path | None = None,
+        env: dict[str, str] | None = None,
     ) -> Ran:
         """Run ``neolith check <apps> --settings <settings>``."""
         return self.run(
-            "-m", "neolith", "check", *apps, "--settings", settings, cwd=cwd
+            "-m", "neolith", "check", *apps, "--settings", settings, cwd=cwd, env=env
         )
 
     def checkapps(
-        self, *options: str, settings: str = "settings", cwd: Path | None = None
+        self,
+        *options: str,
+        settings: str = "settings",
+        cwd: Path | None = None,
+        env: dict[str, str] | None = None,
     ) -> Ran:
         """Run ``manage.py checkapps`` on the settings module ``settings``."""
         return self.run(
-            "-m", "django", "checkapps", f"--settings={settings}", *options, cwd=cwd
+            "-m",
+            "django",
+            "checkapps",
+            f"--settings={settings}",
+            *options,
+            cwd=cwd,
+            env=env,
         )
