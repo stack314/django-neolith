@@ -334,19 +334,102 @@ def test_a_label_is_printed_on_one_line_whatever_it_holds(two: Two, entry: str) 
     ]
 
 
+@pytest.mark.parametrize(
+    ("name", "printed"),
+    [
+        (b"b\xff", "b\\udcff"),
+        (b"b\nc", "b\\nc"),
+        ("b\u2028c".encode(), "b\\u2028c"),
+        ("b\u200bc".encode(), "b\\u200bc"),
+    ],
+    ids=["byte 0xff", "line feed", "line separator", "zero-width space"],
+)
 @pytest.mark.parametrize("entry", _ENTRIES)
-def test_a_path_that_is_not_text_is_printed_escaped(tmp_path: Path, entry: str) -> None:
+def test_a_path_is_printed_on_one_line_whatever_it_holds(
+    tmp_path: Path, entry: str, name: bytes, printed: str
+) -> None:
     # The byte 0xff in a directory's name reaches Python as a lone surrogate,
-    # which no UTF-8 stream can write.
-    root = Path(os.fsdecode(bytes(tmp_path) + b"/b\xff"))
+    # which no UTF-8 stream can write; the others would break the line.
+    root = Path(os.fsdecode(bytes(tmp_path) + b"/" + name))
     root.mkdir()
     project = Two(root)
-    elsewhere = root / "elsewhere"
+    elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
     ran = project.entry(entry, cwd=elsewhere)
-    path = f"{tmp_path}/b\\udcff/desk/models.py"
+    path = f"{tmp_path}/{printed}/desk/models.py"
     assert ran.findings == [_FK.replace("desk/models.py", path)], ran.stderr
     assert ran.status == 1
+
+
+@pytest.mark.parametrize("entry", _ENTRIES)
+def test_a_hosted_app_without_a_database_needs_no_migrations(
+    tmp_path: Path, entry: str
+) -> None:
+    project = Two(tmp_path)
+    project.app("plain", migrations=False)
+    project.write(
+        "plain/apps.py",
+        """\
+        from neolith import NeolithAppConfig
+
+
+        class Config(NeolithAppConfig):
+            name = "plain"
+            label = "plain"
+        """,
+    )
+    project.deployer("shop", "desk")
+    neolith = {"DATABASES": project.databases("shop", "desk")}
+    project.settings(["shop", "desk", "plain"], neolith=neolith)
+    ran = (
+        project.check("shop", "desk", "plain")
+        if entry == "neolith check"
+        else project.checkapps()
+    )
+    assert ran.errors == []
+    assert ran.lines == [
+        _FK,
+        "neolith check: 1 errors, 0 errors in report-only apps, 0 warnings",
+    ]
+
+
+_LOADING_ADMIN = """\
+from django.contrib import admin
+from shop.models import Item
+
+
+class LoadingAdmin(admin.ModelAdmin):
+    pass
+
+
+site = admin.AdminSite(name="loading")
+site.register(Item, LoadingAdmin)
+"""
+
+
+@pytest.mark.parametrize("entry", _ENTRIES)
+def test_an_admin_set_up_warned_about_is_not_warned_again(
+    tmp_path: Path, entry: str
+) -> None:
+    # Registered while the apps load, so set-up warns; phase 4 does not.
+    project = Two(tmp_path)
+    project.write("loading_admin.py", _LOADING_ADMIN)
+    project.app(
+        "desk",
+        models=_NOTE,
+        config="""\
+        def ready(self):
+            import loading_admin  # noqa: F401
+        """,
+    )
+    ran = project.entry(entry)
+    found = [line for line in ran.errors if "(neolith.W001)" in line]
+    assert len(found) == 1, ran.stderr
+    assert found[0].endswith(
+        "(neolith.W001) loading_admin.LoadingAdmin: admin class in no installed "
+        "app; its views have no calling app, and a contract call from them is "
+        "refused"
+    )
 
 
 # The arguments.
