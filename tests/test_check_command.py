@@ -161,7 +161,8 @@ _LISTED = "[tool.neolith] boundary-report-only"
             [f"{_LISTED}: d listed twice"],
         ),
         (
-            b"[tool.neolith]\nboundary-report-only = ['x\\u2028y', 'x\\u2028y']\n",
+            # A basic string, so TOML reads the escape as the character.
+            b'[tool.neolith]\nboundary-report-only = ["x\\u2028y", "x\\u2028y"]\n',
             [f"{_LISTED}: x\\u2028y listed twice"],
         ),
         (
@@ -295,6 +296,57 @@ def test_a_listed_label_that_is_not_a_hosted_app_is_refused_after_set_up(
         f"neolith: {_LISTED}: auth is not a hosted app",
     ]
     assert ran.stdout == ""
+
+
+@pytest.mark.parametrize(
+    ("text", "printed"),
+    [
+        ("a\nb", "a\\nb"),
+        ("a\x1bb", "a\\x1bb"),
+        ("a\u200bb", "a\\u200bb"),
+        ("a\ud800b", "a\\ud800b"),
+        ("a\u2028b", "a\\u2028b"),
+        ("a\u2029b", "a\\u2029b"),
+        ("é ü ok", "é ü ok"),
+    ],
+    ids=["Cc line feed", "Cc escape", "Cf", "Cs", "Zl", "Zp", "printable"],
+)
+def test_shown_escapes_what_would_break_a_line_and_nothing_else(
+    text: str, printed: str
+) -> None:
+    assert _check.shown(text) == printed
+    assert _check.shown(text * 200, 10).endswith("...")
+
+
+@pytest.mark.parametrize("entry", _ENTRIES)
+def test_a_label_is_printed_on_one_line_whatever_it_holds(two: Two, entry: str) -> None:
+    # A line separator (Zl), a zero-width space (Cf), an escape (Cc) and a
+    # paragraph separator (Zp), each as TOML reads a basic string's escape.
+    two.pyproject(
+        "[tool.neolith]\nboundary-report-only = "
+        '["a\\u2028b", "c\\u200bd", "e\\u001bf", "g\\u2029h"]\n'
+    )
+    ran = two.entry(entry)
+    assert ran.status == 2
+    assert ran.errors == [
+        f"neolith: {_LISTED}: {shown} is not a hosted app"
+        for shown in ["a\\u2028b", "c\\u200bd", "e\\x1bf", "g\\u2029h"]
+    ]
+
+
+@pytest.mark.parametrize("entry", _ENTRIES)
+def test_a_path_that_is_not_text_is_printed_escaped(tmp_path: Path, entry: str) -> None:
+    # The byte 0xff in a directory's name reaches Python as a lone surrogate,
+    # which no UTF-8 stream can write.
+    root = Path(os.fsdecode(bytes(tmp_path) + b"/b\xff"))
+    root.mkdir()
+    project = Two(root)
+    elsewhere = root / "elsewhere"
+    elsewhere.mkdir()
+    ran = project.entry(entry, cwd=elsewhere)
+    path = f"{tmp_path}/b\\udcff/desk/models.py"
+    assert ran.findings == [_FK.replace("desk/models.py", path)], ran.stderr
+    assert ran.status == 1
 
 
 # The arguments.
@@ -509,6 +561,47 @@ def test_both_entries_print_the_same_lines_for_phases_4_and_5(tmp_path: Path) ->
         f"{_FK} (report only)",
         "neolith check: 0 errors, 1 errors in report-only apps, 0 warnings",
     ]
+
+
+_ADMIN_URLS = """\
+from django.contrib import admin
+from shop.models import Item
+
+
+class ProjectAdmin(admin.ModelAdmin):
+    pass
+
+
+site = admin.AdminSite(name="project")
+site.register(Item, ProjectAdmin)
+urlpatterns = []
+"""
+
+
+@pytest.mark.parametrize("silenced", [False, True])
+@pytest.mark.parametrize("entry", _ENTRIES)
+def test_an_admin_the_urlconf_registers_is_warned_once_unless_silenced(
+    tmp_path: Path, entry: str, silenced: bool
+) -> None:
+    # Set-up ran before the URLconf was imported, so only phase 4 sees it.
+    project = Two(tmp_path, urls=_ADMIN_URLS)
+    if silenced:
+        below = 'SILENCED_SYSTEM_CHECKS = ["neolith.W001"]\n'
+        neolith = {"DATABASES": project.databases("shop", "desk")}
+        project.deployer("shop", "desk", below=below)
+        project.settings(["shop", "desk"], neolith=neolith, below=below)
+    ran = project.entry(entry)
+    warned = (
+        "neolith: warning: (neolith.W001) urls.ProjectAdmin: admin class in no "
+        "installed app; its views have no calling app, and a contract call from "
+        "them is refused"
+    )
+    assert ran.errors == ([] if silenced else [warned])
+    assert ran.lines == [
+        _FK,
+        "neolith check: 1 errors, 0 errors in report-only apps, 0 warnings",
+    ]
+    assert ran.status == 1
 
 
 @pytest.mark.parametrize("entry", _ENTRIES)

@@ -68,7 +68,8 @@ class Thing(models.Model):
 # the app, which are admitted.
 _DESK = """\
 from django.conf import settings
-from django.contrib.auth.models import User
+from django.contrib.auth.base_user import AbstractBaseUser
+from django.contrib.auth.models import AbstractUser, User
 from django.contrib.contenttypes.fields import GenericForeignKey, GenericRelation
 from django.db import models
 from legacy.models import Thing
@@ -174,6 +175,14 @@ class ParentChild(Parent):
     pass
 
 
+class Member(AbstractUser):
+    pass
+
+
+class Plain(AbstractBaseUser):
+    USERNAME_FIELD = "id"
+
+
 class Pair(models.Model):
     content_type = models.ForeignKey(
         "contenttypes.ContentType", on_delete=models.CASCADE, related_name="+"
@@ -262,6 +271,13 @@ def test_each_relation_to_another_app_is_reported_and_none_inside_one(
         ),
         relation("FromAbstract", "inherited", "a foreign key to", "shop.Item"),
         relation("Parent", "tags", "a generic relation to", "shop.Item"),
+        relation("Member", "groups", "a many-to-many relation to", "auth.Group"),
+        relation(
+            "Member",
+            "user_permissions",
+            "a many-to-many relation to",
+            "auth.Permission",
+        ),
         relation(
             "Pair",
             "content_type",
