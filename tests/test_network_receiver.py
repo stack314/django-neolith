@@ -853,7 +853,7 @@ print("\\n".join(said))
 """
 
 
-@pytest.mark.spec("CON-42")
+@pytest.mark.spec("CON-42", "CON-52")
 def test_a_deep_text_is_refused_on_a_one_megabyte_thread_stack() -> None:
     # Alpine's Python builds give a thread 1 MB of stack, where the json
     # module's reader ends the process on Python 3.12 and 3.13 before
@@ -875,7 +875,7 @@ def test_a_deep_text_is_refused_on_a_one_megabyte_thread_stack() -> None:
     ]
 
 
-@pytest.mark.spec("CON-42")
+@pytest.mark.spec("CON-42", "CON-52")
 @pytest.mark.parametrize("depth", [201, 256])
 def test_a_text_as_deep_as_a_reader_admits_is_read(depth: int) -> None:
     # 201 levels is the deepest pydantic-core's reader admits; up to the

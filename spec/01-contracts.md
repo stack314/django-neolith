@@ -97,6 +97,8 @@ Values travel as JSON text (RFC 8259), with each form written as below ([ADR 001
 
 **CON-42.** A receiver MUST refuse a body that holds a duplicate member name, a lone surrogate or a number outside the range of a double.
 
+**CON-52.** A receiver MUST refuse a body whose arrays and objects nest more than 256 levels deep, and judge that depth before a reader that recurses reads the body, so that the outcome never depends on the stack of the thread that reads it (RFC 8259, section 9, lets a parser limit nesting). A receiver whose reader admits less refuses a shallower body too.
+
 Text may hold a noncharacter, such as U+FFFF, as CON-25 and CON-30 allow, although I-JSON (RFC 7493, section 2.1) excludes it.
 
 ## Errors

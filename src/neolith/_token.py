@@ -25,6 +25,7 @@ from collections.abc import Mapping
 from typing import Final, NoReturn, final
 
 from neolith import _naming
+from neolith._nesting import deeper_than
 from neolith._portable import SAFE_INTEGER_MAX
 
 __all__ = [
@@ -231,7 +232,7 @@ def _strict(data: bytes) -> dict[str, object] | None:
     an exponent is read as a double, and must be finite.
 
     A text that nests more than 64 arrays and objects is ``None`` too,
-    judged by ``_shallow`` before the json module reads it, since its
+    judged by ``deeper_than`` before the json module reads it, since its
     recursive scanner can exhaust a thread's stack before it raises
     ``RecursionError``, which stays caught as a backstop. Spec 03 (HTTP-7)
     lets a reader limit nesting; a valid header has one level.
@@ -266,7 +267,7 @@ def _strict(data: bytes) -> dict[str, object] | None:
 
     try:
         text = data.decode("utf-8")
-        if not _shallow(text):
+        if deeper_than(data, _DEPTH):
             return None
         value = json.loads(
             text,
@@ -281,30 +282,6 @@ def _strict(data: bytes) -> dict[str, object] | None:
         return None
     found: dict[str, object] = value
     return found
-
-
-def _shallow(text: str) -> bool:
-    """True when ``text`` nests at most ``_DEPTH`` arrays and objects."""
-    if text.count("[") + text.count("{") <= _DEPTH:
-        return True
-    depth, quoted, escaped = 0, False, False
-    for char in text:
-        if escaped:
-            escaped = False
-        elif quoted:
-            if char == "\\":
-                escaped = True
-            elif char == '"':
-                quoted = False
-        elif char == '"':
-            quoted = True
-        elif char in "[{":
-            depth += 1
-            if depth > _DEPTH:
-                return False
-        elif char in "]}":
-            depth -= 1
-    return True
 
 
 def _texts_encode(value: object) -> bool:

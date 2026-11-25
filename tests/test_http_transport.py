@@ -203,6 +203,7 @@ def test_an_unknown_kinds_detail_at_the_untyped_bounds_arrives() -> None:
     assert outcome.kind == "moved"
 
 
+@pytest.mark.spec("CON-52")
 def test_a_deep_error_body_is_judged_without_recursion_on_a_small_stack() -> None:
     # Issue #125: on a 1 MB thread stack, 9,000 levels of nesting would end the
     # process inside the json module; the nesting is judged before it reads.
