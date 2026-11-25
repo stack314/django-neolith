@@ -249,16 +249,21 @@ class NeolithAppConfig(AppConfig):
     ``__init_subclass__``. It reads the names each class holds, not what
     code does. Code in a mixin, a base class or a metaclass can still give
     the class a ``path`` or ``default`` that no body writes, and nothing
-    refuses it: an ``__init__``, a ``__getattr__``, an ``__init_subclass__``,
-    a private method Django calls such as ``_path_from_module``, a metaclass
-    property, or a later rebinding. Past the check, neolith reads neither
-    value, and the snapshot holds neither. Such a ``path`` changes only where
-    Django looks for the app's templates, static files, locale files,
-    fixtures and commands, and where ``makemigrations`` puts the app's
-    migrations package when it does not exist yet. A ``default`` that reads
-    false when the host's settings builder reads the app makes Django choose
-    a plain config, and the builder refuses the app as having no
-    declaration.
+    refuses it. A ``path`` can come from an ``__init__``, a ``__getattr__``,
+    an ``__init_subclass__``, a private method Django calls such as
+    ``_path_from_module``, a metaclass property, or a later rebinding.
+    Django reads ``default`` from the class only, so a ``default`` counts
+    only when class-level code changes it: an ``__init_subclass__``, a
+    metaclass property, or a later rebinding of the declaring class itself.
+    A ``default`` that only an instance holds, or that a mixin gets later,
+    behind the ``default`` the declaring class holds, has no effect. Past
+    the check, neolith reads neither value, and the snapshot holds neither.
+    Such a ``path`` changes only where Django looks for the app's
+    templates, static files, locale files, fixtures and commands, and where
+    ``makemigrations`` puts the app's migrations package when it does not
+    exist yet. A class ``default`` that reads false when the host's settings
+    builder reads the app makes Django choose a plain config, and the
+    builder refuses the app as having no declaration.
 
     A declaration outside this form raises ``DeclarationError`` when the class
     is defined, listing every refusal.
@@ -270,7 +275,8 @@ class NeolithAppConfig(AppConfig):
     Attributes:
         default: Django's option: whether Django picks this config for its
             app on its own. ``False`` on this class and on a base class;
-            ``True`` on a declaring class unless its own body sets it.
+            ``True`` on a declaring class unless its own body sets it or
+            class-level code changes it, as described above.
         provides: The contracts the app provides, one ``Provided`` each.
         requires: The contract classes the app calls. The host finds each
             one's provider: the app of the host that provides it, or the

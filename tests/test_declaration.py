@@ -1744,20 +1744,36 @@ class Base(NeolithAppConfig, metaclass=Quiet):
 """
 
 
+_DEFAULT_FALSE_BEFORE_THE_CHECK = """
+class Quiet:
+    def __init_subclass__(cls, **kwargs):
+        cls.default = False
+        super().__init_subclass__(**kwargs)
+"""
+
+
 @pytest.mark.parametrize(
-    ("hook", "bases"),
+    ("hook", "bases", "after"),
     [
-        (_DEFAULT_FALSE_FROM_A_MIXIN, "Quiet, NeolithAppConfig"),
-        (_DEFAULT_FALSE_FROM_A_METACLASS, "Base"),
+        (_DEFAULT_FALSE_FROM_A_MIXIN, "Quiet, NeolithAppConfig", ""),
+        (_DEFAULT_FALSE_BEFORE_THE_CHECK, "Quiet, NeolithAppConfig", ""),
+        (_DEFAULT_FALSE_FROM_A_METACLASS, "Base", ""),
+        ("", "NeolithAppConfig", "\nStockConfig.default = False\n"),
     ],
-    ids=["mixin's __init_subclass__", "base class's metaclass"],
+    ids=[
+        "mixin's __init_subclass__",
+        "__init_subclass__ before super()",
+        "base class's metaclass",
+        "rebinding the declaring class",
+    ],
 )
 def test_a_default_that_code_makes_false_is_refused_as_no_declaration(
-    make_app: MakeApp, hook: str, bases: str
+    make_app: MakeApp, hook: str, bases: str, after: str
 ) -> None:
-    """ADR 0021 Decision 2 checks names, not code, so code can make the
-    declaring class's default read false; Django then gives the package a
-    plain config, and the Hosted apps row of ADR 0022 refuses it."""
+    """ADR 0021 Decision 2 checks names, not code, so class-level code can
+    make the declaring class's default read false; Django then gives the
+    package a plain config, and the Hosted apps row of ADR 0022 refuses
+    it."""
     from neolith._configure import configure
 
     package = make_app(
@@ -1765,6 +1781,7 @@ def test_a_default_that_code_makes_false_is_refused_as_no_declaration(
             "class StockConfig(NeolithAppConfig):",
             f"{hook}\n\nclass StockConfig({bases}):",
         )
+        + after
     )
     config = _config_class(package)
     assert declaration_of(config) is not None
@@ -1772,6 +1789,62 @@ def test_a_default_that_code_makes_false_is_refused_as_no_declaration(
     with pytest.raises(ImproperlyConfigured) as raised:
         configure([package, _COURIERS], _neolith(package))
     assert str(raised.value) == f"app {package}: has no declaration"
+
+
+_DEFAULT_FALSE_ON_THE_INSTANCE = """
+class Quiet:
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.default = False
+
+    def __getattr__(self, name):
+        if name == "default":
+            return False
+        raise AttributeError(name)
+"""
+
+_DEFAULT_FALSE_ON_A_MIXIN_LATER = """
+class Quiet:
+    pass
+"""
+
+
+@pytest.mark.parametrize(
+    ("hook", "after"),
+    [
+        (_DEFAULT_FALSE_ON_THE_INSTANCE, ""),
+        (_DEFAULT_FALSE_ON_A_MIXIN_LATER, "\nQuiet.default = False\n"),
+    ],
+    ids=["__init__ and __getattr__", "rebinding a mixin"],
+)
+def test_a_default_that_code_makes_false_off_the_class_has_no_effect(
+    make_app: MakeApp, hook: str, after: str
+) -> None:
+    """Django picks a config by the class's default, so a default only an
+    instance holds, or one a mixin gets after the declaring class wrote
+    ``default = True`` into its own body, changes nothing: the host admits
+    the app (ADR 0022, the Hosted apps row)."""
+    from neolith._configure import configure
+
+    package = make_app(
+        _APPS.replace(
+            "class StockConfig(NeolithAppConfig):",
+            f"{hook}\n\nclass StockConfig(Quiet, NeolithAppConfig):",
+        )
+        + after
+    )
+    config = _config_class(package)
+    assert config.default is True
+    created = AppConfig.create(package)
+    assert type(created) is config
+    deployer = {
+        **_neolith(package),
+        "MIDDLEWARE": [
+            "neolith.middleware.RootMiddleware",
+            "neolith.middleware.PrincipalMiddleware",
+        ],
+    }
+    assert package in configure([package, _COURIERS], deployer)["INSTALLED_APPS"]
 
 
 _PATH_FROM_A_PRIVATE_METHOD = """
