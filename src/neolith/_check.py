@@ -334,10 +334,19 @@ def _boot_checks() -> bool:
 
 def _boundary(hosted: Sequence[str]) -> list[Finding]:
     """Phase 5: every finding of the boundary pass."""
-    from neolith import _check_models
+    from neolith import _check_models, _check_source
 
     configs = {label: global_apps.get_app_config(label) for label in hosted}
-    return _check_models.findings(configs)
+    source = _check_source.Source(configs, _owner)
+    return [*_check_models.findings(configs), *_check_source.findings(source)]
+
+
+def _owner(name: str) -> str | None:
+    """The label of the installed app that holds the dotted name ``name``,
+    as Django's registry gives it (``Apps.get_containing_app_config``).
+    """
+    config = global_apps.get_containing_app_config(name)
+    return None if config is None else config.label
 
 
 def _report(
