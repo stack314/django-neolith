@@ -51,6 +51,8 @@ What this version does. The [changelog](https://github.com/stack314/django-neoli
 
 Not yet in this version: the boundary check (`neolith check`) and events. See the roadmap below.
 
+<!-- neolith-example:start -->
+
 ## A short example
 
 A contract, in a contract package other apps may import:
@@ -172,6 +174,8 @@ $ neolith run inventory shop --settings deploy --bind 127.0.0.1:8000
 ```
 
 `neolith run` uses Django's development server, which is not for production; in production, serve a settings module like the one above with any WSGI or ASGI server. On `SIGINT` or `SIGTERM` it stops taking requests and gives each request in flight until `NEOLITH["REQUEST_DEADLINE"]`, or 30 seconds when that is `None`. Under another server, give its graceful shutdown a timeout no shorter than the request deadline. In a host built by a settings module, `manage.py migrateapps` is the migrate step, and `manage.py migrateapps --check` reports what the host would refuse at start-up.
+
+<!-- neolith-example:end -->
 
 ## Roadmap
 
