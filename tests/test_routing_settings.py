@@ -27,7 +27,7 @@ from hypothesis import strategies as st
 from neolith import _checks, _http_transport
 from neolith._configure import configure
 from neolith._declaration import Declaration
-from neolith._host import remote_refused, resolve
+from neolith._host import refused_identities, resolve
 from tests.hosting import in_built_host, in_fresh_process
 from tests.test_host import _hosts
 from tests.test_remote_providers import (
@@ -575,14 +575,56 @@ def test_a_list_resolve_refuses_gets_one_instruction(
 
 
 @pytest.mark.spec("APP-8", "APP-64")
+@pytest.mark.parametrize(
+    ("hosted", "identity", "refusal"),
+    [
+        (
+            [COURIERS, WEB],
+            "couriers.v3",
+            f"{ROUTING}: couriers.v3 is provided by app couriers in this host, "
+            "which is its one provider; remove it",
+        ),
+        (
+            [WEB],
+            "billing.invoices.v1",
+            f"{ROUTING}: billing.invoices.v1 is required by no hosted app; remove it",
+        ),
+    ],
+)
+def test_a_policy_resolve_refuses_gets_one_instruction(
+    hosted: list[str], identity: str, refusal: str
+) -> None:
+    neolith: dict[str, Any] = {
+        "REMOTE_PROVIDERS": both([entry(A)]),
+        "ROUTING_POLICIES": {identity: "fast"},
+    }
+    if COURIERS in hosted:
+        del neolith["REMOTE_PROVIDERS"]["couriers.v3"]
+    # The value is still refused, but with no advice to name local-first,
+    # which Resolve refuses for this identity in turn.
+    value = f'{ROUTING}["{identity}"]: is not a routing policy of this host'
+    assert built(neolith, hosted) == [refusal, value]
+    neolith["ROUTING_POLICIES"] = {identity: "local-first"}
+    assert refusal in built(neolith, hosted)
+    # Following the instruction admits the host.
+    del neolith["ROUTING_POLICIES"]
+    assert built(neolith, hosted) == []
+    # The value's own advice still stands for an identity Resolve admits.
+    neolith["ROUTING_POLICIES"] = {"stock.v1": "fast"}
+    assert built(neolith, hosted) == [
+        f'{ROUTING}["stock.v1"]: {NOT_A_POLICY.format("stock.v1")}'
+    ]
+
+
+@pytest.mark.spec("APP-8", "APP-64")
 @_HYPOTHESIS
 @given(
     _hosts(),
     st.dictionaries(st.sampled_from(_POOL), st.integers(1, 3)),
-    st.sets(st.sampled_from(_POOL)),
+    st.dictionaries(st.sampled_from(_POOL), st.sampled_from(["local-first", "fast"])),
 )
 def test_no_identity_is_told_both_to_go_and_to_name_local_first(
-    declarations: list[Declaration], counts: dict[str, int], named: set[str]
+    declarations: list[Declaration], counts: dict[str, int], policies: dict[str, str]
 ) -> None:
     urls = [A, B, "https://inventory-c.internal"]
     neolith: dict[str, Any] = {}
@@ -591,19 +633,32 @@ def test_no_identity_is_told_both_to_go_and_to_name_local_first(
             identity: [entry(url) for url in urls[:count]]
             for identity, count in counts.items()
         }
-    if named:
-        neolith["ROUTING_POLICIES"] = dict.fromkeys(named, "local-first")
-    remote = _checks.remote_identities(neolith)
-    _, refusals = resolve(declarations, remote, _checks.routed(neolith))
-    lines = refusals + _checks.neolith_problems(
-        neolith, declarations, refused=remote_refused(declarations, remote)
+    if policies:
+        neolith["ROUTING_POLICIES"] = policies
+    _, refusals = resolve(
+        declarations, _checks.remote_identities(neolith), _checks.routed(neolith)
     )
+    lines = refusals + _checks.neolith_problems(
+        neolith, declarations, refused=refused_identities(declarations, neolith)
+    )
+
+    def removed(identity: str) -> bool:
+        return any(
+            line.startswith((f"{REMOTE}: {identity} is ", f"{ROUTING}: {identity} is "))
+            and "remove" in line
+            and "one entry" not in line
+            for line in lines
+        )
+
+    # Each hint to name local-first is left out exactly where Resolve says
+    # to remove the identity, and kept everywhere else its row refuses it.
     for identity, count in counts.items():
-        removed = any(line.startswith(f"{REMOTE}: {identity} is ") for line in lines)
         advised = _lists(identity, count) in lines
-        # The hint is left out exactly where Resolve says to remove the
-        # entry, and kept everywhere else APP-64 refuses the list.
-        assert advised == (count > 1 and identity not in named and not removed)
+        ordered = policies.get(identity) == "local-first"
+        assert advised == (count > 1 and not ordered and not removed(identity))
+    for identity, policy in policies.items():
+        advised = f'{ROUTING}["{identity}"]: {NOT_A_POLICY.format(identity)}' in lines
+        assert advised == (policy != "local-first" and not removed(identity))
 
 
 # override_settings, W002 (ADR 0031, the admitted set).
@@ -907,6 +962,20 @@ _E001 = "host: the settings are refused before the host serves:"
                 "remove it",
                 f"{REMOTE}: couriers.v3 is provided by app couriers in this host, "
                 f"{IN_HOST}",
+            ],
+        ),
+        # A value that is not a policy: Resolve's "remove it" is the one advice.
+        (
+            {
+                "REMOTE_PROVIDERS": {"stock.v1": [entry(A)]},
+                "ROUTING_POLICIES": {"couriers.v3": "fast", "other.v1": "fast"},
+            },
+            [
+                f"{ROUTING}: couriers.v3 is provided by app couriers in this host, "
+                "which is its one provider; remove it",
+                f"{ROUTING}: other.v1 is required by no hosted app; remove it",
+                f'{ROUTING}["couriers.v3"]: is not a routing policy of this host',
+                f'{ROUTING}["other.v1"]: is not a routing policy of this host',
             ],
         ),
         # Every row at once.

@@ -242,9 +242,10 @@ def neolith_problems(
     """Judge ``NEOLITH``: present, a ``dict`` whose keys are in the key
     table, each with its one form (ADR 0022 Decision 3), against the
     declarations of the hosted apps. Leave ``value`` out when the setting is
-    absent. ``refused`` names the ``REMOTE_PROVIDERS`` identities Resolve
-    refuses whatever their list holds (``remote_refused``); see
-    ``remote_problems``.
+    absent. ``refused`` names the identities Resolve refuses whatever
+    ``REMOTE_PROVIDERS`` or ``ROUTING_POLICIES`` holds for them
+    (``_host.refused_identities``); see ``remote_problems`` and
+    ``routing_problems``.
     """
     if value is _MISSING:
         return ["settings: NEOLITH is required; it is {} when nothing is set"]
@@ -274,7 +275,7 @@ def neolith_problems(
         elif key == _REMOTE_KEY:
             problems.extend(remote_problems(item, local_first(entries), refused))
         elif key == _ROUTING_KEY:
-            problems.extend(routing_problems(item))
+            problems.extend(routing_problems(item, refused))
     if "DATABASES" not in entries:
         problems.extend(
             f"app {label}: no connection settings for its database"
@@ -360,7 +361,7 @@ def remote_problems(
 
     An identity in ``refused`` is one Resolve refuses with "remove the
     entry" or "remove it", whatever its list holds: one no hosted app
-    requires or one an app of the host provides (``remote_refused``). Its
+    requires or one an app of the host provides (``refused_identities``). Its
     list of two or more entries gets no advice to name ``local-first``,
     which would contradict that refusal and be refused in turn by the
     ``ROUTING_POLICIES`` row of Resolve; the identity is refused all the
@@ -507,11 +508,16 @@ LOCAL_FIRST: Final = "local-first"
 _SINGLE: Final = "single"
 
 
-def routing_problems(value: object) -> list[str]:
+def routing_problems(value: object, refused: Collection[str] = ()) -> list[str]:
     """Judge the form of ``NEOLITH["ROUTING_POLICIES"]`` (ADR 0031, the
     builder's rows): a ``dict`` of one or more contract identities, each
     mapped to exactly the ``str`` ``"local-first"``, compared as written.
     ``single`` is what an identity left out means, so it is not a value.
+
+    An identity in ``refused`` is one Resolve refuses with "remove it",
+    whatever its value (``refused_identities``): a value that is not a
+    policy gets no advice to name ``local-first``, which Resolve would
+    refuse in turn (ADR 0031, the Resolve rows).
 
     Every problem found is returned, those under a refused key included. A
     refused value is never shown; a refused key is shown as
@@ -542,6 +548,8 @@ def routing_problems(value: object) -> list[str]:
             problems.append(
                 f"{where}: {_SINGLE} is what leaving {named} out means; leave it out"
             )
+        elif policy != LOCAL_FIRST and type(key) is str and key in refused:
+            problems.append(f"{where}: is not a routing policy of this host")
         elif policy != LOCAL_FIRST:
             problems.append(
                 f"{where}: is not a routing policy of this host; the one policy "

@@ -715,14 +715,15 @@ def build(registry: Apps) -> tuple[Host, list[str]]:
     ]
     neolith = getattr(settings, "NEOLITH", _checks.MISSING)
     declarations = [declaration for _, declaration in hosted]
-    remote = _checks.remote_identities(neolith)
-    contracts, refusals = resolve(declarations, remote, _checks.routed(neolith))
+    contracts, refusals = resolve(
+        declarations, _checks.remote_identities(neolith), _checks.routed(neolith)
+    )
     if refusals:
         # Resolve reads NEOLITH, so a requirement it finds unmet may come
         # from a problem there: those, and its remote providers' callers
         # that have no signing key, are reported with its refusals.
         refusals += _checks.neolith_problems(
-            neolith, declarations, refused=remote_refused(declarations, remote)
+            neolith, declarations, refused=refused_identities(declarations, neolith)
         )
         refusals += _checks.unsigned_problems(neolith, declarations)
     connectors: dict[str, Bound] = {}
@@ -860,17 +861,21 @@ def resolve(
     return {identity: found for identity, (found, _) in named.items()}, refusals
 
 
-def remote_refused(
-    declarations: Sequence[Declaration], remote: Collection[str]
+def refused_identities(
+    declarations: Sequence[Declaration], neolith: object
 ) -> frozenset[str]:
-    """The identities of ``remote`` that ``resolve`` refuses whatever their
-    list holds: one no hosted app requires, and one an app provides. Their
-    refusals say to remove the entry, so ``NEOLITH``'s problems, reported
-    with them, give no other advice for those lists (``remote_problems``).
+    """The identities ``NEOLITH["REMOTE_PROVIDERS"]`` or
+    ``NEOLITH["ROUTING_POLICIES"]`` names, as ``resolve`` reads them, that
+    ``resolve`` refuses whatever their value: one no hosted app requires, and
+    one an app provides. Their refusals say to remove the entry, so
+    ``NEOLITH``'s problems, reported with them, give no advice to name
+    ``local-first`` for those identities (``remote_problems``,
+    ``routing_problems``).
     """
+    named = _checks.remote_identities(neolith) | frozenset(_checks.routed(neolith))
     required = {c.identity for d in declarations for c in d.requires}
     provided = {p.contract.identity for d in declarations for p in d.provides}
-    return frozenset(i for i in remote if i not in required or i in provided)
+    return frozenset(i for i in named if i not in required or i in provided)
 
 
 def _class(contract: Contract) -> str:
