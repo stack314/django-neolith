@@ -50,7 +50,9 @@ jobs:
           python scripts/sdist_check.py "$RUNNER_TEMP"/dist/*.tar.gz
       # ADR 0024: the docs site builds, and its checks pass: the citations in
       # the mirrored records and specification among them. Sphinx 9.2 needs
-      # Python 3.13, so the site is built in a venv of its own.
+      # Python 3.13, so the site is built in a venv of its own. publish runs
+      # the check and assembles what Workers Builds deploys, the URL contract
+      # with it (scripts/workers_build.sh).
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         id: docs-python
         with:
@@ -62,7 +64,7 @@ jobs:
         run: |
           "$DOCS_PYTHON" -m venv "$RUNNER_TEMP/docs"
           "$RUNNER_TEMP/docs/bin/python" -m pip install . --group docs "Django~=5.2.0"
-          "$RUNNER_TEMP/docs/bin/python" scripts/docs.py check --out "$RUNNER_TEMP/site"
+          "$RUNNER_TEMP/docs/bin/python" scripts/docs.py publish --out "$RUNNER_TEMP/site"
 
   test:
     # ADR 0012: the floor and the newest supported pair, on x86-64 and arm64.

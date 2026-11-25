@@ -1587,6 +1587,8 @@ def test_a_check_says_when_no_html_was_built(
         ("build", ["a problem"], 1),
         ("stage", [], 0),
         ("stage", ["a problem"], 1),
+        ("publish", [], 0),
+        ("publish", ["a problem"], 1),
     ],
 )
 def test_the_exit_status_is_1_exactly_when_a_problem_is_found(
@@ -1612,6 +1614,7 @@ def test_the_exit_status_is_1_exactly_when_a_problem_is_found(
     monkeypatch.setattr(docs, "stage", step("stage"))
     monkeypatch.setattr(docs, "build", step("build"))
     monkeypatch.setattr(docs, "check", check)
+    monkeypatch.setattr(docs, "publish", step("publish"))
     assert docs.main([command, "--out", "x"]) == status
     assert called == [command]
     out, err = capsys.readouterr()
@@ -1625,6 +1628,366 @@ def test_the_exit_status_is_1_exactly_when_a_problem_is_found(
 def test_a_place_that_is_not_safe_exits_1(capsys: pytest.CaptureFixture[str]) -> None:
     assert docs.main(["stage", "--out", str(ROOT)]) == 1
     assert "holds the repository" in capsys.readouterr().err
+
+
+# Publishing (ADR 0024): the Worker, the site's root files and the URL contract
+
+
+def _config() -> dict[str, object]:
+    loaded = json.loads((ROOT / "wrangler.json").read_text(encoding="utf-8"))
+    assert isinstance(loaded, dict)
+    return loaded
+
+
+def test_the_worker_serves_the_published_directory_at_the_base_path() -> None:
+    config = _config()
+    assert config["name"] == "neolith-docs"
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(config["compatibility_date"]))
+    assert config["assets"] == {
+        "directory": (docs.OUT / "site").relative_to(ROOT).as_posix(),
+        "base_path": docs.BASE_PATH,
+        "html_handling": "auto-trailing-slash",
+        "not_found_handling": "404-page",
+    }
+    assert docs.BASE_PATH == "/neolith"
+    assert docs.SITE_URL.endswith(docs.BASE_PATH + "/")
+
+
+def test_the_worker_serves_assets_only_on_the_routes_the_dashboard_sets() -> None:
+    config = _config()
+    # No script, no workers.dev copy of the site, and no route: a deploy
+    # leaves the routes set in the dashboard as they are.
+    assert config["workers_dev"] is False
+    assert config["preview_urls"] is False
+    assert not {"main", "route", "routes"} & config.keys()
+
+
+def test_the_build_command_publishes_as_ci_does() -> None:
+    script = (ROOT / "scripts" / "workers_build.sh").read_text(encoding="utf-8")
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    install = '-m pip install . --group docs "Django~=5.2.0"'
+    assert install in script
+    assert install in ci
+    assert "scripts/docs.py publish\n" in script
+    assert "scripts/docs.py publish --out" in ci
+    assert "set -eu\n" in script
+
+
+def _published(tmp_path: Path) -> Path:
+    """A published site without Sphinx: an empty page for each staged page."""
+    source = docs.stage(ROOT, tmp_path / "out").path
+    site = tmp_path / "out" / "site"
+    for page in source.rglob("*.md"):
+        rel = page.relative_to(source).with_suffix("").as_posix()
+        rel = rel.removesuffix("index").rstrip("/")
+        target = site / docs.DEV / rel / "index.html"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("<p>page</p>", encoding="utf-8")
+    for name, text in docs.root_files(ROOT).items():
+        (site / name).write_text(text, encoding="utf-8")
+    return site
+
+
+def test_the_published_site_has_every_root_file_and_no_problem(
+    tmp_path: Path,
+) -> None:
+    site = _published(tmp_path)
+    assert sorted(docs.root_files(ROOT)) == [
+        "404.html",
+        "_redirects",
+        "llms.txt",
+        "versions.json",
+    ]
+    assert docs.root_problems(ROOT, site) == []
+
+
+def test_every_redirect_line_is_valid() -> None:
+    rules, problems = docs.redirect_rules(docs.root_files(ROOT)["_redirects"])
+    assert problems == []
+    assert len(rules) == len(docs.REDIRECTS)
+    dynamic = [rule for rule in rules if rule.source.endswith("*")]
+    assert rules[-len(dynamic) :] == dynamic
+    assert {rule.code for rule in rules} <= {301, 302}
+
+
+@pytest.mark.parametrize(
+    ("line", "problem"),
+    [
+        ("/neolith/a/ /neolith/b/", "no status code"),
+        ("/neolith/a/ /neolith/b/ 200", "status 200 is not a redirect"),
+        ("/neolith/a/ /neolith/b/ 301 x", "not source, destination and code"),
+        ("/elsewhere/ /neolith/b/ 301", "not under /neolith/"),
+        ("/neolith/a/*/b/ /neolith/b/ 301", "a splat only at the end"),
+        ("/neolith/a/ /neolith/:splat 301", ":splat without a splat"),
+        ("/neolith/a/ b/ 301", "neither a path under /neolith/ nor a URL"),
+        ("/neolith/a/ http://example.com/ 301", "neither a path under /neolith/ nor"),
+        ("/neolith/a /neolith/b/ 301", "does not end in a slash"),
+        ("/neolithic/ /neolith/b/ 301", "not under /neolith/"),
+    ],
+)
+def test_a_bad_redirect_line_is_refused(line: str, problem: str) -> None:
+    _, problems = docs.redirect_rules(line + "\n")
+    assert len(problems) == 1, problems
+    assert problem in problems[0]
+    assert problems[0].startswith("_redirects line 1: ")
+
+
+def test_a_source_without_its_slash_is_valid_beside_its_slashed_form() -> None:
+    text = (
+        "/neolith/ /neolith/dev/ 302\n/neolith /neolith/dev/ 302\n"
+        "/neolith/a /neolith/b/ 301\n/neolith/a/ /neolith/b/ 301\n"
+    )
+    rules, problems = docs.redirect_rules(text)
+    assert problems == []
+    assert [rule.source for rule in rules] == [
+        "/neolith/",
+        "/neolith",
+        "/neolith/a",
+        "/neolith/a/",
+    ]
+
+
+def test_a_repeated_source_and_a_static_rule_after_a_splat_are_refused() -> None:
+    text = (
+        "# a comment\n\n/neolith/a/* /neolith/b/:splat 301\n"
+        "/neolith/a/x/ /neolith/b/ 301\n/neolith/a/x/ /neolith/c/ 301\n"
+    )
+    _, problems = docs.redirect_rules(text)
+    assert problems == [
+        "_redirects line 4: a static rule after a splat; static rules come first",
+        "_redirects line 5: a static rule after a splat; static rules come first",
+        "_redirects line 5: /neolith/a/x/ is already a source on line 4",
+    ]
+
+
+def _old_urls() -> list[str]:
+    """Every page of the site this one replaces, by the URL its sitemap lists."""
+    urls = [
+        "/neolith/",
+        "/neolith/latest/",
+        "/neolith/decisions/",
+        "/neolith/spec/",
+        "/neolith/reference/",
+        "/neolith/tutorial/",
+        "/neolith/how-to/",
+    ]
+    for staged in docs.mirror_table(ROOT).values():
+        section, _, name = staged.removesuffix(".md").partition("/")
+        if name != "index":
+            old = {"adr": "decisions"}.get(section, section)
+            urls.append(f"/neolith/{old}/{name}/")
+    return urls
+
+
+def test_every_old_url_reaches_a_page(tmp_path: Path) -> None:
+    site = _published(tmp_path)
+    rules, _ = docs.redirect_rules(docs.root_files(ROOT)["_redirects"])
+    assert set(_old_urls()) <= set(docs.old_urls(ROOT))
+    for url in docs.old_urls(ROOT):
+        hops, end = docs.follow(rules, url)
+        assert hops, url
+        if not end.startswith(REPO + "/"):
+            assert docs.asset(site, end) is not None, (url, end)
+    assert len(_old_urls()) > 40  # every record, spec document and project page
+
+
+def test_record_0011_moves_permanently_to_its_new_name(tmp_path: Path) -> None:
+    site = _published(tmp_path)
+    rules, _ = docs.redirect_rules(docs.root_files(ROOT)["_redirects"])
+    new = "adr/0011-the-host-serves-contract-endpoints-itself/"
+    hops, end = docs.follow(
+        rules, "/neolith/decisions/0011-django-ninja-for-contract-endpoints/"
+    )
+    assert hops == [(301, f"/neolith/latest/{new}"), (302, f"/neolith/dev/{new}")]
+    assert docs.asset(site, end) == site / "dev" / new / "index.html"
+
+
+def test_the_home_and_latest_lead_to_dev_until_the_first_release(
+    tmp_path: Path,
+) -> None:
+    site = _published(tmp_path)
+    rules, _ = docs.redirect_rules(docs.root_files(ROOT)["_redirects"])
+    for start in ("/neolith", "/neolith/", "/neolith/latest", "/neolith/latest/"):
+        assert docs.follow(rules, start) == ([(302, "/neolith/dev/")], "/neolith/dev/")
+    assert docs.follow(rules, "/neolith/latest/spec/") == (
+        [(302, "/neolith/dev/spec/")],
+        "/neolith/dev/spec/",
+    )
+    # Every page of dev is reachable under latest.
+    for page in (site / "dev").rglob("index.html"):
+        rel = page.parent.relative_to(site / "dev").as_posix()
+        url = "/neolith/latest/" + ("" if rel == "." else rel + "/")
+        _, end = docs.follow(rules, url)
+        assert docs.asset(site, end) == page, url
+
+
+def test_the_page_kept_on_github_leads_there() -> None:
+    rules, _ = docs.redirect_rules(docs.root_files(ROOT)["_redirects"])
+    hops, _ = docs.follow(rules, "/neolith/reference/django-host/")
+    assert hops == [(301, f"{REPO}/blob/main/docs/django-host.md")]
+    assert (ROOT / "docs" / "django-host.md").is_file()
+
+
+def test_a_redirect_to_no_page_is_a_problem(tmp_path: Path) -> None:
+    site = _published(tmp_path)
+    shutil.rmtree(site / "dev" / "spec")
+    said = docs.root_problems(ROOT, site)
+    assert "_redirects: /neolith/spec/ leads to /neolith/dev/spec/, no page" in said
+
+
+def test_a_redirect_loop_is_a_problem() -> None:
+    rules, _ = docs.redirect_rules(
+        "/neolith/a/ /neolith/b/ 301\n/neolith/b/ /neolith/a/ 301\n"
+    )
+    with pytest.raises(docs.DocsError, match="more than 5 redirects"):
+        docs.follow(rules, "/neolith/a/")
+
+
+def test_a_path_maps_to_its_asset_as_the_worker_serves_it(tmp_path: Path) -> None:
+    site = _published(tmp_path)
+    assert docs.asset(site, "/neolith/dev/") == site / "dev" / "index.html"
+    assert docs.asset(site, "/neolith/llms.txt") == site / "llms.txt"
+    assert docs.asset(site, "/neolith/dev") is None  # a 307 to the slash first
+    assert docs.asset(site, "/neolith/missing/") is None
+    assert docs.asset(site, "/elsewhere/") is None
+    assert docs.asset(site, "/neolith/../out/") is None
+
+
+def test_versions_lists_only_dev_before_the_first_release() -> None:
+    versions = json.loads(docs.root_files(ROOT)["versions.json"])
+    assert versions == [
+        {"name": "dev (not released)", "version": "dev", "url": "/neolith/dev/"}
+    ]
+
+
+def test_llms_txt_lists_the_dev_pages_and_says_they_are_not_released(
+    tmp_path: Path,
+) -> None:
+    text = docs.root_files(ROOT)["llms.txt"]
+    assert text.startswith("# Neolith\n\n> Neolith lets a Django app run")
+    assert "development version" in text
+    assert "not released" in text
+    links = re.findall(r"\]\(([^)]+)\)", text)
+    assert len(links) >= 6
+    assert all(link.startswith(docs.SITE_URL + "dev/") for link in links)
+    site = _published(tmp_path)
+    for link in links:
+        path = docs.BASE_PATH + "/" + link.removeprefix(docs.SITE_URL)
+        assert docs.asset(site, path) is not None, link
+
+
+def test_a_link_in_llms_txt_to_no_page_is_a_problem(tmp_path: Path) -> None:
+    site = _published(tmp_path)
+    shutil.rmtree(site / "dev" / "concepts")
+    assert docs.root_problems(ROOT, site) == [
+        f"llms.txt: links to {docs.SITE_URL}dev/concepts/, no page"
+    ]
+
+
+def test_the_404_page_is_noindex_with_the_banner_and_the_footer(
+    tmp_path: Path,
+) -> None:
+    text = docs.root_files(ROOT)["404.html"]
+    page = docs._Page()
+    page.feed(text)
+    page.close()
+    assert list(docs._page_problems(page, "404.html", development=True)) == []
+    assert page.hrefs == ["/neolith/dev/"]
+    assert "<link" not in text
+    assert "<script" not in text
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "problem"),
+    [
+        ('content="noindex, nofollow"', 'content="all"', "no noindex"),
+        (docs.BANNER, "Hello.", "no development banner"),
+        (docs.FOOTER, "Hello.", "no footer"),
+        ('href="/neolith/dev/"', 'href="/neolith/gone/"', "/neolith/gone/, no page"),
+        ('href="/neolith/dev/"', 'href="dev/"', "dev/, not a path from the root"),
+    ],
+)
+def test_a_bad_404_page_is_refused(
+    tmp_path: Path, old: str, new: str, problem: str
+) -> None:
+    site = _published(tmp_path)
+    path = site / "404.html"
+    text = path.read_text(encoding="utf-8")
+    assert old in text
+    path.write_text(text.replace(old, new), encoding="utf-8")
+    said = docs.root_problems(ROOT, site)
+    assert len(said) == 1, said
+    assert said[0].startswith("404.html: ")
+    assert problem in said[0]
+
+
+def test_a_missing_root_file_is_a_problem(tmp_path: Path) -> None:
+    site = _published(tmp_path)
+    (site / "versions.json").unlink()
+    assert docs.root_problems(ROOT, site) == ["versions.json: missing"]
+
+
+def test_publishing_builds_a_development_version_whatever_the_version_says(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(docs.DEVELOPMENT_VARIABLE, raising=False)
+    seen: list[object] = []
+
+    def check(root: Path, out: Path, extra: object = None) -> list[str]:
+        seen.append(os.environ.get(docs.DEVELOPMENT_VARIABLE))
+        seen.append(docs.development_version("0.1.0"))
+        html = out / "html"
+        for rel in ("", "spec/", "concepts/", "reference/", "adr/", "project/"):
+            (html / rel).mkdir(parents=True, exist_ok=True)
+            (html / rel / "index.html").write_text("<p>page</p>", "utf-8")
+        (html / "project" / "changelog").mkdir()
+        (html / "project" / "changelog" / "index.html").write_text("x", "utf-8")
+        return ["a problem of the check"]
+
+    monkeypatch.setattr(docs, "check", check)
+    result = docs.publish(ROOT, tmp_path / "out")
+    assert seen == ["1", True]
+    assert docs.DEVELOPMENT_VARIABLE not in os.environ
+    assert docs.development_version("0.1.0") is False
+    assert result.path == tmp_path / "out" / "site"
+    assert (result.path / "dev" / "spec" / "index.html").is_file()
+    for name, text in docs.root_files(ROOT).items():
+        assert (result.path / name).read_text(encoding="utf-8") == text
+    # The check's problems are kept; the old URLs of pages this fake build
+    # lacks are problems too.
+    assert result.problems[0] == "a problem of the check"
+    assert any("leads to /neolith/dev/adr/0" in p for p in result.problems)
+
+
+def test_publishing_restores_the_variable_it_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(docs.DEVELOPMENT_VARIABLE, "0")
+
+    def check(root: Path, out: Path, extra: object = None) -> list[str]:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(docs, "check", check)
+    with pytest.raises(RuntimeError):
+        docs.publish(ROOT, tmp_path / "out")
+    assert os.environ[docs.DEVELOPMENT_VARIABLE] == "0"
+
+
+def test_a_development_version_is_a_dev_one_or_one_publishing_asks_for(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(docs.DEVELOPMENT_VARIABLE, raising=False)
+    assert docs.development_version("0.1.0a4.dev0") is True
+    assert docs.development_version("0.1.0a3") is False
+    monkeypatch.setenv(docs.DEVELOPMENT_VARIABLE, "1")
+    assert docs.development_version("0.1.0a3") is True
+    monkeypatch.setenv(docs.DEVELOPMENT_VARIABLE, "yes")
+    assert docs.development_version("0.1.0a3") is False
+
+
+def test_the_site_configuration_asks_whether_it_builds_a_development_version() -> None:
+    conf = (ROOT / "docs" / "site" / "conf.py").read_text(encoding="utf-8")
+    assert "development = docs.development_version(neolith.__version__)\n" in conf
 
 
 # The build (needs the docs group)
@@ -1803,3 +2166,15 @@ def test_one_check_reports_every_problem_of_every_step(tmp_path: Path) -> None:
         ), (path, said)
     for expected in _BAD_PATCHED:
         assert expected in said, (expected, said)
+
+
+@_needs_sphinx
+def test_the_published_site_is_a_checked_development_build(tmp_path: Path) -> None:
+    assert _run(f"docs.publish(docs.ROOT, Path({str(tmp_path)!r})).problems") == []
+    site = tmp_path / "site"
+    home = (site / "dev" / "index.html").read_text(encoding="utf-8")
+    assert '<meta name="robots" content="noindex, nofollow">' in home
+    assert docs.BANNER in home
+    assert not (site / "dev" / ".buildinfo").exists()
+    for name, text in docs.root_files(ROOT).items():
+        assert (site / name).read_text(encoding="utf-8") == text
