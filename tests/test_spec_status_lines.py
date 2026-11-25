@@ -1,4 +1,7 @@
-"""A status line calls a section specified only if it carries requirement IDs."""
+"""A status line calls a section specified only if it carries requirement IDs.
+
+Covers every spec document except 06 (see EXEMPT).
+"""
 
 from __future__ import annotations
 
@@ -8,18 +11,27 @@ from pathlib import Path
 import pytest
 
 SPEC = Path(__file__).resolve().parent.parent / "spec"
-FILES = [
-    "00-overview.md",
-    "02-transports.md",
-    "03-http-transport.md",
-    "05-app-declaration.md",
-]
+# 06 is exempt: its sections restate other documents' IDs through the item
+# table (ADR 0032) and carry none of their own.
+EXEMPT = {"06-conformance.md"}
+FILES = sorted(p.name for p in SPEC.glob("0*.md") if p.name not in EXEMPT)
 ID = re.compile(r"\*\*[A-Z]+-\d+[.:]?\*\*")
+HEADING = re.compile(r"^(#{2,3}) (.+)$", flags=re.M)
 
 
 def _sections(text: str) -> dict[str, str]:
-    parts = re.split(r"^## (.+)$", text, flags=re.M)
-    return dict(zip(parts[1::2], parts[2::2], strict=True))
+    """Map each ``##`` and ``###`` heading to its text up to the next heading
+    of the same or a higher level, so a section counts its subsections' IDs."""
+    found = list(HEADING.finditer(text))
+    out: dict[str, str] = {}
+    for i, m in enumerate(found):
+        end = len(text)
+        for n in found[i + 1 :]:
+            if len(n.group(1)) <= len(m.group(1)):
+                end = n.start()
+                break
+        out[m.group(2)] = text[m.end() : end]
+    return out
 
 
 @pytest.mark.parametrize("name", FILES)
@@ -29,11 +41,13 @@ def test_status_line_specifies_only_sections_with_ids(name: str) -> None:
     assert status
     sentences = re.split(r"(?<=\.)\s+", status.group(1))
     claimed = " ".join(
-        x for x in sentences if "specified" in x and "described" not in x
+        x
+        for x in sentences
+        if "specified" in x.lower() and "described" not in x.lower()
     ).lower()
     for heading, body in _sections(text).items():
         if not ID.search(body):
-            assert heading.lower() not in claimed, (
+            assert not re.search(rf"\b{re.escape(heading.lower())}\b", claimed), (
                 f"{name}: status line calls '{heading}' specified,"
                 " but it carries no requirement ID"
             )
