@@ -367,3 +367,36 @@ def test_setup_says_how_to_check_g7() -> None:
         "a later `createdAt` than that tip run",
     ):
         assert words in text, words
+
+
+def test_the_landing_page_step_names_the_readme_example_markers() -> None:
+    step = _section(7)
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    start, end = "<!-- neolith-example:start -->", "<!-- neolith-example:end -->"
+    assert readme.count(start) == readme.count(end) == 1
+    assert start in step
+    assert end in step
+    found = re.search(r"git show \"v\$\{VERSION\}:README.md\" \| ([^\n]+)", step)
+    assert found, "section 7 has no command that prints the marked example"
+    pipeline = found.group(1)
+    assert f"/^{start}$/,/^{end}$/p" in pipeline
+    # Run the runbook's own pipeline (everything after `git show ... |`), so a
+    # command that leaves the marker lines in the output fails here.
+    shown = subprocess.run(  # noqa: S603
+        ["sh", "-c", pipeline],  # noqa: S607
+        input=readme,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    inner = readme.split(start + "\n", 1)[1].split(end, 1)[0]
+    assert shown == inner
+    assert start not in shown
+    assert end not in shown
+    for words in (
+        "same code blocks and paragraphs as the output",
+        "in the same order",
+        "none missing, none added",
+        "No marker line is in the output",
+    ):
+        assert words in step, words
