@@ -234,12 +234,17 @@ def _deadline_problems(value: object) -> list[str]:
 
 
 def neolith_problems(
-    value: object = _MISSING, hosted: Sequence[Declaration] = ()
+    value: object = _MISSING,
+    hosted: Sequence[Declaration] = (),
+    *,
+    refused: Collection[str] = (),
 ) -> list[str]:
     """Judge ``NEOLITH``: present, a ``dict`` whose keys are in the key
     table, each with its one form (ADR 0022 Decision 3), against the
     declarations of the hosted apps. Leave ``value`` out when the setting is
-    absent.
+    absent. ``refused`` names the ``REMOTE_PROVIDERS`` identities Resolve
+    refuses whatever their list holds (``remote_refused``); see
+    ``remote_problems``.
     """
     if value is _MISSING:
         return ["settings: NEOLITH is required; it is {} when nothing is set"]
@@ -267,7 +272,7 @@ def neolith_problems(
         elif key == _caller.SIGNING:
             problems.extend(_caller.signing_problems(item, [d.label for d in hosted]))
         elif key == _REMOTE_KEY:
-            problems.extend(remote_problems(item, local_first(entries)))
+            problems.extend(remote_problems(item, local_first(entries), refused))
         elif key == _ROUTING_KEY:
             problems.extend(routing_problems(item))
     if "DATABASES" not in entries:
@@ -339,7 +344,9 @@ _ENTRY_KEYS: Final = ("BACKEND", "OPTIONS")
 _URL: Final = "url"
 
 
-def remote_problems(value: object, routed: Collection[str] = ()) -> list[str]:
+def remote_problems(
+    value: object, routed: Collection[str] = (), refused: Collection[str] = ()
+) -> list[str]:
     """Judge the form of ``NEOLITH["REMOTE_PROVIDERS"]`` (ADR 0014, the
     builder's rows, as ADR 0031 widens them): a ``dict`` of one or more
     contract identities, each mapped to a ``list`` of one or more entries,
@@ -350,6 +357,14 @@ def remote_problems(value: object, routed: Collection[str] = ()) -> list[str]:
     ``dict`` with exactly ``url``, an origin in its one spelling, and no two
     entries of one identity have one ``url``, compared as written. Every
     container is exactly the type named.
+
+    An identity in ``refused`` is one Resolve refuses with "remove the
+    entry" or "remove it", whatever its list holds: one no hosted app
+    requires or one an app of the host provides (``remote_refused``). Its
+    list of two or more entries gets no advice to name ``local-first``,
+    which would contradict that refusal and be refused in turn by the
+    ``ROUTING_POLICIES`` row of Resolve; the identity is refused all the
+    same, with Resolve's message (ADR 0031, the Resolve rows).
 
     Every problem found is returned, those under a refused key included. A
     refused ``url`` is never shown, in whole or in part (ADR 0014 Decision
@@ -375,12 +390,13 @@ def remote_problems(value: object, routed: Collection[str] = ()) -> list[str]:
             )
             where, named = f"{REMOTE}[{shown}]", "it"
         ordered = type(key) is str and key in routed
-        problems.extend(_providers_problems(where, named, providers, ordered))
+        advised = not (type(key) is str and key in refused)
+        problems.extend(_providers_problems(where, named, providers, ordered, advised))
     return problems
 
 
 def _providers_problems(
-    where: str, named: str, value: object, ordered: bool
+    where: str, named: str, value: object, ordered: bool, advised: bool
 ) -> list[str]:
     if type(value) is not list:
         return [f"{where}: expected a list of providers, got {_type(value)}"]
@@ -388,7 +404,7 @@ def _providers_problems(
     if not providers:
         return [f"{where}: is empty; leave {named} out"]
     problems: list[str] = []
-    if len(providers) > 1 and not ordered:
+    if len(providers) > 1 and not ordered and advised:
         problems.append(
             f"{where}: lists {len(providers)} providers; with the single routing "
             "policy a contract has one provider; to try them in order, name "
