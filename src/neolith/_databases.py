@@ -15,6 +15,9 @@ What is compared for "one database" (ADR 0009 Decision 5):
   SQLite with ``uri=True``. Only the literal ``:memory:`` is exempt, being
   one database per connection.
 - Any other backend: ``(ENGINE, HOST, PORT, NAME)``.
+
+A refusal names the alias, or the two aliases, and the rule. It never shows
+a value under an alias, in whole or in part (ADR 0033 Decision 7, ADR 0034).
 """
 
 import os
@@ -38,6 +41,13 @@ DEFAULT: Final = "default"
 MEMORY: Final = ":memory:"
 _DUMMY: Final = frozenset({"django.db.backends.dummy", "django.db.backends."})
 _KEY: Final = 'NEOLITH["DATABASES"]'
+# The refusal of two aliases on one database names the rule, never a value
+# compared (ADR 0034): those are connection settings.
+_ONE_FILE: Final = "both name one SQLite file; each alias needs a database of its own"
+_ONE_SERVER: Final = (
+    "both name one database, with the same ENGINE, HOST, PORT and NAME; each "
+    "alias needs a database of its own"
+)
 
 
 def _type(value: object) -> str:
@@ -45,8 +55,8 @@ def _type(value: object) -> str:
 
 
 def _shown(value: object) -> str:
-    """A name or a value for a message: an exact ``str`` within a bound, and
-    anything else by its type, so no author code runs.
+    """An alias, a key the deployer chose, for a message: an exact ``str``
+    within a bound, and anything else by its type, so no author code runs.
     """
     if type(value) is str:
         text: str = value
@@ -104,20 +114,20 @@ def sqlite_path(name: object) -> str | None:
 
 
 def _identity(engine: str, entry: Mapping[str, Any]) -> tuple[object, ...] | None:
-    """What two aliases on one database share; ``None`` for one exempt."""
+    """What two aliases on one database share, led by the rule their refusal
+    states; ``None`` for one exempt, or for a server alias whose ``HOST`` or
+    ``PORT`` is not one a backend reads.
+    """
     name = entry.get("NAME")
     if is_sqlite(engine):
         path = sqlite_path(name)
-        return None if path is None else ("sqlite", path)
-    return (engine, entry.get("HOST", ""), entry.get("PORT", ""), name)
-
-
-def _named(engine: str, entry: Mapping[str, Any]) -> str:
-    name = entry.get("NAME")
-    if is_sqlite(engine):
-        return f"{engine} {sqlite_path(name)}"
+        return None if path is None else (_ONE_FILE, path)
     host, port = entry.get("HOST", ""), entry.get("PORT", "")
-    return f"{engine} {_shown(name)} on {_shown(host)}:{_shown(port)}"
+    if type(host) is not str or (type(port) is not str and type(port) is not int):
+        # Not compared (ADR 0034 Decision 2): its backend meets the value
+        # when it connects, and no value's own hashing runs here.
+        return None
+    return (_ONE_SERVER, engine, host, port, name)
 
 
 def databases_problems(value: object, with_database: Iterable[str]) -> list[str]:
@@ -151,9 +161,7 @@ def databases_problems(value: object, with_database: Iterable[str]) -> list[str]
             continue
         first = compared.setdefault(identity, alias)
         if first != alias:
-            problems.append(
-                f"databases {first} and {alias}: both name {_named(engine, settings)}"
-            )
+            problems.append(f"databases {first} and {alias}: {identity[0]}")
     problems.extend(
         f"app {label}: no connection settings for its database"
         for label in labels

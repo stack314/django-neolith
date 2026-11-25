@@ -535,14 +535,19 @@ def _pair(tmp_path: Path) -> list[tuple[str, object, object]]:
     ]
 
 
+# The rule two aliases on one database break, and no value compared (ADR 0034).
+_ONE_FILE = "both name one SQLite file; each alias needs a database of its own"
+_ONE_SERVER = (
+    "both name one database, with the same ENGINE, HOST, PORT and NAME; each "
+    "alias needs a database of its own"
+)
+
+
 def test_two_aliases_on_one_database_are_refused(tmp_path: Path) -> None:
     for case, first, second in _pair(tmp_path):
         aliases = {"ledger": sqlite(first), "billing": sqlite(second)}
         found = _db_refusal(**aliases)
-        assert len(found) == 1, case
-        assert found[0].startswith(
-            f"databases ledger and billing: both name {SQLITE} "
-        ), case
+        assert found == [f"databases ledger and billing: {_ONE_FILE}"], case
 
 
 def test_two_server_aliases_on_one_database_are_refused() -> None:
@@ -553,7 +558,7 @@ def test_two_server_aliases_on_one_database_are_refused() -> None:
         "PORT": "5",
     }
     assert _db_refusal(ledger=server, billing=dict(server)) == [
-        "databases ledger and billing: both name django.db.backends.postgresql n on h:5"
+        f"databases ledger and billing: {_ONE_SERVER}"
     ]
     # Another NAME on the same server is another database.
     assert configure(
@@ -575,7 +580,7 @@ def test_default_is_compared_with_the_app_aliases(tmp_path: Path) -> None:
     path = str(tmp_path / "x")
     assert _db_refusal(
         default=sqlite(path), ledger=sqlite(path), billing=sqlite(path + "b")
-    ) == [f"databases default and ledger: both name {SQLITE} {os.path.realpath(path)}"]
+    ) == [f"databases default and ledger: {_ONE_FILE}"]
 
 
 def test_every_database_refusal_reaches_the_diagnostic(tmp_path: Path) -> None:
@@ -1336,6 +1341,115 @@ def test_no_value_under_an_alias_is_shown_in_a_difference(
             assert problems[0].startswith(
                 "settings: DATABASES differs from what the host builds: "
             ), (path, change)
+
+
+def _refusals(databases: dict[str, Any]) -> list[str]:
+    """Every message for ``NEOLITH["DATABASES"]`` set to ``databases``: the
+    judgement of the mapping, which ``neolith.E001`` reports too, and the
+    builder's refusal, none when it builds."""
+    from neolith._databases import databases_problems
+
+    messages = databases_problems(databases, ["ledger", "billing"])
+    try:
+        configure([*HOSTED, LEDGER, BILLING], _databases(**databases))
+    except (ImproperlyConfigured, DeclarationError) as error:
+        messages.append(str(error))
+    return messages
+
+
+def _sqlite_marked(name: object) -> dict[str, Any]:
+    """``_marked`` on SQLite: ``ENGINE`` must name it for its path to be
+    compared, and ``NAME`` is ``name``."""
+    return {**_marked("ledger"), "ENGINE": SQLITE, "NAME": name}
+
+
+def _one_database(tmp_path: Path) -> list[tuple[dict[str, Any], str]]:
+    """Two aliases on one database, with the marker in every leaf, and the
+    rule their refusal states."""
+    path = tmp_path / _MARKER
+    names: list[object] = [
+        str(path),
+        path,
+        f"file:{path}?{_MARKER}={_MARKER}",
+        f"file://localhost{path}?mode=ro#{_MARKER}",
+        f"file:{str(path).replace(' ', '%20')}",
+    ]
+    server = _marked("ledger")
+    pairs = [({"ledger": server, "billing": copy.deepcopy(server)}, _ONE_SERVER)]
+    for name in names:
+        marked = _sqlite_marked(name)
+        pairs.append(({"ledger": marked, "billing": copy.deepcopy(marked)}, _ONE_FILE))
+        pairs.append(({"default": marked, "ledger": copy.deepcopy(marked)}, _ONE_FILE))
+    return pairs
+
+
+@pytest.mark.spec("APP-18")
+def test_two_aliases_on_one_database_show_no_value_compared(tmp_path: Path) -> None:
+    """The refusal names the two aliases and the rule. Neither ``ENGINE``,
+    ``HOST``, ``PORT`` nor ``NAME``, nor the path a SQLite ``NAME`` opens,
+    is shown, whatever form ``NAME`` takes (ADR 0034)."""
+    for databases, rule in _one_database(tmp_path):
+        first, second = list(databases)
+        if "billing" not in databases:
+            databases["billing"] = _marked("billing")
+        messages = _refusals(databases)
+        assert _MARKER not in "\n".join(messages), databases
+        assert messages[0] == f"databases {first} and {second}: {rule}", databases
+        assert messages[1:] == [messages[0]], databases
+
+
+# Inputs 0009 refuses under an alias, each holding the marker.
+_REFUSED = [
+    ("ENGINE",),
+    ("NAME",),
+    ("ATOMIC_REQUESTS",),
+    ("TEST",),
+    ("TEST", "MIRROR"),
+    ("TEST", "DEPENDENCIES"),
+    ("TEST", "NAME"),
+]
+
+
+def _held(value: object) -> list[object]:
+    """Values of other types that hold ``value``, or are made from it."""
+    text = str(value)
+    return [
+        text,
+        _Name(text),
+        Path(text),
+        text.encode(),
+        [text],
+        {"x": text},
+        (text,),
+        "",
+    ]
+
+
+@pytest.mark.spec("APP-18")
+def test_no_value_under_an_alias_is_shown_in_a_refusal(tmp_path: Path) -> None:
+    """``NEOLITH["DATABASES"]`` with the marker in every leaf, then changed
+    at one place at a time: each leaf, and each key 0009 refuses, set to a
+    value of each type that holds the marker, on an alias of its own and on
+    one that names the database of another. No message of the mapping's
+    judgement or of the builder shows the marker (ADR 0033 Decision 7)."""
+    bases = [
+        {alias: _marked(alias) for alias in ("default", "ledger", "billing")},
+        *(databases for databases, _ in _one_database(tmp_path)[:2]),
+    ]
+    for base in bases:
+        base.setdefault("billing", _marked("billing"))
+        places = [*_paths(base["ledger"]), *_REFUSED]
+        for path in places:
+            for value in _held(f"{_MARKER}, changed"):
+                found = copy.deepcopy(base)
+                holder: Any = found["ledger"]
+                for part in path[:-1]:
+                    if type(holder) is dict and part not in holder:
+                        holder[part] = {}
+                    holder = holder[part]
+                holder[path[-1]] = value
+                messages = _refusals(found)
+                assert _MARKER not in "\n".join(messages), (path, value)
 
 
 class _Loud:
