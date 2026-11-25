@@ -498,7 +498,7 @@ class _RefusesTheSnapshot(type):
 
 
 def _mixin(metaclass: type) -> type:
-    return metaclass("Mixin", (), {"__module__": __name__})
+    return cast("type", metaclass("Mixin", (), {"__module__": __name__}))
 
 
 _DEFAULT_SET = "neolith sets default = {} on the class, and setting it raised "
