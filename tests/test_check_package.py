@@ -509,6 +509,103 @@ def _provider(
     )
 
 
+# A contract in a package's __init__.py, with its records in a module below
+# it: the package is a module of the contract package, not one above it.
+_KEPT_ABOVE = """\
+from typing import Protocol
+
+from neolith import action, contract
+from pk.api.records import Ping
+
+
+@contract("pk.v1")
+class Pk(Protocol):
+    @action
+    def ping(self, request: Ping) -> Ping: ...
+"""
+
+# A record nested in a plain class is named by its qualified name.
+_NESTED = """\
+from typing import Protocol
+
+from pydantic import BaseModel
+
+from neolith import action, contract
+
+
+class Outer:
+    class Inner(BaseModel):
+        n: int
+
+
+@contract("nest.v1")
+class Nest(Protocol):
+    @action
+    def ping(self, request: Outer.Inner) -> Outer.Inner: ...
+"""
+
+# Two contracts and their two implementations in one module, provided in
+# the reverse order of their names.
+_TWO = """\
+from typing import Protocol
+
+from pydantic import BaseModel
+
+from neolith import action, contract
+
+
+class Ping(BaseModel):
+    n: int
+
+
+@contract("two.a.v1")
+class A(Protocol):
+    @action
+    def ping(self, request: Ping) -> Ping: ...
+
+
+@contract("two.b.v1")
+class B(Protocol):
+    @action
+    def ping(self, request: Ping) -> Ping: ...
+
+
+class AImpl:
+    def ping(self, request: Ping) -> Ping:
+        return request
+
+
+class ZImpl:
+    def ping(self, request: Ping) -> Ping:
+        return request
+"""
+
+# A record module whose two models are registered in the reverse order of
+# their names, the second swapped out for the first.
+_SWAPPED_RECORDS = """\
+from pydantic import BaseModel
+
+
+class Ping(BaseModel):
+    n: int
+
+
+def build():
+    from django.db import models
+
+    class Zed(models.Model):
+        class Meta:
+            app_label = "sw"
+
+    class Abe(models.Model):
+        class Meta:
+            app_label = "sw"
+            swappable = "SW_ABE"
+
+    return Zed, Abe
+"""
+
+
 # Run in the child: build the host, derive every contract package, and
 # look each module it names up in the interpreter's table of loaded modules.
 _SCRIPT = """\
@@ -653,6 +750,50 @@ def _project(root: Path) -> Project:
         "space.desk.service.Service",
     )
 
+    # An implementation in a package module above a contract module.
+    project.write("imp/api/__init__.py", _service("imp.api.records", "Ping"))
+    project.write("imp/api/records.py", _RECORDS)
+    project.write("imp/api/contracts.py", _plain("imp.v1", "imp.api.records"))
+    _provider(project, "imp", "imp.api.contracts", "Plain", "imp.api.Service")
+
+    project.write("pk/api/__init__.py", _KEPT_ABOVE)
+    project.write("pk/api/records.py", _RECORDS)
+    project.write("pk/service.py", _service("pk.api.records", "Ping"))
+    _provider(project, "pk", "pk.api", "Pk", "pk.service.Service")
+
+    project.write("nest/contracts.py", _NESTED)
+    project.write(
+        "nest/service.py",
+        "from nest.contracts import Outer\n\n\nclass Service:\n"
+        "    def ping(self, request: Outer.Inner) -> Outer.Inner:\n"
+        "        return request\n",
+    )
+    _provider(project, "nest", "nest.contracts", "Nest", "nest.service.Service")
+
+    project.write("two/contracts.py", _TWO)
+    project.app(
+        "two",
+        imports="from neolith import Provided\nfrom two.contracts import A, B\n",
+        config="""\
+        provides = (
+            Provided(B, implementation="two.contracts.ZImpl", principal_from=()),
+            Provided(A, implementation="two.contracts.AImpl", principal_from=()),
+        )
+        """,
+    )
+
+    project.write("sw/contracts.py", _plain("sw.v1", "sw.records"))
+    project.write("sw/records.py", _SWAPPED_RECORDS)
+    project.write("sw/service.py", _service("sw.records", "Ping"))
+    _provider(
+        project,
+        "sw",
+        "sw.contracts",
+        "Plain",
+        "sw.service.Service",
+        models="from sw.records import build\n\nZed, Abe = build()\n",
+    )
+
     hosted = [
         "one",
         "several",
@@ -666,6 +807,11 @@ def _project(root: Path) -> Project:
         "outer.inner",
         "proj.shop",
         "space.desk",
+        "imp",
+        "pk",
+        "nest",
+        "two",
+        "sw",
     ]
     project.settings(
         hosted,
@@ -674,7 +820,7 @@ def _project(root: Path) -> Project:
                 *(name.rpartition(".")[2] for name in hosted)
             )
         },
-        below='SILENCED_SYSTEM_CHECKS = ["neolith.W004"]\n',
+        below='SILENCED_SYSTEM_CHECKS = ["neolith.W004"]\nSW_ABE = "sw.Zed"\n',
     )
     return project
 
@@ -784,6 +930,54 @@ def test_the_contract_package_of_each_layout(tmp_path: Path) -> None:
                 "space.desk.contracts_records": ["Ping"],
             },
             {"space.desk": "desk", "space": None},
+        ),
+        # A package module above a contract module that holds the
+        # implementation is left out, as a module that defines one is.
+        "imp": _package(
+            {"imp.api.contracts": ["Plain"], "imp.api.records": ["Ping"]},
+            {"imp": "imp"},
+            {
+                "imp.api": {
+                    "defines": [],
+                    "models": [],
+                    "implementations": ["imp.api.Service"],
+                }
+            },
+        ),
+        # A module of the package that is also above another is not named
+        # among those above.
+        "pk": _package(
+            {"pk.api": ["Pk"], "pk.api.records": ["Ping"]},
+            {"pk": "pk"},
+        ),
+        # A nested record is named by its qualified name.
+        "nest": _package({"nest.contracts": ["Nest", "Outer.Inner"]}, {"nest": "nest"}),
+        # Several implementations in one module, sorted.
+        "two": _package(
+            {},
+            {},
+            {
+                "two.contracts": {
+                    "defines": ["A", "B", "Ping"],
+                    "models": [],
+                    "implementations": [
+                        "two.contracts.AImpl",
+                        "two.contracts.ZImpl",
+                    ],
+                }
+            },
+        ),
+        # Several models in one module, sorted, a swapped one included.
+        "sw": _package(
+            {"sw.contracts": ["Plain"]},
+            {"sw": "sw"},
+            {
+                "sw.records": {
+                    "defines": ["Ping"],
+                    "models": ["sw.Abe", "sw.Zed"],
+                    "implementations": [],
+                }
+            },
         ),
     }
     # Every module named is one the interpreter loaded, and every package

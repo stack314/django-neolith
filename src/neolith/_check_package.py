@@ -13,10 +13,11 @@ them, every package module up to the top-level package, since Python runs
 each before the module itself, with the installed app that holds it: the
 app itself, an outer app it is nested in, or none.
 
-A contract module that also defines a model, or holds the implementation of
-a contract the app provides, is left out, with each reason: such a module is
-not part of the contract package, not even as a package module above
-another (``neolith.E105``, which the import rules report). Its models are
+A module of the package, a contract module or a package module above one,
+that also defines a model, or holds the implementation of a contract the app
+provides, is left out, with each reason: such a module is never part of the
+contract package, not even as a package module above another
+(``neolith.E105``, which the import rules report). Its models are
 those of the registry whose class names it as its own module, other than
 the automatic tables of many-to-many relations, which Django builds there
 for the model that declares them.
@@ -40,12 +41,13 @@ __all__ = ["ContractPackage", "LeftOut", "packages"]
 
 @dataclasses.dataclass(slots=True)
 class LeftOut:
-    """A module of the app that defines a contract or one of its records or
-    enums, and is not part of the contract package, with why.
+    """A module that would be part of the contract package, one that
+    defines a contract or one of its records or enums or a package module
+    above one, and is not, with why.
 
     Attributes:
         defines: The qualified names of the contract classes, records and
-            enums it defines, sorted.
+            enums it defines, sorted; none for a package module above.
         models: The labels of the models it defines, sorted.
         implementations: The dotted paths of the implementations of the
             app's contracts that it holds, sorted.
@@ -72,8 +74,8 @@ class ContractPackage:
             out, with the label of the installed app that holds it, or
             ``None`` when it lies in no app. A namespace package is named
             too; it has no file, so nothing of it runs.
-        left_out: Each module that would be one of ``modules``, but also
-            defines a model or holds an implementation.
+        left_out: Each module that would be one of ``modules`` or a key of
+            ``above``, but also defines a model or holds an implementation.
     """
 
     modules: Mapping[str, tuple[str, ...]]
@@ -137,6 +139,14 @@ def _package(
         parts = module.split(".")
         for end in range(1, len(parts)):
             package = ".".join(parts[:end])
-            if package not in kept and package not in left_out:
+            if package in kept or package in left_out or package in above:
+                continue
+            if package in models or package in implementations:
+                left_out[package] = LeftOut(
+                    (),
+                    tuple(sorted(models.get(package, ()))),
+                    tuple(sorted(implementations.get(package, ()))),
+                )
+            else:
                 above[package] = _holder(package)
     return ContractPackage(kept, above, left_out)
