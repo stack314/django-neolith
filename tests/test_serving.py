@@ -4,6 +4,7 @@ the one-shot commands, waiting on what the host prints, never on time (T3).
 """
 
 import json
+import os
 import signal
 import socket
 import sys
@@ -108,6 +109,20 @@ _FILES = {
     "broken_host.py": """\
         raise RuntimeError("this host cannot start")
         """,
+    # A host that leaves a process of its own holding its output open: it
+    # writes that process's id where the test can stop it, then fails.
+    "held_host.py": """\
+        import os
+        import subprocess
+        import sys
+
+        held = subprocess.Popen(
+            [sys.executable, "-c", "import signal; signal.pause()"]
+        )
+        with open(os.path.join(os.environ["TINY_DATA"], "held.pid"), "w") as out:
+            out.write(str(held.pid))
+        raise RuntimeError("this host leaves its output open")
+        """,
 }
 
 
@@ -168,6 +183,68 @@ def test_a_host_that_ends_fails_the_wait_with_what_it_printed(
         assert host.ended() == 1
     finally:
         host.close()
+
+
+def test_a_wait_that_outlasts_the_bound_fails_with_what_was_printed(
+    tiny: tuple[Path, dict[str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, env = tiny
+    _migrated(root, env)
+    with serving.served(["tiny"], settings="tiny_host", cwd=root, env=env) as host:
+        monkeypatch.setattr(serving, "BOUND", 2.0)
+        with pytest.raises(pytest.fail.Exception) as failed:
+            host.wait_for("a line the host never prints")
+    assert "2 s passed" in str(failed.value)
+    assert serving.SERVING in str(failed.value)
+
+
+def test_a_one_shot_command_that_outlasts_the_bound_fails(
+    tiny: tuple[Path, dict[str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, env = tiny
+    monkeypatch.setattr(serving, "BOUND", 0.05)
+    with pytest.raises(pytest.fail.Exception, match="ran past"):
+        serving.once("migrate", ["tiny"], settings="tiny_host", cwd=root, env=env)
+
+
+def test_a_host_is_stopped_when_the_body_raises(
+    tiny: tuple[Path, dict[str, str]],
+) -> None:
+    root, env = tiny
+    _migrated(root, env)
+    with (
+        pytest.raises(LookupError),
+        serving.served(["tiny"], settings="tiny_host", cwd=root, env=env) as host,
+    ):
+        raise LookupError
+    assert host.process.returncode is not None
+
+
+def test_output_held_open_past_the_host_fails_the_end_and_close_returns(
+    tiny: tuple[Path, dict[str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, env = tiny
+    monkeypatch.setattr(serving, "BOUND", 2.0)
+    host = serving.Host(["tiny"], settings="held_host", cwd=root, env=env)
+    held = Path(env["TINY_DATA"]) / "held.pid"
+    try:
+        with pytest.raises(pytest.fail.Exception) as failed:
+            host.ended()
+        assert "still open" in str(failed.value)
+        assert "this host leaves its output open" in str(failed.value)
+        host.close()
+        assert host.process.stdout is not None
+        assert host.process.stderr is not None
+        assert not host.process.stdout.closed
+        assert not host.process.stderr.closed
+    finally:
+        if held.exists():
+            os.kill(int(held.read_text(encoding="utf-8")), signal.SIGKILL)
+        for reader in host._readers:
+            reader.join()
+        host.close()
+    assert host.process.stdout.closed
+    assert host.process.stderr.closed
 
 
 def test_a_host_killed_by_close_is_gone(tiny: tuple[Path, dict[str, str]]) -> None:

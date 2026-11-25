@@ -124,8 +124,10 @@ class Host:
         env: Mapping[str, str],
         bind: str = BIND,
     ) -> None:
-        # neolith's own reading of --bind, so that every address admitted
-        # here is one the host listens on and request() connects to.
+        # neolith's own reading of --bind, so that an address neolith would
+        # refuse is refused here, and request() connects to the address the
+        # host bound. An admitted address the host cannot listen on fails at
+        # serving(), with the host's "cannot listen" line.
         self.address, _, _ = parse_bind(bind)
         self.arguments = command("run", apps, settings, "--bind", bind)
         self.cwd = cwd
@@ -236,6 +238,11 @@ class Host:
             pytest.fail(f"the host ran past {BOUND:.0f} s; printed: {self.lines}")
         while self._take(deadline):
             pass
+        if self._ends != 2:
+            pytest.fail(
+                f"the host ended with {status}, but its output was still open "
+                f"after {BOUND:.0f} s; printed: {self.lines}"
+            )
         return status
 
     def printed(self) -> str:
@@ -243,14 +250,18 @@ class Host:
         return "\n".join(line for _, line in self.lines)
 
     def close(self) -> None:
-        """Kill the process if it still runs, and close its pipes."""
+        """Kill the process if it still runs, and close each pipe whose
+        reader has finished, all within one bound. A pipe something else
+        still holds open is left open: closing it would wait on its reader
+        with no bound."""
+        deadline = time.monotonic() + BOUND
         if self.process.poll() is None:
             self.process.kill()
         self.process.wait(timeout=BOUND)
-        for reader in self._readers:
-            reader.join(timeout=BOUND)
-        for stream in (self.process.stdout, self.process.stderr):
-            if stream is not None:
+        streams = (self.process.stdout, self.process.stderr)
+        for reader, stream in zip(self._readers, streams, strict=True):
+            reader.join(timeout=max(0.0, deadline - time.monotonic()))
+            if stream is not None and not reader.is_alive():
                 stream.close()
 
 
