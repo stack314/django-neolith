@@ -31,8 +31,15 @@ from markdown_it.token import Token
 README = Path(__file__).resolve().parents[1] / "README.md"
 _HEADER = re.compile(r"^# (\S+\.py)$")
 _ABSOLUTE = re.compile(r"^https://")
-# The language names GitHub reads as Python (its first-word rule, lower-cased).
-_PYTHON = frozenset({"python", "python3", "py"})
+# The names GitHub highlights as Python source (Linguist's Python aliases and
+# extensions, and the languages it renders with the Python grammar), lower-cased.
+# Checked with GitHub's renderer (POST /markdown); the console and traceback
+# languages (pycon, pytb) are not Python source and are not here.
+_PYTHON = frozenset(
+    ["python", "python3", "py3", "py", "rusthon", "sage", "gyp", "gypi", "lmi", "pyde", "pyi", "pyp", "pyt", "pyw", "rpy", "spec", "tac", "wsgi", "xpy", "bzl", "bazel", "starlark", "snakemake"]
+)
+# GitHub ends the language at the first space, tab or comma.
+_LANGUAGE_END = re.compile(r"[ \t,]")
 _START = "<!-- neolith-example:start -->"
 _END = "<!-- neolith-example:end -->"
 
@@ -79,15 +86,17 @@ print("view", response.status_code, response.content.decode())
 
 
 def is_python_fence(token: Token) -> bool:
-    """Whether a fence is a Python block: the first word of its info string.
+    """Whether a fence is a Python block, as GitHub reads its info string.
 
-    CommonMark takes the first word of the info string as the language and
-    leaves the rest (attributes, a title) to the renderer. markdown-it-py keeps
-    the whole string in ``token.info``, as written but for the backslash
-    escapes and entities the renderer resolves, so this resolves them too.
+    markdown-it-py keeps the whole info string in ``token.info``, as written
+    but for the backslash escapes and entities the renderer resolves, so this
+    resolves them too. GitHub then cuts the language at the first ASCII space,
+    tab or comma (not at other Unicode whitespace) and matches it, ignoring
+    case, against the names it highlights as Python.
     """
-    words = unescapeAll(token.info).split(maxsplit=1)
-    return token.type == "fence" and bool(words) and words[0].lower() in _PYTHON
+    info = unescapeAll(token.info).strip(" \t")
+    language = _LANGUAGE_END.split(info, maxsplit=1)[0]
+    return token.type == "fence" and language.lower() in _PYTHON
 
 
 def readme_files(text: str | None = None) -> dict[str, str]:
@@ -258,6 +267,16 @@ def test_relative_links_are_found_in_markdown_and_html() -> None:
         "py {1,3}",
         "python\ttitle=x",
         "pyth&#111;n",
+        "python,ignore",
+        "py,x",
+        "py3",
+        "pyi",
+        "rusthon",
+        "sage",
+        "Starlark",
+        "bzl",
+        "snakemake",
+        "py&#32;x",
     ],
 )
 @pytest.mark.parametrize("fence", ["```", "~~~", "````"])
@@ -268,7 +287,22 @@ def test_any_python_fence_is_a_python_block(fence: str, info: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "info", ["", "console", "text python", "pythonic", "python-3", "ipython", "pyc"]
+    "info",
+    [
+        "",
+        "console",
+        "text python",
+        "pythonic",
+        "python-3",
+        "ipython",
+        "pyc",
+        "pycon",
+        "pytb",
+        "py\u00a0x",
+        "\u00a0py",
+        "py&nbsp;x",
+        "py\u2003x",
+    ],
 )
 @pytest.mark.parametrize("fence", ["```", "~~~"])
 def test_other_fences_are_not_python_blocks(fence: str, info: str) -> None:
