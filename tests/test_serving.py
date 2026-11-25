@@ -3,7 +3,10 @@ host written to ``tmp_path``: it starts, answers, stops on SIGTERM, and runs
 the one-shot commands, waiting on what the host prints, never on time (T3).
 """
 
+import json
 import signal
+import socket
+import sys
 import textwrap
 from pathlib import Path
 
@@ -60,7 +63,9 @@ _FILES = {
             ]
         """,
     "tiny/urls.py": """\
+        import json
         import os
+        import sys
 
         from django.http import HttpResponse
         from django.urls import path
@@ -70,13 +75,21 @@ _FILES = {
             return HttpResponse(os.environ["TINY_WORD"])
 
 
-        urlpatterns = [path("word/", word)]
+        def seen(request):
+            return HttpResponse(
+                json.dumps(
+                    {"names": sorted(os.environ), "warnoptions": sys.warnoptions}
+                )
+            )
+
+
+        urlpatterns = [path("word/", word), path("seen/", seen)]
         """,
     "tiny_host.py": """\
         import os
 
         SECRET_KEY = "a key for one test process only"
-        ALLOWED_HOSTS = ["127.0.0.1"]
+        ALLOWED_HOSTS = ["127.0.0.1", "[::1]"]
         MIDDLEWARE = [
             "neolith.middleware.RootMiddleware",
             "neolith.middleware.PrincipalMiddleware",
@@ -191,3 +204,63 @@ def test_apps_given_as_one_string_are_refused(tmp_path: Path) -> None:
 def test_only_migrate_and_check_run_once(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="one-shot"):
         serving.once("run", ["tiny"], settings="tiny_host", cwd=tmp_path, env={})
+
+
+def test_the_host_sees_only_the_given_environment_and_warnings_as_errors(
+    tiny: tuple[Path, dict[str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, env = tiny
+    monkeypatch.setenv("NEOLITH_TEST_SENTINEL", "from the parent")
+    _migrated(root, env)
+    with serving.served(["tiny"], settings="tiny_host", cwd=root, env=env) as host:
+        status, body = host.request("GET", "/seen/")
+    assert status == 200
+    seen = json.loads(body)
+    # Python itself may set LC_CTYPE when it coerces the C locale (PEP 538).
+    assert set(seen["names"]) - {"LC_CTYPE"} == {"PATH", "PYTHONPATH", *env}
+    assert seen["warnoptions"] == ["error"]
+    assert host.arguments[:5] == [sys.executable, "-W", "error", "-m", "neolith"]
+
+
+def test_a_line_printed_before_the_last_one_waited_for_can_still_be_waited_for(
+    tiny: tuple[Path, dict[str, str]],
+) -> None:
+    root, env = tiny
+    _migrated(root, env)
+    with serving.served(["tiny"], settings="tiny_host", cwd=root, env=env) as host:
+        assert host.request("GET", "/word/")[0] == 200
+        assert host.request("GET", "/seen/")[0] == 200
+        assert "GET /seen/" in host.wait_for("GET /seen/")
+        assert "GET /word/" in host.wait_for("GET /word/")
+        assert host.stop() == 0
+
+
+def _ipv6_loopback() -> bool:
+    try:
+        with socket.socket(socket.AF_INET6) as probe:
+            probe.bind(("::1", 0))
+    except OSError:
+        return False
+    return True
+
+
+@pytest.mark.skipif(not _ipv6_loopback(), reason="no IPv6 loopback here")
+def test_a_host_bound_to_ipv6_loopback_answers(
+    tiny: tuple[Path, dict[str, str]],
+) -> None:
+    root, env = tiny
+    _migrated(root, env)
+    with serving.served(
+        ["tiny"], settings="tiny_host", cwd=root, env=env, bind="[::1]:0"
+    ) as host:
+        assert host.request("GET", "/word/") == (200, _WORD.encode())
+
+
+@pytest.mark.parametrize(
+    "bind", ["127.0.0.1", "[::1]", "[fe80::1%eth0]:0", "0x7f000001:0", "a b:0", ":0"]
+)
+def test_a_bind_address_neolith_would_refuse_is_refused_first(
+    tmp_path: Path, bind: str
+) -> None:
+    with pytest.raises(ValueError, match="bind"):
+        serving.Host(["tiny"], settings="tiny_host", cwd=tmp_path, env={}, bind=bind)

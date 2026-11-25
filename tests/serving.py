@@ -25,6 +25,8 @@ from typing import IO
 
 import pytest
 
+from neolith._cli import parse_bind
+
 # ADR 0032 Decision 11: every subprocess has a bound of 120 seconds.
 BOUND = 120.0
 SERVING = "neolith: serving "
@@ -122,13 +124,14 @@ class Host:
         env: Mapping[str, str],
         bind: str = BIND,
     ) -> None:
-        if not re.fullmatch(r"[0-9A-Za-z.:\[\]]+", bind):
-            raise ValueError(f"not a bind address: {bind!r}")
+        # neolith's own reading of --bind, so that every address admitted
+        # here is one the host listens on and request() connects to.
+        self.address, _, _ = parse_bind(bind)
         self.arguments = command("run", apps, settings, "--bind", bind)
         self.cwd = cwd
         self.lines: list[tuple[str, str]] = []
         self.port = 0
-        self._waited = 0
+        self._waited: set[int] = set()
         self._queue: queue.Queue[tuple[str, str | None]] = queue.Queue()
         self._ends = 0
         self.process = subprocess.Popen(  # noqa: S603
@@ -178,11 +181,11 @@ class Host:
         contains ``text``. Fails the test, with everything printed, if the
         host ends or the bound passes first."""
         deadline = time.monotonic() + BOUND
-        start = self._waited
+        start = 0
         while True:
             for index in range(start, len(self.lines)):
-                if text in self.lines[index][1]:
-                    self._waited = index + 1
+                if index not in self._waited and text in self.lines[index][1]:
+                    self._waited.add(index)
                     return self.lines[index][1]
             start = len(self.lines)
             if not self._take(deadline):
@@ -205,9 +208,10 @@ class Host:
         body: bytes | None = None,
         headers: Mapping[str, str] | None = None,
     ) -> tuple[int, bytes]:
-        """One request to the host over loopback; the status and the body."""
+        """One request to the address the host was bound to; the status and
+        the body."""
         assert self.port, "the host has not said where it serves"
-        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=BOUND)
+        connection = http.client.HTTPConnection(self.address, self.port, timeout=BOUND)
         try:
             connection.request(method, path, body=body, headers=dict(headers or {}))
             reply = connection.getresponse()
