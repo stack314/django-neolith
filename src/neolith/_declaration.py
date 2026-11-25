@@ -272,7 +272,10 @@ class NeolithAppConfig(AppConfig):
     class Django picks declares it.
 
     A declaration outside this form raises ``DeclarationError`` when the class
-    is defined, listing every refusal.
+    is defined, listing every refusal. So does a class whose metaclass keeps
+    neolith from setting ``default`` or the snapshot on it, such as one with
+    a ``default`` property that has no setter, naming the attribute and the
+    error raised.
 
     The four fields are not set on this class. A declaring class sets those
     it has an entry for, and its snapshot holds an empty tuple for each one
@@ -297,7 +300,8 @@ class NeolithAppConfig(AppConfig):
 
     Raises:
         DeclarationError: When a subclass is defined whose declaration is
-            outside this form.
+            outside this form, or whose metaclass keeps neolith from setting
+            ``default`` or the snapshot on it.
     """
 
     default = False
@@ -316,13 +320,13 @@ class NeolithAppConfig(AppConfig):
                 "\n".join(sorted(f"app {app}: {refusal}" for refusal in refusals))
             )
         if snapshot is None:
-            cls.default = False
+            _give(cls, "default", False)
             return
         # Every key of the class's own body is exactly a str, or it was
         # refused above.
         if "default" not in _naming.namespace(cls):
-            cls.default = True
-        setattr(cls, _SNAPSHOT_ATTR, snapshot)
+            _give(cls, "default", True)
+        _give(cls, _SNAPSHOT_ATTR, snapshot)
 
     def import_models(self) -> None:
         """Check this instance against the snapshot, then load the models.
@@ -389,6 +393,29 @@ class NeolithAppConfig(AppConfig):
         if refusals:
             raise DeclarationError("\n".join(sorted(refusals)))
         super().import_models()
+
+
+def _give(cls: type[NeolithAppConfig], attribute: str, value: object) -> None:
+    """Set an attribute neolith gives a new subclass, or refuse the class.
+
+    Setting it runs code of the class's metaclass, such as a ``default``
+    property with no setter or a ``__setattr__``, which can raise. The class
+    is then refused with the cause (K2), as every other refusal at Declare
+    is, and not with the raw exception.
+    """
+    try:
+        setattr(cls, attribute, value)
+    except Exception as error:
+        what = (
+            "the checked declaration"
+            if attribute == _SNAPSHOT_ATTR
+            else f"{attribute} = {value!r}"
+        )
+        raise DeclarationError(
+            f"app {_class_name(cls)}: {attribute}: neolith sets {what} on the "
+            f"class, and setting it raised {_naming.cause(error)}; the class's "
+            "metaclass must let neolith set it"
+        ) from error
 
 
 def _check(cls: type[NeolithAppConfig]) -> tuple[list[str], Declaration | None]:
