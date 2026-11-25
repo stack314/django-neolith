@@ -606,6 +606,107 @@ def build():
 """
 
 
+# A package module above a contract module whose two models, built in a
+# function, are registered in the reverse order of their names. Zed names
+# its module through a str subclass of another hash, which is read as the
+# text it holds.
+_MODELS_ABOVE = """\
+class Module(str):
+    def __hash__(self):
+        return 0
+
+
+def build():
+    from django.db import models
+
+    class Zed(models.Model):
+        __module__ = Module(__name__)
+
+        class Meta:
+            app_label = "pm"
+
+    class Abe(models.Model):
+        class Meta:
+            app_label = "pm"
+
+    return Zed, Abe
+"""
+
+# Two contracts whose implementations a package module above holds, provided
+# in the reverse order of their names.
+_TWO_ABOVE = """\
+from typing import Protocol
+
+from neolith import action, contract
+from pi.api.records import Ping
+
+
+@contract("pi.a.v1")
+class A(Protocol):
+    @action
+    def ping(self, request: Ping) -> Ping: ...
+
+
+@contract("pi.b.v1")
+class B(Protocol):
+    @action
+    def ping(self, request: Ping) -> Ping: ...
+"""
+
+_TWO_IMPLEMENTATIONS = """\
+from pi.api.records import Ping
+
+
+class AImpl:
+    def ping(self, request: Ping) -> Ping:
+        return request
+
+
+class ZImpl:
+    def ping(self, request: Ping) -> Ping:
+        return request
+"""
+
+# A record whose class body sets its module to None, which names no module;
+# one that names its module through a str subclass of another hash, read as
+# the text it holds; and a record nested in a class whose qualified name is
+# longer than the limit names are otherwise cut at.
+_LONG = "L" * 120
+_ODD = f"""\
+from typing import Protocol
+
+from pydantic import BaseModel
+
+from neolith import action, contract
+
+
+class Module(str):
+    def __hash__(self):
+        return 0
+
+
+class Tagged(BaseModel):
+    __module__ = Module(__name__)
+    n: int
+
+
+class Hidden(BaseModel):
+    __module__ = None
+    tagged: Tagged
+
+
+class {_LONG}:
+    class {_LONG}(BaseModel):
+        n: int
+
+
+@contract("odd.v1")
+class Odd(Protocol):
+    @action
+    def ping(self, request: Hidden) -> {_LONG}.{_LONG}: ...
+"""
+
+
 # Run in the child: build the host, derive every contract package, and
 # look each module it names up in the interpreter's table of loaded modules.
 _SCRIPT = """\
@@ -794,6 +895,44 @@ def _project(root: Path) -> Project:
         models="from sw.records import build\n\nZed, Abe = build()\n",
     )
 
+    # Two models in a package module above a contract module.
+    project.write("pm/api/__init__.py", _MODELS_ABOVE)
+    project.write("pm/api/records.py", _RECORDS)
+    project.write("pm/api/contracts.py", _plain("pm.v1", "pm.api.records"))
+    project.write("pm/service.py", _service("pm.api.records", "Ping"))
+    _provider(
+        project,
+        "pm",
+        "pm.api.contracts",
+        "Plain",
+        "pm.service.Service",
+        models="from pm.api import build\n\nZed, Abe = build()\n",
+    )
+
+    # Two implementations in a package module above a contract module.
+    project.write("pi/api/__init__.py", _TWO_IMPLEMENTATIONS)
+    project.write("pi/api/records.py", _RECORDS)
+    project.write("pi/api/contracts.py", _TWO_ABOVE)
+    project.app(
+        "pi",
+        imports="from neolith import Provided\nfrom pi.api.contracts import A, B\n",
+        config="""\
+        provides = (
+            Provided(B, implementation="pi.api.ZImpl", principal_from=()),
+            Provided(A, implementation="pi.api.AImpl", principal_from=()),
+        )
+        """,
+    )
+
+    project.write("odd/contracts.py", _ODD)
+    project.write(
+        "odd/service.py",
+        f"from odd.contracts import {_LONG}, Hidden\n\n\nclass Service:\n"
+        f"    def ping(self, request: Hidden) -> {_LONG}.{_LONG}:\n"
+        f"        return {_LONG}.{_LONG}(n=request.tagged.n)\n",
+    )
+    _provider(project, "odd", "odd.contracts", "Odd", "odd.service.Service")
+
     hosted = [
         "one",
         "several",
@@ -812,6 +951,9 @@ def _project(root: Path) -> Project:
         "nest",
         "two",
         "sw",
+        "pm",
+        "pi",
+        "odd",
     ]
     project.settings(
         hosted,
@@ -978,6 +1120,38 @@ def test_the_contract_package_of_each_layout(tmp_path: Path) -> None:
                     "implementations": [],
                 }
             },
+        ),
+        # A package module above that defines models is left out too, with
+        # them sorted, one named through a str subclass included.
+        "pm": _package(
+            {"pm.api.contracts": ["Plain"], "pm.api.records": ["Ping"]},
+            {"pm": "pm"},
+            {
+                "pm.api": {
+                    "defines": [],
+                    "models": ["pm.Abe", "pm.Zed"],
+                    "implementations": [],
+                }
+            },
+        ),
+        # And one that holds several implementations, with them sorted.
+        "pi": _package(
+            {"pi.api.contracts": ["A", "B"], "pi.api.records": ["Ping"]},
+            {"pi": "pi"},
+            {
+                "pi.api": {
+                    "defines": [],
+                    "models": [],
+                    "implementations": ["pi.api.AImpl", "pi.api.ZImpl"],
+                }
+            },
+        ),
+        # A record that names no module is named nowhere, one that names it
+        # through a str subclass is named by its text, and a long qualified
+        # name is named whole.
+        "odd": _package(
+            {"odd.contracts": [f"{_LONG}.{_LONG}", "Odd", "Tagged"]},
+            {"odd": "odd"},
         ),
     }
     # Every module named is one the interpreter loaded, and every package
