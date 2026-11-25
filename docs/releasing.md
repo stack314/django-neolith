@@ -475,7 +475,11 @@ Go through the items below on the live page. Where a value comes "from the tag",
   ```
   Expected: `Would install ... django-neolith-<VERSION> ...`.
 - [ ] *Get started*: the link to the release's README is `https://pypi.org/project/django-neolith/<VERSION>/`.
-- [ ] The code example is identical to the README's example at the tag, and its label names the release. The README's example runs against the release in section 6, so an identical copy runs too.
+- [ ] The code example is the text the README marks between `<!-- neolith-example:start -->` and `<!-- neolith-example:end -->` at the tag, copied as it stands, and its label names the release. Print what the markers enclose (Markdown: a heading, prose and fenced blocks) and compare it with the page's example by code block and paragraph, both ways and in order; the page is HTML, so the heading, the fences, inline code marks and line wrapping differ. The README's example runs against the release in section 6, so an identical copy runs too.
+  ```
+  git show "v${VERSION}:README.md" | sed -n '/^<!-- neolith-example:start -->$/,/^<!-- neolith-example:end -->$/p' | sed '1d;$d'
+  ```
+  Expected: the page's example has the same code blocks and paragraphs as the output, in the same order, each word for word: none missing, none added. Only the heading, the fences, inline code marks and line wrapping differ. No marker line is in the output.
 - [ ] The notes under the example and the figures ("planned for 0.1", "only in-process is built", "the settings format is not final") are still true.
 - [ ] Every external link on the page answers.
   ```
