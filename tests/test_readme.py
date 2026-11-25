@@ -7,6 +7,9 @@ key and a URLconf, above the builder call), and runs them in a fresh process, si
 process hosts one set of apps (ADR 0022 Decision 5). So the example and the
 host's checks before it serves cannot drift apart.
 
+The example section sits between two HTML comment markers, so the website can
+copy it verbatim (``_START`` and ``_END``).
+
 README.md is also the package's description on PyPI, where a relative link
 resolves under the project's page and leads nowhere, so every link and image
 in it is absolute.
@@ -25,6 +28,8 @@ from markdown_it import MarkdownIt
 README = Path(__file__).resolve().parents[1] / "README.md"
 _HEADER = re.compile(r"^# (\S+\.py)$")
 _ABSOLUTE = re.compile(r"^https://")
+_START = "<!-- neolith-example:start -->"
+_END = "<!-- neolith-example:end -->"
 
 # What the README leaves to the project; nothing here is a neolith setting.
 _PROJECT = """
@@ -131,6 +136,52 @@ def test_the_readme_example_runs_under_its_settings(tmp_path: Path) -> None:
     )
     assert ran.returncode == 0, ran.stderr[-3000:]
     assert ran.stdout.splitlines() == ["command 2", "view 200 4"]
+
+
+def marker_lines(text: str) -> dict[str, list[int]]:
+    """The first line (0-based) of each marker, as a Markdown block, by marker."""
+    found: dict[str, list[int]] = {_START: [], _END: []}
+    for token in MarkdownIt("commonmark").parse(text):
+        if token.type == "html_block" and token.map:
+            marker = token.content.strip()
+            if marker in found:
+                found[marker].append(token.map[0])
+    return found
+
+
+def python_fence_lines(text: str) -> list[int]:
+    """The first line (0-based) of each Python block."""
+    return [
+        token.map[0]
+        for token in MarkdownIt("commonmark").parse(text)
+        if token.type == "fence" and token.info.strip() == "python" and token.map
+    ]
+
+
+def test_each_example_marker_appears_once() -> None:
+    text = README.read_text(encoding="utf-8")
+    for marker in (_START, _END):
+        assert text.count(marker) == 1, marker
+        assert len(marker_lines(text)[marker]) == 1, marker
+
+
+def test_every_python_block_lies_between_the_markers() -> None:
+    text = README.read_text(encoding="utf-8")
+    (start,), (end,) = marker_lines(text)[_START], marker_lines(text)[_END]
+    assert start < end
+    blocks = python_fence_lines(text)
+    assert blocks
+    assert [line for line in blocks if not start < line < end] == []
+
+
+def test_markers_are_checked_in_markdown_blocks_only() -> None:
+    sample = (
+        f"{_END}\n\ntext\n\n```python\nx = 1\n```\n\n{_START}\n\n"
+        f"```\n{_START}\n```\n\n```python\ny = 2\n```\n"
+    )
+    found = marker_lines(sample)
+    assert found == {_START: [8], _END: [0]}
+    assert python_fence_lines(sample) == [4, 14]
 
 
 class _Attributes(HTMLParser):

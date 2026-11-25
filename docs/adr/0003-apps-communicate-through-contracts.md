@@ -1,6 +1,7 @@
 # 0003. Apps communicate only through contracts and connectors
 
 - **Status:** Accepted
+- Narrowed by [0030](0030-the-boundary-check-uses-the-standard-library-only.md) (Decision 4)
 - **Date:** 2026-11-03
 
 ## Context

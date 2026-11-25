@@ -9,7 +9,7 @@ enforce = ["01", "02", "03", "05", "06"]
 # with the reason: what verifies it instead, or the roadmap step that will test
 # it. An entry is removed when a test starts citing the requirement.
 [not-tested]
-OVR-2 = "Binds app code. Checked by the boundary check, roadmap step 7."
+OVR-2 = "Binds app code. The check before deployment reports it (APP-66)."
 OVR-5 = "Shown by the example apps running attached and detached, roadmap step 8."
 OVR-7 = "Binds app code, which keeps the call context out of request types."
 CON-1 = "Binds contract authors. Breaking-change detection is deferred past 0.1."
