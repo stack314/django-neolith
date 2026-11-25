@@ -7,12 +7,15 @@ on generated package directories. The findings are checked through the
 command, in a child process (``tests/checking.py``).
 """
 
+import ast
 import importlib.machinery
 import os
 import pkgutil
 import re
 import string
+import symtable
 import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -377,3 +380,278 @@ def test_sources_are_read_once_per_run(tmp_path: Path) -> None:
     source = _check_source.Source({}, lambda name: None)
     file = File(str(tmp_path / "m.py"), "m", "")
     assert source.read(file) is source.read(file)
+
+
+# Which statements, and how they resolve.
+
+_KNOWN = frozenset(
+    {"pkg", "pkg.a", "pkg.a.b", "pkg.sub", "pkg.sub.m", "pkg.sub.n", "other"}
+)
+
+
+def _edges(text: str, package: str = "pkg.sub") -> list[tuple[str, int]]:
+    tree = ast.parse(textwrap.dedent(text))
+    return [
+        (edge.target, edge.line)
+        for edge in _check_source.imports(tree, package, _KNOWN.__contains__)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("statement", "targets"),
+    [
+        ("import pkg.a.b", ["pkg.a.b"]),
+        ("import pkg.a.b as x", ["pkg.a.b"]),
+        ("import pkg, other", ["pkg", "other"]),
+        ("import pkg.a.missing", ["pkg.a"]),
+        ("import pkg.a.missing.deeper", ["pkg.a"]),
+        ("from pkg.a import b", ["pkg.a.b"]),
+        ("from pkg.a import b as x, name", ["pkg.a.b", "pkg.a"]),
+        ("from pkg.a.missing import n", ["pkg.a"]),
+        ("from pkg.missing.deeper import n", ["pkg"]),
+        ("from . import m", ["pkg.sub.m"]),
+        ("from . import name", ["pkg.sub"]),
+        ("from .m import name", ["pkg.sub.m"]),
+        ("from .. import a", ["pkg.a"]),
+        ("from ..a import b", ["pkg.a.b"]),
+        ("from ..missing import b", ["pkg"]),
+        ("from ... import x", []),
+        ("from ...deeper import x", []),
+        ("from pkg import *", ["pkg"]),
+        ("from .m import *", ["pkg.sub.m"]),
+        ("from pkg.a.b import *", ["pkg.a.b"]),
+        ("import os.path", ["os.path"]),
+    ],
+)
+def test_each_import_form_gives_its_edge(statement: str, targets: list[str]) -> None:
+    assert _edges(statement) == [(target, 1) for target in targets]
+
+
+def test_a_relative_import_in_a_top_level_module_gives_no_edge() -> None:
+    assert _edges("from . import m\nfrom .m import x\n", package="") == []
+
+
+def test_every_import_statement_is_read_wherever_it_stands() -> None:
+    text = """\
+        from typing import TYPE_CHECKING
+        if TYPE_CHECKING:
+            import pkg.a
+        try:
+            import pkg.a.b
+        except ImportError:
+            import other
+        def f():
+            from . import m
+            class K:
+                import pkg.sub.n
+            return [__import__ for _ in ()]
+        with x:
+            from pkg import a
+        match y:
+            case _:
+                from ..a import b
+        """
+    assert _edges(text) == [
+        ("typing", 1),
+        ("pkg.a", 3),
+        ("pkg.a.b", 5),
+        ("other", 7),
+        ("pkg.sub.m", 9),
+        ("pkg.sub.n", 11),
+        ("pkg.a", 14),
+        ("pkg.a.b", 17),
+    ]
+
+
+@pytest.mark.skipif(sys.version_info < (3, 15), reason="lazy imports are 3.15's")
+def test_a_lazy_import_is_an_import() -> None:  # pragma: no cover
+    assert _edges("lazy import pkg.a\nlazy from pkg.a import b\n") == [
+        ("pkg.a", 1),
+        ("pkg.a.b", 2),
+    ]
+
+
+def _calls(text: str) -> tuple[list[tuple[str, int]], list[tuple[str, str, int]]]:
+    text = textwrap.dedent(text)
+    tree = ast.parse(text)
+    table = symtable.symtable(text, "<fixture>", "exec")
+    edges, unread = _check_source.calls(tree, table, "pkg.sub", _KNOWN.__contains__)
+    assert all(edge.dynamic for edge in edges)
+    return (
+        [(edge.target, edge.line) for edge in edges],
+        [(call.name, call.what, call.line) for call in unread],
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "targets"),
+    [
+        ("from importlib import import_module\nimport_module('pkg.a')", ["pkg.a"]),
+        ("import importlib\nimportlib.import_module('pkg.a.b')", ["pkg.a.b"]),
+        ("import importlib as il\nil.import_module('pkg.a.gone')", ["pkg.a"]),
+        (
+            "from importlib import import_module\n"
+            "import_module('.m', package='pkg.sub')",
+            ["pkg.sub.m"],
+        ),
+        (
+            "from importlib import import_module\nimport_module('.m', 'pkg.sub')",
+            ["pkg.sub.m"],
+        ),
+        (
+            "from importlib import import_module\nimport_module('..a', __package__)",
+            ["pkg.a"],
+        ),
+        (
+            "from importlib import import_module\n"
+            "import_module(name='.n', package=__package__)",
+            ["pkg.sub.n"],
+        ),
+        ("from importlib import import_module\nimport_module('.m')", []),
+        ("from importlib import import_module\nimport_module('....x', 'pkg.sub')", []),
+        ("__import__('pkg.a')", ["pkg.a"]),
+        ("__import__('pkg.a', globals(), locals(), [], 0)", ["pkg.a"]),
+        ("__import__('a', globals(), locals(), [], 1)", []),
+        (
+            "from django.utils.module_loading import import_string\n"
+            "import_string('pkg.a.Thing')",
+            ["pkg.a"],
+        ),
+        (
+            "from django.utils.module_loading import import_string\n"
+            "import_string('nodot')",
+            [],
+        ),
+        ("from django.urls import include\ninclude('pkg.a')", ["pkg.a"]),
+        ("from django.conf.urls import include\ninclude(('pkg.a', 'x'))", ["pkg.a"]),
+        (
+            "from django.urls import include\ninclude(arg='pkg.a', namespace='n')",
+            ["pkg.a"],
+        ),
+        ("from django.urls import include\ninclude(('pkg.a',))", []),
+        ("from django.urls import include\ninclude(['pkg.a'])", []),
+        ("from django.urls import include\ninclude(router.urls)", []),
+        # __import__ bound by the file is not the builtin, whatever binds it.
+        ("__import__ = f\n__import__('pkg.a')", []),
+        ("def f(__import__):\n    __import__('pkg.a')", []),
+        ("from x import __import__\n__import__('pkg.a')", []),
+        ("def f():\n    from x import __import__\n__import__('pkg.a')", []),
+        ("[__import__ for __import__ in ()]\n__import__('pkg.a')", []),
+        ("from x import *\n__import__('pkg.a')", []),
+        # A callee the file binds otherwise is not followed.
+        (
+            "from importlib import import_module\n"
+            "def g(import_module):\n    pass\nimport_module('pkg.a')",
+            [],
+        ),
+        ("import_module('pkg.a')", []),
+    ],
+)
+def test_each_literal_dynamic_import_gives_its_edge(
+    text: str, targets: list[str]
+) -> None:
+    edges, unread = _calls(text)
+    assert [target for target, _ in edges] == targets
+    assert unread == []
+
+
+@pytest.mark.parametrize(
+    ("text", "unread"),
+    [
+        ("from neolith import connect\nconnect(name)", ("connect", "argument")),
+        ("import neolith\nneolith.connect(*names)", ("connect", "argument")),
+        (
+            "from neolith import command_scope\ncommand_scope(label)",
+            ("command_scope", "argument"),
+        ),
+        (
+            "from neolith import command_scope\ncommand_scope(app=label)",
+            ("command_scope", "argument"),
+        ),
+        (
+            "from neolith import command_scope\ncommand_scope(**options)",
+            ("command_scope", "argument"),
+        ),
+        (
+            "from importlib import import_module\nimport_module(name)",
+            ("import_module", "argument"),
+        ),
+        (
+            "from importlib import import_module\nimport_module('.x', name)",
+            ("import_module", "package"),
+        ),
+        (
+            "from importlib import import_module\nimport_module('x', package=name)",
+            ("import_module", "package"),
+        ),
+        ("__import__(name)", ("__import__", "argument")),
+        (
+            "from django.utils.module_loading import import_string\n"
+            "import_string(path)",
+            ("import_string", "argument"),
+        ),
+        ("apps.get_model(label, 'Item')", ("get_model", "argument")),
+        ("apps.get_model('shop', model)", ("get_model", "argument")),
+        ("apps.get_model(app_label=label)", ("get_model", "argument")),
+        ("config.get_model(name)", ("get_model", "argument")),
+        ("self.registry.get_model(*parts)", ("get_model", "argument")),
+        ("apps.get_app_config(label)", ("get_app_config", "argument")),
+        ("x.get_app_config(app_label=label)", ("get_app_config", "argument")),
+    ],
+)
+def test_each_computed_form_is_unread(text: str, unread: tuple[str, str]) -> None:
+    found = _calls(text)[1]
+    assert found == [(*unread, 2 if "\n" in text else 1)]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "from neolith import connect\nconnect('shop.orders.v1')",
+        "from neolith import command_scope\ncommand_scope('shop', timeout=t)",
+        "from importlib import import_module\nimport_module('x', __package__)",
+        "from importlib import import_module\nimport_module('x', None)",
+        "apps.get_model('shop', 'Item')",
+        "apps.get_model('shop.Item')",
+        "config.get_model('Item', False)",
+        "apps.get_app_config('shop')",
+        "from django.urls import include\ninclude(admin.site.urls)",
+        # Not a listed name: a connect the file binds otherwise.
+        "from neolith import connect\nconnect = other\nconnect(name)",
+        "def f(connect):\n    connect(name)",
+        "get_model(label)",
+    ],
+)
+def test_the_nearest_admitted_shapes_are_read(text: str) -> None:
+    assert _calls(text)[1] == []
+
+
+@pytest.mark.parametrize("entry", _ENTRIES)
+def test_a_computed_argument_is_w101(tmp_path: Path, entry: str) -> None:
+    shop = Shop(tmp_path)
+    shop.write(
+        "shop/services.py",
+        """\
+        from django.apps import apps
+        from neolith import connect
+
+
+        def orders(name, label):
+            connect("shop.orders.v1")
+            apps.get_model("shop", "Item")
+            return connect(name), apps.get_model(label, "Item")
+        """,
+    )
+    ran = shop.entry(entry)
+    hint = (
+        "write it as a literal where it is fixed; the check does not judge this "
+        "call otherwise"
+    )
+    assert ran.findings == [
+        "shop/services.py:8: neolith.W101 app shop: module shop.services: connect() "
+        f"is called with a computed argument, which the check cannot read; {hint}",
+        "shop/services.py:8: neolith.W101 app shop: module shop.services: get_model() "
+        f"is called with a computed argument, which the check cannot read; {hint}",
+    ], ran.stdout + ran.stderr
+    assert _SUMMARY.fullmatch(ran.summary).groups() == ("0", "0", "2")  # type: ignore[union-attr]
+    assert ran.status == 0

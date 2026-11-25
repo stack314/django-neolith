@@ -337,8 +337,18 @@ def _boundary(hosted: Sequence[str]) -> list[Finding]:
     from neolith import _check_models, _check_source
 
     configs = {label: global_apps.get_app_config(label) for label in hosted}
-    source = _check_source.Source(configs, _owner)
+    source = _check_source.Source(configs, _owner, settings_module=_settings_module())
     return [*_check_models.findings(configs), *_check_source.findings(source)]
+
+
+def _settings_module() -> str | None:
+    """The settings module Django loaded, under ``manage.py checkapps``;
+    ``None`` when settings were configured without one.
+    """
+    from django.conf import settings
+
+    name = getattr(settings, "SETTINGS_MODULE", None)
+    return name if type(name) is str else None
 
 
 def _owner(name: str) -> str | None:

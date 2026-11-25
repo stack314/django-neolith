@@ -23,9 +23,13 @@ This module never imports a module of the project and never calls
 import ast
 import dataclasses
 import importlib.machinery
+import importlib.util
 import os
+import site
 import stat
 import symtable
+import sys
+import sysconfig
 import warnings
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Final
@@ -37,12 +41,31 @@ from neolith import _naming
 from neolith._check import Finding, place, shown
 
 __all__ = [
+    "COMMAND_SCOPE",
+    "CONNECT",
+    "IMPORT_MODULE",
+    "IMPORT_STRING",
+    "INCLUDE",
+    "LISTED",
+    "Call",
+    "Edge",
     "File",
     "Module",
+    "Placed",
     "Source",
     "app_files",
+    "bound",
+    "calls",
+    "canonical",
     "findings",
+    "first_party",
+    "imports",
+    "is_test_module",
+    "library_directories",
+    "module_map",
+    "nearest",
     "read",
+    "resolved",
     "split",
 ]
 
@@ -63,6 +86,10 @@ _CACHE: Final = "__pycache__"
 _INIT: Final = "__init__"
 _UNREADABLE_HINT: Final = (
     "make it a file Python can import; the check judges nothing else in it"
+)
+_COMPUTED_HINT: Final = (
+    "write it as a literal where it is fixed; the check does not judge this "
+    "call otherwise"
 )
 _SOURCELESS_HINT: Final = (
     "keep the module's source in the app, so that the check can read what it "
@@ -251,24 +278,686 @@ def read(file: File) -> Module:
     return module
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class Edge:
+    """An import of the module ``target`` at ``line``; ``dynamic`` when a
+    literal of a call names it rather than a statement.
+    """
+
+    target: str
+    line: int
+    dynamic: bool = False
+
+
+def _iterate(node: ast.AST) -> Iterator[ast.AST]:
+    """Every node under ``node``, ``node`` included, without recursion."""
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        yield current
+        stack.extend(reversed(list(ast.iter_child_nodes(current))))
+
+
+def _relative(name: str, level: int, package: str) -> str | None:
+    """A ``from`` statement's module, resolved as Python resolves it
+    (``importlib.util.resolve_name``); ``None`` when Python refuses it, such
+    as a relative name past the top-level package.
+    """
+    if not level:
+        return name
+    try:
+        return importlib.util.resolve_name("." * level + name, package)
+    except (ImportError, ValueError):
+        return None
+
+
+def nearest(name: str, known: Callable[[str], bool]) -> str:
+    """``name``, or its nearest package that ``known`` holds, however many
+    levels are missing; ``name`` itself when no part of it is known, which
+    is a module the check cannot place.
+    """
+    candidate = name
+    while True:
+        if known(candidate):
+            return candidate
+        candidate, dot, _ = candidate.rpartition(".")
+        if not dot:
+            return name
+
+
+def imports(tree: ast.Module, package: str, known: Callable[[str], bool]) -> list[Edge]:
+    """Every ``import`` and ``from ... import`` statement in the file,
+    wherever it stands, resolved as ADR 0030 Decision 3 says.
+
+    ``import a.b`` and ``import a.b as x`` are imports of ``a.b``; ``from m
+    import n`` of ``m.n`` when ``known`` holds it and of ``m`` otherwise; a
+    star import of ``m``. A name with no file is its nearest known package.
+    A relative name Python would refuse gives no edge.
+    """
+    edges: list[Edge] = []
+    for node in _iterate(tree):
+        if isinstance(node, ast.Import):
+            edges += [
+                Edge(nearest(alias.name, known), node.lineno) for alias in node.names
+            ]
+        elif isinstance(node, ast.ImportFrom):
+            base = _relative(node.module or "", node.level, package)
+            if not base:
+                continue
+            for alias in node.names:
+                below = f"{base}.{alias.name}"
+                if alias.name != "*" and known(below):
+                    edges.append(Edge(below, node.lineno))
+                else:
+                    edges.append(Edge(nearest(base, known), node.lineno))
+    return edges
+
+
+# The listed names (ADR 0030 Decision 3): each object, named by the module
+# that defines it, with every module of Django and of neolith whose __all__
+# lists it, bound to the same object. tests/test_check_listed.py pins the
+# set with a walk of both, on each supported Django version.
+_TRANSACTION: Final = (
+    "atomic",
+    "clean_savepoints",
+    "commit",
+    "get_autocommit",
+    "get_connection",
+    "get_rollback",
+    "mark_for_rollback_on_error",
+    "non_atomic_requests",
+    "on_commit",
+    "rollback",
+    "savepoint",
+    "savepoint_commit",
+    # Django 6.1 adds it; on 5.2 a name of it reaches nothing.
+    "savepoint_create",
+    "savepoint_rollback",
+    "set_autocommit",
+    "set_rollback",
+)
+LISTED: Final[Mapping[str, frozenset[str]]] = {
+    "neolith._host.connect": frozenset({"neolith.connect"}),
+    "neolith._host.command_scope": frozenset({"neolith.command_scope"}),
+    "neolith.testing.boot": frozenset(),
+    "django.contrib.auth.get_user_model": frozenset(),
+    "importlib.import_module": frozenset(),
+    "django.utils.module_loading.import_string": frozenset(),
+    "django.urls.conf.include": frozenset(
+        {"django.urls.include", "django.conf.urls.include"}
+    ),
+    "django.db.connection": frozenset(),
+    "django.db.connections": frozenset(),
+    "django.db.utils.DEFAULT_DB_ALIAS": frozenset({"django.db.DEFAULT_DB_ALIAS"}),
+    **{f"django.db.transaction.{name}": frozenset() for name in _TRANSACTION},
+}
+_CANONICAL: Final[Mapping[str, str]] = {
+    name: canonical
+    for canonical, others in LISTED.items()
+    for name in (canonical, *others)
+}
+CONNECT: Final = "neolith._host.connect"
+COMMAND_SCOPE: Final = "neolith._host.command_scope"
+IMPORT_MODULE: Final = "importlib.import_module"
+IMPORT_STRING: Final = "django.utils.module_loading.import_string"
+INCLUDE: Final = "django.urls.conf.include"
+_IMPORT: Final = "__import__"
+
+
+def canonical(name: str) -> str:
+    """The listed object ``name`` stands for, by its defining module; any
+    other name as it is.
+    """
+    return _CANONICAL.get(name, name)
+
+
+def _blocks(statement: ast.stmt) -> list[list[ast.stmt]]:
+    """The blocks of a compound statement that stay in its scope: those of
+    ``if``, ``try``, ``with``, ``for``, ``while`` and ``match``; never a
+    function's or a class's body.
+    """
+    if isinstance(statement, (ast.If, ast.For, ast.AsyncFor, ast.While)):
+        return [statement.body, statement.orelse]
+    if isinstance(statement, (ast.With, ast.AsyncWith)):
+        return [statement.body]
+    if isinstance(statement, (ast.Try, ast.TryStar)):
+        return [
+            statement.body,
+            *(handler.body for handler in statement.handlers),
+            statement.orelse,
+            statement.finalbody,
+        ]
+    if isinstance(statement, ast.Match):
+        return [case.body for case in statement.cases]
+    return []
+
+
+def _top_level(tree: ast.Module) -> Iterator[ast.Import | ast.ImportFrom]:
+    """Each import statement in the module's own scope, at any depth of its
+    compound statements.
+    """
+    stack = list(reversed(tree.body))
+    while stack:
+        statement = stack.pop()
+        if isinstance(statement, (ast.Import, ast.ImportFrom)):
+            yield statement
+        for block in reversed(_blocks(statement)):
+            stack.extend(reversed(block))
+
+
+def _stars(tree: ast.Module) -> bool:
+    return any(
+        isinstance(node, ast.ImportFrom) and any(a.name == "*" for a in node.names)
+        for node in _iterate(tree)
+    )
+
+
+def _tables(table: symtable.SymbolTable) -> Iterator[symtable.SymbolTable]:
+    stack = [table]
+    while stack:
+        current = stack.pop()
+        yield current
+        stack.extend(current.get_children())
+
+
+def _bound_otherwise(tree: ast.Module, table: symtable.SymbolTable) -> set[str]:
+    """Every name something other than a top-level import can bind: a
+    table of any scope marks it assigned, a parameter, declared global or
+    nonlocal, or imported in a scope other than the module's; or it is a
+    comprehension's target, which Python 3.12 folds into its scope.
+    """
+    names: set[str] = set()
+    for current in _tables(table):
+        module = current is table
+        for symbol in current.get_symbols():
+            if (
+                symbol.is_assigned()
+                or symbol.is_parameter()
+                or symbol.is_declared_global()
+                or symbol.is_nonlocal()
+                or (symbol.is_imported() and not module)
+            ):
+                names.add(symbol.get_name())
+    for node in _iterate(tree):
+        if isinstance(node, ast.comprehension):
+            names.update(
+                target.id
+                for target in _iterate(node.target)
+                if isinstance(target, ast.Name)
+            )
+    return names
+
+
+def _binds(
+    node: ast.Import | ast.ImportFrom, package: str
+) -> Iterator[tuple[str, str | None]]:
+    """The names an import statement binds, each with the dotted name it
+    binds it to, or ``None`` when Python would refuse the statement.
+    """
+    if isinstance(node, ast.Import):
+        for alias in node.names:
+            if alias.asname is None:
+                head = alias.name.partition(".")[0]
+                yield head, head
+            else:
+                yield alias.asname, alias.name
+        return
+    base = _relative(node.module or "", node.level, package)
+    for alias in node.names:
+        if alias.name != "*":
+            yield alias.asname or alias.name, f"{base}.{alias.name}" if base else None
+
+
+def bound(
+    tree: ast.Module, table: symtable.SymbolTable, package: str
+) -> dict[str, str]:
+    """The names the file binds by top-level imports alone, each with the
+    dotted name it stands for (ADR 0030 Decision 3, *How a name is
+    resolved*).
+
+    A name is followed when every top-level import of it gives one dotted
+    name, or names that stand for one listed object, and nothing else in
+    the file can bind it. No name is followed in a file with a star import.
+    """
+    if _stars(tree):
+        return {}
+    found: dict[str, set[str | None]] = {}
+    for node in _top_level(tree):
+        for name, dotted in _binds(node, package):
+            found.setdefault(name, set()).add(dotted)
+    otherwise = _bound_otherwise(tree, table)
+    followed: dict[str, str] = {}
+    for name, targets in found.items():
+        if name in otherwise or None in targets:
+            continue
+        names = {each for each in targets if each is not None}
+        objects = {canonical(each) for each in names}
+        if len(names) == 1:
+            followed[name] = names.pop()
+        elif len(objects) == 1 and next(iter(objects)) in LISTED:
+            followed[name] = objects.pop()
+    return followed
+
+
+def resolved(node: ast.expr, followed: Mapping[str, str]) -> str | None:
+    """The dotted name an expression stands for: a followed name, or an
+    attribute chain on one, which extends its dotted name.
+    """
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name) or node.id not in followed:
+        return None
+    return ".".join([followed[node.id], *reversed(parts)])
+
+
+def _builtin_import(tree: ast.Module, table: symtable.SymbolTable) -> bool:
+    """Whether ``__import__`` in the file is the builtin: nothing in it
+    binds that name, an import at module level included, and it has no
+    star import.
+    """
+    if _stars(tree) or _IMPORT in _bound_otherwise(tree, table):
+        return False
+    try:
+        return not table.lookup(_IMPORT).is_imported()
+    except KeyError:
+        return True
+
+
+class _Computed:
+    """An argument the check cannot read: a starred or ``**`` argument in
+    front of it.
+    """
+
+
+_COMPUTED: Final = _Computed()
+
+
+def _argument(
+    call: ast.Call, index: int | None, keyword: str | None
+) -> ast.expr | _Computed | None:
+    """The argument of ``call`` at positional ``index`` or named
+    ``keyword``; ``None`` when it is not given.
+    """
+    if index is not None:
+        for position, argument in enumerate(call.args):
+            if isinstance(argument, ast.Starred):
+                return _COMPUTED
+            if position == index:
+                return argument
+    for given in call.keywords:
+        if given.arg is None:
+            return _COMPUTED
+        if given.arg == keyword:
+            return given.value
+    return None
+
+
+def _computed(argument: ast.expr | _Computed | None) -> bool:
+    return argument is not None and not isinstance(argument, ast.Constant)
+
+
+def _text(argument: ast.expr | _Computed | None) -> str | None:
+    if isinstance(argument, ast.Constant) and type(argument.value) is str:
+        return argument.value
+    return None
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class Call:
+    """A call of a listed name the check cannot read: ``name`` is called
+    with a computed ``what`` at ``line`` (``neolith.W101``).
+    """
+
+    name: str
+    what: str
+    line: int
+
+
+# Each listed callee W101 names, by the object it resolves to, with the
+# place of the argument that names what it reaches.
+_NAMED: Final[Mapping[str, tuple[str, int, str]]] = {
+    CONNECT: ("connect", 0, ""),
+    COMMAND_SCOPE: ("command_scope", 0, "app"),
+    IMPORT_STRING: ("import_string", 0, "dotted_path"),
+}
+_BY_ATTRIBUTE: Final = {
+    "get_model": (("app_label", 0), ("model_name", 1)),
+    "get_app_config": (("app_label", 0),),
+}
+
+
+def calls(
+    tree: ast.Module,
+    table: symtable.SymbolTable,
+    package: str,
+    known: Callable[[str], bool],
+    followed: Mapping[str, str] | None = None,
+) -> tuple[list[Edge], list[Call]]:
+    """The literal dynamic imports in the file, as edges, and each call of
+    a listed name with a computed argument (ADR 0030 Decision 3, *Literal
+    dynamic imports*, and ``neolith.W101``).
+    """
+    if followed is None:
+        followed = bound(tree, table, package)
+    builtin = _builtin_import(tree, table)
+    edges: list[Edge] = []
+    unread: list[Call] = []
+    for node in _iterate(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        line = node.lineno
+        callee = resolved(node.func, followed)
+        target = canonical(callee) if callee is not None else None
+        if target == IMPORT_MODULE:
+            name = _argument(node, 0, "name")
+            base = _argument(node, 1, "package")
+            if _computed(name):
+                unread.append(Call("import_module", "argument", line))
+            if _computed(base) and not (
+                isinstance(base, ast.Name) and base.id == "__package__"
+            ):
+                unread.append(Call("import_module", "package", line))
+            text = _text(name)
+            if text is None:
+                continue
+            if text.startswith("."):
+                if isinstance(base, ast.Name) and base.id == "__package__":
+                    start: str | None = package
+                else:
+                    start = _text(base)
+                try:
+                    text = importlib.util.resolve_name(text, start)
+                except (ImportError, ValueError, TypeError, AttributeError):
+                    continue
+            if text:
+                edges.append(Edge(nearest(text, known), line, dynamic=True))
+        elif builtin and isinstance(node.func, ast.Name) and node.func.id == _IMPORT:
+            name = _argument(node, 0, "name")
+            level = _argument(node, 4, "level")
+            if _computed(name):
+                unread.append(Call(_IMPORT, "argument", line))
+            text = _text(name)
+            if text and (
+                level is None or (isinstance(level, ast.Constant) and level.value == 0)
+            ):
+                edges.append(Edge(nearest(text, known), line, dynamic=True))
+        elif target is not None and target in _NAMED:
+            short, index, keyword = _NAMED[target]
+            argument = _argument(node, index, keyword or None)
+            if _computed(argument):
+                unread.append(Call(short, "argument", line))
+            text = _text(argument)
+            if target == IMPORT_STRING and text and "." in text:
+                edges.append(
+                    Edge(nearest(text.rpartition(".")[0], known), line, dynamic=True)
+                )
+        elif target == INCLUDE:
+            argument = _argument(node, 0, "arg")
+            if isinstance(argument, ast.Tuple) and len(argument.elts) == 2:
+                argument = argument.elts[0]
+            text = _text(argument)
+            if text:
+                edges.append(Edge(nearest(text, known), line, dynamic=True))
+        elif _unread_by_attribute(node):
+            unread.append(Call(node.func.attr, "argument", line))  # type: ignore[attr-defined]
+    return edges, unread
+
+
+def _unread_by_attribute(call: ast.Call) -> bool:
+    """A call of an attribute named ``get_model`` or ``get_app_config``,
+    whatever its receiver, with a computed label or model name.
+    """
+    function = call.func
+    return (
+        isinstance(function, ast.Attribute)
+        and function.attr in _BY_ATTRIBUTE
+        and any(
+            _computed(_argument(call, index, keyword))
+            for keyword, index in _BY_ATTRIBUTE[function.attr]
+        )
+    )
+
+
+def library_directories() -> list[str]:
+    """The interpreter's library directories: those ``sysconfig`` gives for
+    ``stdlib``, ``platstdlib``, ``purelib`` and ``platlib``, and those
+    ``site`` reports, the user site included.
+    """
+    paths = sysconfig.get_paths()
+    found = [
+        paths[key]
+        for key in ("stdlib", "platstdlib", "purelib", "platlib")
+        if key in paths
+    ]
+    getsitepackages = getattr(site, "getsitepackages", None)
+    if callable(getsitepackages):
+        found += getsitepackages()
+    found.append(site.getusersitepackages())
+    return found
+
+
+def _under(path: str, directories: Sequence[str]) -> bool:
+    """Whether ``path`` is one of ``directories`` or lies under one, each
+    compared by its real path.
+    """
+    real = os.path.realpath(path)
+    for directory in directories:
+        other = os.path.realpath(directory)
+        try:
+            if os.path.commonpath([real, other]) == other:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _imported_from(module: object) -> list[str]:
+    """The directories a top-level module or package was imported from,
+    read from its spec: the parent of each of a package's directories, or
+    of a module's file.
+    """
+    spec = getattr(module, "__spec__", None)
+    locations = getattr(spec, "submodule_search_locations", None)
+    if locations is not None:
+        try:
+            return [os.path.dirname(entry) for entry in locations if type(entry) is str]
+        except TypeError:
+            return []
+    origin = getattr(spec, "origin", None)
+    if type(origin) is str and os.path.isabs(origin):
+        return [os.path.dirname(origin)]
+    return []
+
+
+def first_party(
+    tops: Sequence[str],
+    modules: Mapping[str, object],
+    path: Sequence[str],
+    libraries: Sequence[str],
+) -> list[str]:
+    """The first-party directories: each directory one of the top-level
+    modules ``tops``, read from ``modules`` (``sys.modules``), was imported
+    from, unless it lies under one of ``libraries``, in the order of
+    ``path`` (``sys.path``) and then in the order found.
+    """
+    found: list[str] = []
+    for top in tops:
+        module = modules.get(top)
+        for directory in _imported_from(module):
+            if directory not in found and not _under(directory, libraries):
+                found.append(directory)
+    order = [os.path.realpath(entry or os.curdir) for entry in path]
+
+    def place_of(directory: str) -> int:
+        real = os.path.realpath(directory)
+        return order.index(real) if real in order else len(order)
+
+    return sorted(found, key=place_of)
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class Placed:
+    """Where a first-party dotted name is: the file Python's path finder
+    loads for it and whether it has source, or, for a namespace package,
+    its portions; and the first-party directory it is named from.
+    """
+
+    path: str | None
+    root: str
+    source: bool = True
+    portions: tuple[str, ...] = ()
+
+    def parts(self) -> list[str]:
+        """The file's path below its first-party directory, by part."""
+        if self.path is None:
+            return []
+        return os.path.relpath(self.path, self.root).split(os.sep)
+
+
+def _scan(
+    directory: str, inner: frozenset[str]
+) -> dict[str, tuple[str, str | None, str]]:
+    """The names one directory gives, as the path finder reads it: for
+    each, its kind (``package``, ``module`` or ``namespace``), the file
+    loaded and the directory a package or portion holds. A regular package
+    comes before a module of its name and a module before a namespace
+    portion (``FileFinder.find_spec``). Skipped: what no dotted name
+    reaches, symbolic links to directories, virtual environments, and the
+    first-party directories ``inner``, each of which is named from itself.
+    """
+    try:
+        entries = _listing(directory)
+    except OSError:
+        return {}
+    names = frozenset(entry.name for entry in entries)
+    found: dict[str, tuple[str, str | None, str]] = {}
+    for entry in entries:
+        if not _is_directory(entry):
+            continue
+        if (
+            not _reached(entry.name)
+            or os.path.realpath(entry.path) in inner
+            or os.path.lexists(os.path.join(entry.path, "pyvenv.cfg"))
+        ):
+            continue
+        init = next(
+            (
+                os.path.join(entry.path, _INIT + suffix)
+                for suffix in _LOADED
+                if os.path.isfile(os.path.join(entry.path, _INIT + suffix))
+            ),
+            None,
+        )
+        if init is not None:
+            found[entry.name] = ("package", init, entry.path)
+    for entry in entries:
+        if _is_directory(entry) or _links_a_directory(entry):
+            continue
+        parts = split(entry.name)
+        if parts is None or parts[0] == _INIT or parts[0] in found:
+            continue
+        loaded = _loaded(directory, parts[0], names)
+        if loaded is not None:
+            found[parts[0]] = ("module", os.path.join(directory, parts[0] + loaded), "")
+    for entry in entries:
+        if (
+            _is_directory(entry)
+            and _reached(entry.name)
+            and entry.name not in found
+            and os.path.realpath(entry.path) not in inner
+            and not os.path.lexists(os.path.join(entry.path, "pyvenv.cfg"))
+        ):
+            found[entry.name] = ("namespace", None, entry.path)
+    return found
+
+
+def module_map(directories: Sequence[str]) -> dict[str, Placed]:
+    """Every dotted name the first-party ``directories`` give, in their
+    order, mapped to where it is, without running code (ADR 0030 Decision
+    3, *How a dotted name is placed*).
+
+    Across locations Python's path finder decides: the first location
+    that holds a regular package or a module wins, and namespace portions
+    join only while none does (``PathFinder._get_spec``). Where one
+    directory lies inside another, each file is named from the innermost.
+    """
+    inner = frozenset(os.path.realpath(directory) for directory in directories)
+    placed: dict[str, Placed] = {}
+    queue: list[tuple[str, list[tuple[str, str]]]] = [
+        ("", [(directory, directory) for directory in directories])
+    ]
+    while queue:
+        prefix, locations = queue.pop()
+        chosen: dict[str, tuple[str, str | None, list[tuple[str, str]], str]] = {}
+        for location, root in locations:
+            for name, (kind, file, holds) in _scan(location, inner).items():
+                earlier = chosen.get(name)
+                if kind == "namespace":
+                    if earlier is None:
+                        chosen[name] = (kind, None, [(holds, root)], root)
+                    elif earlier[0] == "namespace":
+                        earlier[2].append((holds, root))
+                elif earlier is None or earlier[0] == "namespace":
+                    below = [(holds, root)] if kind == "package" else []
+                    chosen[name] = (kind, file, below, root)
+        for name, (kind, file, below, root) in chosen.items():
+            dotted = f"{prefix}{name}"
+            source = file is None or file.endswith(_SOURCE)
+            portions = tuple(holds for holds, _ in below) if kind == "namespace" else ()
+            placed[dotted] = Placed(file, root, source, portions)
+            if below:
+                queue.append((f"{dotted}.", below))
+    return placed
+
+
+def is_test_module(parts: Sequence[str]) -> bool:
+    """Whether a file, by its path's parts below its first-party directory,
+    is a test module: ``conftest.py``, ``tests.py``, ``test_*.py``,
+    ``*_test.py``, or any file under a directory named ``tests``.
+    """
+    if not parts:
+        return False
+    name = parts[-1]
+    return (
+        "tests" in parts[:-1]
+        or name in ("conftest.py", "tests.py")
+        or (name.startswith("test_") and name.endswith(".py"))
+        or name.endswith("_test.py")
+    )
+
+
 class Source:
     """What one run of the check reads, each file once: the files of every
-    hosted app, as ``owner`` attributes modules to installed apps.
+    hosted app, as ``owner`` attributes modules to installed apps, and the
+    map of first-party dotted names to files.
     """
 
     def __init__(
         self,
         hosted: Mapping[str, AppConfig],
         owner: Callable[[str], str | None],
+        *,
+        settings_module: str | None = None,
     ) -> None:
         """Read the hosted apps ``hosted``, by label; ``owner`` gives the
         label of the installed app that holds a dotted name, or ``None``.
+        The first-party directories are those the hosted apps and
+        ``settings_module`` were imported from.
         """
         self.hosted = dict(hosted)
         self._owner = owner
+        self._settings = settings_module
         self._modules: dict[str, Module] = {}
         self._files: dict[str, list[File]] | None = None
         self._failed: dict[str, list[tuple[str, OSError]]] = {}
+        self._directories: list[str] | None = None
+        self._map: dict[str, Placed] | None = None
+        self._tops: frozenset[str] = frozenset()
+        self._loaded: frozenset[str] = frozenset()
+        self._bound: dict[str, dict[str, str]] = {}
+        self._calls: dict[str, tuple[list[Edge], list[Call]]] = {}
 
     def files(self) -> dict[str, list[File]]:
         """The files of each hosted app, by label. A nested app's files are
@@ -309,6 +998,80 @@ class Source:
             if file.source:
                 yield self.read(file)
 
+    def first_party(self) -> list[str]:
+        """The first-party directories of this host."""
+        if self._directories is None:
+            tops = [config.name.partition(".")[0] for config in self.hosted.values()]
+            if self._settings:
+                tops.append(self._settings.partition(".")[0])
+            self._directories = first_party(
+                list(dict.fromkeys(tops)),
+                dict(sys.modules),
+                list(sys.path),
+                library_directories(),
+            )
+        return self._directories
+
+    def map(self) -> dict[str, Placed]:
+        """The first-party dotted names, each with where it is."""
+        if self._map is None:
+            self._map = module_map(self.first_party())
+            self._tops = frozenset(name.partition(".")[0] for name in self._map)
+            self._loaded = frozenset(sys.modules)
+        return self._map
+
+    def known(self, name: str) -> bool:
+        """Whether ``name`` is a module the check knows of: a first-party
+        name the map holds, or a module loaded in this process whose
+        top-level package is not first-party.
+        """
+        placed = self.map()
+        if name.partition(".")[0] in self._tops:
+            return name in placed
+        return name in self._loaded
+
+    def bound(self, module: Module) -> dict[str, str]:
+        """The names ``module`` binds by top-level imports alone."""
+        if module.tree is None or module.table is None:
+            return {}
+        found = self._bound.get(module.file.path)
+        if found is None:
+            found = self._bound[module.file.path] = bound(
+                module.tree, module.table, module.file.package
+            )
+        return found
+
+    def edges(self, module: Module) -> list[Edge]:
+        """Every import of ``module``: its statements and its literal
+        dynamic imports.
+        """
+        if module.tree is None:
+            return []
+        return [
+            *imports(module.tree, module.file.package, self.known),
+            *self._read_calls(module)[0],
+        ]
+
+    def unread(self, module: Module) -> list[Call]:
+        """The calls of listed names in ``module`` with a computed
+        argument.
+        """
+        return self._read_calls(module)[1]
+
+    def _read_calls(self, module: Module) -> tuple[list[Edge], list[Call]]:
+        if module.tree is None or module.table is None:
+            return [], []
+        found = self._calls.get(module.file.path)
+        if found is None:
+            found = self._calls[module.file.path] = calls(
+                module.tree,
+                module.table,
+                module.file.package,
+                self.known,
+                self.bound(module),
+            )
+        return found
+
 
 def _directories(config: AppConfig) -> list[str]:
     """The directories of an app's package, as its ``__path__`` lists
@@ -323,7 +1086,9 @@ def _directories(config: AppConfig) -> list[str]:
 
 
 def findings(source: Source) -> list[Finding]:
-    """``neolith.E112`` and ``neolith.W104`` for the hosted apps' files."""
+    """``neolith.E112``, ``neolith.W104`` and ``neolith.W101`` for the hosted
+    apps' files.
+    """
     found: list[Finding] = []
     message: checks.CheckMessage
     for label, failed in source.failed().items():
@@ -355,4 +1120,14 @@ def findings(source: Source) -> list[Finding]:
                     id="neolith.E112",
                 )
                 found.append(Finding(message, label, place(file.path), module.line))
+                continue
+            for call in source.unread(module):
+                message = checks.Warning(
+                    f"app {shown(label)}: module {shown(file.module)}: "
+                    f"{call.name}() is called with a computed {call.what}, which "
+                    "the check cannot read",
+                    hint=_COMPUTED_HINT,
+                    id="neolith.W101",
+                )
+                found.append(Finding(message, label, place(file.path), call.line))
     return found
