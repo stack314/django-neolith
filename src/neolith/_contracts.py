@@ -483,6 +483,7 @@ class Contract:
         "_actions",
         "_codecs",
         "_description",
+        "_types",
         "declaration",
         "identity",
         "major",
@@ -500,6 +501,7 @@ class Contract:
         actions: Mapping[str, Action],
         description: Mapping[str, Any],
         codecs: Mapping[type[BaseModel], object],
+        named: Mapping[str, type[Any]],
     ) -> None:
         self.identity = identity
         self.name, self.major = _parse_identity(identity)
@@ -510,6 +512,11 @@ class Contract:
         # record, built from the core schema the description was written
         # from (spec 02, Values across a call).
         self._codecs = types.MappingProxyType(dict(codecs))
+        # The record and enum classes the description names under $defs, by
+        # those names: the description holds names, not classes, and the
+        # check before deployment reads the modules that define them (ADR
+        # 0030 Decision 2).
+        self._types = types.MappingProxyType(dict(named))
 
     @property
     def actions(self) -> Mapping[str, Action]:
@@ -805,7 +812,9 @@ def contract[T](identity: str, /) -> Callable[[type[T]], type[T]]:
         setattr(
             declaration,
             _CONTRACT_ATTR,
-            Contract(identity, declaration, actions, description, codecs),
+            Contract(
+                identity, declaration, actions, description, codecs, portable.named
+            ),
         )
         return declaration
 
