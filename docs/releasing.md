@@ -538,8 +538,8 @@ Run these in your own clone, not in the worktrees under `$WORK`.
   gh api -X PATCH "repos/${REPO}/pulls/<number>" -f state=open -q .state
   gh run list --repo "$REPO" --workflow ci.yml --event pull_request --limit 3 --json databaseId,status,conclusion,createdAt
   ```
-  Expected: `closed`, `open`, then a run created just now, on the new base: `queued` or `in_progress`, or, for a first-time contributor's fork, waiting for approval (`action_required`), which the next step gives.
-- [ ] Approve the run if it waits. A run for a pull request from a fork can wait for a maintainer's approval before it starts: GitHub asks for this from first-time contributors, and the run reports `action_required` with no jobs. Read the fork's changes first, since the run executes its code.
+  Expected: `closed`, `open`, then a run created just now, on the new base, with status `queued` or `in_progress`; for a first-time contributor's fork, status `completed` with conclusion `action_required` and no jobs: the run waits for the approval the next step gives.
+- [ ] Approve the run if it waits. A run for a pull request from a fork can wait for a maintainer's approval before it starts: GitHub asks for this from first-time contributors, and the run reports status `completed` with conclusion `action_required` and no jobs. Read the fork's changes first, since the run executes its code.
   ```
   gh run list --repo "$REPO" --workflow ci.yml --status action_required --json databaseId,headSha,createdAt
   gh api -X POST "repos/${REPO}/actions/runs/<run id>/approve"

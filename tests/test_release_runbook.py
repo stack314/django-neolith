@@ -191,15 +191,22 @@ def _rule(name: str) -> str:
     return found.group(0)
 
 
-def test_g7_holds_merges_until_ci_passed_on_the_tip() -> None:
-    rule = _rule("G7")
-    assert "current tip" in rule
-    assert "While that tip fails" in rule
-    assert "Closing and reopening" in rule
-    assert "keeps the approval" in rule
-    assert "re-run" in rule
-    # The known gap is written down, not hidden.
-    assert "can still turn the tip red once" in rule
+@pytest.mark.parametrize(
+    "clause",
+    [
+        "once CI's run on the branch's current tip has passed",
+        "While that tip fails, only a pull request whose checks passed on that tip"
+        " merges: the fix",
+        "needs passing checks from a run made after the current tip landed",
+        "Closing and reopening it starts that run and keeps the approval",
+        "a re-run does not count, since it tests the old base",
+        # The known gap is written down, not hidden.
+        "can still turn the tip red once; this rule then holds the next merge",
+    ],
+)
+def test_g7_holds_merges_until_ci_passed_on_the_tip(clause: str) -> None:
+    # Whole clauses, so that reversing one ("a re-run also counts") fails.
+    assert clause in _rule("G7")
 
 
 def test_every_path_g7_names_as_a_checker_exists() -> None:
@@ -211,13 +218,42 @@ def test_every_path_g7_names_as_a_checker_exists() -> None:
         assert (ROOT / path).exists(), f"G7 names {path}, which does not exist"
 
 
-def test_every_file_ci_runs_is_a_checker_g7_names() -> None:
-    paths = re.findall(r"`([^`]+)`", _rule("G7"))
+def _checked_by_ci() -> list[str]:
+    """Every file outside the package that decides whether CI passes."""
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     run = sorted(set(re.findall(r"\b(scripts/[\w./-]+\.py)", workflow)))
     assert run, "ci.yml runs no script under scripts/"
-    for script in [*run, "tests/conftest.py", "tests/spec_trace.toml"]:
-        assert any(script.startswith(p) for p in paths), f"G7 misses {script}"
+    files = [*run, "tests/conftest.py", "tests/spec_trace.toml"]
+    if "scripts/docs.py" in run:
+        # Sphinx runs the site's configuration and extensions as code, and the
+        # build fails on any warning they raise.
+        site = ROOT / "docs" / "site"
+        code = [site / "conf.py", *sorted((site / "_ext").glob("*.py"))]
+        files += [path.relative_to(ROOT).as_posix() for path in code]
+    return files
+
+
+def test_every_file_ci_runs_is_a_checker_g7_names() -> None:
+    paths = re.findall(r"`([^`]+)`", _rule("G7"))
+    for checked in _checked_by_ci():
+        assert any(checked.startswith(p) for p in paths), f"G7 misses {checked}"
+
+
+_READS_THE_REPOSITORY = re.compile(
+    r"""["'](?:docs|spec|README\.md|CONTRIBUTING\.md|CHANGELOG\.md|\.github)\b"""
+)
+
+
+def test_g7_counts_tests_of_the_repository_files_as_checkers() -> None:
+    # A test that reads the repository's documents is a check on them: one
+    # added in a pull request can fail on a base that moved, as #113 did.
+    rule = _rule("G7")
+    assert "a test that checks the repository's own files" in rule
+    named = re.findall(r"`(tests/test_\w+\.py)`", rule)
+    assert named, "G7 gives no example of such a test"
+    for example in named:
+        text = (ROOT / example).read_text(encoding="utf-8")
+        assert _READS_THE_REPOSITORY.search(text), f"{example} reads no document"
 
 
 def test_section_8_retargets_before_it_closes_and_reopens() -> None:
@@ -232,6 +268,18 @@ def test_section_8_retargets_before_it_closes_and_reopens() -> None:
     step = re.search(r"- \[ \] Run CI again[^\n]*", text)
     assert step
     assert "retarget first, then close and reopen" in step.group(0)
+    assert "a re-run of an old run would test the old base" in step.group(0)
+
+
+def test_a_run_waiting_for_approval_is_described_by_its_conclusion() -> None:
+    # GitHub reports such a run as status `completed`, conclusion
+    # `action_required`: a reader who sees `completed` must not take it as done.
+    text = _section(8)
+    assert "status `completed` with conclusion `action_required`" in text
+    for sentence in re.findall(r"[^.\n]*`action_required`[^.\n]*", text):
+        assert "conclusion `action_required`" in sentence or "--status" in sentence, (
+            sentence
+        )
 
 
 def test_the_contributor_comments_explain_the_reopen() -> None:
