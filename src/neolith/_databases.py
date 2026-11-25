@@ -24,7 +24,7 @@ import os
 import pathlib
 import urllib.parse
 from collections.abc import Iterable, Mapping
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from neolith import _naming
 
@@ -113,19 +113,36 @@ def sqlite_path(name: object) -> str | None:
     return os.path.realpath(os.path.abspath(text))
 
 
+def _plain(value: object, kinds: tuple[type, ...]) -> object:
+    """``value`` as the first of ``kinds`` it is an instance of reads it: an
+    exact ``str``, ``int`` or ``float``, made by that type's own method, so
+    no code of a subclass runs. ``None`` when it is none of them.
+    """
+    for kind in kinds:
+        if issubclass(type(value), kind):
+            if kind is str:
+                return str.__str__(cast("str", value))
+            if kind is int:
+                return int.__int__(cast("int", value))
+            return float.__float__(cast("float", value))
+    return None
+
+
 def _identity(engine: str, entry: Mapping[str, Any]) -> tuple[object, ...] | None:
     """What two aliases on one database share, led by the rule their refusal
-    states; ``None`` for one exempt, or for a server alias whose ``HOST`` or
-    ``PORT`` is not one a backend reads.
+    states; ``None`` for one exempt, or for a server alias whose ``HOST`` is
+    not a ``str`` or whose ``PORT`` is not a ``str``, an ``int`` or a
+    ``float``.
     """
     name = entry.get("NAME")
     if is_sqlite(engine):
         path = sqlite_path(name)
         return None if path is None else (_ONE_FILE, path)
-    host, port = entry.get("HOST", ""), entry.get("PORT", "")
-    if type(host) is not str or (type(port) is not str and type(port) is not int):
+    host = _plain(entry.get("HOST", ""), (str,))
+    port = _plain(entry.get("PORT", ""), (str, int, float))
+    if host is None or port is None:
         # Not compared (ADR 0034 Decision 2): its backend meets the value
-        # when it connects, and no value's own hashing runs here.
+        # when it connects, and no value's own code runs here.
         return None
     return (_ONE_SERVER, engine, host, port, name)
 

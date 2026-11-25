@@ -567,6 +567,68 @@ def test_two_server_aliases_on_one_database_are_refused() -> None:
     )
 
 
+class _Text(str):
+    __slots__ = ()
+
+
+class _Host(str):
+    """A ``HOST`` whose own code would raise if the comparison ran it."""
+
+    __slots__ = ()
+
+    def __hash__(self) -> int:
+        raise AssertionError("the comparison ran the value's own __hash__")
+
+    def __eq__(self, other: object) -> bool:
+        raise AssertionError("the comparison ran the value's own __eq__")
+
+    def __str__(self) -> str:
+        raise AssertionError("the comparison ran the value's own __str__")
+
+
+class _Port(int):
+    """A ``PORT`` whose own code would raise if the comparison ran it."""
+
+    __slots__ = ()
+
+    def __hash__(self) -> int:
+        raise AssertionError("the comparison ran the value's own __hash__")
+
+    def __eq__(self, other: object) -> bool:
+        raise AssertionError("the comparison ran the value's own __eq__")
+
+    def __int__(self) -> int:
+        raise AssertionError("the comparison ran the value's own __int__")
+
+
+@pytest.mark.parametrize(
+    ("host", "port"),
+    [
+        (_Text("h"), "5"),
+        (_Host("h"), 5),
+        ("h", 5.0),
+        ("h", _Port(5)),
+        ("h", True),
+    ],
+    ids=["str subclass", "str subclass with code", "float", "int subclass", "bool"],
+)
+def test_two_server_aliases_are_compared_whatever_form_of_host_and_port(
+    host: object, port: object
+) -> None:
+    """A Django backend reads a ``HOST`` that is a ``str`` of any subclass,
+    and MySQL and Oracle read ``int(PORT)``. Such forms are compared as the
+    base type reads them, so no value's own code runs (ADR 0034 Decision 2)."""
+    server = {
+        "ENGINE": "django.db.backends.mysql",
+        "NAME": "n",
+        "HOST": host,
+        "PORT": port,
+    }
+    assert _db_refusal(ledger=server, billing=dict(server)) == [
+        f"databases ledger and billing: {_ONE_SERVER}"
+    ]
+
+
 @pytest.mark.parametrize("name", [":memory:", Path(":memory:")], ids=["str", "path"])
 def test_the_literal_memory_name_is_exempt_from_the_pair_check(name: object) -> None:
     built = configure(
