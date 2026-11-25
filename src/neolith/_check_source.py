@@ -196,6 +196,9 @@ class _Found(NamedTuple):
     kind: str
     file: str | None = None
     holds: str = ""
+    # False for a namespace portion reached through a symbolic link: its
+    # names are looked up, as Python does, but its files are not read.
+    walked: bool = True
 
 
 def _scan(
@@ -203,11 +206,12 @@ def _scan(
 ) -> dict[str, _Found]:
     """What each name ``directory`` gives is, as the path finder reads it:
     a regular package before a module of its name and a module before a
-    namespace portion (``FileFinder.find_spec``). Skipped: what no dotted
-    name reaches, a symbolic link to a directory with no ``__init__``, the
-    first-party directories ``inner``, each of which is named from itself,
-    and, when ``venvs``, virtual environments. An ``OSError`` listing
-    ``directory`` is raised.
+    namespace portion (``FileFinder.find_spec``). A symbolic link to a
+    directory is never walked: a package there wins its name as a blind
+    spot, and a namespace portion there is only probed. Skipped: what no
+    dotted name reaches, the first-party directories ``inner``, each of
+    which is named from itself, and, when ``venvs``, virtual environments.
+    An ``OSError`` listing ``directory`` is raised.
     """
     entries = _listing(directory)
     names = frozenset(entry.name for entry in entries)
@@ -239,8 +243,7 @@ def _scan(
         if loaded is not None:
             found[name] = _Found(_MODULE, os.path.join(directory, name + loaded))
         elif folder is not None:
-            if not linked:
-                found[name] = _Found(_NAMESPACE, None, folder.path)
+            found[name] = _Found(_NAMESPACE, None, folder.path, walked=not linked)
         else:
             unloadable = [name + suffix for suffix in _SOURCE if name + suffix in names]
             if unloadable:
@@ -300,7 +303,7 @@ def _choose(
                 result = _Chosen(found.kind, found.file, below, root)
                 break
             if found.kind == _NAMESPACE:
-                portions.append((found.holds, root))
+                portions.append((found.holds, root if found.walked else None))
             elif unloadable is None:
                 unloadable = _Chosen(found.kind, found.file, [], root)
         if result is None and portions:
@@ -340,7 +343,10 @@ def app_files(
     while stack:
         prefix, locations = stack.pop()
         scanned: list[dict[str, _Found] | None] = []
-        for directory, _ in locations:
+        for directory, root in locations:
+            if root is None:
+                scanned.append(None)
+                continue
             try:
                 scanned.append(_scan(directory))
             except OSError as error:
