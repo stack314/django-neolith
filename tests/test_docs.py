@@ -1457,6 +1457,61 @@ def test_a_release_build_needs_no_banner_and_refuses_no_install(tmp_path: Path) 
     assert docs.check_html(html, ROOT, development=False) == []
 
 
+def test_a_development_build_of_a_released_version_may_show_an_install_command(
+    tmp_path: Path,
+) -> None:
+    # publish builds main, which carries a released version, as a development
+    # build: the install rule follows the version, not the banner.
+    page = _page(_GOOD_TEXT + " pip install --pre django-neolith")
+    html = _site(tmp_path, {"index.html": page})
+    assert docs.check_html(html, ROOT, development=True, unreleased=False) == []
+    said = docs.check_html(html, ROOT, development=True)
+    assert any("shows an install command before a release" in p for p in said), said
+
+
+@pytest.mark.parametrize(
+    ("version", "variable", "unreleased"),
+    [
+        ("0.1.0a4.dev0", None, True),
+        ("0.1.0a3", None, False),
+        ("0.1.0a3", "1", False),  # publish's development build of main
+        ("0.1.0a4.dev0", "1", True),
+    ],
+)
+def test_the_install_rule_follows_the_version_whatever_publish_asks_for(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    version: str,
+    variable: str | None,
+    unreleased: bool,
+) -> None:
+    if variable is None:
+        monkeypatch.delenv(docs.DEVELOPMENT_VARIABLE, raising=False)
+    else:
+        monkeypatch.setenv(docs.DEVELOPMENT_VARIABLE, variable)
+    init = tmp_path / "src" / "neolith" / "__init__.py"
+    init.parent.mkdir(parents=True)
+    init.write_text(f'__version__ = "{version}"\n', encoding="utf-8")
+    assert docs.unreleased(tmp_path) is unreleased
+    seen: list[tuple[bool, bool | None]] = []
+
+    def check_html(
+        html: Path,
+        root: Path,
+        development: bool = True,
+        unreleased: bool | None = None,
+    ) -> list[str]:
+        seen.append((development, unreleased))
+        return []
+
+    html = tmp_path / "out" / "html"
+    html.mkdir(parents=True)
+    monkeypatch.setattr(docs, "build", lambda root, out, extra=None: docs.Result(html))
+    monkeypatch.setattr(docs, "check_html", check_html)
+    assert docs.check(tmp_path, tmp_path / "out") == []
+    assert seen == [(docs.development_version(version), unreleased)]
+
+
 def test_the_people_are_the_authors_the_holder_and_the_committers(
     tmp_path: Path,
 ) -> None:
@@ -1556,10 +1611,10 @@ def test_a_check_reports_every_step_and_a_version_it_cannot_read(
         docs, "build", lambda root, out, extra: docs.Result(html, ["built"])
     )
 
-    def unreadable(root: Path) -> bool:
+    def unreadable(root: Path) -> str:
         raise docs.DocsError("src/neolith/__init__.py: no __version__")
 
-    monkeypatch.setattr(docs, "development", unreadable)
+    monkeypatch.setattr(docs, "source_version", unreadable)
     found = docs.check(ROOT, tmp_path)
     assert found[:2] == [
         "built",
@@ -1782,13 +1837,61 @@ def _old_urls() -> list[str]:
 def test_every_old_url_reaches_a_page(tmp_path: Path) -> None:
     site = _published(tmp_path)
     rules, _ = docs.redirect_rules(docs.root_files(ROOT)["_redirects"])
-    assert set(_old_urls()) <= set(docs.old_urls(ROOT))
+    # The live site answers each old URL without its slash too (a 307 to it).
+    slashless = [url.removesuffix("/") for url in _old_urls()]
+    assert set(_old_urls() + slashless) <= set(docs.old_urls(ROOT))
     for url in docs.old_urls(ROOT):
         hops, end = docs.follow(rules, url)
         assert hops, url
         if not end.startswith(REPO + "/"):
-            assert docs.asset(site, end) is not None, (url, end)
+            # A path without its slash reaches the page by the Worker's 307.
+            assert docs.served(site, end) is not None, (url, end)
     assert len(_old_urls()) > 40  # every record, spec document and project page
+
+
+def test_every_static_source_with_a_slash_has_its_slashless_twin_first() -> None:
+    rules, _ = docs.redirect_rules(docs.root_files(ROOT)["_redirects"])
+    static = [rule for rule in rules if not rule.source.endswith("*")]
+    slashed = [rule for rule in static if rule.source.endswith("/")]
+    assert len(static) == 2 * len(slashed)
+    for rule in slashed:
+        twin = static[static.index(rule) - 1]
+        assert (twin.source, twin.destination, twin.code) == (
+            rule.source.removesuffix("/"),
+            rule.destination,
+            rule.code,
+        )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "/neolith/decisions",
+        "/neolith/spec",
+        "/neolith/reference",
+        "/neolith/tutorial",
+        "/neolith/how-to",
+        "/neolith/decisions/0011-django-ninja-for-contract-endpoints",
+    ],
+)
+def test_an_old_url_without_its_slash_leads_where_its_slashed_form_does(
+    url: str,
+) -> None:
+    rules, _ = docs.redirect_rules(docs.root_files(ROOT)["_redirects"])
+    assert docs.follow(rules, url) == docs.follow(rules, url + "/")
+    hops, _ = docs.follow(rules, "/neolith/reference/django-host")
+    assert hops == [(301, f"{REPO}/blob/main/docs/django-host.md")]
+
+
+def test_a_missing_slashless_twin_is_a_problem(tmp_path: Path) -> None:
+    site = _published(tmp_path)
+    redirects = site / "_redirects"
+    lines = redirects.read_text(encoding="utf-8").splitlines(keepends=True)
+    lines.remove("/neolith/spec /neolith/latest/spec/ 301\n")
+    redirects.write_text("".join(lines), encoding="utf-8")
+    assert docs.root_problems(ROOT, site) == [
+        "_redirects: /neolith/spec leads to /neolith/spec, no page"
+    ]
 
 
 def test_record_0011_moves_permanently_to_its_new_name(tmp_path: Path) -> None:
@@ -1848,6 +1951,9 @@ def test_a_path_maps_to_its_asset_as_the_worker_serves_it(tmp_path: Path) -> Non
     assert docs.asset(site, "/neolith/dev/") == site / "dev" / "index.html"
     assert docs.asset(site, "/neolith/llms.txt") == site / "llms.txt"
     assert docs.asset(site, "/neolith/dev") is None  # a 307 to the slash first
+    assert docs.served(site, "/neolith/dev") == site / "dev" / "index.html"
+    assert docs.served(site, "/neolith/dev/") == site / "dev" / "index.html"
+    assert docs.served(site, "/neolith/missing") is None
     assert docs.asset(site, "/neolith/missing/") is None
     assert docs.asset(site, "/elsewhere/") is None
     assert docs.asset(site, "/neolith/../out/") is None
@@ -2127,9 +2233,9 @@ _BAD_PAGES = {
     ),
 }
 _BAD_PATCH = """
-# Checked as a development build whatever __version__ says, so the rules that
-# hold only before a release (bad/install.md) are checked too.
-docs.development = lambda root: True
+# Checked as a .dev version whatever __version__ says, so the rules that hold
+# only before a release (bad/install.md) are checked too.
+docs.source_version = lambda root: "0.0.0.dev0"
 site_init = neolith_docs._Site.__init__
 def patched(self, root):
     site_init(self, root)
