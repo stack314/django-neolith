@@ -17,6 +17,7 @@ through a set-up that refuses; the ``setting_changed`` receiver through
 
 import copy
 import json
+import ntpath
 import os
 import subprocess
 import sys
@@ -24,8 +25,8 @@ import textwrap
 import types
 from collections.abc import Callable, Iterator
 from decimal import Decimal
-from pathlib import Path
-from typing import Any, cast
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
+from typing import Any, NoReturn, cast
 
 import pytest
 from django.apps import AppConfig
@@ -34,11 +35,13 @@ from django.apps.registry import Apps
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.test import override_settings
+from django.utils.functional import SimpleLazyObject
 from hypothesis import given
 from hypothesis import strategies as st
 
 from neolith import DeclarationError, _checks, _host
 from neolith._configure import configure
+from neolith._databases import databases_problems, sqlite_path
 from neolith._declaration import declaration_of
 from tests import host_apps
 from tests.hosting import NEOLITH_KEYS, in_built_host, in_fresh_process
@@ -395,12 +398,100 @@ def test_a_host_error_cannot_be_silenced(silenced: object, message: str) -> None
 # NEOLITH["DATABASES"]: ADR 0009's rows before Django imports a model.
 
 
+class _EqualsRaises(str):
+    """A key whose own ``__eq__`` would raise if a lookup ran it."""
+
+    __slots__ = ()
+
+    def __eq__(self, other: object) -> bool:
+        raise AssertionError("a lookup ran the key's own __eq__")
+
+    __hash__ = str.__hash__
+
+
+class _LoudPath(PurePosixPath):
+    """A path whose own methods would raise if the check ran them."""
+
+    def __str__(self) -> str:
+        raise AssertionError("the check ran the path's own __str__")
+
+    def __fspath__(self) -> str:
+        raise AssertionError("the check ran the path's own __fspath__")
+
+    def __hash__(self) -> int:
+        raise AssertionError("the check ran the path's own __hash__")
+
+    def __eq__(self, other: object) -> bool:
+        raise AssertionError("the check ran the path's own __eq__")
+
+
+class _PathMeta(type):
+    """A metaclass that raises for every read of a class attribute that is
+    not a special name, as ``PurePath.__str__`` reads ``parser``."""
+
+    def __getattribute__(cls, name: str) -> object:
+        if not name.startswith("__"):
+            raise AssertionError(f"the check read {name} through the metaclass")
+        return type.__getattribute__(cls, name)
+
+
+class _MetaPath(PurePosixPath, metaclass=_PathMeta):
+    pass
+
+
+class _FoldedPath(PurePosixPath):
+    """A POSIX path that pathlib compares as a Windows path."""
+
+    parser = _flavour = ntpath
+
+
+class _CachedPath(PurePosixPath):
+    """A path whose text is a property of its own."""
+
+    @property
+    def _str(self) -> str:
+        raise AssertionError("the check ran the path's own _str")
+
+
+class _AttributePath(PurePosixPath):
+    """A path whose attribute reads run its own code."""
+
+    def __getattribute__(self, name: str) -> object:
+        raise AssertionError(f"the check read the path's own {name}")
+
+
+def _text_not_str() -> PurePosixPath:
+    """One of pathlib's own paths whose cached text is a ``str`` subclass."""
+    path = PurePosixPath("n")
+    path._str = _EqualsRaises("n")  # type: ignore[attr-defined]
+    return path
+
+
 def _databases(**aliases: object) -> dict[str, Any]:
     return deployer(NEOLITH={"DATABASES": aliases})
 
 
 def _db_refusal(**aliases: object) -> list[str]:
     return refusal([*HOSTED, LEDGER, BILLING], _databases(**aliases)).splitlines()
+
+
+@pytest.mark.parametrize("key", ["MIRROR", "DEPENDENCIES", "NAME", "CHARSET"])
+def test_a_test_key_that_is_not_exactly_a_str_is_refused_before_any_lookup(
+    key: str,
+) -> None:
+    """Looking ``MIRROR``, ``DEPENDENCIES`` or ``NAME`` up in ``TEST`` would
+    run the ``__eq__`` of a ``str``-subclass key with the same hash (rule
+    K2); the key is refused by its type first, and the same key as an exact
+    ``str`` is judged by its own row.
+    """
+    entry = {**sqlite("b"), "TEST": {_EqualsRaises(key): None}}
+    assert databases_problems({"billing": entry}, ["billing"]) == [
+        "database billing: TEST: a key of type _EqualsRaises is not a setting's name"
+    ]
+    plain = databases_problems(
+        {"billing": {**sqlite("b"), "TEST": {key: None}}}, ["billing"]
+    )
+    assert len(plain) == (0 if key == "CHARSET" else 1)
 
 
 @pytest.mark.parametrize(
@@ -425,6 +516,15 @@ def _db_refusal(**aliases: object) -> list[str]:
         (
             {"billing": sqlite(b"b")},
             "database billing: NAME: expected a str or a path, got bytes",
+        ),
+        (
+            {"billing": sqlite(_LoudPath("b"))},
+            "database billing: NAME: _LoudPath is a subclass of a pathlib path; "
+            "give a str or a path of pathlib's own classes",
+        ),
+        (
+            {"billing": sqlite(_text_not_str())},
+            "database billing: NAME: a PurePosixPath that cannot be read as a path",
         ),
         (
             {"billing": {**sqlite("b"), "ATOMIC_REQUESTS": False}},
@@ -453,6 +553,11 @@ def _db_refusal(**aliases: object) -> list[str]:
             {"billing": {**sqlite("b"), "TEST": {"NAME": "t"}}},
             "database billing: TEST.NAME is not admitted yet; Django names the test "
             "database from NAME",
+        ),
+        (
+            {"billing": {**sqlite("b"), "TEST": {_EqualsRaises("NAME"): "t"}}},
+            "database billing: TEST: a key of type _EqualsRaises is not a "
+            "setting's name",
         ),
     ],
 )
@@ -871,6 +976,220 @@ def test_server_aliases_with_a_host_or_port_of_another_type_are_not_compared(
     assert configure(
         [*HOSTED, LEDGER, BILLING], _databases(ledger=shared, billing=dict(shared))
     )
+
+
+@pytest.mark.parametrize("path", [PurePosixPath, Path])
+def test_a_path_name_is_compared_by_its_text(path: type[PurePosixPath]) -> None:
+    """Two paths of one text are one database; a path and a ``str`` of the
+    same text are not, as ``PurePath.__eq__`` and ``str.__eq__`` say."""
+    server = {"ENGINE": "django.db.backends.postgresql", "NAME": path("n")}
+    assert _db_refusal(ledger=server, billing={**server, "NAME": path("n")}) == [
+        f"databases ledger and billing: {_ONE_SERVER}"
+    ]
+    assert configure(
+        [*HOSTED, LEDGER, BILLING],
+        _databases(ledger=server, billing={**server, "NAME": "n"}),
+    )
+
+
+def test_a_path_name_is_compared_as_paths_compare() -> None:
+    """Windows paths are equal ignoring case, and never equal a POSIX path
+    of the same text, as pathlib compares them.
+    """
+    server = {"ENGINE": "django.db.backends.postgresql"}
+    (found,) = _db_refusal(
+        ledger={**server, "NAME": PureWindowsPath("A")},
+        billing={**server, "NAME": PureWindowsPath("a")},
+    )
+    assert found.startswith("databases ledger and billing: both name ")
+    assert configure(
+        [*HOSTED, LEDGER, BILLING],
+        _databases(
+            ledger={**server, "NAME": PurePosixPath("a")},
+            billing={**server, "NAME": PureWindowsPath("a")},
+        ),
+    )
+
+
+_PATH_SUBCLASSES = {
+    "_LoudPath": _LoudPath,
+    "_MetaPath": _MetaPath,
+    "_FoldedPath": _FoldedPath,
+    "_CachedPath": _CachedPath,
+    "_AttributePath": _AttributePath,
+}
+
+
+@pytest.mark.parametrize(("kind", "path"), _PATH_SUBCLASSES.items())
+@pytest.mark.parametrize("engine", [SQLITE, "django.db.backends.postgresql"])
+def test_a_subclass_of_a_path_is_refused_without_running_its_code(
+    engine: str, kind: str, path: type[PurePosixPath]
+) -> None:
+    """``PurePath.__str__`` reads attributes and methods any subclass may
+    replace, so a ``NAME`` that is a subclass of a path is refused by its
+    type, and none of its code runs (rule K2), with the alias's other
+    refusals; one of ``pathlib``'s own classes is admitted.
+    """
+    entry = {"ENGINE": engine, "NAME": path("n"), "TEST": {"NAME": "t"}}
+    test_name = (
+        "database default: TEST.NAME is not admitted yet; Django names the test "
+        "database from NAME"
+    )
+    assert databases_problems({"default": entry}, []) == [
+        f"database default: NAME: {kind} is a subclass of a pathlib path; give a "
+        "str or a path of pathlib's own classes",
+        test_name,
+    ]
+    own = {**entry, "NAME": Path("n")}
+    assert databases_problems({"default": own}, []) == [test_name]
+
+
+class _Probe(str):
+    """Text whose own code records each call, and raises."""
+
+    __slots__ = ()
+    calls: list[str] = []  # noqa: RUF012  # one list shared by every probe
+
+    def _ran(self, *args: object) -> NoReturn:
+        _Probe.calls.append("ran")
+        raise RuntimeError("the check ran the text's own code")
+
+    __bool__ = __len__ = __getitem__ = __eq__ = __ne__ = __iter__ = _ran
+    __hash__ = str.__hash__
+
+
+def _tampered(slot: str, value: object) -> Callable[[], PurePosixPath]:
+    def build() -> PurePosixPath:
+        path = PurePosixPath("n")
+        setattr(path, slot, value)
+        return path
+
+    return build
+
+
+# A path of pathlib's own class whose parts are not exact text: what its
+# ordinary constructors keep, and slots set by hand.
+_HELD: dict[str, Callable[[], PurePath]] = {
+    "constructor": lambda: PurePosixPath(_Probe("db.sqlite3")),
+    "join": lambda: Path("data") / _Probe("db.sqlite3"),
+    "_drv": _tampered("_drv", _Probe("")),
+    "_tail_cached": _tampered("_tail_cached", [_Probe("n")]),
+    "tail list subclass": _tampered("_tail_cached", type("Tail", (list,), {})()),
+    "_str": _tampered("_str", _Probe("n")),
+}
+
+
+@pytest.mark.parametrize("held", _HELD.values(), ids=_HELD.keys())
+@pytest.mark.parametrize("engine", [SQLITE, "django.db.backends.postgresql"])
+def test_a_path_holding_text_that_is_not_exactly_a_str_is_refused(
+    engine: str, held: Callable[[], PurePath]
+) -> None:
+    """An exact ``pathlib`` class does not make what it holds exact:
+    ``str()`` parses the parts the constructor kept. Each slot is judged by
+    its type before the text is read, so none of their code runs (rule K2),
+    in the check and in ``sqlite_path``, which Boot calls."""
+    _Probe.calls.clear()
+    name = held()
+    kind = type(name).__name__
+    assert databases_problems({"default": {"ENGINE": engine, "NAME": name}}, []) == [
+        f"database default: NAME: a {kind} that cannot be read as a path"
+    ]
+    assert sqlite_path(name) == ""
+    assert _Probe.calls == []
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: Path.cwd(),
+        lambda: Path("a") / "b" / "c.sqlite3",
+        lambda: Path.cwd().resolve().parent,
+        lambda: PureWindowsPath("C:/data/db"),
+        lambda: next(iter(Path(__file__).parent.iterdir())),
+        lambda: next(Path(__file__).parent.glob("*.py")),
+    ],
+    ids=["cwd", "joined", "resolved parent", "windows", "iterdir", "glob"],
+)
+def test_ordinary_paths_are_admitted(build: Callable[[], PurePath]) -> None:
+    """The nearest admitted shapes: paths that pathlib builds itself, read
+    once already, hashed, or not."""
+    for touch in (lambda path: None, str, hash):
+        path = build()
+        touch(path)
+        server = {"ENGINE": "django.db.backends.postgresql", "NAME": path}
+        assert databases_problems({"default": server}, []) == []
+        assert databases_problems({"default": sqlite(path)}, []) == []
+
+
+def test_posix_paths_that_differ_only_in_case_are_two_databases() -> None:
+    """``PurePath.__eq__`` folds case for a Windows path only."""
+    server = {"ENGINE": "django.db.backends.postgresql"}
+    assert configure(
+        [*HOSTED, LEDGER, BILLING],
+        _databases(
+            ledger={**server, "NAME": PurePosixPath("/srv/A")},
+            billing={**server, "NAME": PurePosixPath("/srv/a")},
+        ),
+    )
+
+
+@pytest.mark.parametrize("engine", [SQLITE, "django.db.backends.postgresql"])
+def test_a_path_whose_cached_text_is_not_a_str_is_refused(engine: str) -> None:
+    entry = {"ENGINE": engine, "NAME": _text_not_str()}
+    assert databases_problems({"default": entry}, []) == [
+        "database default: NAME: a PurePosixPath that cannot be read as a path"
+    ]
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["a\x00b", "file:a%00b", "\ud800", PurePosixPath("a\x00b")],
+    ids=["NUL", "NUL in a file URI", "lone surrogate", "path"],
+)
+def test_a_sqlite_name_that_cannot_be_resolved_is_refused(name: object) -> None:
+    """SQLite opens no file for such a name, and resolving it raises; the
+    same text on a server backend is compared as written.
+    """
+    kind = type(name).__name__
+    assert databases_problems({"default": sqlite(name)}, []) == [
+        f"database default: NAME: a {kind} that cannot be read as a path"
+    ]
+    server = {"ENGINE": "django.db.backends.postgresql", "NAME": name}
+    assert databases_problems({"default": server}, []) == []
+
+
+@pytest.mark.parametrize("error", [RecursionError, OSError, ValueError])
+def test_a_sqlite_name_whose_resolution_raises_is_refused(
+    monkeypatch: pytest.MonkeyPatch, error: type[Exception]
+) -> None:
+    """On Python 3.12, ``os.path.realpath`` raises ``RecursionError`` for a
+    long chain of symbolic links; any error while resolving is a refusal.
+    """
+
+    def realpath(path: str, **options: object) -> str:
+        raise error
+
+    monkeypatch.setattr(os.path, "realpath", realpath)
+    assert databases_problems({"default": sqlite("n")}, []) == [
+        "database default: NAME: a str that cannot be read as a path"
+    ]
+
+
+def test_a_lazy_path_name_is_refused_by_type_without_being_evaluated() -> None:
+    """A proxy is judged by its own type, so its set-up never runs; SQLite
+    cannot open it either (``os.fspath`` refuses it).
+    """
+    calls: list[int] = []
+
+    def setup() -> Path:
+        calls.append(1)
+        return Path("/srv/x.db")
+
+    found = databases_problems({"default": sqlite(SimpleLazyObject(setup))}, [])
+    assert found == [
+        "database default: NAME: expected a str or a path, got SimpleLazyObject"
+    ]
+    assert calls == []
 
 
 @pytest.mark.parametrize("name", [":memory:", Path(":memory:")], ids=["str", "path"])
