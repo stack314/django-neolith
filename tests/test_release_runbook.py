@@ -10,9 +10,11 @@ is checked against the runbook steps that follow it.
 """
 
 import json
+import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -221,11 +223,31 @@ def test_every_path_g7_names_as_a_checker_exists() -> None:
         assert (ROOT / path).exists(), f"G7 names {path}, which does not exist"
 
 
+# Boots Django on the test settings and resolves the URLconf, as the first
+# request test does, imports the conftests named in argv, and prints every
+# non-empty module under tests/ that this loaded. "Loads" is transitive, so the
+# runtime is asked rather than predicted from file names.
+_LOADS = """
+import importlib, os, sys
+import django
+django.setup()
+from django.urls import get_resolver
+get_resolver().url_patterns
+for name in sys.argv[1:]:
+    importlib.import_module(name)
+tests = os.path.join(os.getcwd(), "tests") + os.sep
+for module in list(sys.modules.values()):
+    path = os.path.abspath(getattr(module, "__file__", None) or "")
+    if path.startswith(tests) and os.path.getsize(path):
+        print(os.path.relpath(path, os.getcwd()))
+"""
+
+
 def _checked_by_ci() -> list[str]:
     """Every file outside the package that decides whether CI passes.
 
-    Found from what CI and its tools load without being asked, not listed by
-    hand, so that a conftest or template added later is found too.
+    Found from what CI and its tools load without being asked, and what those
+    load in turn, not listed by hand, so that a module added later is found too.
     """
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     run = sorted(set(re.findall(r"\b(scripts/[\w./-]+\.py)", workflow)))
@@ -242,7 +264,15 @@ def _checked_by_ci() -> list[str]:
     )
     assert settings, "pyproject.toml names no settings module for pytest"
     module = settings.group(1).replace(".", "/") + ".py"
-    files = [*run, *conftests, module, "tests/spec_trace.toml"]
+    loaded = subprocess.run(  # noqa: S603 (our own code, fixed arguments)
+        [sys.executable, "-c", _LOADS, *(c[:-3].replace("/", ".") for c in conftests)],
+        cwd=ROOT,
+        env={**os.environ, "DJANGO_SETTINGS_MODULE": settings.group(1)},
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    files = [*run, *conftests, module, *loaded, "tests/spec_trace.toml"]
     if "scripts/docs.py" in run:
         # Sphinx runs the site's configuration and extensions as code, renders
         # every page through its templates, and fails on any warning.
