@@ -23,11 +23,16 @@ import textwrap
 from html.parser import HTMLParser
 from pathlib import Path
 
+import pytest
 from markdown_it import MarkdownIt
+from markdown_it.common.utils import unescapeAll
+from markdown_it.token import Token
 
 README = Path(__file__).resolve().parents[1] / "README.md"
 _HEADER = re.compile(r"^# (\S+\.py)$")
 _ABSOLUTE = re.compile(r"^https://")
+# The language names GitHub reads as Python (its first-word rule, lower-cased).
+_PYTHON = frozenset({"python", "python3", "py"})
 _START = "<!-- neolith-example:start -->"
 _END = "<!-- neolith-example:end -->"
 
@@ -73,12 +78,25 @@ print("view", response.status_code, response.content.decode())
 """
 
 
-def readme_files() -> dict[str, str]:
-    """The files the README's Python blocks write, by path."""
+def is_python_fence(token: Token) -> bool:
+    """Whether a fence is a Python block: the first word of its info string.
+
+    CommonMark takes the first word of the info string as the language and
+    leaves the rest (attributes, a title) to the renderer. markdown-it-py keeps
+    the whole string in ``token.info``, as written but for the backslash
+    escapes and entities the renderer resolves, so this resolves them too.
+    """
+    words = unescapeAll(token.info).split(maxsplit=1)
+    return token.type == "fence" and bool(words) and words[0].lower() in _PYTHON
+
+
+def readme_files(text: str | None = None) -> dict[str, str]:
+    """The files the Python blocks write, by path (the README's, by default)."""
     files: dict[str, str] = {}
-    tokens = MarkdownIt("commonmark").parse(README.read_text(encoding="utf-8"))
-    for token in tokens:
-        if token.type != "fence" or token.info.strip() != "python":
+    if text is None:
+        text = README.read_text(encoding="utf-8")
+    for token in MarkdownIt("commonmark").parse(text):
+        if not is_python_fence(token):
             continue
         path: str | None = None
         for line in token.content.splitlines(keepends=True):
@@ -154,7 +172,7 @@ def python_fence_lines(text: str) -> list[int]:
     return [
         token.map[0]
         for token in MarkdownIt("commonmark").parse(text)
-        if token.type == "fence" and token.info.strip() == "python" and token.map
+        if is_python_fence(token) and token.map
     ]
 
 
@@ -226,3 +244,42 @@ def test_relative_links_are_found_in_markdown_and_html() -> None:
         '<p><img src="x.svg"></p>\n'
     )
     assert sorted(links(sample)) == ["LICENSE", "VISION.md", "c.png", "x.svg"]
+
+
+@pytest.mark.parametrize(
+    "info",
+    [
+        "python",
+        "py",
+        "python3",
+        "Python",
+        "  python  ",
+        'python title="x"',
+        "py {1,3}",
+        "python\ttitle=x",
+        "pyth&#111;n",
+    ],
+)
+@pytest.mark.parametrize("fence", ["```", "~~~", "````"])
+def test_any_python_fence_is_a_python_block(fence: str, info: str) -> None:
+    sample = f"{fence}{info}\n# a.py\nx = 1\n{fence}\n"
+    assert readme_files(sample) == {"a.py": "x = 1\n"}
+    assert python_fence_lines(sample) == [0]
+
+
+@pytest.mark.parametrize(
+    "info", ["", "console", "text python", "pythonic", "python-3", "ipython", "pyc"]
+)
+@pytest.mark.parametrize("fence", ["```", "~~~"])
+def test_other_fences_are_not_python_blocks(fence: str, info: str) -> None:
+    sample = f"{fence}{info}\n# a.py\nx = 1\n{fence}\n"
+    assert readme_files(sample) == {}
+    assert python_fence_lines(sample) == []
+
+
+def test_a_python_block_outside_the_markers_is_found_in_any_spelling() -> None:
+    sample = (
+        f"{_START}\n\n~~~py title=x\nx = 1\n~~~\n\n{_END}\n\n```python3\ny = 2\n```\n"
+    )
+    start, end = marker_lines(sample)[_START][0], marker_lines(sample)[_END][0]
+    assert [n for n in python_fence_lines(sample) if not start < n < end] == [8]
