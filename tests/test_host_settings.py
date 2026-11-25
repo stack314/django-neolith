@@ -666,7 +666,7 @@ class _Float(float):
         raise AssertionError("the comparison ran the value's own __int__")
 
 
-class _Opaque:
+class _Sealed:
     """A value whose own comparison and hash would raise if they ran."""
 
     def __hash__(self) -> int:
@@ -711,7 +711,7 @@ def _forms(groups: dict[str, list[object]]) -> list[tuple[str, object, object]]:
 
 
 def _server(key: str, value: object) -> dict[str, object]:
-    entry = {"ENGINE": "django.db.backends.postgresql", "NAME": "n"}
+    entry: dict[str, object] = {"ENGINE": "django.db.backends.postgresql", "NAME": "n"}
     entry["HOST" if key == "PORT" else "PORT"] = "5"
     if value is not _ABSENT:
         entry[key] = value
@@ -769,11 +769,11 @@ def test_server_aliases_with_forms_read_as_two_values_build(
         ("HOST", b"db"),
         ("HOST", ["db"]),
         ("HOST", 5),
-        ("HOST", _Opaque()),
+        ("HOST", _Sealed()),
         ("PORT", b"5432"),
         ("PORT", ["5432"]),
         ("PORT", 5432j),
-        ("PORT", _Opaque()),
+        ("PORT", _Sealed()),
     ],
     ids=[
         "HOST bytes",
