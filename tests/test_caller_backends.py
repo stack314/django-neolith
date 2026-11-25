@@ -52,6 +52,7 @@ from neolith._token import Secret, check, decode, mint, secret_problem
 from neolith.callers import CallerBackend, CredentialRefused, SharedSecretBackend
 from neolith.principals import PrincipalBackend
 from tests import host_apps
+from tests.small_stack import on_a_small_stack
 
 HERE = "tests.test_caller_backends"
 SETTING = 'NEOLITH["CALLER_BACKENDS"]'
@@ -377,23 +378,16 @@ def test_many_sibling_arrays_are_not_nesting(sibling: str) -> None:
     assert check(bearer(token), IDENTITY, KEYS, NOW) == (None, _token.PARTS)
 
 
+def _check_a_deep_first_part() -> list[str]:
+    return [repr(check(bearer(signed(raw_head=_nested(9000))), IDENTITY, KEYS, NOW))]
+
+
 @pytest.mark.spec("HTTP-7")
 def test_a_deep_first_part_abstains_on_a_thread_with_a_small_stack() -> None:
     """The depth is judged before the json module reads the text, whose
     recursive scanner could otherwise exhaust a 1 MB thread stack, as the
     official Alpine images give every thread."""
-    value = bearer(signed(raw_head=_nested(9000)))
-    found: list[object] = []
-    previous = threading.stack_size(1024 * 1024)
-    try:
-        worker = threading.Thread(
-            target=lambda: found.append(check(value, IDENTITY, KEYS, NOW))
-        )
-        worker.start()
-        worker.join()
-    finally:
-        threading.stack_size(previous)
-    assert found == [(None, None)]
+    assert on_a_small_stack(_check_a_deep_first_part) == (0, "", ["(None, None)"])
 
 
 # Recognition: the backend abstains on anything else (HTTP-7, HTTP-11)
