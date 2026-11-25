@@ -79,6 +79,7 @@ __all__ = [
     "schema_messages",
     "shadow_messages",
     "state_messages",
+    "static_messages",
 ]
 
 _log = logging.getLogger("neolith.host")
@@ -234,15 +235,46 @@ def _warn_again() -> None:
     """Log each ``neolith.W001`` that set-up did not log, unless silenced: an
     admin registered while the URLconf's modules loaded.
     """
+    for message in _again():
+        with contextlib.suppress(Exception):
+            _log.warning("(%s) %s", message.id, message.msg)
+
+
+def _again() -> list[checks.CheckMessage]:
+    """Each ``neolith.W001`` that set-up did not log and that is not
+    silenced.
+    """
     from neolith._host import _current
 
     host = _current()
     logged = host.warned if host is not None else frozenset()
-    for message in _checks.admin_check():
-        if message.msg in logged or message.is_silenced():
-            continue
-        with contextlib.suppress(Exception):
-            _log.warning("(%s) %s", message.id, message.msg)
+    return [
+        message
+        for message in _checks.admin_check()
+        if message.msg not in logged and not message.is_silenced()
+    ]
+
+
+def static_messages() -> tuple[list[str], list[checks.CheckMessage]]:
+    """Boot's checks that read no database, for the check before
+    deployment (ADR 0030 Decision 7, phase 4): what is wrong with
+    ``ROOT_URLCONF``, each a line; and the messages of the other checks:
+    ``neolith.W001`` again, as Boot warns, ``neolith.W003`` when
+    ``ROOT_URLCONF`` imports, each unless silenced, and the checks of the
+    code (``code_messages``) over the hosted apps with a database. Keeps no
+    outcome and marks nothing booted.
+    """
+    problems = _urlconf_problems()
+    found = _again()
+    if not problems:
+        found += [m for m in shadow_messages() if not m.is_silenced()]
+    hosted: list[str] = []
+    for config in global_apps.get_app_configs():
+        declaration = declaration_of(type(config))
+        if declaration is not None and "database" in declaration.resources:
+            hosted.append(config.label)
+    found += code_messages(hosted, [])[0]
+    return problems, found
 
 
 def shadow_messages() -> list[checks.CheckMessage]:

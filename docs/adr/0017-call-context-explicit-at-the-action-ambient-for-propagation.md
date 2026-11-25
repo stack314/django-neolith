@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - Narrowed by [0027](0027-a-caller-backend-names-the-calling-app-over-http.md) (Decision 11)
 - Narrowed by [0033](0033-eight-points-of-the-http-transport-settled-for-0-1.md) (Decision 1)
+- Narrowed by [0030](0030-the-boundary-check-uses-the-standard-library-only.md) (Decision 9)
 - **Accepted:** 2026-11-11
 - **Date:** 2026-11-09
 
