@@ -3,7 +3,7 @@
 - **Status:** Proposed
 - **Date:** 2026-11-26
 - **Accepted by:** the pull request that carries the first code built on it. In #15's plan that is step 8's task 4, which adds `examples/` and its boundary check.
-- **Narrows:** [0032](0032-the-conformance-suite-runs-each-case-once-per-transport.md) (the `suite` member of Decision 9's run, Decision 3 here). When this record is accepted, 0032 gains `Narrowed by 0037 (Decision 3)` under its status (D2); nothing else in it changes.
+- **Narrows:** [0032](0032-the-conformance-suite-runs-each-case-once-per-transport.md) (the `suite` member of Decision 9's run, Decision 3 here) and [0017](0017-call-context-explicit-at-the-action-ambient-for-propagation.md) (one sentence of its Consequences, Decision 4 here). When this record is accepted, each gains `Narrowed by 0037 (Decision k)` under its status (D2), with the Decision it names above; nothing else in either changes.
 - **Answers:** 0032's open question 3, which is also the seam part of [0014](0014-pluggable-connector-transports.md)'s open question 4, for 0.1 (Decision 2).
 - **Leaves unchanged:** [0031](0031-a-contract-version-is-routed-by-single-unless-local-first-is-named.md) Decision 3, whose arrangement the example builds as written; 0032's four parts and their case files; every requirement ID.
 
@@ -24,7 +24,7 @@ Roadmap step 8 (#15) is "Two small example apps under `examples/` showing attach
 4. **Spec 06 already admits a requirement with no case.** "02's TRN-73, the share of the connect phase, and TRN-74, the text of a `timeout` after a move, have no case: no case on one machine holds a connect phase open, or lets a deadline pass after a move without waiting for it. The implementation's own tests verify them." The conformance run is written from the whole test run's report (`scripts/spec_trace.py --conformance`), so a test outside `tests/conformance/` that cites an ID counts in the same run.
 5. **`neolith run` finds modules from its working directory.** It puts that directory on `sys.path` (`src/neolith/_cli.py`), so an example project runs from its own directory, and a test runs it from a copy in `tmp_path`.
 6. **The packages.** The wheel carries `src/neolith` only (`[tool.hatch.build.targets.wheel]`, `packages = ["src/neolith"]`). The sdist carries an anchored list of top-level paths, and `scripts/sdist_check.py` holds a built sdist to that list.
-7. **The declaration admits an app that accepts no principal.** `principal_from=()` is admitted; the refusal's own advice says "or write principal_from=() for none" (`src/neolith/_declaration.py`, `_check_principal_from`). A closed host "cannot use `auth`, `sessions`, `admin` or any other battery with tables in step 4" (0022, Consequences), so a 0.1 example host has no signed-in user to act for.
+7. **The declaration admits an app that accepts no principal.** `principal_from=()` is admitted; the refusal's own advice says "or write principal_from=() for none" (`src/neolith/_declaration.py`, `_check_principal_from`). A 0.1 host can still carry a principal without a battery: through a project's own `PrincipalBackend` (0023 Decision 2), or through `command_scope(principal=...)` for a command or background work. Whether a caller sends one is the deployment's choice, not something a closed host forces.
 
 ## Options
 
@@ -71,12 +71,14 @@ In spec 06, "00" links to the document, as "02" does in the paragraph before. Th
 - **Rules.** It follows the code rules (CONTRIBUTING, *Code*: "Tests and examples follow them too"). Its apps import each other's contract package only (K8), and `neolith check` holds them to that. Its host modules read every secret and every address from the environment (K9), and a host module that needs a secret and finds none stops at import with a message that names the variable, never with a bare `KeyError`. A host that takes no calls over HTTP needs no secret.
 - **Names.** The example's host modules and environment variables belong to the example. They are not neolith settings, and neolith reads none of them. The example adds no public name, setting, command or dependency to the `neolith` package.
 - **Version words.** The example's guide names no version or status word, so the release runbook's search for them (`docs/releasing.md`) has nothing to change there.
-- **The principal.** The providing app declares `principal_from=()`. The caller acts on no user's behalf: a 0.1 example host has no auth battery (fact 7), so there is no principal to carry. 0017's sentence that the 0.1 skeleton "includes those entries" is an expectation in its Consequences, written before 0022 closed hosts to batteries with tables; its rule, that apps calling each other on behalf of users list each other, is unchanged and does not apply here. The guide shows where the entry goes when a caller sends a principal. 0017 gains no line.
+- **The principal.** The providing app declares `principal_from=()`. This is the example's choice: its caller acts on no user's behalf, and its hosts configure no principal backend, so the example shows a change of mode and nothing more (fact 7). The guide shows where the entry goes when a caller sends a principal.
+
+  **The narrowing.** 0017, Consequences: "The roadmap's 0.1 skeleton, where two apps call each other, includes those entries." The 0.1 skeleton is this example, and its apps call each other on no user's behalf, so it includes no such entry. The sentence before it, that "Apps that call each other on behalf of users list each other in their declarations", is unchanged, and the README and the test apps keep showing those entries.
 
 ## Consequences
 
 - When this record is accepted, OVR-5 leaves `[not-tested]` once its test passes, and spec 00 joins `enforce`, as 0032 Decision 10's table assigns to step 8. django-neolith's run can then report `conforms: true`.
-- 0032 gains `Narrowed by 0037 (Decision 3)`. `scripts/spec_trace.py` hashes `examples/` into `suite.tests`, with a test, in the pull request that builds the OVR-5 test.
+- 0032 gains `Narrowed by 0037 (Decision 3)`, and 0017 gains `Narrowed by 0037 (Decision 4)`. `scripts/spec_trace.py` hashes `examples/` into `suite.tests`, with a test, in the pull request that builds the OVR-5 test.
 - `docs/open-questions.md` gains the item of Decision 2. `over_http` stays private and unchanged.
 - The sdist gains `/examples`; the wheel is unchanged. Ruff and mypy run over `examples/` as over `tests/`.
 - A run's `suite.tests` changes when the example changes, as it does for any file under `tests/`.
@@ -88,5 +90,5 @@ Follows principles 8 (*one test suite over many code paths*), 11 (*specification
 ## References
 
 - Spec [00](../../spec/00-overview.md), OVR-4 and OVR-5; spec [06](../../spec/06-conformance.md), the paragraph on TRN-73 and TRN-74 and *Claiming conformance*.
-- [0031](0031-a-contract-version-is-routed-by-single-unless-local-first-is-named.md) Decision 3; [0032](0032-the-conformance-suite-runs-each-case-once-per-transport.md) Decisions 4, 6, 9 and 10 and open question 3; [0014](0014-pluggable-connector-transports.md) Decisions 6 and 7 and open question 4.
+- [0031](0031-a-contract-version-is-routed-by-single-unless-local-first-is-named.md) Decision 3; [0032](0032-the-conformance-suite-runs-each-case-once-per-transport.md) Decisions 4, 6, 9 and 10 and open question 3; [0014](0014-pluggable-connector-transports.md) Decisions 6 and 7 and open question 4; [0017](0017-call-context-explicit-at-the-action-ambient-for-propagation.md), Consequences; [0023](0023-a-request-principal-comes-from-ordered-backends.md) Decision 2.
 - Roadmap step 8 and its plan, #15.
