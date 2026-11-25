@@ -247,23 +247,29 @@ class NeolithAppConfig(AppConfig):
 
     The check runs at Declare, when the class is defined, from
     ``__init_subclass__``. It reads the names each class holds, not what
-    code does. Code in a mixin, a base class or a metaclass can still give
-    the class a ``path`` or ``default`` that no body writes, and nothing
-    refuses it. A ``path`` can come from an ``__init__``, a ``__getattr__``,
+    code does. Code in a mixin, a base class, a metaclass or a decorator can
+    still give the class a ``path`` or ``default`` that no body writes, and
+    nothing refuses it. Django reads ``path`` on the config instance, so a
+    ``path`` can come from code such as an ``__init__``, a ``__getattr__``,
     an ``__init_subclass__``, a private method Django calls such as
-    ``_path_from_module``, a metaclass property, or a later rebinding.
+    ``_path_from_module``, a metaclass's ``__init__``, a class decorator, or
+    a later rebinding; a metaclass property does not reach the instance.
     Django reads ``default`` from the class only, so a ``default`` counts
-    only when class-level code changes it: an ``__init_subclass__``, a
-    metaclass property, or a later rebinding of the declaring class itself.
-    A ``default`` that only an instance holds, or that a mixin gets later,
-    behind the ``default`` the declaring class holds, has no effect. Past
-    the check, neolith reads neither value, and the snapshot holds neither.
-    Such a ``path`` changes only where Django looks for the app's
-    templates, static files, locale files, fixtures and commands, and where
-    ``makemigrations`` puts the app's migrations package when it does not
-    exist yet. A class ``default`` that reads false when the host's settings
-    builder reads the app makes Django choose a plain config, and the
-    builder refuses the app as having no declaration.
+    only when class-level code changes it, such as an ``__init_subclass__``,
+    a metaclass (its ``__init__``, a property or ``__getattribute__``), a
+    class decorator, a body helper's ``__set_name__``, or a later rebinding
+    of the declaring class itself. A ``default`` that only an instance
+    holds, or that a mixin gets later, behind the ``default`` the declaring
+    class holds, has no effect. Past the check, neolith reads neither value,
+    and the snapshot holds neither. Such a ``path`` changes only where
+    Django looks for the app's templates, static files, locale files,
+    fixtures and commands, and where ``makemigrations`` puts the app's
+    migrations package when it does not exist yet. A class ``default`` that
+    reads false when the host's settings builder reads the app works as
+    ``default = False`` written in the body: Django picks another config
+    class in the ``apps`` module if one qualifies, or else a plain config,
+    and the builder refuses the app as having no declaration unless the
+    class Django picks declares it.
 
     A declaration outside this form raises ``DeclarationError`` when the class
     is defined, listing every refusal.
