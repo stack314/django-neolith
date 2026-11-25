@@ -5,7 +5,8 @@ release branch after GitHub deleted it: moved, recovered, or left alone. The
 sorting is a ``jq`` program in the runbook, run here on the shapes of
 pull request the REST API returns, so that a merged pull request or one closed
 on purpose is never reopened. The text around it is checked for the claims a
-reader acts on.
+reader acts on, and CONTRIBUTING G7's rule for merging into a release branch
+is checked against the runbook steps that follow it.
 """
 
 import json
@@ -16,7 +17,9 @@ from pathlib import Path
 
 import pytest
 
-RUNBOOK = Path(__file__).resolve().parents[1] / "docs" / "releasing.md"
+ROOT = Path(__file__).resolve().parents[1]
+RUNBOOK = ROOT / "docs" / "releasing.md"
+CONTRIBUTING = ROOT / "CONTRIBUTING.md"
 BRANCH = "release/0.1.0a4"
 DELETED = ["base_ref_deleted", "closed"]
 # The events of #147 (0.1.0a3), oldest first, up to its first reopen.
@@ -179,3 +182,71 @@ def test_deleting_the_open_branch_closes_its_pull_requests() -> None:
     text = _section(10)
     assert "closes or moves" not in text
     assert "closes every open pull request into it instead of moving them" in text
+
+
+def _rule(name: str) -> str:
+    text = CONTRIBUTING.read_text(encoding="utf-8")
+    found = re.search(rf"^- \*\*{name}\.\*\* [^\n]*", text, re.M)
+    assert found, f"CONTRIBUTING has no rule {name}"
+    return found.group(0)
+
+
+def test_g7_holds_merges_until_ci_passed_on_the_tip() -> None:
+    rule = _rule("G7")
+    assert "current tip" in rule
+    assert "While that tip fails" in rule
+    assert "Closing and reopening" in rule
+    assert "keeps the approval" in rule
+    assert "re-run" in rule
+    # The known gap is written down, not hidden.
+    assert "can still turn the tip red once" in rule
+
+
+def test_every_path_g7_names_as_a_checker_exists() -> None:
+    listed = re.search(r"a checker \(([^)]*)\)", _rule("G7"))
+    assert listed, "G7 does not list what counts as CI or a checker"
+    paths = re.findall(r"`([^`]+)`", listed.group(1))
+    assert paths
+    for path in paths:
+        assert (ROOT / path).exists(), f"G7 names {path}, which does not exist"
+
+
+def test_every_file_ci_runs_is_a_checker_g7_names() -> None:
+    paths = re.findall(r"`([^`]+)`", _rule("G7"))
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    run = sorted(set(re.findall(r"\b(scripts/[\w./-]+\.py)", workflow)))
+    assert run, "ci.yml runs no script under scripts/"
+    for script in [*run, "tests/conftest.py", "tests/spec_trace.toml"]:
+        assert any(script.startswith(p) for p in paths), f"G7 misses {script}"
+
+
+def test_section_8_retargets_before_it_closes_and_reopens() -> None:
+    text = _section(8)
+    retargets = [m.start() for m in re.finditer(r'-f base="\$NEXT_BRANCH"', text)]
+    closes = [m.start() for m in re.finditer(r"-f state=closed", text)]
+    assert retargets
+    assert closes
+    assert max(retargets) < min(closes), (
+        "a run started before the retarget tests the old base"
+    )
+    step = re.search(r"- \[ \] Run CI again[^\n]*", text)
+    assert step
+    assert "retarget first, then close and reopen" in step.group(0)
+
+
+def test_the_contributor_comments_explain_the_reopen() -> None:
+    text = _section(8)
+    step = text[text.index("Leave a comment for the contributor") :].split("\n- [ ]")[0]
+    bodies = re.findall(r'body="([^"]+)"|instead: `([^`]+)`', step)
+    assert len(bodies) == 2
+    for body in ("".join(pair) for pair in bodies):
+        assert "closed and reopened" in body
+        assert "only to run CI" in body
+
+
+def test_setup_says_why_there_is_no_queue_and_no_up_to_date_rule() -> None:
+    text = _section(10)
+    line = re.search(r"- \*\*No merge queue[^\n]*", text)
+    assert line, "section 10 does not say why there is no merge queue"
+    for words in ("up to date", "G7", "G5", "merge method", "dismissed on push"):
+        assert words in line.group(0)
