@@ -233,18 +233,21 @@ def test_output_held_open_past_the_host_fails_the_end_and_close_returns(
         assert "still open" in str(failed.value)
         assert "this host leaves its output open" in str(failed.value)
         host.close()
-        assert host.process.stdout is not None
-        assert host.process.stderr is not None
-        assert not host.process.stdout.closed
-        assert not host.process.stderr.closed
+        assert _closed(host) == [False, False]
     finally:
         if held.exists():
             os.kill(int(held.read_text(encoding="utf-8")), signal.SIGKILL)
         for reader in host._readers:
             reader.join()
         host.close()
-    assert host.process.stdout.closed
-    assert host.process.stderr.closed
+    assert _closed(host) == [True, True]
+
+
+def _closed(host: serving.Host) -> list[bool]:
+    return [
+        stream is None or stream.closed
+        for stream in (host.process.stdout, host.process.stderr)
+    ]
 
 
 def test_a_host_killed_by_close_is_gone(tiny: tuple[Path, dict[str, str]]) -> None:
