@@ -202,6 +202,9 @@ def _rule(name: str) -> str:
         "a re-run does not count, since it tests the old base",
         # The known gap is written down, not hidden.
         "can still turn the tip red once; this rule then holds the next merge",
+        # Any pull request checked on an older tip, not only one that predates
+        # a new check: a change on the base can break it without touching it.
+        "whose checks ran on an older tip meets every change since then",
     ],
 )
 def test_g7_holds_merges_until_ci_passed_on_the_tip(clause: str) -> None:
@@ -219,16 +222,36 @@ def test_every_path_g7_names_as_a_checker_exists() -> None:
 
 
 def _checked_by_ci() -> list[str]:
-    """Every file outside the package that decides whether CI passes."""
+    """Every file outside the package that decides whether CI passes.
+
+    Found from what CI and its tools load without being asked, not listed by
+    hand, so that a conftest or template added later is found too.
+    """
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     run = sorted(set(re.findall(r"\b(scripts/[\w./-]+\.py)", workflow)))
     assert run, "ci.yml runs no script under scripts/"
-    files = [*run, "tests/conftest.py", "tests/spec_trace.toml"]
+    # pytest loads every conftest under the test paths, and pytest-django the
+    # settings module pyproject.toml names, for every test.
+    conftests = sorted(
+        p.relative_to(ROOT).as_posix() for p in ROOT.glob("tests/**/conftest.py")
+    )
+    settings = re.search(
+        r'^DJANGO_SETTINGS_MODULE = "([\w.]+)"',
+        (ROOT / "pyproject.toml").read_text(encoding="utf-8"),
+        re.M,
+    )
+    assert settings, "pyproject.toml names no settings module for pytest"
+    module = settings.group(1).replace(".", "/") + ".py"
+    files = [*run, *conftests, module, "tests/spec_trace.toml"]
     if "scripts/docs.py" in run:
-        # Sphinx runs the site's configuration and extensions as code, and the
-        # build fails on any warning they raise.
+        # Sphinx runs the site's configuration and extensions as code, renders
+        # every page through its templates, and fails on any warning.
         site = ROOT / "docs" / "site"
-        code = [site / "conf.py", *sorted((site / "_ext").glob("*.py"))]
+        code = [
+            site / "conf.py",
+            *sorted((site / "_ext").glob("*.py")),
+            *sorted((site / "_templates").glob("*")),
+        ]
         files += [path.relative_to(ROOT).as_posix() for path in code]
     return files
 
@@ -298,3 +321,19 @@ def test_setup_says_why_there_is_no_queue_and_no_up_to_date_rule() -> None:
     assert line, "section 10 does not say why there is no merge queue"
     for words in ("up to date", "G7", "G5", "merge method", "dismissed on push"):
         assert words in line.group(0)
+
+
+def test_setup_says_how_to_check_g7() -> None:
+    # G7 rests on two facts: the tip's run passed, and a pull request's run
+    # came after the tip landed. Each is read with one command.
+    line = re.search(r"- \*\*Checking G7\*\*[^\n]*", _section(10))
+    assert line, "section 10 does not say how to check G7"
+    text = line.group(0)
+    for words in (
+        "--event push --branch release/<VERSION> -L 1",
+        "--json headSha,conclusion,createdAt",
+        "`headSha` equal to the branch tip and conclusion `success`",
+        "--event pull_request --branch <head branch>",
+        "a later `createdAt` than that tip run",
+    ):
+        assert words in text, words
