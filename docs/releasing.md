@@ -279,7 +279,7 @@ Run every check on the tip of the release branch after the version pull request 
   gh pr checks <number> --repo "$REPO" --required --watch
   ```
   Expected: the lint job and the four test jobs pass.
-- [ ] List the other pull requests still open into the release branch, forks included, and keep the list for section 8. Deleting the branch changes them: GitHub's documentation says that a pull request from the same repository is moved to the release pull request's base, `main`, and that other pull requests open on a deleted branch are closed. In 0.1.0a3 the one from a fork (#147) was closed. Section 8 checks each one, whichever happened.
+- [ ] List the other pull requests still open into the release branch, forks included, and keep the list for section 8. Deleting the branch changes them. GitHub's documentation says that when a merged pull request's head branch is deleted, GitHub moves the open pull requests "in the same repository" that target it to that pull request's base, here `main`, and that deleting a branch closes the open pull requests associated with it. In 0.1.0a3 the one from a fork (#147) was closed, not moved, on 2026-11-19. Section 8 checks each one, whichever happened.
   ```
   gh pr list --repo "$REPO" --base "$BRANCH" --state open --json number,isCrossRepository,title \
     -q '.[] | "\(.number) \(if .isCrossRepository then "fork" else "same-repo" end) \(.title)"' | tee "$WORK/open-prs.txt"
@@ -505,26 +505,26 @@ Run these in your own clone, not in the worktrees under `$WORK`.
   gh api "repos/${REPO}/milestones" -q ".[] | select(.title == \"${NEXT_VERSION}\") | .title + \" \" + .state"
   ```
   Expected: `<NEXT_VERSION> open`. If nothing is printed, create it with `gh api "repos/${REPO}/milestones" -f title="${NEXT_VERSION}"`.
-- [ ] Sort each pull request in `$WORK/open-prs.txt` (section 4). GitHub's documentation says that deleting the release branch moves a pull request from the same repository to `main` and closes the others; 0.1.0a3 matched it, since the one from a fork (#147) was closed, with the events `base_ref_deleted` and `closed` in the same second. A pull request can also have been merged, or closed on purpose, after the list was made; only one that the deletion closed is recovered, which is one closed when or after the release pull request merged.
+- [ ] Sort each pull request in `$WORK/open-prs.txt` (section 4). Deleting the release branch moves a pull request to `main` or closes it (section 4): in 0.1.0a3 the one from a fork (#147) got the events `base_ref_deleted` and then `closed`, in the same second. A pull request can also have been merged, or closed on purpose, after the list was made; only one that the deletion closed is recovered, which is one whose last `closed` event comes right after a `base_ref_deleted` event.
   ```
-  MERGED_AT=$(gh pr view <release pull request> --repo "$REPO" --json mergedAt -q .mergedAt)
   while read -r NUMBER _; do
-    gh api "repos/${REPO}/pulls/${NUMBER}" | jq -r --arg merged "$MERGED_AT" --arg base "$BRANCH" '
+    LAST=$(gh api --paginate "repos/${REPO}/issues/${NUMBER}/events" -q '.[] | select(.event == "base_ref_deleted" or .event == "closed" or .event == "reopened") | .event' | tail -n 2 | paste -sd ' ' -)
+    gh api "repos/${REPO}/pulls/${NUMBER}" | jq -r --arg last "$LAST" --arg base "$BRANCH" '
       "#\(.number) fork=\(.head.repo.fork) " + (
         if .merged then "leave: merged"
         elif .state == "open" then (if .base.ref == "main" then "move" else "leave: open on \(.base.ref)" end)
-        elif .base.ref == $base and .closed_at >= $merged then "recover"
-        else "leave: closed before the release" end)
+        elif .base.ref == $base and $last == "base_ref_deleted closed" then "recover"
+        else "leave: closed on purpose" end)
     '
   done < "$WORK/open-prs.txt"
   ```
-  Expected: one line for each, ending in `move`, `recover` or `leave: ...`. Do nothing to a `leave`. The steps below handle the other two. (The timestamps are in one format, so the comparison of text is a comparison of time.)
+  Expected: one line for each, ending in `move`, `recover` or `leave: ...`. Do nothing to a `leave`. The steps below handle the other two.
 - [ ] Move each pull request marked `move` to the new branch, which is `$NEXT_BRANCH` (after a hotfix, `$OPEN_BRANCH`, section 9). Use the API: `gh pr edit` fails on this repository.
   ```
   gh api -X PATCH "repos/${REPO}/pulls/<number>" -f base="$NEXT_BRANCH" -q .base.ref
   ```
   Expected: `release/<NEXT_VERSION>`. Then run the CI step below for it.
-- [ ] Recover each pull request marked `recover` (#147 in 0.1.0a3). GitHub reopens a pull request only while its base branch exists, so make the old branch again at the release pull request's head, which is the tip it had:
+- [ ] Recover each pull request marked `recover` (#147 in 0.1.0a3). On #147 (2026-11-19) the old branch was made again, at the release pull request's head, which is the tip it had, and the pull request was then reopened and retargeted; do the same, in that order:
   ```
   gh api "repos/${REPO}/git/refs" -f ref="refs/heads/${BRANCH}" \
     -f sha="$(gh pr view <release pull request> --repo "$REPO" --json headRefOid -q .headRefOid)" -q .ref
@@ -662,7 +662,7 @@ For reference, and for checking when something in section 5 fails.
 - **PyPI trusted publisher** for the project `django-neolith`: owner `stack314`, repository `django-neolith`, workflow `release.yml`, environment `release`. No API token is stored anywhere.
 - **The `release` environment** (Settings, Environments): the maintainer is a required reviewer, and only tags matching `v*` may deploy to it.
 - **Branch rulesets** (Settings, Rules):
-  - `release/*`, which covers each release branch from the moment it is made: no force push; changes by pull request only, one approving review, stale approvals dismissed on push; the lint job and the four test jobs required. Squash merges and merge commits are allowed: every pull request is squash-merged except the one that brings `main` in after a hotfix (section 9). Deletion is not restricted, so that GitHub can delete a release branch when its release pull request merges; a rule or ruleset that restricts it keeps GitHub from doing so. The cost: anyone with write access can delete the open release branch, and GitHub then closes or moves every open pull request into it (section 8).
+  - `release/*`, which covers each release branch from the moment it is made: no force push; changes by pull request only, one approving review, stale approvals dismissed on push; the lint job and the four test jobs required. Squash merges and merge commits are allowed: every pull request is squash-merged except the one that brings `main` in after a hotfix (section 9). Deletion is not restricted, so that GitHub can delete a release branch when its release pull request merges; a rule or ruleset that restricts it keeps GitHub from doing so. The cost: anyone with write access can delete the open release branch, and GitHub then closes every open pull request into it instead of moving them, since it moves them only when the deleted branch is a merged pull request's head.
   - `main` (the default branch): no deletion or force push; changes by pull request only, merge commits only, one approving review, stale approvals dismissed on push; the same five jobs required. A second ruleset for `main`, which would let only admins update it, exists and is disabled.
 - **Merge settings** (Settings, General): squash merging and merge commits allowed, rebase merging off. Both take the pull request's title and description as the commit's message. Head branches are deleted after merge: a release branch goes when its release pull request merges, and the open pull requests that targeted it are moved to `main` or closed (section 8).
 - **Release branches**: nothing is set per branch. Section 8 makes each release's branch from `main` once the previous release is published, and section 9 makes a hotfix's.
