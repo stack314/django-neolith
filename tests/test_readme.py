@@ -36,7 +36,31 @@ _ABSOLUTE = re.compile(r"^https://")
 # Checked with GitHub's renderer (POST /markdown); the console and traceback
 # languages (pycon, pytb) are not Python source and are not here.
 _PYTHON = frozenset(
-    ["python", "python3", "py3", "py", "rusthon", "sage", "gyp", "gypi", "lmi", "pyde", "pyi", "pyp", "pyt", "pyw", "rpy", "spec", "tac", "wsgi", "xpy", "bzl", "bazel", "starlark", "snakemake"]
+    [
+        "python",
+        "python3",
+        "py3",
+        "py",
+        "rusthon",
+        "sage",
+        "gyp",
+        "gypi",
+        "lmi",
+        "pyde",
+        "pyi",
+        "pyp",
+        "pyt",
+        "pyw",
+        "rpy",
+        "spec",
+        "tac",
+        "wsgi",
+        "xpy",
+        "bzl",
+        "bazel",
+        "starlark",
+        "snakemake",
+    ]
 )
 # GitHub ends the language at the first space, tab or comma.
 _LANGUAGE_END = re.compile(r"[ \t,]")
