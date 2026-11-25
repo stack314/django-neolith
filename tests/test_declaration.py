@@ -37,6 +37,7 @@ from neolith._declaration import (
     _DJANGO_OPTIONS,
     _EVENT_FIELDS,
     _FIELDS,
+    _SNAPSHOT_ATTR,
     ADMITTED_NAMES,
     RESOURCE_KINDS,
     SHARED_NAMES,
@@ -466,6 +467,108 @@ def test_a_base_class_whose_default_was_rebound_is_refused_in_a_subclass() -> No
 
 def test_a_declaring_class_keeps_the_default_it_sets() -> None:
     assert _declare(_valid(default=False)).default is False
+
+
+class _ReadOnlyDefault(type):
+    @property
+    def default(cls) -> bool:
+        return False
+
+
+class _RefusedDefault(type):
+    @property
+    def default(cls) -> bool:
+        return False
+
+    @default.setter
+    def default(cls, value: bool) -> None:
+        raise TypeError("default is fixed")
+
+
+class _RefusesEverySet(type):
+    def __setattr__(cls, name: str, value: object) -> None:
+        raise RuntimeError(f"{name} is fixed")
+
+
+class _RefusesTheSnapshot(type):
+    def __setattr__(cls, name: str, value: object) -> None:
+        if name == _SNAPSHOT_ATTR:
+            raise RuntimeError("no new attributes")
+        super().__setattr__(name, value)
+
+
+def _mixin(metaclass: type) -> type:
+    return metaclass("Mixin", (), {"__module__": __name__})
+
+
+_DEFAULT_SET = "neolith sets default = {} on the class, and setting it raised "
+_LET_IT = "; the class's metaclass must let neolith set it"
+_NO_SETTER = (
+    "AttributeError: property 'default' of '_ReadOnlyDefault' object has no setter"
+)
+
+
+@pytest.mark.spec("APP-6")
+@pytest.mark.parametrize(
+    ("metaclass", "namespace", "name", "refusal"),
+    [
+        (
+            _ReadOnlyDefault,
+            _valid(),
+            "StockConfig",
+            "default: " + _DEFAULT_SET.format(True) + _NO_SETTER + _LET_IT,
+        ),
+        (
+            _ReadOnlyDefault,
+            {},
+            "Base",
+            "default: " + _DEFAULT_SET.format(False) + _NO_SETTER + _LET_IT,
+        ),
+        (
+            _RefusedDefault,
+            _valid(),
+            "StockConfig",
+            "default: "
+            + _DEFAULT_SET.format(True)
+            + "TypeError: default is fixed"
+            + _LET_IT,
+        ),
+        (
+            _RefusesEverySet,
+            _valid(),
+            "StockConfig",
+            "default: "
+            + _DEFAULT_SET.format(True)
+            + "RuntimeError: default is fixed"
+            + _LET_IT,
+        ),
+        (
+            _RefusesTheSnapshot,
+            _valid(default=True),
+            "StockConfig",
+            f"{_SNAPSHOT_ATTR}: neolith sets the checked declaration on the "
+            "class, and setting it raised RuntimeError: no new attributes" + _LET_IT,
+        ),
+    ],
+    ids=[
+        "read-only default, declaring class",
+        "read-only default, base class",
+        "default setter that raises",
+        "__setattr__ that raises",
+        "__setattr__ that refuses the snapshot",
+    ],
+)
+def test_a_metaclass_that_refuses_what_neolith_sets_is_refused_by_name(
+    metaclass: type, namespace: Namespace, name: str, refusal: str
+) -> None:
+    """Every attribute __init_subclass__ sets on a new class is set through
+    the metaclass, which can raise; the class is refused at Declare with a
+    DeclarationError that names the app, the attribute and the cause (K2),
+    never the metaclass's own exception."""
+    with pytest.raises(DeclarationError) as raised:
+        _declare(namespace, _mixin(metaclass), name=name)
+    assert str(raised.value) == f"app {__name__}.{name}: {refusal}"
+    assert type(raised.value.__cause__) is not DeclarationError
 
 
 @pytest.mark.spec("APP-6", "APP-7")
@@ -1841,6 +1944,39 @@ def test_a_default_that_code_makes_false_is_refused_as_no_declaration(
     with pytest.raises(ImproperlyConfigured) as raised:
         configure([package, _COURIERS], _neolith(package))
     assert str(raised.value) == f"app {package}: has no declaration"
+
+
+_DEFAULT_READ_ONLY_FROM_A_METACLASS = """
+class QuietMeta(type):
+    @property
+    def default(cls):
+        return False
+
+
+class Quiet(metaclass=QuietMeta):
+    pass
+"""
+
+
+@pytest.mark.spec("APP-6")
+def test_a_metaclass_default_with_no_setter_is_refused_by_name_at_configure(
+    make_app: MakeApp,
+) -> None:
+    """A read-only metaclass default keeps neolith from setting default on
+    the declaring class; the builder stops with the DeclarationError that
+    names it, not the metaclass's AttributeError behind "cannot be read"."""
+    from neolith._configure import configure
+
+    header = _declaring(_DEFAULT_READ_ONLY_FROM_A_METACLASS, "Quiet, NeolithAppConfig")
+    package = make_app(_APPS.replace(_HEADER, header))
+    with pytest.raises(DeclarationError) as raised:
+        configure([package, _COURIERS], _neolith(package))
+    assert str(raised.value) == (
+        f"app {package}.apps.StockConfig: default: neolith sets default = True "
+        "on the class, and setting it raised AttributeError: property 'default' "
+        "of 'QuietMeta' object has no setter; the class's metaclass must let "
+        "neolith set it"
+    )
 
 
 # The declaring class of _APPS, renamed, for a second class in one module.
