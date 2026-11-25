@@ -48,8 +48,9 @@ What this version does. The [changelog](https://github.com/stack314/django-neoli
 - **`local-first` routing.** `NEOLITH["ROUTING_POLICIES"]` can name `local-first` for a contract version with two or more providers, tried in order; an idempotent call moves to the next on `unavailable`, within its one deadline.
 - **Conformance suite.** Spec 06's suite runs each contract case over the in-process and the HTTP transports and checks that they give one outcome.
 - **One app alone.** `neolith run <app>` boots apps from their declarations and serves them, and `neolith migrate <app>` applies each app's migrations to its own database.
+- **Boundary check.** `neolith check <app> [<app> ...] --settings <module>`, or `manage.py checkapps` in a host built by a settings module, reports before deployment what the hosted apps do across an app boundary, such as a relation to another app's model, and opens no database connection. An app listed in `[tool.neolith] boundary-report-only` in `pyproject.toml` is reported without failing the check.
 
-Not yet in this version: the boundary check (`neolith check`) and events. See the roadmap below.
+Not yet in this version: events. See the roadmap below.
 
 ## A short example
 
