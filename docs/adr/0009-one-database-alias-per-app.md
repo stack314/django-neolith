@@ -1,6 +1,7 @@
 # 0009. One database alias per app
 
 - **Status:** Accepted
+- Narrowed by [0034](0034-two-aliases-on-one-database-are-refused-without-their-connection-settings.md) (Decisions 1 and 2)
 - **Accepted:** 2026-11-12
 - **Date:** 2026-11-03, amended 2026-11-12
 

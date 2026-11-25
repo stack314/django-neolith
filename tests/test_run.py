@@ -660,7 +660,7 @@ def test_the_environment_s_settings_module_is_ignored(site: Site) -> None:
         ),
         (
             [DESK],
-            "(neolith.E018) database desk: no database at {desk}; the database "
+            "(neolith.E018) database desk: no database at its NAME; the database "
             "is in memory, or nothing has created it yet (the migrate step creates "
             "the aliases it migrates)",
             "neolith: serving",
@@ -1442,7 +1442,7 @@ def test_the_check_reports_what_boot_would_refuse_and_writes_nothing(
     manage = _project(site, {"DATABASES": site.databases("desk")})
     ran = manage("migrateapps", "--check")
     assert ran.returncode == 1
-    assert "(neolith.E018) database desk: no database at" in ran.stderr
+    assert "(neolith.E018) database desk: no database at its NAME;" in ran.stderr
     assert not site.database("desk").exists()
     connection = sqlite3.connect(site.database("desk"))
     connection.execute("CREATE TABLE other (id INTEGER)")
