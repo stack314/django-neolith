@@ -279,6 +279,12 @@ Run every check on the tip of the release branch after the version pull request 
   gh pr checks <number> --repo "$REPO" --required --watch
   ```
   Expected: the lint job and the four test jobs pass.
+- [ ] List the other pull requests still open into the release branch, forks included, and keep the list for section 8. Deleting the branch changes them: GitHub's documentation does not say how, and in 0.1.0a3 it closed the one from a fork.
+  ```
+  gh pr list --repo "$REPO" --base "$BRANCH" --state open --json number,isCrossRepository,title \
+    -q '.[] | "\(.number) \(if .isCrossRepository then "fork" else "same-repo" end) \(.title)"' | tee "$WORK/open-prs.txt"
+  ```
+  Expected: one line per pull request, or no output. The release pull request itself is not in the list, since its base is `main`.
 - [ ] **(maintainer)** Merge it with a merge commit, only if the release branch is still the commit section 3 verified. Never squash or rebase.
   ```
   gh pr merge <number> --repo "$REPO" --merge --match-head-commit "$VERIFIED"
@@ -288,7 +294,7 @@ Run every check on the tip of the release branch after the version pull request 
   ```
   git ls-remote origin "refs/heads/${BRANCH}"
   ```
-  Expected: no output. If the branch is still there, a ruleset or the merge settings keep GitHub from deleting it (section 10): fix them, then delete it with *Delete branch* on the merged pull request. GitHub moves the open pull requests that targeted it to `main`, after the automatic deletion or that button; section 8 moves them to the next release branch.
+  Expected: no output. If the branch is still there, a ruleset or the merge settings keep GitHub from deleting it (section 10): fix them, then delete it with *Delete branch* on the merged pull request. The open pull requests that targeted it are then moved to `main` or closed, after the automatic deletion or that button; section 8 checks each one and moves them to the next release branch.
 
 ## 5. Tag and publish
 
@@ -499,12 +505,51 @@ Run these in your own clone, not in the worktrees under `$WORK`.
   gh api "repos/${REPO}/milestones" -q ".[] | select(.title == \"${NEXT_VERSION}\") | .title + \" \" + .state"
   ```
   Expected: `<NEXT_VERSION> open`. If nothing is printed, create it with `gh api "repos/${REPO}/milestones" -f title="${NEXT_VERSION}"`.
-- [ ] Move to the new branch the open pull requests that targeted the release branch. GitHub moved them to `main` when it deleted that branch.
+- [ ] Check each pull request in `$WORK/open-prs.txt` (section 4). Deleting the release branch left it open on `main` or closed it. GitHub's documentation does not say which: in 0.1.0a3 the one from a fork (#147) was closed, with the events `base_ref_deleted` and `closed` in the same second.
   ```
-  gh pr list --repo "$REPO" --base main --state open --json number,title -q '.[] | "\(.number) \(.title)"'
-  gh pr edit <number> --repo "$REPO" --base "$NEXT_BRANCH"
+  while read -r NUMBER _; do
+    gh api "repos/${REPO}/pulls/${NUMBER}" -q '"#\(.number) \(.state) \(.base.ref) fork=\(.head.repo.fork)"'
+  done < "$WORK/open-prs.txt"
   ```
-  Expected: once each is moved, the first command prints nothing.
+  Expected: `open main` or `closed release/<VERSION>` for each. The next two steps handle the two cases.
+- [ ] Move each pull request that is `open main` to the new branch. Use the API: `gh pr edit` fails on this repository.
+  ```
+  gh api -X PATCH "repos/${REPO}/pulls/<number>" -f base="$NEXT_BRANCH" -q .base.ref
+  ```
+  Expected: `release/<NEXT_VERSION>`. Then run the CI step below for it: its checks ran against the old base.
+- [ ] Recover each pull request that is `closed release/<VERSION>` (#147 in 0.1.0a3). GitHub reopens a pull request only while its base branch exists, so make the old branch again at the release pull request's head, which is the tip it had:
+  ```
+  gh api "repos/${REPO}/git/refs" -f ref="refs/heads/${BRANCH}" \
+    -f sha="$(gh pr view <release pull request> --repo "$REPO" --json headRefOid -q .headRefOid)" -q .ref
+  gh api -X PATCH "repos/${REPO}/pulls/<number>" -f state=open -q .state
+  gh api -X PATCH "repos/${REPO}/pulls/<number>" -f base="$NEXT_BRANCH" -q .base.ref
+  ```
+  Expected: `refs/heads/release/<VERSION>`, `open`, then `release/<NEXT_VERSION>`. Make the branch once for all of them. Its creation starts a CI run on an old commit, which can be ignored.
+- [ ] Run CI again for each pull request moved or recovered. After a retarget, the checks it earlier passed do not count for the new base: GitHub lists the required checks as "expected" (seen on #147 on 2026-11-21), and a run that the reopen started while the old base was still set belongs to that base. Closing and reopening starts a new run, as a push would.
+  ```
+  gh api -X PATCH "repos/${REPO}/pulls/<number>" -f state=closed -q .state
+  gh api -X PATCH "repos/${REPO}/pulls/<number>" -f state=open -q .state
+  gh run list --repo "$REPO" --workflow ci.yml --event pull_request --limit 3 --json databaseId,status,conclusion,createdAt
+  ```
+  Expected: `closed`, `open`, then a run created just now, `queued` or `in_progress`.
+- [ ] Approve the run if it waits. A run for a pull request from a fork can wait for a maintainer's approval before it starts: GitHub asks for this from first-time contributors, and the run reports `action_required` with no jobs. Read the fork's changes first, since the run executes its code.
+  ```
+  gh run list --repo "$REPO" --workflow ci.yml --status action_required --json databaseId,headSha,createdAt
+  gh api -X POST "repos/${REPO}/actions/runs/<run id>/approve"
+  gh pr checks <number> --repo "$REPO" --required --watch
+  ```
+  Expected: the run's `headSha` is the pull request's head; the approval prints nothing (HTTP 201); then the lint job and the four test jobs pass. No output from the first command means the run did not need approval.
+- [ ] Leave a comment for the contributor, so a closed pull request is not read as a decision about the change.
+  ```
+  gh api "repos/${REPO}/issues/<number>/comments" -f body="GitHub closed this pull request when release/${VERSION} was deleted after the release; that was not a decision about the change. It is reopened against ${NEXT_BRANCH}, and CI has run again. Nothing is needed from you." -q .html_url
+  ```
+  Expected: the comment's URL.
+- [ ] Once every recovered pull request has its new run, delete the old release branch again.
+  ```
+  gh api -X DELETE "repos/${REPO}/git/refs/heads/${BRANCH}"
+  git ls-remote origin "refs/heads/${BRANCH}"
+  ```
+  Expected: no output from either. Skip this if no pull request was recovered.
 - [ ] Start the next development version with a pull request into the new branch ([G8](../CONTRIBUTING.md#commits-and-pull-requests)). It also points the changelog's `[Unreleased]` link at the new branch, where unreleased work now is.
   ```
   git fetch origin
@@ -610,8 +655,8 @@ For reference, and for checking when something in section 5 fails.
 - **PyPI trusted publisher** for the project `django-neolith`: owner `stack314`, repository `django-neolith`, workflow `release.yml`, environment `release`. No API token is stored anywhere.
 - **The `release` environment** (Settings, Environments): the maintainer is a required reviewer, and only tags matching `v*` may deploy to it.
 - **Branch rulesets** (Settings, Rules):
-  - `release/*`, which covers each release branch from the moment it is made: no force push; changes by pull request only, one approving review, stale approvals dismissed on push; the lint job and the four test jobs required. Squash merges and merge commits are allowed: every pull request is squash-merged except the one that brings `main` in after a hotfix (section 9). Deletion is not restricted, so that GitHub can delete a release branch when its release pull request merges; a rule or ruleset that restricts it keeps GitHub from doing so. The cost: anyone with write access can delete the open release branch, and GitHub then closes every open pull request into it instead of moving them.
+  - `release/*`, which covers each release branch from the moment it is made: no force push; changes by pull request only, one approving review, stale approvals dismissed on push; the lint job and the four test jobs required. Squash merges and merge commits are allowed: every pull request is squash-merged except the one that brings `main` in after a hotfix (section 9). Deletion is not restricted, so that GitHub can delete a release branch when its release pull request merges; a rule or ruleset that restricts it keeps GitHub from doing so. The cost: anyone with write access can delete the open release branch, and GitHub then closes or moves every open pull request into it (section 8).
   - `main` (the default branch): no deletion or force push; changes by pull request only, merge commits only, one approving review, stale approvals dismissed on push; the same five jobs required. A second ruleset for `main`, which would let only admins update it, exists and is disabled.
-- **Merge settings** (Settings, General): squash merging and merge commits allowed, rebase merging off. Both take the pull request's title and description as the commit's message. Head branches are deleted after merge: a release branch goes when its release pull request merges, and GitHub moves the open pull requests that targeted it to `main`.
+- **Merge settings** (Settings, General): squash merging and merge commits allowed, rebase merging off. Both take the pull request's title and description as the commit's message. Head branches are deleted after merge: a release branch goes when its release pull request merges, and the open pull requests that targeted it are moved to `main` or closed (section 8).
 - **Release branches**: nothing is set per branch. Section 8 makes each release's branch from `main` once the previous release is published, and section 9 makes a hotfix's.
 - **CI** (`.github/workflows/ci.yml`) runs on every pull request and on every push to `main` and to a release branch (`release/**`).
