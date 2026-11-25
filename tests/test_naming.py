@@ -470,6 +470,9 @@ def test_settings_checks_given_hostile_values_name_them(key: str) -> None:
     assert _databases.databases_problems(value, [])
     assert _configure.databases_difference(value, {})
     assert _configure.databases_difference({value: {}}, {})
+    for setting in ("NAME", "HOST", "PORT"):
+        entry = {"ENGINE": "django.db.backends.postgresql", "NAME": "x"}
+        assert _databases.databases_problems({"default": {**entry, setting: value}}, [])
 
 
 # A check that looks a name up, or compares a class, runs none of the
@@ -576,6 +579,21 @@ def test_settings_keys_and_values_that_run_code_are_refused() -> None:
     assert _databases.databases_problems(
         {"default": {"ENGINE": sqlite, "NAME": Hostile()}}, []
     ) == ["database default: NAME: expected a str or a path, got Hostile"]
+
+
+def test_a_settings_key_that_runs_code_is_never_looked_up() -> None:
+    """A lookup in the deployer's mapping would run the key's own __eq__."""
+    server = {"ENGINE": "django.db.backends.postgresql", "NAME": "x"}
+    assert _databases.databases_problems({Trap("billing"): server}, ["billing"]) == [
+        'NEOLITH["DATABASES"]: an alias is a str, got Trap',
+        "app billing: no connection settings for its database",
+    ]
+    assert _checks.neolith_problems({Trap("DATABASES"): {}}, ()) == [
+        "NEOLITH: unknown key of type Trap; the keys are "
+        + ", ".join(sorted(_checks.KEYS))
+    ]
+    assert _configure._open_problems({Trap("DATABASES"): {"default": {}}}) == []
+    assert _configure._open_problems({"DATABASES": {Trap("default"): {}}}) == []
 
 
 def test_a_lazy_mapping_is_still_judged_by_what_it_wraps() -> None:

@@ -279,8 +279,9 @@ def _deployer_problems(
 
 def _open_problems(neolith: object) -> list[str]:
     """The refusal of a ``default`` database in a host that must be closed."""
-    databases = neolith.get("DATABASES") if type(neolith) is dict else None
-    if type(databases) is dict and _databases.DEFAULT in databases:
+    # Read with _naming.entry, so that no key's own __eq__ runs.
+    databases = _naming.entry(neolith, "DATABASES") if type(neolith) is dict else None
+    if type(databases) is dict and _naming.holds(databases, _databases.DEFAULT):
         return [
             f"database {_databases.DEFAULT}: neolith run hosts declared apps only "
             "in 0.1"

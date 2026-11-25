@@ -23,7 +23,7 @@ import sys
 import textwrap
 import types
 from collections.abc import Callable, Iterator
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
 import pytest
@@ -38,6 +38,7 @@ from hypothesis import strategies as st
 
 from neolith import DeclarationError, _checks, _host
 from neolith._configure import configure
+from neolith._databases import databases_problems
 from neolith._declaration import declaration_of
 from tests import host_apps
 from tests.hosting import NEOLITH_KEYS, in_built_host, in_fresh_process
@@ -426,6 +427,14 @@ def _db_refusal(**aliases: object) -> list[str]:
             "database billing: NAME: expected a str or a path, got bytes",
         ),
         (
+            {"billing": {**sqlite("b"), "HOST": None}},
+            "database billing: HOST: expected a str, got NoneType",
+        ),
+        (
+            {"billing": {**sqlite("b"), "PORT": True}},
+            "database billing: PORT: expected a str or an int, got bool",
+        ),
+        (
             {"billing": {**sqlite("b"), "ATOMIC_REQUESTS": False}},
             "database billing: ATOMIC_REQUESTS would wrap other apps' views in this "
             "app's transaction",
@@ -560,6 +569,119 @@ def test_two_server_aliases_on_one_database_are_refused() -> None:
         [*HOSTED, LEDGER, BILLING],
         _databases(ledger=server, billing={**server, "NAME": "m"}),
     )
+
+
+# Values of every kind, those that cannot be hashed among them.
+_SETTING_VALUES = st.one_of(
+    st.none(),
+    st.booleans(),
+    st.integers(),
+    st.floats(allow_nan=False),
+    st.text(max_size=8),
+    st.binary(max_size=8),
+    st.lists(st.integers(), max_size=2),
+    st.dictionaries(st.text(max_size=2), st.integers(), max_size=2),
+    st.sets(st.integers(), max_size=2),
+    st.tuples(st.lists(st.integers(), max_size=2)),
+)
+
+
+@given(host=_SETTING_VALUES, port=_SETTING_VALUES)
+def test_host_and_port_of_any_value_are_judged_and_never_raise(
+    host: object, port: object
+) -> None:
+    """HOST is a str and PORT a str or an int, as Django's backends read
+    them; any other value is a refusal that names its type, and two aliases
+    are compared only once both pass, so nothing is hashed that cannot be.
+    """
+    server = {
+        "ENGINE": "django.db.backends.postgresql",
+        "NAME": "n",
+        "HOST": host,
+        "PORT": port,
+    }
+    found = databases_problems(
+        {"default": server, "billing": dict(server)}, ["billing"]
+    )
+    expected = []
+    for alias in ("default", "billing"):
+        if type(host) is not str:
+            expected.append(
+                f"database {alias}: HOST: expected a str, got {type(host).__name__}"
+            )
+        if type(port) not in (str, int):
+            expected.append(
+                f"database {alias}: PORT: expected a str or an int, got "
+                f"{type(port).__name__}"
+            )
+    if not expected:
+        assert len(found) == 1
+        assert found[0].startswith("databases default and billing: both name ")
+    else:
+        assert found == expected
+
+
+def test_an_int_port_is_admitted_and_compared_as_written() -> None:
+    server = {"ENGINE": "django.db.backends.postgresql", "NAME": "n", "PORT": 5432}
+    assert configure(
+        [*HOSTED, LEDGER, BILLING],
+        _databases(ledger=server, billing={**server, "PORT": 5433}),
+    )
+    (found,) = _db_refusal(ledger=server, billing=dict(server))
+    assert found.startswith("databases ledger and billing: both name ")
+
+
+class _Unhashable(PurePosixPath):
+    """A path that defines __eq__ and so, by Python's rule, no __hash__."""
+
+    def __eq__(self, other: object) -> bool:
+        return type(other) is _Unhashable and str(self) == str(other)
+
+    __hash__ = None  # type: ignore[assignment]
+
+
+def test_a_path_name_is_compared_by_its_text() -> None:
+    server = {"ENGINE": "django.db.backends.postgresql", "NAME": _Unhashable("n")}
+    (found,) = _db_refusal(
+        ledger=server, billing={**server, "NAME": PurePosixPath("n")}
+    )
+    assert found.startswith("databases ledger and billing: both name ")
+    # The text of a path is not the str of the same text.
+    assert configure(
+        [*HOSTED, LEDGER, BILLING],
+        _databases(ledger=server, billing={**server, "NAME": "n"}),
+    )
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["a\x00b", "file:a%00b", PurePosixPath("a\x00b")],
+    ids=["str", "file URI", "path"],
+)
+def test_a_sqlite_name_that_cannot_be_resolved_is_refused(name: object) -> None:
+    """Whether resolving a path that holds a NUL raises depends on the
+    Python version; when it does, the refusal names the error's type.
+    """
+    found = databases_problems({"default": sqlite(name)}, [])
+    assert found in (
+        [],
+        ["database default: NAME cannot be read as a path: ValueError"],
+    )
+
+
+class _Unreadable(PurePosixPath):
+    """A path whose text cannot be read."""
+
+    def __str__(self) -> str:
+        raise RuntimeError("unreadable")
+
+
+@pytest.mark.parametrize("engine", [SQLITE, "django.db.backends.postgresql"])
+def test_a_path_name_whose_text_cannot_be_read_is_refused(engine: str) -> None:
+    entry = {"ENGINE": engine, "NAME": _Unreadable("n")}
+    assert databases_problems({"default": entry}, []) == [
+        "database default: NAME cannot be read as a path: RuntimeError"
+    ]
 
 
 @pytest.mark.parametrize("name", [":memory:", Path(":memory:")], ids=["str", "path"])

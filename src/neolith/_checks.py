@@ -270,7 +270,7 @@ def neolith_problems(
             problems.extend(remote_problems(item, local_first(entries)))
         elif key == _ROUTING_KEY:
             problems.extend(routing_problems(item))
-    if "DATABASES" not in entries:
+    if not _naming.holds(entries, "DATABASES"):
         problems.extend(
             f"app {label}: no connection settings for its database"
             for label in with_database(hosted)

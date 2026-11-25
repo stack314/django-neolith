@@ -104,11 +104,23 @@ def sqlite_path(name: object) -> str | None:
 
 
 def _identity(engine: str, entry: Mapping[str, Any]) -> tuple[object, ...] | None:
-    """What two aliases on one database share; ``None`` for one exempt."""
+    """What two aliases on one database share; ``None`` for one exempt.
+
+    Every part is an exact ``str`` or ``int``, so that hashing and comparing
+    the key runs no code of the deployer's: ``HOST`` and ``PORT`` were
+    judged by type, and a path ``NAME`` is compared by its text. Reading
+    that text can raise, as resolving a SQLite path can; the caller turns
+    that into a refusal.
+    """
     name = entry.get("NAME")
     if is_sqlite(engine):
         path = sqlite_path(name)
         return None if path is None else ("sqlite", path)
+    if type(name) is not str:
+        text = str(name)  # a path, judged by _entry_problems
+        if type(text) is not str:
+            raise TypeError("a path's text is not a str")
+        name = ("path", text)
     return (engine, entry.get("HOST", ""), entry.get("PORT", ""), name)
 
 
@@ -131,6 +143,9 @@ def databases_problems(value: object, with_database: Iterable[str]) -> list[str]
     if not entries:
         return [f"{_KEY}: is empty; leave the key out"]
     labels = list(dict.fromkeys(with_database))
+    # Compared with the aliases that are exactly str, so that no key's own
+    # __eq__ runs.
+    aliases = {alias for alias in entries if type(alias) is str}
     problems: list[str] = []
     compared: dict[tuple[object, ...], str] = {}
     for alias, entry in entries.items():
@@ -146,7 +161,13 @@ def databases_problems(value: object, with_database: Iterable[str]) -> list[str]
             continue
         settings: dict[str, Any] = entry  # type: ignore[assignment]  # judged above
         engine: str = settings["ENGINE"]
-        identity = _identity(engine, settings)
+        try:
+            identity = _identity(engine, settings)
+        except Exception as error:  # a path the deployer's own code reads
+            problems.append(
+                f"database {alias}: NAME cannot be read as a path: {_type(error)}"
+            )
+            continue
         if identity is None:
             continue
         first = compared.setdefault(identity, alias)
@@ -157,7 +178,7 @@ def databases_problems(value: object, with_database: Iterable[str]) -> list[str]
     problems.extend(
         f"app {label}: no connection settings for its database"
         for label in labels
-        if label not in entries
+        if label not in aliases
     )
     return problems
 
@@ -190,6 +211,12 @@ def _entry_problems(alias: str, entry: object) -> list[str]:
             f"{where}: NAME is required; a service or option file alone is not "
             "admitted yet"
         )
+    host = settings.get("HOST", "")
+    if type(host) is not str:
+        problems.append(f"{where}: HOST: expected a str, got {_type(host)}")
+    port = settings.get("PORT", "")
+    if type(port) is not str and type(port) is not int:
+        problems.append(f"{where}: PORT: expected a str or an int, got {_type(port)}")
     app = alias != DEFAULT
     if app and "ATOMIC_REQUESTS" in settings:
         problems.append(
