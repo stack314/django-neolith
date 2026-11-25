@@ -1715,6 +1715,119 @@ def test_a_config_class_kept_outside_the_apps_module_is_not_a_hosted_app(
         assert str(raised.value) == refusal
 
 
+# The check reads the names each class holds, not what code does (ADR 0021
+# Decision 2). Code in a mixin, a base class or a metaclass can still give a
+# declaring class a path or default its body never writes. The tests below
+# pin what then holds: the host refuses a default that reads false (ADR 0022,
+# the Hosted apps row), and a path set by code leaves the snapshot alone.
+
+_DEFAULT_FALSE_FROM_A_MIXIN = """
+class Quiet:
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        cls.default = False
+"""
+
+_DEFAULT_FALSE_FROM_A_METACLASS = """
+class Quiet(type(NeolithAppConfig)):
+    @property
+    def default(cls):
+        return False
+
+    @default.setter
+    def default(cls, value):
+        pass
+
+
+class Base(NeolithAppConfig, metaclass=Quiet):
+    pass
+"""
+
+
+@pytest.mark.parametrize(
+    ("hook", "bases"),
+    [
+        (_DEFAULT_FALSE_FROM_A_MIXIN, "Quiet, NeolithAppConfig"),
+        (_DEFAULT_FALSE_FROM_A_METACLASS, "Base"),
+    ],
+    ids=["mixin's __init_subclass__", "base class's metaclass"],
+)
+def test_a_default_that_code_makes_false_is_refused_as_no_declaration(
+    make_app: MakeApp, hook: str, bases: str
+) -> None:
+    """ADR 0021 Decision 2 checks names, not code, so code can make the
+    declaring class's default read false; Django then gives the package a
+    plain config, and the Hosted apps row of ADR 0022 refuses it."""
+    from neolith._configure import configure
+
+    package = make_app(
+        _APPS.replace(
+            "class StockConfig(NeolithAppConfig):",
+            f"{hook}\n\nclass StockConfig({bases}):",
+        )
+    )
+    config = _config_class(package)
+    assert declaration_of(config) is not None
+    assert config.default is False
+    with pytest.raises(ImproperlyConfigured) as raised:
+        configure([package, _COURIERS], _neolith(package))
+    assert str(raised.value) == f"app {package}: has no declaration"
+
+
+_PATH_FROM_A_PRIVATE_METHOD = """
+class Elsewhere:
+    def _path_from_module(self, module):
+        return "/elsewhere"
+"""
+
+_PATH_BEFORE_THE_CHECK = """
+class Elsewhere:
+    def __init_subclass__(cls, **kwargs):
+        cls.path = "/elsewhere"
+        super().__init_subclass__(**kwargs)
+"""
+
+
+@pytest.mark.parametrize(
+    "hook",
+    [_PATH_FROM_A_PRIVATE_METHOD, _PATH_BEFORE_THE_CHECK],
+    ids=["_path_from_module", "__init_subclass__ before super()"],
+)
+def test_a_path_that_code_sets_leaves_the_snapshot_alone(
+    make_app: MakeApp, hook: str
+) -> None:
+    """ADR 0021 Decision 2 checks names, not code, so code can give the
+    declaring class a path; the snapshot, all the host reads (ADR 0022, the
+    Hosted apps row), is the same as without that code."""
+    from neolith._configure import configure
+
+    package = make_app(
+        _APPS.replace(
+            "class StockConfig(NeolithAppConfig):",
+            f"{hook}\n\nclass StockConfig(Elsewhere, NeolithAppConfig):",
+        ),
+        plain=_APPS,
+    )
+    deployer = {
+        **_neolith(package),
+        "MIDDLEWARE": [
+            "neolith.middleware.RootMiddleware",
+            "neolith.middleware.PrincipalMiddleware",
+        ],
+    }
+    assert package in configure([package, _COURIERS], deployer)["INSTALLED_APPS"]
+    config = _config_class(package)
+    found = declaration_of(config)
+    expected = declaration_of(_config_class(package, "plain"))
+    assert found is not None
+    assert expected is not None
+    # Field by field: the snapshot also names its class, which differs.
+    for field in ("name", "label", *_FIELDS):
+        assert getattr(found, field) == getattr(expected, field)
+    # Django uses the path the code gave.
+    assert Apps([package]).get_app_config(package).path == "/elsewhere"
+
+
 @pytest.mark.spec("APP-1")
 def test_a_declared_app_in_the_global_registry_needs_neolith_installed(
     make_app: MakeApp,

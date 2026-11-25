@@ -245,6 +245,21 @@ class NeolithAppConfig(AppConfig):
     Django picks this class from its ``apps`` module, so they are written in
     the body of the class that sets ``name``.
 
+    The check runs at Declare, when the class is defined, from
+    ``__init_subclass__``. It reads the names each class holds, not what
+    code does. Code in a mixin, a base class or a metaclass can still give
+    the class a ``path`` or ``default`` that no body writes, and nothing
+    refuses it: an ``__init__``, a ``__getattr__``, an ``__init_subclass__``,
+    a private method Django calls such as ``_path_from_module``, a metaclass
+    property, or a later rebinding. Past the check, neolith reads neither
+    value, and the snapshot holds neither. Such a ``path`` changes only where
+    Django looks for the app's templates, static files, locale files,
+    fixtures and commands, and where ``makemigrations`` puts the app's
+    migrations package when it does not exist yet. A ``default`` that reads
+    false when the host's settings builder reads the app makes Django choose
+    a plain config, and the builder refuses the app as having no
+    declaration.
+
     A declaration outside this form raises ``DeclarationError`` when the class
     is defined, listing every refusal.
 
