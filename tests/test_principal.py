@@ -9,7 +9,6 @@ principal is tested in ``test_call_context.py``.
 import copy
 import json
 import pickle
-import threading
 from collections.abc import Iterator, Mapping
 from typing import Any
 
@@ -19,6 +18,7 @@ from hypothesis import strategies as st
 
 from neolith import Principal
 from neolith._context import b64url, principal_form, read_principal
+from tests.small_stack import on_a_small_stack
 
 # Deterministic, as every test is (CONTRIBUTING T3): the same examples on each
 # run, and no time limit that a busy machine could miss.
@@ -369,10 +369,7 @@ def test_what_is_not_a_principal_object_is_refused(case: str) -> None:
     assert type(raised.value) is ValueError
 
 
-def test_a_deep_principal_is_refused_on_a_one_megabyte_thread_stack() -> None:
-    # Issue #125: the official Alpine images give a thread 1 MB of stack, on
-    # which the json module ends the process at about 9,000 levels on Python
-    # 3.12 and 3.13 before RecursionError; the nesting is judged first.
+def _read_deep_principals() -> list[str]:
     deep = b"[" * 9000 + b"]" * 9000
     forms = [
         b'{"issuer":"i","subject":"s","claims":{"a":' + deep + b"}}",
@@ -380,22 +377,23 @@ def test_a_deep_principal_is_refused_on_a_one_megabyte_thread_stack() -> None:
         deep,
     ]
     said: list[str] = []
+    for form in forms:
+        try:
+            read_principal(form)
+        except ValueError as error:
+            said.append(str(error))
+    return said
 
-    def run() -> None:
-        for form in forms:
-            try:
-                read_principal(form)
-            except ValueError as error:
-                said.append(str(error))
 
-    previous = threading.stack_size(1024 * 1024)
-    try:
-        worker = threading.Thread(target=run)
-        worker.start()
-        worker.join()
-    finally:
-        threading.stack_size(previous)
-    assert said == ["the principal is not a principal object"] * 3
+def test_a_deep_principal_is_refused_on_a_one_megabyte_thread_stack() -> None:
+    # Issue #125: the official Alpine images give a thread 1 MB of stack, on
+    # which the json module ends the process at about 9,000 levels on Python
+    # 3.12 and 3.13 before RecursionError; the nesting is judged first.
+    assert on_a_small_stack(_read_deep_principals) == (
+        0,
+        "",
+        ["the principal is not a principal object"] * 3,
+    )
 
 
 def test_a_refusal_shows_none_of_the_principal() -> None:
