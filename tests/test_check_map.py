@@ -69,14 +69,19 @@ _NAMES = st.sampled_from(["a", "b", "0001_m", "my-x"])
 _LEAVES = st.sampled_from(["py", "pyc", "ext", "cache", "dotted file", "dotted dir"])
 
 
-def _tree(depth: int) -> st.SearchStrategy[list[tuple[str, str, list[object]]]]:
-    leaf = st.tuples(_NAMES, _LEAVES, st.just([]))
+_Tree = list[tuple[str, str, list[object]]]
+
+
+def _tree(depth: int) -> st.SearchStrategy[_Tree]:
+    leaf: st.SearchStrategy[tuple[str, str, list[object]]] = st.tuples(
+        _NAMES, _LEAVES, st.just([])
+    )
     if depth == 0:
         return st.lists(leaf, max_size=4)
-    inner = st.tuples(
+    inner: st.SearchStrategy[tuple[str, str, list[object]]] = st.tuples(
         _NAMES, st.sampled_from(["package", "namespace"]), _tree(depth - 1)
     )
-    return st.lists(st.one_of(leaf, inner), max_size=4)  # type: ignore[arg-type]
+    return st.lists(st.one_of(leaf, inner), max_size=4)
 
 
 def _write(directory: Path, tree: list[tuple[str, str, list[object]]]) -> list[Path]:

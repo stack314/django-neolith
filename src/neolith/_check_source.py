@@ -39,7 +39,7 @@ import sys
 import sysconfig
 import warnings
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from typing import Final
+from typing import Final, NamedTuple
 
 from django.apps import AppConfig
 from django.core import checks
@@ -124,8 +124,7 @@ def _reached(name: str) -> bool:
     return bool(name) and "." not in name and name != _CACHE
 
 
-@dataclasses.dataclass(frozen=True, slots=True)
-class File:
+class File(NamedTuple):
     """One module file of an app: its path, its dotted name, the package
     its relative imports resolve against, and whether it has source.
     """
@@ -285,8 +284,7 @@ def read(file: File) -> Module:
     return module
 
 
-@dataclasses.dataclass(frozen=True, slots=True)
-class Edge:
+class Edge(NamedTuple):
     """An import of the module ``target`` at ``line``; ``dynamic`` when a
     literal of a call names it rather than a statement.
     """
@@ -611,8 +609,7 @@ def _text(argument: ast.expr | _Computed | None) -> str | None:
     return None
 
 
-@dataclasses.dataclass(frozen=True, slots=True)
-class Call:
+class Call(NamedTuple):
     """A call of a listed name the check cannot read: ``name`` is called
     with a computed ``what`` at ``line`` (``neolith.W101``).
     """
@@ -804,8 +801,7 @@ def first_party(
     return sorted(found, key=place_of)
 
 
-@dataclasses.dataclass(frozen=True, slots=True)
-class Placed:
+class Placed(NamedTuple):
     """Where a first-party dotted name is: the file Python's path finder
     loads for it and whether it has source, or, for a namespace package,
     its portions; and the first-party directory it is named from.
