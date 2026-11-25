@@ -7,6 +7,10 @@ key and a URLconf, above the builder call), and runs them in a fresh process, si
 process hosts one set of apps (ADR 0022 Decision 5). So the example and the
 host's checks before it serves cannot drift apart.
 
+A code block is either a fence of ``python``, which the test writes and
+runs, or one it knows to show and not run; any other fails the test
+(``unknown_blocks``).
+
 The example section sits between two HTML comment markers, so the website can
 copy it verbatim (``_START`` and ``_END``).
 
@@ -23,11 +27,15 @@ import textwrap
 from html.parser import HTMLParser
 from pathlib import Path
 
+import pytest
 from markdown_it import MarkdownIt
+from markdown_it.token import Token
 
 README = Path(__file__).resolve().parents[1] / "README.md"
 _HEADER = re.compile(r"^# (\S+\.py)$")
 _ABSOLUTE = re.compile(r"^https://")
+# The info strings of fences the README shows and the test does not run.
+_SHOWN = frozenset(["console", ""])
 _START = "<!-- neolith-example:start -->"
 _END = "<!-- neolith-example:end -->"
 
@@ -73,12 +81,51 @@ print("view", response.status_code, response.content.decode())
 """
 
 
-def readme_files() -> dict[str, str]:
-    """The files the README's Python blocks write, by path."""
+def is_python_fence(token: Token) -> bool:
+    """Whether a block is one the test writes and runs: a fence of ``python``."""
+    return token.type == "fence" and token.info == "python"
+
+
+def unknown_blocks(text: str) -> list[str]:
+    """What to fix for each code block the test neither runs nor shows.
+
+    The test does not guess a block's language the way GitHub does; it fails
+    closed, as markdownlint's MD040 does with ``allowed_languages`` and
+    ``language_only``. A fence's info string is compared as markdown-it-py
+    gives it (``token.info``), with no stripping, case folding, unescaping or
+    splitting: it is exactly ``python`` (written and run) or in ``_SHOWN``
+    (shown, not run), and anything else, ``py`` or ``settings.py`` included,
+    is refused. So is an indented code block. Known gap: code inside raw HTML
+    (a ``<pre>`` element) is not seen.
+    """
+    found: list[str] = []
+    for token in MarkdownIt("commonmark").parse(text):
+        if token.type not in ("fence", "code_block"):
+            continue
+        assert token.map is not None
+        line = token.map[0] + 1
+        if token.type == "code_block":
+            found.append(
+                f"line {line}: an indented code block; fence it, with 'python'"
+                " for code the test should run"
+            )
+        elif not is_python_fence(token) and token.info not in _SHOWN:
+            found.append(
+                f"line {line}: fence info string {token.info!r} is not one the"
+                " test knows; write 'python' for code the test should run, or"
+                " add the language to _SHOWN in tests/test_readme.py for a"
+                " block shown and not run"
+            )
+    return found
+
+
+def readme_files(text: str | None = None) -> dict[str, str]:
+    """The files the Python blocks write, by path (the README's, by default)."""
     files: dict[str, str] = {}
-    tokens = MarkdownIt("commonmark").parse(README.read_text(encoding="utf-8"))
-    for token in tokens:
-        if token.type != "fence" or token.info.strip() != "python":
+    if text is None:
+        text = README.read_text(encoding="utf-8")
+    for token in MarkdownIt("commonmark").parse(text):
+        if not is_python_fence(token):
             continue
         path: str | None = None
         for line in token.content.splitlines(keepends=True):
@@ -154,7 +201,7 @@ def python_fence_lines(text: str) -> list[int]:
     return [
         token.map[0]
         for token in MarkdownIt("commonmark").parse(text)
-        if token.type == "fence" and token.info.strip() == "python" and token.map
+        if is_python_fence(token) and token.map
     ]
 
 
@@ -226,3 +273,90 @@ def test_relative_links_are_found_in_markdown_and_html() -> None:
         '<p><img src="x.svg"></p>\n'
     )
     assert sorted(links(sample)) == ["LICENSE", "VISION.md", "c.png", "x.svg"]
+
+
+_REFUSED = [
+    " python",
+    "python ",
+    "Python",
+    "py",
+    "python3",
+    'python title="x"',
+    "python,ignore",
+    "settings.py",
+    "pyi,x",
+    "pyth&#111;n",
+    "text",
+    "console ",
+    "Console",
+    " ",
+]
+
+
+@pytest.mark.parametrize("info", _REFUSED)
+@pytest.mark.parametrize("fence", ["```", "~~~", "````"])
+def test_a_fence_the_test_does_not_know_is_refused(fence: str, info: str) -> None:
+    sample = f"text\n\n{fence}{info}\n# a.py\nx = 1\n{fence}\n"
+    (message,) = unknown_blocks(sample)
+    assert message.startswith(f"line 3: fence info string {info!r} ")
+    assert readme_files(sample) == {}
+    assert python_fence_lines(sample) == []
+
+
+def test_the_refusal_says_what_to_write() -> None:
+    assert unknown_blocks("```py\nx = 1\n```\n") == [
+        "line 1: fence info string 'py' is not one the test knows; write"
+        " 'python' for code the test should run, or add the language to"
+        " _SHOWN in tests/test_readme.py for a block shown and not run"
+    ]
+
+
+def test_an_indented_code_block_is_refused() -> None:
+    assert unknown_blocks("text\n\n    x = 1\n") == [
+        "line 3: an indented code block; fence it, with 'python' for code"
+        " the test should run"
+    ]
+
+
+@pytest.mark.parametrize("fence", ["```", "~~~", "````"])
+def test_python_is_written_and_run(fence: str) -> None:
+    sample = f"{fence}python\n# a.py\nx = 1\n{fence}\n"
+    assert unknown_blocks(sample) == []
+    assert readme_files(sample) == {"a.py": "x = 1\n"}
+    assert python_fence_lines(sample) == [0]
+
+
+@pytest.mark.parametrize("info", ["console", ""])
+@pytest.mark.parametrize("fence", ["```", "~~~", "````"])
+def test_a_shown_block_is_not_run(fence: str, info: str) -> None:
+    sample = f"{fence}{info}\n# a.py\nx = 1\n{fence}\n"
+    assert unknown_blocks(sample) == []
+    assert readme_files(sample) == {}
+    assert python_fence_lines(sample) == []
+
+
+@pytest.mark.parametrize(
+    ("sample", "line"),
+    [
+        ("text\n\n- item\n\n  ```py\n  x = 1\n  ```\n", 5),
+        ("text\n\n> quote\n>\n> ```py\n> x = 1\n> ```\n", 5),
+        ("- item\n\n  > ```py\n  > x = 1\n  > ```\n", 3),
+    ],
+)
+def test_a_nested_fence_is_refused(sample: str, line: int) -> None:
+    assert [m.split(" fence ")[0] for m in unknown_blocks(sample)] == [f"line {line}:"]
+
+
+def test_every_refused_block_is_reported() -> None:
+    sample = "```py\nx\n```\n\n```python\ny\n```\n\n    z\n\n~~~sh\nw\n~~~\n"
+    assert [m.split(":")[0] for m in unknown_blocks(sample)] == [
+        "line 1",
+        "line 9",
+        "line 11",
+    ]
+
+
+def test_the_readme_has_no_block_the_test_does_not_know() -> None:
+    text = README.read_text(encoding="utf-8")
+    assert unknown_blocks(text) == []
+    assert python_fence_lines(text)

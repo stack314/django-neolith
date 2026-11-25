@@ -31,10 +31,8 @@ core schema.
 """
 
 import enum
-import itertools
 import json
 import math
-import re
 import sys
 import typing
 from collections.abc import Iterator, Mapping
@@ -50,6 +48,7 @@ from neolith import _naming
 from neolith._checker import TIMES, description_checker
 from neolith._forms import FORM_FOR_KIND
 from neolith._naming import shown
+from neolith._nesting import deeper_than
 from neolith._portable import text_problem
 
 if typing.TYPE_CHECKING:
@@ -456,43 +455,6 @@ _DOUBLE_MAX = int(sys.float_info.max)
 # More digits than that has.
 _DOUBLE_DIGITS = len(str(_DOUBLE_MAX))
 
-# How deep a text may nest before the json module reads it. Its reader
-# recurses on the C stack, and on Python 3.12 and 3.13 the recursion limit
-# assumes a stack of about 2 MB, so on a thread with less, such as the 1 MB
-# that Alpine's Python builds set, deep text ends the process before
-# RecursionError is raised. pydantic-core's reader, which the description
-# check runs next, admits 201 levels, so this bound refuses nothing it would
-# admit. Below about 1 MB, pydantic-core's validators can still exhaust the
-# stack on a record that contains itself, so smaller stacks are not
-# supported.
-_DEPTH = 256
-# A string, from its opening quote to its closing one or to the end of an
-# unterminated text; possessive, so a text of many quotes stays linear.
-_STRING = re.compile(rb'"[^"\\]*+(?:\\.[^"\\]*+)*+(?:"|\\?\Z)', re.DOTALL)
-# Every byte but the brackets, and how each bracket moves the depth.
-_NOT_BRACKETS = bytes(set(range(256)) - set(b"[]{}"))
-_NESTING = [0] * 256
-for _bracket, _step in ((b"[", 1), (b"{", 1), (b"]", -1), (b"}", -1)):
-    _NESTING[_bracket[0]] = _step
-
-
-def _deeper_than(text: bytes, limit: int) -> bool:
-    """Whether a text's arrays and objects nest more than ``limit`` deep.
-
-    Counted without recursion, outside its strings, before any reader that
-    recurses sees it. A text that is not JSON may be counted deeper than a
-    reader would go, which only refuses it sooner.
-    """
-    # Nesting is never deeper than the number of openers, which is cheap to
-    # count, so most texts need no closer look.
-    if text.count(b"[") + text.count(b"{") <= limit:
-        return False
-    brackets = _STRING.sub(b"", text).translate(None, _NOT_BRACKETS)
-    return (
-        max(itertools.accumulate(map(_NESTING.__getitem__, brackets)), default=0)
-        > limit
-    )
-
 
 class _Twice(dict[str, object]):
     """An object in which a member name occurs twice, as the reader made it."""
@@ -552,7 +514,7 @@ def _interchange(text: bytes) -> tuple[object, str | None, tuple[int | str, ...]
     except UnicodeDecodeError:
         problem = "is not UTF-8 text"
     else:
-        if _deeper_than(text, _DEPTH):
+        if deeper_than(text):
             problem = "is nested too deeply to be read as JSON text"
     if problem is None:
         try:
