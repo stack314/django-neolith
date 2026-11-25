@@ -626,6 +626,20 @@ def test_a_cache_entry_key_that_runs_code_is_never_looked_up() -> None:
     assert _checks._database_caches({"default": entry}) == []
 
 
+def test_a_backend_vendor_that_is_not_exactly_a_str_is_not_compared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``vendor`` of a ``str`` subclass is not SQLite's, and its own
+    ``__eq__`` never runs."""
+    base = types.ModuleType("trap_vendor.base")
+    base.DatabaseWrapper = type(  # type: ignore[attr-defined]
+        "Wrapper", (), {"vendor": Trap("sqlite")}
+    )
+    monkeypatch.setitem(sys.modules, "trap_vendor", types.ModuleType("trap_vendor"))
+    monkeypatch.setitem(sys.modules, "trap_vendor.base", base)
+    assert _databases.is_sqlite("trap_vendor") is False
+
+
 def test_a_backend_class_is_read_without_its_metaclass(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

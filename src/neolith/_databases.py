@@ -21,10 +21,11 @@ What is compared for "one database" (ADR 0009 Decision 5):
 
 No code of the deployer's runs while the mapping is read: a key is looked
 up only once it is exactly a ``str``, and a path ``NAME`` is one of
-``pathlib``'s own classes, whose text only ``pathlib`` makes. A subclass is
-refused, since ``PurePath.__str__`` reads attributes any subclass may
-replace. A ``NAME`` whose text, or the path it opens, cannot be read is
-refused.
+``pathlib``'s own classes, and every slot it holds is an exact ``str``,
+``int`` or ``bool``, or a list or tuple of exact ``str``, so ``str()`` runs
+only ``pathlib``'s code. A subclass is refused, since ``PurePath.__str__``
+reads attributes any subclass may replace. A ``NAME`` whose text, or the
+path it opens, cannot be read is refused.
 
 A refusal names the alias, or the two aliases, and the rule. It never shows
 a value under an alias, in whole or in part (ADR 0033 Decision 7, ADR 0034).
@@ -33,6 +34,7 @@ a value under an alias, in whole or in part (ADR 0033 Decision 7, ADR 0034).
 import decimal
 import os
 import pathlib
+import types
 import urllib.parse
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any, Final, cast
@@ -114,16 +116,57 @@ _PATHS: Final = (
 _WINDOWS: Final = (pathlib.PureWindowsPath, pathlib.WindowsPath)
 
 
+def _slots() -> tuple[types.MemberDescriptorType, ...]:
+    """Each slot ``PurePath`` and its bases declare, as its member
+    descriptor: the parts a path holds, which ``str()`` parses or returns.
+    Only ``PurePath``'s own, since ``__str__`` reads no slot a subclass of it
+    declares (such as ``Path``'s ``_info`` on Python 3.14).
+    """
+    found: list[types.MemberDescriptorType] = []
+    for klass in _naming.mro(pathlib.PurePath):
+        space = _naming.namespace(klass)
+        slots = _naming.entry(space, "__slots__", ())
+        for slot in (slots,) if type(slots) is str else cast("Iterable[str]", slots):
+            member = _naming.entry(space, slot)
+            if type(member) is types.MemberDescriptorType:
+                found.append(member)
+    return tuple(found)
+
+
+_SLOTS: Final = _slots()
+
+
+def _plain(held: object) -> bool:
+    """An exact ``str``, ``int`` or ``bool``, or an exact ``list`` or
+    ``tuple`` of exact ``str``: values whose methods are the built-in ones.
+    """
+    if _naming.one_of(type(held), (str, int, bool)):
+        return True
+    if _naming.one_of(type(held), (list, tuple)):
+        items: list[object] | tuple[object, ...] = held  # type: ignore[assignment]
+        return all(type(item) is str for item in items)
+    return False
+
+
 def _text(name: object) -> str | None:
     """The text of a ``NAME``: an exact ``str`` as itself, and a path of one
-    of ``pathlib``'s own classes as ``str()`` makes it, which runs only
-    ``pathlib``'s code. ``None`` for any other value, a subclass of a path
-    included, or for a path whose cached text is not an exact ``str``.
+    of ``pathlib``'s own classes, every slot of which holds an exact ``str``,
+    ``int`` or ``bool``, or a list or tuple of exact ``str``, as ``str()``
+    makes it, which then runs only ``pathlib``'s code. ``None`` for any
+    other value: a subclass of a path, or a path whose parts are not exact
+    text, such as one built from a ``str`` subclass.
     """
     if type(name) is str:
         return name
     if not _naming.one_of(type(name), _PATHS):
         return None
+    for member in _SLOTS:
+        try:
+            held = member.__get__(name, type(name))
+        except AttributeError:  # not computed yet
+            continue
+        if not _plain(held):
+            return None
     text = str(name)
     return text if type(text) is str else None
 

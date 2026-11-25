@@ -25,8 +25,8 @@ import textwrap
 import types
 from collections.abc import Callable, Iterator
 from decimal import Decimal
-from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any, cast
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
+from typing import Any, NoReturn, cast
 
 import pytest
 from django.apps import AppConfig
@@ -41,7 +41,7 @@ from hypothesis import strategies as st
 
 from neolith import DeclarationError, _checks, _host
 from neolith._configure import configure
-from neolith._databases import databases_problems
+from neolith._databases import databases_problems, sqlite_path
 from neolith._declaration import declaration_of
 from tests import host_apps
 from tests.hosting import NEOLITH_KEYS, in_built_host, in_fresh_process
@@ -1042,6 +1042,95 @@ def test_a_subclass_of_a_path_is_refused_without_running_its_code(
     ]
     own = {**entry, "NAME": Path("n")}
     assert databases_problems({"default": own}, []) == [test_name]
+
+
+class _Probe(str):
+    """Text whose own code records each call, and raises."""
+
+    __slots__ = ()
+    calls: list[str] = []  # noqa: RUF012  # one list shared by every probe
+
+    def _ran(self, *args: object) -> NoReturn:
+        _Probe.calls.append("ran")
+        raise RuntimeError("the check ran the text's own code")
+
+    __bool__ = __len__ = __getitem__ = __eq__ = __ne__ = __iter__ = _ran
+    __hash__ = str.__hash__
+
+
+def _tampered(slot: str, value: object) -> Callable[[], PurePosixPath]:
+    def build() -> PurePosixPath:
+        path = PurePosixPath("n")
+        setattr(path, slot, value)
+        return path
+
+    return build
+
+
+# A path of pathlib's own class whose parts are not exact text: what its
+# ordinary constructors keep, and slots set by hand.
+_HELD: dict[str, Callable[[], PurePath]] = {
+    "constructor": lambda: PurePosixPath(_Probe("db.sqlite3")),
+    "join": lambda: Path("data") / _Probe("db.sqlite3"),
+    "_drv": _tampered("_drv", _Probe("")),
+    "_tail_cached": _tampered("_tail_cached", [_Probe("n")]),
+    "tail list subclass": _tampered("_tail_cached", type("Tail", (list,), {})()),
+    "_str": _tampered("_str", _Probe("n")),
+}
+
+
+@pytest.mark.parametrize("held", _HELD.values(), ids=_HELD.keys())
+@pytest.mark.parametrize("engine", [SQLITE, "django.db.backends.postgresql"])
+def test_a_path_holding_text_that_is_not_exactly_a_str_is_refused(
+    engine: str, held: Callable[[], PurePath]
+) -> None:
+    """An exact ``pathlib`` class does not make what it holds exact:
+    ``str()`` parses the parts the constructor kept. Each slot is judged by
+    its type before the text is read, so none of their code runs (rule K2),
+    in the check and in ``sqlite_path``, which Boot calls."""
+    _Probe.calls.clear()
+    name = held()
+    kind = type(name).__name__
+    assert databases_problems({"default": {"ENGINE": engine, "NAME": name}}, []) == [
+        f"database default: NAME: a {kind} that cannot be read as a path"
+    ]
+    assert sqlite_path(name) == ""
+    assert _Probe.calls == []
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: Path.cwd(),
+        lambda: Path("a") / "b" / "c.sqlite3",
+        lambda: Path.cwd().resolve().parent,
+        lambda: PureWindowsPath("C:/data/db"),
+        lambda: next(iter(Path(__file__).parent.iterdir())),
+        lambda: next(Path(__file__).parent.glob("*.py")),
+    ],
+    ids=["cwd", "joined", "resolved parent", "windows", "iterdir", "glob"],
+)
+def test_ordinary_paths_are_admitted(build: Callable[[], PurePath]) -> None:
+    """The nearest admitted shapes: paths that pathlib builds itself, read
+    once already, hashed, or not."""
+    for touch in (lambda path: None, str, hash):
+        path = build()
+        touch(path)
+        server = {"ENGINE": "django.db.backends.postgresql", "NAME": path}
+        assert databases_problems({"default": server}, []) == []
+        assert databases_problems({"default": sqlite(path)}, []) == []
+
+
+def test_posix_paths_that_differ_only_in_case_are_two_databases() -> None:
+    """``PurePath.__eq__`` folds case for a Windows path only."""
+    server = {"ENGINE": "django.db.backends.postgresql"}
+    assert configure(
+        [*HOSTED, LEDGER, BILLING],
+        _databases(
+            ledger={**server, "NAME": PurePosixPath("/srv/A")},
+            billing={**server, "NAME": PurePosixPath("/srv/a")},
+        ),
+    )
 
 
 @pytest.mark.parametrize("engine", [SQLITE, "django.db.backends.postgresql"])
