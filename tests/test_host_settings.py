@@ -17,6 +17,7 @@ through a set-up that refuses; the ``setting_changed`` receiver through
 
 import copy
 import json
+import ntpath
 import os
 import subprocess
 import sys
@@ -424,28 +425,46 @@ class _LoudPath(PurePosixPath):
         raise AssertionError("the check ran the path's own __eq__")
 
 
-class _Unreadable(PurePosixPath):
-    """A path whose attributes cannot be read once it is built, so
-    ``PurePath.__str__`` raises."""
+class _PathMeta(type):
+    """A metaclass that raises for every read of a class attribute that is
+    not a special name, as ``PurePath.__str__`` reads ``parser``."""
 
-    def __init__(self, *parts: str) -> None:
-        super().__init__(*parts)
-        self.built = True
+    def __getattribute__(cls, name: str) -> object:
+        if not name.startswith("__"):
+            raise AssertionError(f"the check read {name} through the metaclass")
+        return type.__getattribute__(cls, name)
+
+
+class _MetaPath(PurePosixPath, metaclass=_PathMeta):
+    pass
+
+
+class _FoldedPath(PurePosixPath):
+    """A POSIX path that pathlib compares as a Windows path."""
+
+    parser = _flavour = ntpath
+
+
+class _CachedPath(PurePosixPath):
+    """A path whose text is a property of its own."""
+
+    @property
+    def _str(self) -> str:
+        raise AssertionError("the check ran the path's own _str")
+
+
+class _AttributePath(PurePosixPath):
+    """A path whose attribute reads run its own code."""
 
     def __getattribute__(self, name: str) -> object:
-        if name != "__dict__" and object.__getattribute__(self, "__dict__").get(
-            "built"
-        ):
-            raise RuntimeError("unreadable")
-        return object.__getattribute__(self, name)
+        raise AssertionError(f"the check read the path's own {name}")
 
 
-class _TextNotStr(PurePosixPath):
-    """A path whose cached text is a ``str`` subclass."""
-
-    def __init__(self, *parts: str) -> None:
-        super().__init__(*parts)
-        self._str = _EqualsRaises("n")
+def _text_not_str() -> PurePosixPath:
+    """One of pathlib's own paths whose cached text is a ``str`` subclass."""
+    path = PurePosixPath("n")
+    path._str = _EqualsRaises("n")  # type: ignore[attr-defined]
+    return path
 
 
 def _databases(**aliases: object) -> dict[str, Any]:
@@ -499,8 +518,13 @@ def test_a_test_key_that_is_not_exactly_a_str_is_refused_before_any_lookup(
             "database billing: NAME: expected a str or a path, got bytes",
         ),
         (
-            {"billing": sqlite(_Unreadable("b"))},
-            "database billing: NAME: a _Unreadable that cannot be read as a path",
+            {"billing": sqlite(_LoudPath("b"))},
+            "database billing: NAME: _LoudPath is a subclass of a pathlib path; "
+            "give a str or a path of pathlib's own classes",
+        ),
+        (
+            {"billing": sqlite(_text_not_str())},
+            "database billing: NAME: a PurePosixPath that cannot be read as a path",
         ),
         (
             {"billing": {**sqlite("b"), "ATOMIC_REQUESTS": False}},
@@ -954,22 +978,14 @@ def test_server_aliases_with_a_host_or_port_of_another_type_are_not_compared(
     )
 
 
-class _Unhashable(PurePosixPath):
-    """A path that defines __eq__ and so, by Python's rule, no __hash__."""
-
-    def __eq__(self, other: object) -> bool:
-        return type(other) is _Unhashable and str(self) == str(other)
-
-    __hash__ = None  # type: ignore[assignment]
-
-
-def test_a_path_name_is_compared_by_its_text() -> None:
-    server = {"ENGINE": "django.db.backends.postgresql", "NAME": _Unhashable("n")}
-    (found,) = _db_refusal(
-        ledger=server, billing={**server, "NAME": PurePosixPath("n")}
-    )
-    assert found.startswith("databases ledger and billing: both name ")
-    # The text of a path is not the str of the same text.
+@pytest.mark.parametrize("path", [PurePosixPath, Path])
+def test_a_path_name_is_compared_by_its_text(path: type[PurePosixPath]) -> None:
+    """Two paths of one text are one database; a path and a ``str`` of the
+    same text are not, as ``PurePath.__eq__`` and ``str.__eq__`` say."""
+    server = {"ENGINE": "django.db.backends.postgresql", "NAME": path("n")}
+    assert _db_refusal(ledger=server, billing={**server, "NAME": path("n")}) == [
+        f"databases ledger and billing: {_ONE_SERVER}"
+    ]
     assert configure(
         [*HOSTED, LEDGER, BILLING],
         _databases(ledger=server, billing={**server, "NAME": "n"}),
@@ -995,39 +1011,44 @@ def test_a_path_name_is_compared_as_paths_compare() -> None:
     )
 
 
-@pytest.mark.parametrize("engine", [SQLITE, "django.db.backends.postgresql"])
-def test_a_path_name_is_read_without_its_own_code(engine: str) -> None:
-    """A path's text is made by ``PurePath.__str__``, never by the
-    subclass's own ``__str__``, ``__fspath__``, ``__hash__`` or ``__eq__``
-    (rule K2): two aliases on one path are refused, and one is admitted.
-    """
-    entry = {"ENGINE": engine, "NAME": _LoudPath("/srv/x.db")}
-    one = _ONE_FILE if engine == SQLITE else _ONE_SERVER
-    assert _db_refusal(ledger=entry, billing=dict(entry)) == [
-        f"databases ledger and billing: {one}"
-    ]
-    assert databases_problems({"ledger": entry}, ["ledger"]) == []
+_PATH_SUBCLASSES = {
+    "_LoudPath": _LoudPath,
+    "_MetaPath": _MetaPath,
+    "_FoldedPath": _FoldedPath,
+    "_CachedPath": _CachedPath,
+    "_AttributePath": _AttributePath,
+}
 
 
-@pytest.mark.parametrize(
-    "path",
-    [_Unreadable, _TextNotStr],
-    ids=["raises", "text not a str"],
-)
+@pytest.mark.parametrize(("kind", "path"), _PATH_SUBCLASSES.items())
 @pytest.mark.parametrize("engine", [SQLITE, "django.db.backends.postgresql"])
-def test_a_path_name_whose_text_cannot_be_read_is_refused(
-    engine: str, path: type[PurePosixPath]
+def test_a_subclass_of_a_path_is_refused_without_running_its_code(
+    engine: str, kind: str, path: type[PurePosixPath]
 ) -> None:
-    """Anything ``PurePath.__str__`` cannot read as an exact ``str`` is a
-    refusal by type, reported with the alias's other refusals.
+    """``PurePath.__str__`` reads attributes and methods any subclass may
+    replace, so a ``NAME`` that is a subclass of a path is refused by its
+    type, and none of its code runs (rule K2), with the alias's other
+    refusals; one of ``pathlib``'s own classes is admitted.
     """
-    name = path("n")
-    entry = {"ENGINE": engine, "NAME": name, "TEST": {"NAME": "t"}}
-    kind = type(name).__name__
-    assert databases_problems({"default": entry}, []) == [
-        f"database default: NAME: a {kind} that cannot be read as a path",
+    entry = {"ENGINE": engine, "NAME": path("n"), "TEST": {"NAME": "t"}}
+    test_name = (
         "database default: TEST.NAME is not admitted yet; Django names the test "
-        "database from NAME",
+        "database from NAME"
+    )
+    assert databases_problems({"default": entry}, []) == [
+        f"database default: NAME: {kind} is a subclass of a pathlib path; give a "
+        "str or a path of pathlib's own classes",
+        test_name,
+    ]
+    own = {**entry, "NAME": Path("n")}
+    assert databases_problems({"default": own}, []) == [test_name]
+
+
+@pytest.mark.parametrize("engine", [SQLITE, "django.db.backends.postgresql"])
+def test_a_path_whose_cached_text_is_not_a_str_is_refused(engine: str) -> None:
+    entry = {"ENGINE": engine, "NAME": _text_not_str()}
+    assert databases_problems({"default": entry}, []) == [
+        "database default: NAME: a PurePosixPath that cannot be read as a path"
     ]
 
 
@@ -1046,6 +1067,23 @@ def test_a_sqlite_name_that_cannot_be_resolved_is_refused(name: object) -> None:
     ]
     server = {"ENGINE": "django.db.backends.postgresql", "NAME": name}
     assert databases_problems({"default": server}, []) == []
+
+
+@pytest.mark.parametrize("error", [RecursionError, OSError, ValueError])
+def test_a_sqlite_name_whose_resolution_raises_is_refused(
+    monkeypatch: pytest.MonkeyPatch, error: type[Exception]
+) -> None:
+    """On Python 3.12, ``os.path.realpath`` raises ``RecursionError`` for a
+    long chain of symbolic links; any error while resolving is a refusal.
+    """
+
+    def realpath(path: str, **options: object) -> str:
+        raise error
+
+    monkeypatch.setattr(os.path, "realpath", realpath)
+    assert databases_problems({"default": sqlite("n")}, []) == [
+        "database default: NAME: a str that cannot be read as a path"
+    ]
 
 
 def test_a_lazy_path_name_is_refused_by_type_without_being_evaluated() -> None:

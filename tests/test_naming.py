@@ -607,15 +607,18 @@ class _TrapText(PurePosixPath):
 @pytest.mark.parametrize(
     "engine", ["django.db.backends.sqlite3", "django.db.backends.postgresql"]
 )
-def test_a_path_name_is_compared_by_the_text_pathlib_makes(engine: str) -> None:
-    """The path's own ``__str__`` never runs, so two aliases on one path
-    are compared by ``PurePath.__str__``'s text (rule K2)."""
+def test_a_path_whose_own_text_runs_code_is_refused_by_type(engine: str) -> None:
+    """A subclass of a path is refused by its type, and its own text is
+    never read or compared (rule K2)."""
     entry = {"ENGINE": engine, "NAME": _TrapText("/srv/n")}
     other = {**entry, "NAME": _TrapText("/srv/n")}
-    (found,) = _databases.databases_problems(
+    assert _databases.databases_problems(
         {"default": entry, "billing": other}, ["billing"]
-    )
-    assert found.startswith("databases default and billing: both name one ")
+    ) == [
+        f"database {alias}: NAME: _TrapText is a subclass of a pathlib path; give "
+        "a str or a path of pathlib's own classes"
+        for alias in ("default", "billing")
+    ]
 
 
 def test_a_cache_entry_key_that_runs_code_is_never_looked_up() -> None:

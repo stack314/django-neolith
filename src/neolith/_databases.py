@@ -17,13 +17,14 @@ What is compared for "one database" (ADR 0009 Decision 5):
 - Any other backend: ``(ENGINE, HOST, PORT, NAME)``, with ``HOST`` and
   ``PORT`` read as Django's backends read them (ADR 0034 Decision 2), and a
   path ``NAME`` as ``pathlib`` compares paths: by its flavour and its text,
-  case-folded for a Windows path.
+  lower-cased for a Windows path.
 
 No code of the deployer's runs while the mapping is read: a key is looked
-up only once it is exactly a ``str``, and a path's text is made by
-``pathlib.PurePath.__str__``, never by a subclass's own ``__str__``,
-``__fspath__``, ``__hash__`` or ``__eq__``. A ``NAME`` whose text or path
-cannot be read that way is refused.
+up only once it is exactly a ``str``, and a path ``NAME`` is one of
+``pathlib``'s own classes, whose text only ``pathlib`` makes. A subclass is
+refused, since ``PurePath.__str__`` reads attributes any subclass may
+replace. A ``NAME`` whose text, or the path it opens, cannot be read is
+refused.
 
 A refusal names the alias, or the two aliases, and the rule. It never shows
 a value under an alias, in whole or in part (ADR 0033 Decision 7, ADR 0034).
@@ -100,21 +101,30 @@ class _NotAPath(ValueError):
     """A ``NAME`` whose text, or the path it opens, cannot be read."""
 
 
+# pathlib's own classes, compared by identity: no subclass, whose methods
+# and attributes would be the deployer's code.
+_PATHS: Final = (
+    pathlib.PurePath,
+    pathlib.PurePosixPath,
+    pathlib.PureWindowsPath,
+    pathlib.Path,
+    pathlib.PosixPath,
+    pathlib.WindowsPath,
+)
+_WINDOWS: Final = (pathlib.PureWindowsPath, pathlib.WindowsPath)
+
+
 def _text(name: object) -> str | None:
-    """The text of a ``NAME``: an exact ``str`` as itself, and a path, of any
-    subclass, as ``pathlib.PurePath.__str__`` makes it, so no ``__str__``,
-    ``__fspath__``, ``__hash__`` or ``__eq__`` of a subclass runs. ``None``
-    for any other value, or for a path whose text that method cannot make
-    as an exact ``str``.
+    """The text of a ``NAME``: an exact ``str`` as itself, and a path of one
+    of ``pathlib``'s own classes as ``str()`` makes it, which runs only
+    ``pathlib``'s code. ``None`` for any other value, a subclass of a path
+    included, or for a path whose cached text is not an exact ``str``.
     """
     if type(name) is str:
         return name
-    if not issubclass(type(name), pathlib.PurePath):
+    if not _naming.one_of(type(name), _PATHS):
         return None
-    try:
-        text = pathlib.PurePath.__str__(cast("pathlib.PurePath", name))
-    except Exception:  # a subclass may break what the method reads
-        return None
+    text = str(name)
     return text if type(text) is str else None
 
 
@@ -138,7 +148,10 @@ def _resolved(name: object) -> str | None:
             return ""
     try:
         return os.path.realpath(os.path.abspath(text))
-    except (ValueError, OSError) as error:  # a NUL, a lone surrogate, no cwd
+    # A NUL or a lone surrogate, no working directory, or, on Python 3.12,
+    # RecursionError for a long chain of symbolic links: only the standard
+    # library's code runs here, on an exact str.
+    except Exception as error:
         raise _NotAPath from error
 
 
@@ -227,9 +240,9 @@ def _identity(engine: str, entry: Mapping[str, Any]) -> tuple[object, ...] | Non
     """What two aliases on one database share, led by the rule their refusal
     states; ``None`` for one exempt, or for a server alias whose ``HOST`` or
     ``PORT`` is of a type not compared (ADR 0034 Decision 2). Every part is
-    an exact ``str``, ``int`` or ``float``, so hashing and comparing it runs
-    no code of the deployer's. Raises ``_NotAPath`` for a ``NAME`` that
-    cannot be read as a path.
+    an exact ``str``, ``int``, ``float`` or ``bool``, or a tuple of them, so
+    hashing and comparing it runs no code of the deployer's. Raises
+    ``_NotAPath`` for a SQLite ``NAME`` whose path cannot be read.
     """
     name = entry.get("NAME")
     if is_sqlite(engine):
@@ -245,19 +258,17 @@ def _identity(engine: str, entry: Mapping[str, Any]) -> tuple[object, ...] | Non
 
 
 def _server_name(name: object) -> object:
-    """A server ``NAME`` as ``pathlib`` and ``str`` compare it: a ``str`` as
-    itself, never equal to a path, and a path by its flavour and its text,
-    case-folded for a Windows path, as ``PurePath.__eq__`` compares them.
+    """A server ``NAME`` as ``str`` and ``pathlib`` compare it: a ``str`` as
+    itself, never equal to a path, and a path, one of ``pathlib``'s own
+    classes, by its flavour and its text, lower-cased for a Windows path,
+    as ``PurePath.__eq__`` compares them.
     """
     if type(name) is str:
         return name
     text = _text(name)
-    if text is None:
+    if text is None:  # judged by _entry_problems
         raise _NotAPath
-    kind = type(name)
-    windows = issubclass(kind, pathlib.PureWindowsPath) or (
-        not issubclass(kind, pathlib.PurePosixPath) and os.name == "nt"
-    )
+    windows = _naming.one_of(type(name), _WINDOWS)
     return ("path", windows, text.lower() if windows else text)
 
 
@@ -333,9 +344,14 @@ def _entry_problems(alias: str, entry: object) -> list[str]:
             f"{where}: ENGINE is required; the dummy backend is not a database"
         )
     name = settings.get("NAME", "")
-    # By type, a subclass of a path included, so no code of the value runs.
+    # By type, so no code of the value runs.
     if type(name) is not str and not issubclass(type(name), pathlib.PurePath):
         problems.append(f"{where}: NAME: expected a str or a path, got {_type(name)}")
+    elif type(name) is not str and not _naming.one_of(type(name), _PATHS):
+        problems.append(
+            f"{where}: NAME: {_type(name)} is a subclass of a pathlib path; give a "
+            "str or a path of pathlib's own classes"
+        )
     elif _text(name) is None:
         problems.append(_unreadable(alias, name))
     elif type(name) is str and not name:
