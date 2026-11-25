@@ -9,6 +9,7 @@ command, in a child process (``tests/checking.py``).
 
 import ast
 import importlib.machinery
+import itertools
 import os
 import pkgutil
 import re
@@ -16,6 +17,7 @@ import string
 import symtable
 import sys
 import textwrap
+import types
 from pathlib import Path
 
 import pytest
@@ -171,16 +173,126 @@ def test_a_module_whose_path_finder_file_has_no_source_is_listed_as_such(
 ) -> None:
     for name in ["alone.pyc", f"fast{_EXTENSION}", "kept.py", "kept.pyc"]:
         (tmp_path / name).write_text("")
+    # The path finder loads an extension module before source of its name,
+    # and skips a broken link to one.
     (tmp_path / "both.py").write_text("")
     (tmp_path / f"both{_EXTENSION}").write_text("")
+    (tmp_path / "linked.py").write_text("")
+    (tmp_path / f"linked{_EXTENSION}").symlink_to(tmp_path / "nothing")
     files, _ = app_files("p", [str(tmp_path)])
     assert sorted((file.module, file.source) for file in files) == [
         ("p.alone", False),
         ("p.both", False),
-        ("p.both", True),
         ("p.fast", False),
         ("p.kept", True),
+        ("p.linked", True),
     ]
+
+
+def _shadowed(root: Path) -> Path:
+    """A package ``app`` where each name has a file the path finder never
+    loads for it beside the one it does.
+    """
+    app = root / "app"
+    for package in ("x", "y", "z", "q", "so"):
+        (app / package).mkdir(parents=True)
+        (app / package / "__init__.py").write_text("X = 1\n")
+    (app / "__init__.py").write_text("")
+    # A module beside a package of its name, which wins.
+    (app / "x.py").write_text("def broken(:\n")
+    (app / "y.py").write_text("import importlib\nimportlib.import_module(name)\n")
+    (app / "z.pyc").write_bytes(b"")
+    (app / f"so{_EXTENSION}").write_bytes(b"")
+    # A module beside a namespace directory of its name, which it hides.
+    (app / "m.py").write_text("M = 1\n")
+    (app / "m").mkdir()
+    (app / "m" / "inner.py").write_text("def broken(:\n")
+    # A module beside a link to a package directory, which wins: the name
+    # is a blind spot.
+    (app / "s").symlink_to(app / "q", target_is_directory=True)
+    (app / "s.py").write_text("def broken(:\n")
+    # A link to a directory with no __init__ beside a module: the module.
+    (root / "elsewhere").mkdir()
+    (app / "n").symlink_to(root / "elsewhere", target_is_directory=True)
+    (app / "n.py").write_text("N = 1\n")
+    # A broken link, which the path finder skips for a namespace directory.
+    (app / "w").mkdir()
+    (app / "w" / "inner.py").write_text("W = 1\n")
+    (app / "w.py").symlink_to(root / "nothing.py")
+    return app
+
+
+def test_a_file_python_never_loads_for_its_name_is_not_listed(
+    tmp_path: Path,
+) -> None:
+    app = _shadowed(tmp_path)
+    files, failed = app_files("app", [str(app)])
+    assert failed == []
+    assert sorted((file.module, file.path) for file in files) == sorted(
+        [
+            ("app", str(app / "__init__.py")),
+            ("app.m", str(app / "m.py")),
+            ("app.n", str(app / "n.py")),
+            ("app.q", str(app / "q" / "__init__.py")),
+            ("app.so", str(app / "so" / "__init__.py")),
+            ("app.w.inner", str(app / "w" / "inner.py")),
+            ("app.x", str(app / "x" / "__init__.py")),
+            ("app.y", str(app / "y" / "__init__.py")),
+            ("app.z", str(app / "z" / "__init__.py")),
+        ]
+    )
+    # Python's own path finder agrees, name by name.
+    names = ["app.m", "app.n", "app.q", "app.s", "app.so", "app.w", "app.w.inner"]
+    names += ["app.x", "app.y", "app.z"]
+    found = _origins(tmp_path, names)
+    assert found["app.s"] == str(app / "s" / "__init__.py")
+    assert found["app.w"] is None
+    for file in files:
+        if file.module != "app":
+            assert found[file.module] == file.path, file.module
+
+
+_ORIGINS = """\
+import importlib.util, json, sys
+root, names = json.loads(sys.argv[1])
+sys.path.insert(0, root)
+found = {}
+for name in names:
+    spec = importlib.util.find_spec(name)
+    found[name] = None if spec is None else spec.origin
+print(json.dumps(found))
+"""
+
+
+def _origins(root: Path, names: list[str]) -> dict[str, str | None]:
+    import json
+    import subprocess
+
+    ran = subprocess.run(  # noqa: S603
+        [sys.executable, "-I", "-S", "-c", _ORIGINS, json.dumps([str(root), names])],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=60,
+    )
+    found: dict[str, str | None] = json.loads(ran.stdout)
+    return found
+
+
+def test_a_file_python_never_loads_for_its_name_gives_no_finding(
+    tmp_path: Path,
+) -> None:
+    app = _shadowed(tmp_path)
+    (app / "good.py").write_text("def broken(:\n")
+    config = types.SimpleNamespace(
+        name="app", module=types.SimpleNamespace(__path__=[str(app)]), path=str(app)
+    )
+    source = _check_source.Source({"app": config}, lambda name: "app")  # type: ignore[dict-item]
+    found = [
+        (os.path.relpath(finding.path or "", tmp_path), finding.message.id)
+        for finding in _check_source.findings(source)
+    ]
+    assert found == [("app/good.py", "neolith.E112")]
 
 
 # How a file is read.
@@ -511,10 +623,28 @@ def _calls(text: str) -> tuple[list[tuple[str, int]], list[tuple[str, str, int]]
         ("from importlib import import_module\nimport_module('....x', 'pkg.sub')", []),
         ("__import__('pkg.a')", ["pkg.a"]),
         ("__import__('pkg.a', globals(), locals(), [], 0)", ["pkg.a"]),
-        ("__import__('a', globals(), locals(), [], 1)", []),
+        # __import__ read as the statement it performs: a relative level
+        # against the file's package, and a fromlist as a from import.
+        ("__import__('a', globals(), locals(), [], 1)", ["pkg.sub"]),
+        ("__import__('m', globals(), None, [], 1)", ["pkg.sub.m"]),
+        ("__import__('', globals(), None, ['m', 'gone'], 1)", ["pkg.sub.m", "pkg.sub"]),
+        ("__import__('a', globals(), None, ('b',), level=2)", ["pkg.a.b"]),
+        ("__import__('pkg.sub', fromlist=['m'])", ["pkg.sub.m"]),
+        ("__import__('pkg.sub', None, None, ['*'])", ["pkg.sub"]),
+        ("__import__('pkg.sub', fromlist=None)", ["pkg.sub"]),
+        # Python refuses these, so they import nothing.
+        ("__import__('m', None, None, [], 1)", []),
+        ("__import__('m', level=1)", []),
+        ("__import__('m', globals(), None, [], 5)", []),
+        ("__import__('')", []),
         (
             "from django.utils.module_loading import import_string\n"
             "import_string('pkg.a.Thing')",
+            ["pkg.a"],
+        ),
+        (
+            "from django.utils.module_loading import import_string\n"
+            "import_string(dotted_path='pkg.a.Thing')",
             ["pkg.a"],
         ),
         (
@@ -585,6 +715,16 @@ def test_each_literal_dynamic_import_gives_its_edge(
             ("import_module", "package"),
         ),
         ("__import__(name)", ("__import__", "argument")),
+        ("__import__('pkg', fromlist=names)", ("__import__", "argument")),
+        ("__import__('pkg', None, None, [name])", ("__import__", "argument")),
+        ("__import__('pkg', None, None, [], level)", ("__import__", "argument")),
+        ("__import__('m', scope, None, [], 1)", ("__import__", "argument")),
+        ("__import__('pkg', *rest)", ("__import__", "argument")),
+        (
+            "from django.utils.module_loading import import_string\n"
+            "import_string(dotted_path=path)",
+            ("import_string", "argument"),
+        ),
         (
             "from django.utils.module_loading import import_string\n"
             "import_string(path)",
@@ -655,3 +795,44 @@ def test_a_computed_argument_is_w101(tmp_path: Path, entry: str) -> None:
     ], ran.stdout + ran.stderr
     assert _SUMMARY.fullmatch(ran.summary).groups() == ("0", "0", "2")  # type: ignore[union-attr]
     assert ran.status == 0
+
+
+# The settings module's directory is first-party under both entries.
+
+_FIRST_PARTY_PROBE = """\
+import sys
+from neolith import _check_source
+
+_findings = _check_source.findings
+
+
+def findings(source):
+    print("first-party:", *source.first_party(), sep="\\n", file=sys.stderr)
+    return _findings(source)
+
+
+_check_source.findings = findings
+"""
+
+
+@pytest.mark.parametrize("entry", _ENTRIES)
+def test_the_settings_module_s_directory_is_first_party(
+    tmp_path: Path, entry: str
+) -> None:
+    shop = Shop(tmp_path / "project")
+    library = shop.root / "lib"
+    library.mkdir()
+    (shop.root / "shop").rename(library / "shop")
+    probe = tmp_path / "probe"
+    probe.mkdir()
+    (probe / "sitecustomize.py").write_text(_FIRST_PARTY_PROBE)
+    path = os.pathsep.join([str(probe), str(shop.root), str(library), *sys.path])
+    if entry == "neolith check":
+        ran = shop.check("shop", env={"PYTHONPATH": path})
+    else:
+        ran = shop.checkapps(env={"PYTHONPATH": path})
+    lines = ran.errors
+    assert "first-party:" in lines, ran.stdout + ran.stderr
+    after = lines[lines.index("first-party:") + 1 :]
+    found = list(itertools.takewhile(os.path.isabs, after))
+    assert found == [str(shop.root), str(library)], ran.stderr

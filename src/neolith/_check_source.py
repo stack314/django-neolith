@@ -1,15 +1,17 @@
 """Reading source for the check before deployment (ADR 0030 Decision 3, as
 ADR 0035 narrows it).
 
-The files of a hosted app are every Python source file under the
-directories its package's ``__path__`` lists, at any depth, and every module
-file without source there (``neolith.W104``). A walk skips ``__pycache__``,
-a symbolic link to a directory, and a file or directory whose module name
-holds a dot: a file's module name is its name less the longest suffix
-Python's path finder loads (``importlib.machinery.all_suffixes()``, as
-``inspect.getmodulename`` reads it). A name that is not an identifier, such
-as a migration's ``0001_initial``, is read, since ``import_module`` reaches
-it (ADR 0035).
+The files of a hosted app are, for each dotted name below its package, at
+any depth under the directories its ``__path__`` lists, the file Python's
+path finder loads for that name, read when it is Python source and
+``neolith.W104`` when it is not. A file the path finder never loads for its
+name, such as ``x.py`` beside a package ``x``, is not read. A walk skips
+``__pycache__``, a symbolic link to a directory, and a file or directory
+whose module name holds a dot: a file's module name is its name less the
+longest suffix Python's path finder loads
+(``importlib.machinery.all_suffixes()``, as ``inspect.getmodulename`` reads
+it). A name that is not an identifier, such as a migration's
+``0001_initial``, is read, since ``import_module`` reaches it (ADR 0035).
 
 Each file is read once per run (``Source``), parsed with ``ast.parse``,
 compiled with ``compile`` and given its ``symtable``; a file that cannot be
@@ -168,6 +170,149 @@ def _loaded(directory: str, stem: str, names: frozenset[str]) -> str | None:
     return None
 
 
+def _init_file(directory: str) -> str | None:
+    """The ``__init__`` file the path finder loads for the package
+    ``directory``, or ``None`` when it holds none.
+    """
+    for suffix in _LOADED:
+        path = os.path.join(directory, _INIT + suffix)
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+# What one location gives a name, as FileFinder.find_spec reads it: a regular
+# package, a module, a namespace portion; a regular package reached through
+# a symbolic link, which wins the name but is not followed (a blind spot);
+# or only a source file the path finder cannot load, such as a broken link.
+_PACKAGE: Final = "package"
+_MODULE: Final = "module"
+_NAMESPACE: Final = "namespace"
+_LINKED: Final = "linked"
+_UNLOADABLE: Final = "unloadable"
+
+
+class _Found(NamedTuple):
+    kind: str
+    file: str | None = None
+    holds: str = ""
+
+
+def _scan(
+    directory: str, inner: frozenset[str] = frozenset(), *, venvs: bool = False
+) -> dict[str, _Found]:
+    """What each name ``directory`` gives is, as the path finder reads it:
+    a regular package before a module of its name and a module before a
+    namespace portion (``FileFinder.find_spec``). Skipped: what no dotted
+    name reaches, a symbolic link to a directory with no ``__init__``, the
+    first-party directories ``inner``, each of which is named from itself,
+    and, when ``venvs``, virtual environments. An ``OSError`` listing
+    ``directory`` is raised.
+    """
+    entries = _listing(directory)
+    names = frozenset(entry.name for entry in entries)
+    folders: dict[str, os.DirEntry[str]] = {}
+    stems: set[str] = set()
+    for entry in entries:
+        if _is_directory(entry) or _links_a_directory(entry):
+            if _reached(entry.name):
+                folders[entry.name] = entry
+            continue
+        parts = split(entry.name)
+        if parts is not None and parts[0] != _INIT:
+            stems.add(parts[0])
+    found: dict[str, _Found] = {}
+    for name in sorted(folders.keys() | stems):
+        folder = folders.get(name)
+        if folder is not None and (
+            os.path.realpath(folder.path) in inner
+            or (venvs and os.path.lexists(os.path.join(folder.path, "pyvenv.cfg")))
+        ):
+            folder = None
+        linked = folder is not None and not _is_directory(folder)
+        if folder is not None:
+            init = _init_file(folder.path)
+            if init is not None:
+                found[name] = _Found(_LINKED if linked else _PACKAGE, init, folder.path)
+                continue
+        loaded = _loaded(directory, name, names) if name in stems else None
+        if loaded is not None:
+            found[name] = _Found(_MODULE, os.path.join(directory, name + loaded))
+        elif folder is not None:
+            if not linked:
+                found[name] = _Found(_NAMESPACE, None, folder.path)
+        else:
+            unloadable = [name + suffix for suffix in _SOURCE if name + suffix in names]
+            if unloadable:
+                file = os.path.join(directory, unloadable[0])
+                found[name] = _Found(_UNLOADABLE, file)
+    return found
+
+
+def _probe(directory: str, name: str) -> _Found | None:
+    """What ``name`` is in a directory the check does not walk, such as a
+    library directory, by the path finder's own tests on that one name.
+    """
+    base = os.path.join(directory, name)
+    folder = os.path.isdir(base)
+    init = _init_file(base) if folder else None
+    if init is not None:
+        return _Found(_PACKAGE, init, base)
+    for suffix in _LOADED:
+        if os.path.isfile(base + suffix):
+            return _Found(_MODULE, base + suffix)
+    return _Found(_NAMESPACE, None, base) if folder else None
+
+
+# A location to look a name up in, with the first-party directory it is
+# named from; ``None`` for a directory the check does not walk.
+_Location = tuple[str, str | None]
+
+
+class _Chosen(NamedTuple):
+    kind: str
+    file: str | None
+    below: list[_Location]
+    root: str | None
+
+
+def _choose(
+    locations: Sequence[_Location], scanned: Sequence[dict[str, _Found] | None]
+) -> dict[str, _Chosen]:
+    """For each name a walked location gives, what Python's path finder
+    takes for it across ``locations``, in their order: the first regular
+    package or module wins, and namespace portions join only while none
+    does (``PathFinder._get_spec``). ``scanned`` holds each walked
+    location's scan, and ``None`` for one only probed.
+    """
+    candidates = sorted({name for scan in scanned if scan for name in scan})
+    chosen: dict[str, _Chosen] = {}
+    for name in candidates:
+        portions: list[_Location] = []
+        unloadable: _Chosen | None = None
+        result: _Chosen | None = None
+        for (directory, root), scan in zip(locations, scanned, strict=True):
+            found = scan.get(name) if scan is not None else _probe(directory, name)
+            if found is None:
+                continue
+            if found.kind in (_PACKAGE, _MODULE, _LINKED):
+                below = [(found.holds, root)] if found.kind == _PACKAGE else []
+                result = _Chosen(found.kind, found.file, below, root)
+                break
+            if found.kind == _NAMESPACE:
+                portions.append((found.holds, root))
+            elif unloadable is None:
+                unloadable = _Chosen(found.kind, found.file, [], root)
+        if result is None and portions:
+            roots = [root for _, root in portions if root is not None]
+            result = _Chosen(_NAMESPACE, None, portions, roots[0] if roots else None)
+        if result is None:
+            result = unloadable
+        if result is not None:
+            chosen[name] = result
+    return chosen
+
+
 def app_files(
     name: str, directories: Sequence[str]
 ) -> tuple[list[File], list[tuple[str, OSError]]]:
@@ -175,45 +320,43 @@ def app_files(
     ``directories``, at any depth, and each directory that could not be
     listed, with its error.
 
-    Every source file is listed, and, for each module name whose file the
-    path finder loads has no source, that file, with ``source`` false.
+    Each dotted name below the package is given the file Python's path
+    finder loads for it (``source`` false when that file has no Python
+    source), or, when it loads none, the name's source file, which cannot
+    be read (``neolith.E112``). A file the path finder never loads for its
+    name, such as ``x.py`` beside a package ``x``, is not listed, nor is
+    anything under a symbolic link to a directory.
     """
     files: list[File] = []
     failed: list[tuple[str, OSError]] = []
-    stack = [(directory, name) for directory in reversed(directories)]
+    for directory in directories:
+        init = _init_file(directory)
+        if init is not None:
+            files.append(File(init, name, name, init.endswith(_SOURCE)))
+            break
+    stack: list[tuple[str, list[_Location]]] = [
+        (name, [(directory, directory) for directory in directories])
+    ]
     while stack:
-        directory, prefix = stack.pop()
-        try:
-            entries = _listing(directory)
-        except OSError as error:
-            failed.append((directory, error))
-            continue
-        names = frozenset(entry.name for entry in entries)
-        below: list[tuple[str, str]] = []
-        seen: set[str] = set()
-        for entry in entries:
-            if _is_directory(entry):
-                if _reached(entry.name):
-                    below.append((entry.path, f"{prefix}.{entry.name}"))
-                continue
-            if _links_a_directory(entry):
-                continue
-            parts = split(entry.name)
-            if parts is None:
-                continue
-            stem, suffix = parts
-            # __init__ names its package, which its relative imports start
-            # from; any other module's start from the package it is in.
-            module = prefix if stem == _INIT else f"{prefix}.{stem}"
-            package = prefix
-            if suffix in _SOURCE:
-                files.append(File(entry.path, module, package))
-            elif stem not in seen:
-                seen.add(stem)
-                loaded = _loaded(directory, stem, names)
-                if loaded is not None and loaded not in _SOURCE:
-                    path = os.path.join(directory, stem + loaded)
-                    files.append(File(path, module, package, source=False))
+        prefix, locations = stack.pop()
+        scanned: list[dict[str, _Found] | None] = []
+        for directory, _ in locations:
+            try:
+                scanned.append(_scan(directory))
+            except OSError as error:
+                failed.append((directory, error))
+                scanned.append({})
+        below: list[tuple[str, list[_Location]]] = []
+        for stem, chosen in _choose(locations, scanned).items():
+            module = f"{prefix}.{stem}"
+            if chosen.file is not None and chosen.kind != _LINKED:
+                # A package's relative imports start from itself; a
+                # module's from the package it is in.
+                package = module if chosen.kind == _PACKAGE else prefix
+                source = chosen.file.endswith(_SOURCE)
+                files.append(File(chosen.file, module, package, source))
+            if chosen.kind in (_PACKAGE, _NAMESPACE):
+                below.append((module, chosen.below))
         stack.extend(reversed(below))
     return files, failed
 
@@ -678,15 +821,10 @@ def calls(
             if text:
                 edges.append(Edge(nearest(text, known), line, dynamic=True))
         elif builtin and isinstance(node.func, ast.Name) and node.func.id == _IMPORT:
-            name = _argument(node, 0, "name")
-            level = _argument(node, 4, "level")
-            if _computed(name):
+            found, readable = _dunder_import(node, package, known)
+            edges += found
+            if not readable:
                 unread.append(Call(_IMPORT, "argument", line))
-            text = _text(name)
-            if text and (
-                level is None or (isinstance(level, ast.Constant) and level.value == 0)
-            ):
-                edges.append(Edge(nearest(text, known), line, dynamic=True))
         elif target is not None and target in _NAMED:
             short, index, keyword = _NAMED[target]
             argument = _argument(node, index, keyword or None)
@@ -707,6 +845,72 @@ def calls(
         elif _unread_by_attribute(node):
             unread.append(Call(node.func.attr, "argument", line))  # type: ignore[attr-defined]
     return edges, unread
+
+
+def _from_names(argument: ast.expr | _Computed | None) -> list[str] | None:
+    """The names of a literal ``fromlist``: a list or tuple of strings, or
+    ``None``; ``None`` for anything else.
+    """
+    if argument is None or (
+        isinstance(argument, ast.Constant) and argument.value is None
+    ):
+        return []
+    if isinstance(argument, (ast.List, ast.Tuple)) and all(
+        isinstance(item, ast.Constant) and type(item.value) is str
+        for item in argument.elts
+    ):
+        return [item.value for item in argument.elts]  # type: ignore[attr-defined]
+    return None
+
+
+def _globals_call(argument: ast.expr | _Computed | None) -> bool:
+    return (
+        isinstance(argument, ast.Call)
+        and isinstance(argument.func, ast.Name)
+        and argument.func.id == "globals"
+        and not argument.args
+        and not argument.keywords
+    )
+
+
+def _dunder_import(
+    call: ast.Call, package: str, known: Callable[[str], bool]
+) -> tuple[list[Edge], bool]:
+    """The edges of a call of the builtin ``__import__(name, globals,
+    locals, fromlist, level)``, read as the ``import`` or ``from ... import``
+    statement it performs, and whether the check could read it: a computed
+    name, ``fromlist`` or ``level``, or a relative level with ``globals``
+    other than ``globals()``, cannot be read.
+    """
+    line = call.lineno
+    name = _argument(call, 0, "name")
+    scope = _argument(call, 1, "globals")
+    level = _argument(call, 4, "level")
+    names = _from_names(_argument(call, 3, "fromlist"))
+    if _computed(name) or names is None or _computed(level):
+        return [], False
+    text = _text(name)
+    depth = level.value if isinstance(level, ast.Constant) else 0
+    if text is None or type(depth) is not int or depth < 0:
+        return [], True
+    if depth:
+        if not _globals_call(scope):
+            return [], scope is None or (
+                isinstance(scope, ast.Constant) and scope.value is None
+            )
+        base = _relative(text, depth, package)
+    else:
+        base = text or None
+    if not base:
+        return [], True
+    if not names:
+        return [Edge(nearest(base, known), line, dynamic=True)], True
+    edges = []
+    for each in names:
+        below = f"{base}.{each}"
+        target = below if each != "*" and known(below) else nearest(base, known)
+        edges.append(Edge(target, line, dynamic=True))
+    return edges, True
 
 
 def _unread_by_attribute(call: ast.Call) -> bool:
@@ -819,99 +1023,92 @@ class Placed(NamedTuple):
         return os.path.relpath(self.path, self.root).split(os.sep)
 
 
-def _scan(
-    directory: str, inner: frozenset[str]
-) -> dict[str, tuple[str, str | None, str]]:
-    """The names one directory gives, as the path finder reads it: for
-    each, its kind (``package``, ``module`` or ``namespace``), the file
-    loaded and the directory a package or portion holds. A regular package
-    comes before a module of its name and a module before a namespace
-    portion (``FileFinder.find_spec``). Skipped: what no dotted name
-    reaches, symbolic links to directories, virtual environments, and the
-    first-party directories ``inner``, each of which is named from itself.
+def _taken_elsewhere(name: str) -> bool:
+    """Whether Python imports the top-level ``name`` before the path finder
+    looks: a built-in or frozen module (``sys.meta_path``'s first finders).
     """
-    try:
-        entries = _listing(directory)
-    except OSError:
-        return {}
-    names = frozenset(entry.name for entry in entries)
-    found: dict[str, tuple[str, str | None, str]] = {}
-    for entry in entries:
-        if not _is_directory(entry):
-            continue
-        if (
-            not _reached(entry.name)
-            or os.path.realpath(entry.path) in inner
-            or os.path.lexists(os.path.join(entry.path, "pyvenv.cfg"))
-        ):
-            continue
-        init = next(
-            (
-                os.path.join(entry.path, _INIT + suffix)
-                for suffix in _LOADED
-                if os.path.isfile(os.path.join(entry.path, _INIT + suffix))
-            ),
-            None,
-        )
-        if init is not None:
-            found[entry.name] = ("package", init, entry.path)
-    for entry in entries:
-        if _is_directory(entry) or _links_a_directory(entry):
-            continue
-        parts = split(entry.name)
-        if parts is None or parts[0] == _INIT or parts[0] in found:
-            continue
-        loaded = _loaded(directory, parts[0], names)
-        if loaded is not None:
-            found[parts[0]] = ("module", os.path.join(directory, parts[0] + loaded), "")
-    for entry in entries:
-        if (
-            _is_directory(entry)
-            and _reached(entry.name)
-            and entry.name not in found
-            and os.path.realpath(entry.path) not in inner
-            and not os.path.lexists(os.path.join(entry.path, "pyvenv.cfg"))
-        ):
-            found[entry.name] = ("namespace", None, entry.path)
-    return found
+    return (
+        name in sys.builtin_module_names
+        or importlib.machinery.FrozenImporter.find_spec(name) is not None
+    )
 
 
-def module_map(directories: Sequence[str]) -> dict[str, Placed]:
-    """Every dotted name the first-party ``directories`` give, in their
-    order, mapped to where it is, without running code (ADR 0030 Decision
-    3, *How a dotted name is placed*).
+def _ordered(directories: Sequence[str], path: Sequence[str]) -> list[_Location]:
+    """Every location of ``path`` (``sys.path``) in its order, each named
+    from itself when it is one of the first-party ``directories``, then the
+    first-party directories ``path`` does not hold.
+    """
+    first = {os.path.realpath(directory): directory for directory in directories}
+    locations: list[_Location] = []
+    seen: set[str] = set()
+    for entry in path:
+        given = entry or os.getcwd()
+        real = os.path.realpath(given)
+        if real in seen:
+            continue
+        seen.add(real)
+        directory = first.get(real)
+        locations.append((given, None) if directory is None else (directory, directory))
+    locations += [
+        (directory, directory) for real, directory in first.items() if real not in seen
+    ]
+    return locations
 
-    Across locations Python's path finder decides: the first location
-    that holds a regular package or a module wins, and namespace portions
-    join only while none does (``PathFinder._get_spec``). Where one
-    directory lies inside another, each file is named from the innermost.
+
+def module_map(
+    directories: Sequence[str], path: Sequence[str] | None = None
+) -> dict[str, Placed]:
+    """Every dotted name the first-party ``directories`` give, mapped to
+    where it is, without running code (ADR 0030 Decision 3, *How a dotted
+    name is placed*).
+
+    Python's path finder decides across locations: the first that holds a
+    regular package or a module wins, and namespace portions join only
+    while none does (``PathFinder._get_spec``). The locations are those of
+    ``path`` (``sys.path``) in its order, the first-party directories
+    walked and every other one probed name by name, or, when ``path`` is
+    not given, the first-party directories in their order. A name another
+    location wins, or a built-in or frozen module takes, is not
+    first-party; nor is a package reached through a symbolic link, which
+    is a blind spot. Where one directory lies inside another, each file is
+    named from the innermost.
     """
     inner = frozenset(os.path.realpath(directory) for directory in directories)
+    top = (
+        [(directory, directory) for directory in directories]
+        if path is None
+        else _ordered(directories, path)
+    )
     placed: dict[str, Placed] = {}
-    queue: list[tuple[str, list[tuple[str, str]]]] = [
-        ("", [(directory, directory) for directory in directories])
-    ]
+    queue: list[tuple[str, list[_Location]]] = [("", top)]
     while queue:
         prefix, locations = queue.pop()
-        chosen: dict[str, tuple[str, str | None, list[tuple[str, str]], str]] = {}
-        for location, root in locations:
-            for name, (kind, file, holds) in _scan(location, inner).items():
-                earlier = chosen.get(name)
-                if kind == "namespace":
-                    if earlier is None:
-                        chosen[name] = (kind, None, [(holds, root)], root)
-                    elif earlier[0] == "namespace":
-                        earlier[2].append((holds, root))
-                elif earlier is None or earlier[0] == "namespace":
-                    below = [(holds, root)] if kind == "package" else []
-                    chosen[name] = (kind, file, below, root)
-        for name, (kind, file, below, root) in chosen.items():
+        scanned: list[dict[str, _Found] | None] = []
+        for directory, root in locations:
+            if root is None:
+                scanned.append(None)
+                continue
+            try:
+                scanned.append(_scan(directory, inner, venvs=True))
+            except OSError:
+                scanned.append({})
+        for name, chosen in _choose(locations, scanned).items():
+            if (
+                chosen.root is None
+                or chosen.kind in (_LINKED, _UNLOADABLE)
+                or (not prefix and _taken_elsewhere(name))
+            ):
+                continue
             dotted = f"{prefix}{name}"
-            source = file is None or file.endswith(_SOURCE)
-            portions = tuple(holds for holds, _ in below) if kind == "namespace" else ()
-            placed[dotted] = Placed(file, root, source, portions)
-            if below:
-                queue.append((f"{dotted}.", below))
+            source = chosen.file is None or chosen.file.endswith(_SOURCE)
+            portions = (
+                tuple(holds for holds, _ in chosen.below)
+                if chosen.kind == _NAMESPACE
+                else ()
+            )
+            placed[dotted] = Placed(chosen.file, chosen.root, source, portions)
+            if chosen.below:
+                queue.append((f"{dotted}.", chosen.below))
     return placed
 
 
@@ -957,7 +1154,6 @@ class Source:
         self._failed: dict[str, list[tuple[str, OSError]]] = {}
         self._directories: list[str] | None = None
         self._map: dict[str, Placed] | None = None
-        self._tops: frozenset[str] = frozenset()
         self._loaded: frozenset[str] = frozenset()
         self._bound: dict[str, dict[str, str]] = {}
         self._calls: dict[str, tuple[list[Edge], list[Call]]] = {}
@@ -1018,20 +1214,16 @@ class Source:
     def map(self) -> dict[str, Placed]:
         """The first-party dotted names, each with where it is."""
         if self._map is None:
-            self._map = module_map(self.first_party())
-            self._tops = frozenset(name.partition(".")[0] for name in self._map)
+            self._map = module_map(self.first_party(), list(sys.path))
             self._loaded = frozenset(sys.modules)
         return self._map
 
     def known(self, name: str) -> bool:
         """Whether ``name`` is a module the check knows of: a first-party
-        name the map holds, or a module loaded in this process whose
-        top-level package is not first-party.
+        name the map holds, or a module loaded in this process, such as a
+        library module in a namespace package that first-party code shares.
         """
-        placed = self.map()
-        if name.partition(".")[0] in self._tops:
-            return name in placed
-        return name in self._loaded
+        return name in self.map() or name in self._loaded
 
     def bound(self, module: Module) -> dict[str, str]:
         """The names ``module`` binds by top-level imports alone."""

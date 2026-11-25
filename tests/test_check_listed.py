@@ -101,3 +101,23 @@ def test_the_functions_of_transaction_are_those_django_defines() -> None:
     extra = set() if django.VERSION >= (6, 1) else {"savepoint_create"}
     assert set(_TRANSACTION) == defined | extra
     assert not defined & extra
+
+
+def test_the_listed_names_are_those_adr_0030_gives() -> None:
+    # ADR 0030 Decision 3: neolith.connect, command_scope and testing.boot,
+    # get_user_model, import_module, import_string, include, connection,
+    # connections, DEFAULT_DB_ALIAS and the functions of transaction, each
+    # by the module that defines it.
+    assert set(LISTED) == {
+        "neolith._host.connect",
+        "neolith._host.command_scope",
+        "neolith.testing.boot",
+        "django.contrib.auth.get_user_model",
+        "importlib.import_module",
+        "django.utils.module_loading.import_string",
+        "django.urls.conf.include",
+        "django.db.connection",
+        "django.db.connections",
+        "django.db.utils.DEFAULT_DB_ALIAS",
+        *(f"django.db.transaction.{name}" for name in _TRANSACTION),
+    }

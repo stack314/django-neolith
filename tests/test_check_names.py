@@ -114,6 +114,16 @@ _POSITIONS: dict[str, tuple[list[str], list[str]]] = {
     "while": (["while True:"], ["    break"]),
     "while else": (["while False:", "    pass", "else:"], []),
     "match": (["match 1:", "    case _:"], []),
+    "try star": (["try:"], ["except* ImportError:", "    pass"]),
+    "except star": (["try:", "    raise ImportError", "except* ImportError:"], []),
+    "try star else": (
+        ["try:", "    pass", "except* ImportError:", "    pass", "else:"],
+        [],
+    ),
+    "try star finally": (
+        ["try:", "    pass", "except* ImportError:", "    pass", "finally:"],
+        [],
+    ),
 }
 
 
@@ -265,6 +275,14 @@ def test_a_name_the_rule_follows_reaches_what_it_imports_wherever_it_is_read() -
             "        from other import connect\n",
             False,
         ),
+        # A later import of the same name in a module-level try/except*.
+        (
+            "from neolith import connect\ntry:\n    pass\n"
+            "except* ValueError:\n    from other import connect\n",
+            False,
+        ),
+        # A relative import Python refuses, of the same name.
+        ("from neolith import connect\nif x:\n    from . import connect\n", False),
         # A star import after an import of the same name.
         ("from neolith import connect\nfrom other import *\n", False),
         # The nearest admitted shapes: the same import twice, and one in a
