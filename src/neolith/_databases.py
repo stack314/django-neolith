@@ -21,10 +21,11 @@ A refusal names the alias, or the two aliases, and the rule. It never shows
 a value under an alias, in whole or in part (ADR 0033 Decision 7, ADR 0034).
 """
 
+import decimal
 import os
 import pathlib
 import urllib.parse
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any, Final, cast
 
 from neolith import _naming
@@ -114,46 +115,70 @@ def sqlite_path(name: object) -> str | None:
     return os.path.realpath(os.path.abspath(text))
 
 
-def _host(value: object) -> str | None:
-    """``HOST`` as Django's backends read it: ``""`` for one not set, as an
-    absent key, ``None`` and an empty ``str`` read (``if settings_dict["HOST"]``),
-    and a ``str`` of any subclass as an exact ``str``, made by ``str.__str__``
-    so no code of the subclass runs. ``None`` for any other value, which is
-    not compared.
-    """
-    if value is None:
-        return ""
-    if issubclass(type(value), str):
-        return str.__str__(cast("str", value))
-    return None
+_OTHER: Final = object()
+# Other types whose truth the backends test (``if settings_dict["HOST"]``),
+# each with its base type's own method, so no code of a subclass runs.
+_SIZED: Final[tuple[tuple[type, Callable[[Any], object]], ...]] = (
+    (bytes, bytes.__len__),
+    (bytearray, bytearray.__len__),
+    (list, list.__len__),
+    (tuple, tuple.__len__),
+    (dict, dict.__len__),
+    (set, set.__len__),
+    (frozenset, frozenset.__len__),
+    (complex, complex.__bool__),
+    (decimal.Decimal, decimal.Decimal.__bool__),
+)
 
 
-def _port(value: object) -> object:
-    """``PORT`` as Django's backends read it: ``""`` for one not set, as
-    ``None`` and every false ``str``, ``int`` or ``float`` read
-    (``if settings_dict["PORT"]``); otherwise the number ``int()`` reads, as
-    MySQL's and Oracle's backends do, or the value as its base type reads it
-    when ``int()`` reads none. Each is read through the base type's own
-    method, so no code of a subclass runs. ``None`` for a value of any other
-    type, which is not compared.
+def _read(value: object) -> object:
+    """``HOST`` or ``PORT`` as its base type reads it: ``None`` as ``""``,
+    which is how Django leaves an absent key, and a ``str``, ``int`` or
+    ``float`` of any subclass as an exact value, made by the base type's own
+    method so no code of the subclass runs. A false value of a type in
+    ``_SIZED``, which a backend reads as not set too, as ``""``. ``_OTHER``
+    for any other value.
     """
     if value is None:
         return ""
     kind = type(value)
-    plain: str | float
     if issubclass(kind, str):
-        plain = str.__str__(cast("str", value))
-    elif issubclass(kind, int):
-        plain = int.__int__(cast("int", value))
-    elif issubclass(kind, float):
-        plain = float.__float__(cast("float", value))
-    else:
-        return None
+        return str.__str__(cast("str", value))
+    if issubclass(kind, int):
+        return int.__int__(cast("int", value))
+    if issubclass(kind, float):
+        return float.__float__(cast("float", value))
+    for base, truth in _SIZED:
+        if issubclass(kind, base):
+            return _OTHER if truth(value) else ""
+    return _OTHER
+
+
+def _host(value: object) -> str | None:
+    """``HOST`` as Django's backends read it: ``""`` for one not set, as every
+    value ``_read`` makes false reads (``if settings_dict["HOST"]``), and a
+    ``str`` as itself. ``None`` for any other value, which is not compared.
+    """
+    plain = _read(value)
     if not plain:
         return ""
+    return plain if type(plain) is str else None
+
+
+def _port(value: object) -> object:
+    """``PORT`` as Django's backends read it: ``""`` for one not set, as every
+    value ``_read`` makes false reads (``if settings_dict["PORT"]``), and as
+    ``0`` from ``int()`` reads, which MySQL's client takes as its default;
+    otherwise the number ``int()`` reads, as MySQL's and Oracle's backends
+    do, or the value itself when ``int()`` reads none. ``None`` for a value
+    of another type, which is not compared.
+    """
+    plain = _read(value)
+    if plain is _OTHER:
+        return None
     try:
-        return int(plain)
-    except (ValueError, OverflowError):  # a str int() refuses, nan, inf
+        return int(cast("str | float", plain)) or ""
+    except (ValueError, OverflowError):  # "", a str int() refuses, nan, inf
         return plain
 
 

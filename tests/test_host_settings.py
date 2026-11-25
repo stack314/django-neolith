@@ -23,6 +23,7 @@ import sys
 import textwrap
 import types
 from collections.abc import Callable, Iterator
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, cast
 
@@ -676,16 +677,68 @@ class _Sealed:
         raise AssertionError("the comparison ran the value's own __eq__")
 
 
+class _Bytes(bytes):
+    """An empty ``bytes`` whose own truth would raise if the check ran it."""
+
+    def __len__(self) -> int:
+        raise AssertionError("the comparison ran the value's own __len__")
+
+    def __bool__(self) -> bool:
+        raise AssertionError("the comparison ran the value's own __bool__")
+
+
+# False values of other types, which the backends read as not set too.
+_FALSE_OTHERS: list[object] = [
+    b"",
+    _Bytes(),
+    bytearray(),
+    [],
+    (),
+    {},
+    set(),
+    frozenset(),
+    0j,
+    Decimal(0),
+    Decimal("-0.0"),
+]
+
+
 _ABSENT = object()
 
 # Forms of HOST and PORT that each backend reads as one value: every form in
 # a group is compared equal (ADR 0034 Decision 2).
 _HOSTS: dict[str, list[object]] = {
-    "not set": [_ABSENT, None, "", _Text("")],
+    "not set": [
+        _ABSENT,
+        None,
+        "",
+        _Text(""),
+        False,
+        0,
+        0.0,
+        _Port(0),
+        _Float(0.0),
+        *_FALSE_OTHERS,
+    ],
     "db": ["db", _Text("db"), _Host("db")],
 }
 _PORTS: dict[str, list[object]] = {
-    "not set": [_ABSENT, None, "", 0, 0.0, False, _Text(""), _Port(0)],
+    "not set": [
+        _ABSENT,
+        None,
+        "",
+        0,
+        0.0,
+        False,
+        _Text(""),
+        _Port(0),
+        _Float(0.0),
+        "0",
+        " 0 ",
+        _Host("0"),
+        0.5,
+        *_FALSE_OTHERS,
+    ],
     "5432": [
         "5432",
         " 5432 ",
@@ -702,11 +755,15 @@ _PORTS: dict[str, list[object]] = {
 
 
 def _forms(groups: dict[str, list[object]]) -> list[tuple[str, object, object]]:
+    """Each form beside itself and, both ways round, beside the group's
+    first: the comparison is by hash and equality, so that covers each pair."""
     return [
-        (group, first, second)
+        (group, *pair)
         for group, forms in groups.items()
-        for first in forms
-        for second in forms
+        for form in forms
+        for pair in [(form, form), (form, forms[0]), (forms[0], form)][
+            : 1 if form is forms[0] else 3
+        ]
     ]
 
 
@@ -723,14 +780,20 @@ def _server(key: str, value: object) -> dict[str, object]:
     ("key", "group", "first", "second"),
     [("HOST", *form) for form in _forms(_HOSTS)]
     + [("PORT", *form) for form in _forms(_PORTS)],
+    # By type for a subclass, so that no code of the value runs for its id.
+    ids=lambda value: (
+        type(value).__name__ if type(value).__module__ == __name__ else None
+    ),
 )
 def test_server_aliases_with_forms_a_backend_reads_as_one_value_are_refused(
     key: str, group: str, first: object, second: object
 ) -> None:
     """Django leaves an absent ``HOST`` or ``PORT`` as ``""``, and its
-    backends connect to the default for any false value (``if
-    settings_dict["PORT"]`` in ``postgresql/base.py``, ``mysql/base.py`` and
-    ``oracle/utils.py``); MySQL and Oracle read ``int(PORT)``. Two aliases
+    backends connect to the default for any false value, of any type (``if
+    settings_dict["HOST"]`` and ``if settings_dict["PORT"]`` in
+    ``postgresql/base.py`` and ``mysql/base.py``, the latter in
+    ``oracle/utils.py``); MySQL and Oracle read ``int(PORT)``, and MySQL's
+    client takes port ``0`` as its default. Two aliases
     whose forms read as one value are refused, and no code of a subclass
     runs (ADR 0034 Decision 2)."""
     found = _db_refusal(ledger=_server(key, first), billing=_server(key, second))
@@ -746,7 +809,12 @@ def test_server_aliases_with_forms_a_backend_reads_as_one_value_are_refused(
         ("HOST", "db", "DB2"),
         ("PORT", None, "5432"),
         ("PORT", 0, 5432),
-        ("PORT", "", "0"),
+        ("HOST", False, "db"),
+        ("HOST", 0, "db"),
+        ("PORT", "", "1"),
+        ("PORT", None, "5432.0"),
+        ("PORT", "a", "b"),
+        ("PORT", float("inf"), float("-inf")),
         ("PORT", "5432", "5433"),
         ("PORT", 5432, 5433.0),
         ("PORT", "5432", "5432.0"),
@@ -769,20 +837,26 @@ def test_server_aliases_with_forms_read_as_two_values_build(
         ("HOST", b"db"),
         ("HOST", ["db"]),
         ("HOST", 5),
+        ("HOST", 5.0),
+        ("HOST", True),
         ("HOST", _Sealed()),
         ("PORT", b"5432"),
         ("PORT", ["5432"]),
         ("PORT", 5432j),
+        ("PORT", Decimal(5432)),
         ("PORT", _Sealed()),
     ],
     ids=[
         "HOST bytes",
         "HOST list",
         "HOST int",
+        "HOST float",
+        "HOST true",
         "HOST with code",
         "PORT bytes",
         "PORT list",
         "PORT complex",
+        "PORT Decimal",
         "PORT with code",
     ],
 )
