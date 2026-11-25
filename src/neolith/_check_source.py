@@ -1080,7 +1080,7 @@ def module_map(
     named from the innermost.
     """
     inner = frozenset(os.path.realpath(directory) for directory in directories)
-    top = (
+    top: list[_Location] = (
         [(directory, directory) for directory in directories]
         if path is None
         else _ordered(directories, path)
