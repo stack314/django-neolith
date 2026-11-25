@@ -23,7 +23,7 @@ import sys
 import textwrap
 import types
 from collections.abc import Callable, Iterator
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, cast
 
 import pytest
@@ -427,8 +427,8 @@ def _db_refusal(**aliases: object) -> list[str]:
             "database billing: NAME: expected a str or a path, got bytes",
         ),
         (
-            {"billing": {**sqlite("b"), "HOST": None}},
-            "database billing: HOST: expected a str, got NoneType",
+            {"billing": {**sqlite("b"), "HOST": b"h"}},
+            "database billing: HOST: expected a str, got bytes",
         ),
         (
             {"billing": {**sqlite("b"), "PORT": True}},
@@ -590,9 +590,10 @@ _SETTING_VALUES = st.one_of(
 def test_host_and_port_of_any_value_are_judged_and_never_raise(
     host: object, port: object
 ) -> None:
-    """HOST is a str and PORT a str or an int, as Django's backends read
-    them; any other value is a refusal that names its type, and two aliases
-    are compared only once both pass, so nothing is hashed that cannot be.
+    """HOST is a str or None and PORT a str, an int or None, the values
+    Django's backends read; any other value is a refusal that names its
+    type, and two aliases are compared only once both pass, so nothing is
+    hashed that cannot be.
     """
     server = {
         "ENGINE": "django.db.backends.postgresql",
@@ -605,11 +606,11 @@ def test_host_and_port_of_any_value_are_judged_and_never_raise(
     )
     expected = []
     for alias in ("default", "billing"):
-        if type(host) is not str:
+        if host is not None and type(host) is not str:
             expected.append(
                 f"database {alias}: HOST: expected a str, got {type(host).__name__}"
             )
-        if type(port) not in (str, int):
+        if port is not None and type(port) not in (str, int):
             expected.append(
                 f"database {alias}: PORT: expected a str or an int, got "
                 f"{type(port).__name__}"
@@ -631,6 +632,14 @@ def test_an_int_port_is_admitted_and_compared_as_written() -> None:
     assert found.startswith("databases ledger and billing: both name ")
 
 
+@pytest.mark.parametrize("setting", ["HOST", "PORT"])
+@pytest.mark.parametrize("engine", [SQLITE, "django.db.backends.postgresql"])
+def test_a_host_or_port_of_none_is_admitted(engine: str, setting: str) -> None:
+    """Django's backends read HOST and PORT by truth, so None is unset."""
+    entry = {"ENGINE": engine, "NAME": "n", setting: None}
+    assert configure([*HOSTED, LEDGER], _databases(ledger=entry))
+
+
 class _Unhashable(PurePosixPath):
     """A path that defines __eq__ and so, by Python's rule, no __hash__."""
 
@@ -650,6 +659,25 @@ def test_a_path_name_is_compared_by_its_text() -> None:
     assert configure(
         [*HOSTED, LEDGER, BILLING],
         _databases(ledger=server, billing={**server, "NAME": "n"}),
+    )
+
+
+def test_a_path_name_is_compared_as_paths_compare() -> None:
+    """Windows paths are equal ignoring case, and never equal a POSIX path
+    of the same text, as pathlib compares them.
+    """
+    server = {"ENGINE": "django.db.backends.postgresql"}
+    (found,) = _db_refusal(
+        ledger={**server, "NAME": PureWindowsPath("A")},
+        billing={**server, "NAME": PureWindowsPath("a")},
+    )
+    assert found.startswith("databases ledger and billing: both name ")
+    assert configure(
+        [*HOSTED, LEDGER, BILLING],
+        _databases(
+            ledger={**server, "NAME": PurePosixPath("a")},
+            billing={**server, "NAME": PureWindowsPath("a")},
+        ),
     )
 
 

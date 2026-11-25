@@ -106,11 +106,12 @@ def sqlite_path(name: object) -> str | None:
 def _identity(engine: str, entry: Mapping[str, Any]) -> tuple[object, ...] | None:
     """What two aliases on one database share; ``None`` for one exempt.
 
-    Every part is an exact ``str`` or ``int``, so that hashing and comparing
-    the key runs no code of the deployer's: ``HOST`` and ``PORT`` were
-    judged by type, and a path ``NAME`` is compared by its text. Reading
-    that text can raise, as resolving a SQLite path can; the caller turns
-    that into a refusal.
+    Every part is an exact ``str``, ``int`` or ``None``, so that hashing and
+    comparing the key runs no code of the deployer's: ``HOST`` and ``PORT``
+    were judged by type, and a path ``NAME`` is compared as ``pathlib``
+    compares paths, by its flavour and its case-normalized text, read once.
+    Reading that text can raise, as resolving a SQLite path can; the caller
+    turns that into a refusal.
     """
     name = entry.get("NAME")
     if is_sqlite(engine):
@@ -120,7 +121,10 @@ def _identity(engine: str, entry: Mapping[str, Any]) -> tuple[object, ...] | Non
         text = str(name)  # a path, judged by _entry_problems
         if type(text) is not str:
             raise TypeError("a path's text is not a str")
-        name = ("path", text)
+        if _naming.is_a(name, pathlib.PureWindowsPath):
+            name = ("windows path", text.lower())
+        else:
+            name = ("path", text)
     return (engine, entry.get("HOST", ""), entry.get("PORT", ""), name)
 
 
@@ -211,11 +215,12 @@ def _entry_problems(alias: str, entry: object) -> list[str]:
             f"{where}: NAME is required; a service or option file alone is not "
             "admitted yet"
         )
-    host = settings.get("HOST", "")
-    if type(host) is not str:
+    # Django's backends read HOST and PORT by truth, so None is unset.
+    host = settings.get("HOST")
+    if host is not None and type(host) is not str:
         problems.append(f"{where}: HOST: expected a str, got {_type(host)}")
-    port = settings.get("PORT", "")
-    if type(port) is not str and type(port) is not int:
+    port = settings.get("PORT")
+    if port is not None and type(port) is not str and type(port) is not int:
         problems.append(f"{where}: PORT: expected a str or an int, got {_type(port)}")
     app = alias != DEFAULT
     if app and "ATOMIC_REQUESTS" in settings:

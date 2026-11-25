@@ -20,7 +20,7 @@ import re
 import sys
 import types
 from collections.abc import Callable, Iterator
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, NoReturn, Protocol, cast
 
 import pytest
@@ -594,6 +594,23 @@ def test_a_settings_key_that_runs_code_is_never_looked_up() -> None:
     ]
     assert _configure._open_problems({Trap("DATABASES"): {"default": {}}}) == []
     assert _configure._open_problems({"DATABASES": {Trap("default"): {}}}) == []
+
+
+class _TrapText(PurePosixPath):
+    """A path whose text is a Trap, which raises when compared."""
+
+    def __str__(self) -> str:
+        return Trap("n")
+
+
+def test_a_path_whose_text_runs_code_is_refused_before_it_is_compared() -> None:
+    server = {"ENGINE": "django.db.backends.postgresql", "NAME": _TrapText("n")}
+    assert _databases.databases_problems(
+        {"default": server, "billing": dict(server)}, ["billing"]
+    ) == [
+        "database default: NAME cannot be read as a path: TypeError",
+        "database billing: NAME cannot be read as a path: TypeError",
+    ]
 
 
 def test_a_lazy_mapping_is_still_judged_by_what_it_wraps() -> None:
