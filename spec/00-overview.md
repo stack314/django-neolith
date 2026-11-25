@@ -1,5 +1,7 @@
 # 00. Overview and terms
 
+**Status:** draft. The terms, the two modes and the call model are specified. The invariants are described, not yet specified.
+
 ## Terms
 
 These terms are used with exactly these meanings throughout the specification and the reference implementation. No synonyms are used.
