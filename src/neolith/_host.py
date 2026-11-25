@@ -722,8 +722,9 @@ def build(registry: Apps) -> tuple[Host, list[str]]:
         # Resolve reads NEOLITH, so a requirement it finds unmet may come
         # from a problem there: those, and its remote providers' callers
         # that have no signing key, are reported with its refusals.
-        refusals += _checks.neolith_problems(neolith, declarations)
-        refusals += _checks.unsigned_problems(neolith, declarations)
+        refused = refused_identities(declarations, neolith)
+        refusals += _checks.neolith_problems(neolith, declarations, refused=refused)
+        refusals += _checks.unsigned_problems(neolith, declarations, refused=refused)
     connectors: dict[str, Bound] = {}
     for config, declaration in hosted:
         for provision in declaration.provides:
@@ -857,6 +858,24 @@ def resolve(
                     f"{_checks.REMOTE} has no entry for it"
                 )
     return {identity: found for identity, (found, _) in named.items()}, refusals
+
+
+def refused_identities(
+    declarations: Sequence[Declaration], neolith: object
+) -> frozenset[str]:
+    """The identities ``NEOLITH["REMOTE_PROVIDERS"]`` or
+    ``NEOLITH["ROUTING_POLICIES"]`` names, as ``resolve`` reads them, that
+    ``resolve`` refuses whatever their value: one no hosted app requires, and
+    one an app provides. Their refusals say to remove the entry, so
+    ``NEOLITH``'s problems, reported with them, give no advice to name
+    ``local-first`` for those identities (``remote_problems``,
+    ``routing_problems``), and no app is told it lacks a signing key to call
+    one (``unsigned_problems``; ADR 0036).
+    """
+    named = _checks.remote_identities(neolith) | frozenset(_checks.routed(neolith))
+    required = {c.identity for d in declarations for c in d.requires}
+    provided = {p.contract.identity for d in declarations for p in d.provides}
+    return frozenset(i for i in named if i not in required or i in provided)
 
 
 def _class(contract: Contract) -> str:

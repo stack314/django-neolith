@@ -694,7 +694,7 @@ def test_row_12_under_asgi_a_body_longer_than_its_content_length_is_refused(
     )
 
 
-@pytest.mark.spec("CON-42", "CON-16")
+@pytest.mark.spec("CON-42", "CON-16", "CON-52")
 @pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize(
     ("body", "message"),
