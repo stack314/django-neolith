@@ -104,7 +104,7 @@
     "part": "lifecycle",
     "state": "A host of an app with a database of its own on a SQLite file that does not exist yet.",
     "procedure": "1. In one process, run the host's Boot.\n2. Create the file with the app's schema.\n3. Run Boot again in the same process.",
-    "expected": "Step 1 is refused, with a diagnostic that there is no database at the file's path. Step 3 is refused with the same diagnostic, though the file now exists: Boot runs once per process, and its refusal is logged once.",
+    "expected": "Step 1 is refused, with a diagnostic that names the alias and says there is no database at its NAME, showing no part of the path. Step 3 is refused with the same diagnostic, though the file now exists: Boot runs once per process, and its refusal is logged once.",
     "requirements": [
       "APP-1",
       "APP-31"

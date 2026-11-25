@@ -470,9 +470,8 @@ def test_settings_checks_given_hostile_values_name_them(key: str) -> None:
     assert _databases.databases_problems(value, [])
     assert _configure.databases_difference(value, {})
     assert _configure.databases_difference({value: {}}, {})
-    for setting in ("NAME", "HOST", "PORT"):
-        entry = {"ENGINE": "django.db.backends.postgresql", "NAME": "x"}
-        assert _databases.databases_problems({"default": {**entry, setting: value}}, [])
+    entry = {"ENGINE": "django.db.backends.postgresql", "NAME": value}
+    assert _databases.databases_problems({"default": entry}, [])
 
 
 # A check that looks a name up, or compares a class, runs none of the
@@ -597,20 +596,47 @@ def test_a_settings_key_that_runs_code_is_never_looked_up() -> None:
 
 
 class _TrapText(PurePosixPath):
-    """A path whose text is a Trap, which raises when compared."""
+    """A path whose own text is a Trap, which raises when compared."""
 
     def __str__(self) -> str:
         return Trap("n")
 
+    __fspath__ = __str__
 
-def test_a_path_whose_text_runs_code_is_refused_before_it_is_compared() -> None:
-    server = {"ENGINE": "django.db.backends.postgresql", "NAME": _TrapText("n")}
-    assert _databases.databases_problems(
-        {"default": server, "billing": dict(server)}, ["billing"]
-    ) == [
-        "database default: NAME cannot be read as a path: TypeError",
-        "database billing: NAME cannot be read as a path: TypeError",
-    ]
+
+@pytest.mark.parametrize(
+    "engine", ["django.db.backends.sqlite3", "django.db.backends.postgresql"]
+)
+def test_a_path_name_is_compared_by_the_text_pathlib_makes(engine: str) -> None:
+    """The path's own ``__str__`` never runs, so two aliases on one path
+    are compared by ``PurePath.__str__``'s text (rule K2)."""
+    entry = {"ENGINE": engine, "NAME": _TrapText("/srv/n")}
+    other = {**entry, "NAME": _TrapText("/srv/n")}
+    (found,) = _databases.databases_problems(
+        {"default": entry, "billing": other}, ["billing"]
+    )
+    assert found.startswith("databases default and billing: both name one ")
+
+
+def test_a_cache_entry_key_that_runs_code_is_never_looked_up() -> None:
+    entry = {Trap("BACKEND"): "django.core.cache.backends.db.DatabaseCache"}
+    assert _checks._database_caches({"default": entry}) == []
+
+
+def test_a_backend_class_is_read_without_its_metaclass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Whether a backend opens SQLite is read from its classes' own
+    namespaces, so a metaclass that raises on every read never runs."""
+
+    for name, vendor in (("sqlitelike", "sqlite"), ("serverlike", "postgresql")):
+        base = types.ModuleType(f"hostile_{name}.base")
+        base.DatabaseWrapper = HostileMeta(  # type: ignore[attr-defined]
+            "Wrapper", (), {"vendor": vendor}
+        )
+        monkeypatch.setitem(sys.modules, f"hostile_{name}", types.ModuleType(name))
+        monkeypatch.setitem(sys.modules, f"hostile_{name}.base", base)
+        assert _databases.is_sqlite(f"hostile_{name}") is (vendor == "sqlite")
 
 
 def test_a_lazy_mapping_is_still_judged_by_what_it_wraps() -> None:

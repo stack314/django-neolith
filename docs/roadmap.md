@@ -10,10 +10,10 @@
 | 4 | App declaration and host: `NeolithAppConfig`, settings built from declarations, `neolith run <app>` boots one app on SQLite | 05 |
 | 5 | HTTP transport: provider endpoints served by the host, OpenAPI at the well-known path, connector over the standard library's sockets and TLS, shared-secret tokens for the calling app, and the principal header | 03 |
 | 6 | Conformance suite running every contract test over both transports; `local-first` routing and a failover test with two providers | 06, 02 |
-| 7 | Boundary check: `neolith check` wrapping import-linter, report-only then enforce per app | — |
+| 7 | Boundary check: `neolith check` and `manage.py checkapps`, built on Python's own parser and Django's app registry ([ADR 0030](adr/0030-the-boundary-check-uses-the-standard-library-only.md)), report-only then enforced per app | 05 |
 | 8 | Two small example apps under `examples/` showing attached, detached and both-at-once; the 0.1 proof | all |
 
-A library named in the steps (import-linter) is a working assumption. It needs an Accepted decision record before the step that adds it lands ([K5](../CONTRIBUTING.md)).
+Step 7 first assumed import-linter. [ADR 0030](adr/0030-the-boundary-check-uses-the-standard-library-only.md) builds the check on the standard library instead, so no step adds a library. A library a later step needs takes an Accepted decision record before that step lands ([K5](../CONTRIBUTING.md)).
 
 Gate for releasing 0.1: verified on Python 3.15 with Django 6.1 ([ADR 0012](adr/0012-supported-python-and-django-versions.md)).
 
@@ -67,7 +67,7 @@ Rules that shape it:
 Shell:
 
 ```
-neolith run <app> [<app> ...]    boot the named apps in one host
-neolith check [--report]         boundary check
-neolith openapi <contract>       print the projection
+neolith run <app> [<app> ...]                          boot the named apps in one host
+neolith check <app> [<app> ...] --settings <module>    boundary check
+neolith openapi <contract>                             print the projection
 ```

@@ -50,6 +50,7 @@ from neolith._crossing import Receiver
 from neolith._http_transport import HTTPTransport, origin_problem, over_http
 from tests.declaration_contracts import Level, Sku
 from tests.http_peer import Provider, Script, read_request
+from tests.small_stack import on_a_small_stack
 
 
 class Ask(BaseModel):
@@ -203,30 +204,23 @@ def test_an_unknown_kinds_detail_at_the_untyped_bounds_arrives() -> None:
     assert outcome.kind == "moved"
 
 
-def test_a_deep_error_body_is_judged_without_recursion_on_a_small_stack() -> None:
-    # Issue #125: on a 1 MB thread stack, 9,000 levels of nesting would end the
-    # process inside the json module; the nesting is judged before it reads.
+def _judge_deep_error_bodies() -> list[str]:
     deep = b"[" * 9000 + b"]" * 9000
     bodies = [
         _response(500, deep),
         _response(422, b'{"kind":"moved","message":"m","data":' + deep + b"}"),
         _response(422, b'{"kind":"moved","message":"m","data":{"a":' + deep + b"}}"),
     ]
-    found: list[object] = []
+    return [_kind(_outcome(body)) for body in bodies]
 
-    def run() -> None:
-        found.extend(_outcome(body) for body in bodies)
 
-    old = threading.stack_size(1 << 20)
-    try:
-        thread = threading.Thread(target=run)
-        thread.start()
-        thread.join(30)
-    finally:
-        threading.stack_size(old)
+@pytest.mark.spec("CON-52")
+def test_a_deep_error_body_is_judged_without_recursion_on_a_small_stack() -> None:
+    # Issue #125: on a 1 MB thread stack, 9,000 levels of nesting would end the
+    # process inside the json module; the nesting is judged before it reads.
     # Text nested deeper than the reader admits is not JSON text to it, so
     # it carries no neolith error body (spec 03, as HTTP-7 reads a token).
-    assert [_kind(outcome) for outcome in found] == ["unavailable"] * 3
+    assert on_a_small_stack(_judge_deep_error_bodies) == (0, "", ["unavailable"] * 3)
 
 
 # The fields of one attempt (ADR 0027 Decision 9, in ADR 0028's order).
@@ -662,25 +656,23 @@ def test_both_ways_of_giving_a_deadline_agree_on_the_last_millisecond(
         assert bool(provider.requests) is sent, timeout
 
 
+def _read_deep_principals() -> list[str]:
+    found: list[str] = []
+    for form in (b"[" * 9000 + b"]" * 9000, b'{"claims":' + b"[" * 9000):
+        try:
+            _context.read_principal(form)
+        except ValueError as error:
+            found.append(str(error))
+    return found
+
+
 def test_a_deep_principal_is_refused_without_recursion_on_a_small_stack() -> None:
     # Issue #125: the provider reads Neolith-Principal from the network.
-    found: list[str] = []
-
-    def run() -> None:
-        for form in (b"[" * 9000 + b"]" * 9000, b'{"claims":' + b"[" * 9000):
-            try:
-                _context.read_principal(form)
-            except ValueError as error:
-                found.append(str(error))
-
-    old = threading.stack_size(1 << 20)
-    try:
-        thread = threading.Thread(target=run)
-        thread.start()
-        thread.join(30)
-    finally:
-        threading.stack_size(old)
-    assert found == ["the principal is not a principal object"] * 2
+    assert on_a_small_stack(_read_deep_principals) == (
+        0,
+        "",
+        ["the principal is not a principal object"] * 2,
+    )
 
 
 @pytest.mark.spec("TRN-28")
