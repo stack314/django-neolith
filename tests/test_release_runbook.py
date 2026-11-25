@@ -393,3 +393,10 @@ def test_the_landing_page_step_names_the_readme_example_markers() -> None:
     assert shown == inner
     assert start not in shown
     assert end not in shown
+    for words in (
+        "same code blocks and paragraphs as the output",
+        "in the same order",
+        "none missing, none added",
+        "No marker line is in the output",
+    ):
+        assert words in step, words
