@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - Narrowed by [0025](0025-drain-counts-a-request-from-its-request-line.md) (Decision 1)
 - Narrowed by [0030](0030-the-boundary-check-uses-the-standard-library-only.md) (Decision 9)
+- Narrowed by [0034](0034-two-aliases-on-one-database-are-refused-without-their-connection-settings.md) (Decision 3)
 - **Accepted:** 2026-11-12
 - **Date:** 2026-11-12
 

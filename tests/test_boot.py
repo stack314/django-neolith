@@ -37,6 +37,9 @@ NO_FILE = (
     "the database is in memory, or nothing has created it yet (the migrate step "
     "creates the aliases it migrates)"
 )
+# E018 names the alias and the rule, never the NAME or the path it opens
+# (ADR 0034 Decision 3).
+NO_DATABASE = f"no database at its NAME; {NO_FILE}"
 IN_MEMORY = (
     "an in-memory SQLite database is empty on a new thread, or gone once its last "
     "connection closes; a host that serves needs a file or a server"
@@ -107,7 +110,7 @@ def test_the_literal_memory_name_is_refused_without_a_connection(name: object) -
 def test_a_path_with_no_file_is_refused_and_left_without_one(tmp_path: Path) -> None:
     path = tmp_path / "missing.sqlite3"
     assert read(NAME=str(path)) == [
-        ("neolith.E018", f"database default: no database at {path}; {NO_FILE}")
+        ("neolith.E018", f"database default: {NO_DATABASE}")
     ]
     assert not path.exists()
 
@@ -118,7 +121,7 @@ def test_an_empty_file_is_refused(tmp_path: Path) -> None:
     path = tmp_path / "empty.sqlite3"
     path.touch()
     assert read(NAME=str(path)) == [
-        ("neolith.E018", f"database default: no database at {path}; {NO_FILE}")
+        ("neolith.E018", f"database default: {NO_DATABASE}")
     ]
     assert path.stat().st_size == 0
 
@@ -134,7 +137,7 @@ def test_a_file_with_content_and_no_schema_is_refused(tmp_path: Path) -> None:
     assert path.stat().st_size > 0
     wal = {"init_command": "PRAGMA journal_mode=WAL"}
     assert read(NAME=str(path), OPTIONS=wal) == [
-        ("neolith.E018", f"database default: no database at {path}; {NO_FILE}")
+        ("neolith.E018", f"database default: {NO_DATABASE}")
     ]
 
 
@@ -194,6 +197,46 @@ def test_an_in_memory_uri_that_names_no_file_is_refused_as_no_database(
     assert message.endswith(NO_FILE)
 
 
+MARKER = "a value no message shows"
+
+
+@pytest.mark.spec("APP-31", "APP-32")
+def test_a_refused_sqlite_alias_shows_no_part_of_its_name(tmp_path: Path) -> None:
+    """Each state a SQLite alias is refused in, with the marker in its
+    ``NAME``: in the directory, the file, a URI's query and its fragment.
+    The message names the alias and the rule, and no part of the ``NAME``
+    or of the path it opens (ADR 0034 Decision 3)."""
+    folder = tmp_path / MARKER
+    folder.mkdir()
+    empty, wal = folder / f"{MARKER}.empty", folder / f"{MARKER}.wal"
+    empty.touch()
+    connection = sqlite3.connect(wal)
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.close()
+    names: list[object] = [
+        str(folder / MARKER),
+        folder / MARKER,
+        str(empty),
+        f"file:{empty}?{MARKER}={MARKER}",
+        f"file:?mode=memory&password={MARKER}",
+        f"file:{MARKER}?mode=memory&cache=shared",
+        f"file::memory:?cache=shared#{MARKER}",
+        ":memory:",
+    ]
+    for name in names:
+        found = read(NAME=name)
+        assert found, name
+        assert MARKER not in "\n".join(m for _, m in found), name
+        assert found[0][1] in (
+            f"database default: {NO_DATABASE}",
+            f"database default: {IN_MEMORY}",
+        ), name
+    wal_options = {"init_command": "PRAGMA journal_mode=WAL"}
+    assert read(NAME=str(wal), OPTIONS=wal_options) == [
+        ("neolith.E018", f"database default: {NO_DATABASE}")
+    ]
+
+
 @pytest.mark.spec("APP-36")
 def test_a_file_with_a_schema_is_read_and_left_as_it_was(tmp_path: Path) -> None:
     path = tmp_path / "default.sqlite3"
@@ -222,7 +265,7 @@ def test_a_project_s_own_sqlite_backend_is_judged_as_sqlite(tmp_path: Path) -> N
     lite = "tests.lite"
     missing = tmp_path / "missing.sqlite3"
     assert read(lite, NAME=str(missing)) == [
-        ("neolith.E018", f"database default: no database at {missing}; {NO_FILE}")
+        ("neolith.E018", f"database default: {NO_DATABASE}")
     ]
     assert not missing.exists()
     assert read(lite, NAME=":memory:") == [
@@ -494,8 +537,7 @@ def test_boot_stops_a_handler_and_keeps_its_refusal(tmp_path: Path) -> None:
     refusal = [
         "ImproperlyConfigured",
         "host: the host cannot boot:",
-        f"(neolith.E018) database fresh: no database at {tmp_path / 'fresh.sqlite3'}; "
-        f"{NO_FILE}",
+        f"(neolith.E018) database fresh: {NO_DATABASE}",
     ]
     assert lines[0] == ["1", *refusal]
     assert lines[1] == ["2", *refusal]
