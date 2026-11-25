@@ -376,13 +376,14 @@ def test_the_landing_page_step_names_the_readme_example_markers() -> None:
     assert readme.count(start) == readme.count(end) == 1
     assert start in step
     assert end in step
-    found = re.search(
-        r"git show \"v\$\{VERSION\}:README.md\" \| (sed -n '[^\n]+)", step
-    )
+    found = re.search(r"git show \"v\$\{VERSION\}:README.md\" \| ([^\n]+)", step)
     assert found, "section 7 has no command that prints the marked example"
-    assert f"/^{start}$/,/^{end}$/p" in found.group(1)
+    pipeline = found.group(1)
+    assert f"/^{start}$/,/^{end}$/p" in pipeline
+    # Run the runbook's own pipeline (everything after `git show ... |`), so a
+    # command that leaves the marker lines in the output fails here.
     shown = subprocess.run(  # noqa: S603
-        ["sh", "-c", f"sed -n '/^{start}$/,/^{end}$/p' | sed '1d;$d'"],  # noqa: S607
+        ["sh", "-c", pipeline],  # noqa: S607
         input=readme,
         capture_output=True,
         text=True,
