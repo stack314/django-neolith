@@ -11,12 +11,19 @@ Python's path finder loads (``importlib.machinery.all_suffixes()``, as
 as a migration's ``0001_initial``, is read, since ``import_module`` reaches
 it (ADR 0035).
 
-Each file is read once per run, parsed with ``ast.parse``, compiled with
-``compile`` and given its ``symtable``; a file that cannot be read or
-compiled is ``neolith.E112``. Every walk over a tree is iterative, so a file
-that compiles never ends it with ``RecursionError``.
+Each file is read once per run (``Source``), parsed with ``ast.parse``,
+compiled with ``compile`` and given its ``symtable``; a file that cannot be
+read or compiled is ``neolith.E112``. Every walk over a tree is iterative,
+so a file that compiles never ends it with ``RecursionError``. From each
+file come its import edges (``imports``), the names it binds by top-level
+imports alone (``bound``), its literal dynamic imports and the calls of
+listed names with a computed argument, ``neolith.W101`` (``calls``).
 
-This module never imports a module of the project and never calls
+The first-party directories are those the hosted apps' and the settings
+module's top-level packages were imported from, other than the
+interpreter's library directories (``first_party``); ``module_map`` places
+every dotted name they give as Python's path finder would. This module
+never imports a module of the project and never calls
 ``importlib.util.find_spec``, which runs a name's parent packages.
 """
 

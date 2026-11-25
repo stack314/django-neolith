@@ -14,8 +14,9 @@ command. Its phases, in order:
    ``boundary-report-only`` is a hosted app, status 2 otherwise;
 4. Boot's checks that read no database (``neolith._boot.static_messages``),
    whose refusals and warnings print as the host prints them;
-5. the boundary pass, whose findings print one per line on standard output,
-   sorted, then the summary line.
+5. the boundary pass over the registry's models (``neolith._check_models``)
+   and the hosted apps' source (``neolith._check_source``), whose findings
+   print one per line on standard output, sorted, then the summary line.
 
 A refusal in phases 2 and 3 ends the run with status 1 in the form the
 entry gives it. Phases 4 and 5 both run and are reported together. The exit
