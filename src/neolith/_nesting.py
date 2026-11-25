@@ -6,8 +6,8 @@ such as the 1 MB that Alpine's Python builds set, a text nested some 9,000
 levels deep ends the process before ``RecursionError`` is raised. Catching
 ``RecursionError`` is only a backstop. Every text from a network that neolith
 reads with the json module is judged here first, by a linear scan that does
-not recurse, so the outcome never depends on the stack of the thread that
-reads it (spec 01, CON-52).
+not recurse (spec 01, CON-52), so the json module's reader stays within a
+1 MB thread stack; the note on ``DEPTH`` says what smaller stacks still risk.
 """
 
 import itertools

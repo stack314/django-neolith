@@ -1,5 +1,6 @@
-"""The one depth bound every JSON text from a network passes before the json
-module reads it (spec 01, CON-52; issue #125).
+"""The depth scan every JSON text from a network passes before the json
+module reads it: bodies at 256 levels (spec 01, CON-52), a token's header and
+claims at 64 (spec 03, HTTP-7); issue #125.
 
 The bound is counted by a scan that does not recurse, so these tests hold it
 to two references: the depth of the value a JSON text holds, and a plain
@@ -7,6 +8,8 @@ character-by-character count on any text at all, JSON or not.
 """
 
 import json
+import re
+from pathlib import Path
 
 import pytest
 from hypothesis import given, settings
@@ -123,3 +126,20 @@ def test_a_closer_with_no_opener_ends_the_reading_before_it_nests() -> None:
     with pytest.raises(json.JSONDecodeError) as refused:
         json.loads(text)
     assert refused.value.pos == 0
+
+
+_SETS_A_STACK_SIZE = re.compile(r"\bstack_size\s*\(")
+
+
+def test_only_the_small_stack_harness_sets_a_thread_stack_size() -> None:
+    # A 1 MB-stack check run in the test process ends the whole run on a
+    # regression, so every such check goes through tests/small_stack.py.
+    tests = Path(__file__).parent
+    found = [
+        f"{path.name}:{number}"
+        for path in sorted(tests.rglob("*.py"))
+        if path.name != "small_stack.py"
+        for number, line in enumerate(path.read_text().splitlines(), 1)
+        if _SETS_A_STACK_SIZE.search(line)
+    ]
+    assert found == []
