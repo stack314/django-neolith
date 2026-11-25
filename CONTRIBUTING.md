@@ -80,7 +80,7 @@ python -m pip install -e . --group docs
 python scripts/docs.py check
 ```
 
-`python scripts/docs.py serve` builds the site and serves it at `http://127.0.0.1:8000/`. Until the repository is public, run the check before requesting review.
+`python scripts/docs.py serve` builds the site and serves it at `http://127.0.0.1:8000/`. Until the repository is public, run the check before requesting review. `python scripts/docs.py publish` runs the check as a development build and adds the files the site serves at its root, in `build/docs/site/`; Cloudflare Workers Builds runs it through `scripts/workers_build.sh` and deploys it to `/neolith/dev/` on each push to `main`, with `wrangler.json`.
 
 ## Writing
 
