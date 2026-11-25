@@ -111,7 +111,7 @@ def configure(
     pairs = [(path, found) for path, found in read if type(found) is Declaration]
     _refuse(problems + _compared(pairs))
     declarations = [declaration for _, declaration in pairs]
-    from neolith._host import resolve
+    from neolith._host import refused_identities, resolve
 
     settings_given: dict[object, object] | None = (
         deployer if type(deployer) is dict else None
@@ -131,7 +131,9 @@ def configure(
         if settings_given is None:
             refusals.append(_not_settings(deployer))
         else:
-            refusals += _checks.neolith_problems(neolith, declarations)
+            refusals += _checks.neolith_problems(
+                neolith, declarations, refused=refused_identities(declarations, neolith)
+            )
     if refusals:
         raise DeclarationError("\n".join(sorted(refusals)))
     names, problems = _names(deployer)

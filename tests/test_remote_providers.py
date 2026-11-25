@@ -1147,6 +1147,40 @@ def test_set_up_stops_when_an_app_that_calls_a_remote_provider_cannot_sign(
         ]
 
 
+@pytest.mark.spec("APP-1", "APP-8")
+def test_set_up_asks_no_signing_key_for_an_identity_resolve_removes() -> None:
+    out = in_fresh_process(
+        """
+        import django
+        from django.core.exceptions import ImproperlyConfigured
+
+        try:
+            django.setup()
+        except ImproperlyConfigured as error:
+            print(json.dumps(str(error)))
+        """,
+        [COURIERS, WEB, "neolith"],
+        {
+            "NEOLITH": {
+                "REMOTE_PROVIDERS": remote(
+                    stock_v1="https://a.internal", couriers_v3="https://a.internal"
+                )
+            }
+        },
+        timeout=120,
+    )
+    # couriers.v3 is never called over HTTP, which Resolve says, so web is
+    # told it lacks a key for stock.v1 only (ADR 0036 Decision 2).
+    assert json.loads(out.splitlines()[-1]).splitlines() == sorted(
+        [
+            'app web has no signing key in NEOLITH["SIGNING_SECRETS"], so it '
+            "cannot call stock.v1 over HTTP",
+            f"{REMOTE}: couriers.v3 is provided by app couriers in this host, "
+            f"{IN_HOST}",
+        ]
+    )
+
+
 def test_set_up_logs_w002_and_an_override_leaves_the_set_up_transport() -> None:
     out = in_fresh_process(
         """

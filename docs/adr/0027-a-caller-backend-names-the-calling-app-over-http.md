@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Accepted:** 2026-11-18
+- Narrowed by [0036](0036-set-up-gives-no-hint-that-assumes-a-call-for-an-identity-it-removes.md) (Decision 2)
 - **Date:** 2026-11-18
 
 ## Context
