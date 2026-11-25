@@ -38,7 +38,7 @@ from neolith._declaration import declaration_of
 __all__ = ["ContractPackage", "LeftOut", "packages"]
 
 
-@dataclasses.dataclass(frozen=True, slots=True)
+@dataclasses.dataclass(slots=True)
 class LeftOut:
     """A module of the app that defines a contract or one of its records or
     enums, and is not part of the contract package, with why.
@@ -56,7 +56,7 @@ class LeftOut:
     implementations: tuple[str, ...]
 
 
-@dataclasses.dataclass(frozen=True, slots=True)
+@dataclasses.dataclass(slots=True)
 class ContractPackage:
     """The contract package of one hosted app.
 
