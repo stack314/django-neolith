@@ -83,8 +83,10 @@ def test_copy_deepcopy_pickle_hash_and_describe_of_a_contract_are_unchanged() ->
     # A contract holds read-only maps, which neither copy nor pickle.
     clones: list[Callable[[Contract], object]] = [copy.deepcopy, _pickled]
     for clone in clones:
-        with pytest.raises(TypeError, match=r"^cannot pickle 'mappingproxy' object$"):
+        with pytest.raises(TypeError) as raised:
             clone(held)
+        # Python 3.14 adds notes on where, which pytest's match reads too.
+        assert str(raised.value) == "cannot pickle 'mappingproxy' object"
     assert hash(held) == object.__hash__(held)
     assert held != copied
     assert repr(held) == "<Contract package.v1>"
