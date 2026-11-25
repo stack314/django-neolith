@@ -1,6 +1,6 @@
 # 03. HTTP transport
 
-**Status:** draft. Addressing, the call context, errors, sending a call and reading its response, receiving a call, projection, the calling app and the principal, shared-secret tokens and health are specified.
+**Status:** draft. The call context, errors, sending a call and reading its response, receiving a call, projection, the calling app and the principal, shared-secret tokens and health are specified. Addressing is described.
 
 **HTTP-1.** This is the default network transport, REQUIRED in every implementation.
 

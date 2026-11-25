@@ -1,6 +1,6 @@
 # 00. Overview and terms
 
-**Status:** draft. The terms, the two modes, the call model and the invariants are specified.
+**Status:** draft. The terms, the two modes and the call model are specified. The invariants are described, not yet specified.
 
 ## Terms
 
