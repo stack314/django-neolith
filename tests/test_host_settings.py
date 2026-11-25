@@ -550,20 +550,39 @@ def test_two_aliases_on_one_database_are_refused(tmp_path: Path) -> None:
         assert found == [f"databases ledger and billing: {_ONE_FILE}"], case
 
 
+_SERVER = {
+    "ENGINE": "django.db.backends.postgresql",
+    "NAME": "n",
+    "HOST": "h",
+    "PORT": "5",
+}
+
+
+@pytest.mark.spec("APP-18")
 def test_two_server_aliases_on_one_database_are_refused() -> None:
-    server = {
-        "ENGINE": "django.db.backends.postgresql",
-        "NAME": "n",
-        "HOST": "h",
-        "PORT": "5",
-    }
-    assert _db_refusal(ledger=server, billing=dict(server)) == [
+    assert _db_refusal(ledger=_SERVER, billing=dict(_SERVER)) == [
         f"databases ledger and billing: {_ONE_SERVER}"
     ]
-    # Another NAME on the same server is another database.
+
+
+@pytest.mark.spec("APP-18")
+@pytest.mark.parametrize(
+    ("key", "other"),
+    [
+        ("ENGINE", "django.db.backends.mysql"),
+        ("HOST", "g"),
+        ("PORT", "6"),
+        ("NAME", "m"),
+    ],
+)
+def test_server_aliases_that_differ_in_one_key_are_two_databases(
+    key: str, other: str
+) -> None:
+    """Each of ``ENGINE``, ``HOST``, ``PORT`` and ``NAME`` is compared: two
+    aliases that differ in any one of them build (ADR 0009 Decision 5)."""
     assert configure(
         [*HOSTED, LEDGER, BILLING],
-        _databases(ledger=server, billing={**server, "NAME": "m"}),
+        _databases(ledger=_SERVER, billing={**_SERVER, key: other}),
     )
 
 
@@ -627,6 +646,157 @@ def test_two_server_aliases_are_compared_whatever_form_of_host_and_port(
     assert _db_refusal(ledger=server, billing=dict(server)) == [
         f"databases ledger and billing: {_ONE_SERVER}"
     ]
+
+
+class _Float(float):
+    """A ``PORT`` whose own code would raise if the comparison ran it."""
+
+    __slots__ = ()
+
+    def __hash__(self) -> int:
+        raise AssertionError("the comparison ran the value's own __hash__")
+
+    def __eq__(self, other: object) -> bool:
+        raise AssertionError("the comparison ran the value's own __eq__")
+
+    def __float__(self) -> float:
+        raise AssertionError("the comparison ran the value's own __float__")
+
+    def __int__(self) -> int:
+        raise AssertionError("the comparison ran the value's own __int__")
+
+
+class _Opaque:
+    """A value whose own comparison and hash would raise if they ran."""
+
+    def __hash__(self) -> int:
+        raise AssertionError("the comparison ran the value's own __hash__")
+
+    def __eq__(self, other: object) -> bool:
+        raise AssertionError("the comparison ran the value's own __eq__")
+
+
+_ABSENT = object()
+
+# Forms of HOST and PORT that each backend reads as one value: every form in
+# a group is compared equal (ADR 0034 Decision 2).
+_HOSTS: dict[str, list[object]] = {
+    "not set": [_ABSENT, None, "", _Text("")],
+    "db": ["db", _Text("db"), _Host("db")],
+}
+_PORTS: dict[str, list[object]] = {
+    "not set": [_ABSENT, None, "", 0, 0.0, False, _Text(""), _Port(0)],
+    "5432": [
+        "5432",
+        " 5432 ",
+        _Host("5432"),
+        5432,
+        5432.0,
+        _Port(5432),
+        _Float(5432.0),
+    ],
+    "1": ["1", 1, True, 1.0, 1.5],
+    "a str int() refuses": ["5432.0", _Host("5432.0")],
+    "infinite": [float("inf"), _Float(float("inf"))],
+}
+
+
+def _forms(groups: dict[str, list[object]]) -> list[tuple[str, object, object]]:
+    return [
+        (group, first, second)
+        for group, forms in groups.items()
+        for first in forms
+        for second in forms
+    ]
+
+
+def _server(key: str, value: object) -> dict[str, object]:
+    entry = {"ENGINE": "django.db.backends.postgresql", "NAME": "n"}
+    entry["HOST" if key == "PORT" else "PORT"] = "5"
+    if value is not _ABSENT:
+        entry[key] = value
+    return entry
+
+
+@pytest.mark.spec("APP-18")
+@pytest.mark.parametrize(
+    ("key", "group", "first", "second"),
+    [("HOST", *form) for form in _forms(_HOSTS)]
+    + [("PORT", *form) for form in _forms(_PORTS)],
+)
+def test_server_aliases_with_forms_a_backend_reads_as_one_value_are_refused(
+    key: str, group: str, first: object, second: object
+) -> None:
+    """Django leaves an absent ``HOST`` or ``PORT`` as ``""``, and its
+    backends connect to the default for any false value (``if
+    settings_dict["PORT"]`` in ``postgresql/base.py``, ``mysql/base.py`` and
+    ``oracle/utils.py``); MySQL and Oracle read ``int(PORT)``. Two aliases
+    whose forms read as one value are refused, and no code of a subclass
+    runs (ADR 0034 Decision 2)."""
+    found = _db_refusal(ledger=_server(key, first), billing=_server(key, second))
+    assert found == [f"databases ledger and billing: {_ONE_SERVER}"], group
+
+
+@pytest.mark.spec("APP-18")
+@pytest.mark.parametrize(
+    ("key", "first", "second"),
+    [
+        ("HOST", None, "db"),
+        ("HOST", "", "db"),
+        ("HOST", "db", "DB2"),
+        ("PORT", None, "5432"),
+        ("PORT", 0, 5432),
+        ("PORT", "", "0"),
+        ("PORT", "5432", "5433"),
+        ("PORT", 5432, 5433.0),
+        ("PORT", "5432", "5432.0"),
+    ],
+)
+def test_server_aliases_with_forms_read_as_two_values_build(
+    key: str, first: object, second: object
+) -> None:
+    """The nearest forms that read as two values are two databases."""
+    assert configure(
+        [*HOSTED, LEDGER, BILLING],
+        _databases(ledger=_server(key, first), billing=_server(key, second)),
+    )
+
+
+@pytest.mark.spec("APP-18")
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("HOST", b"db"),
+        ("HOST", ["db"]),
+        ("HOST", 5),
+        ("HOST", _Opaque()),
+        ("PORT", b"5432"),
+        ("PORT", ["5432"]),
+        ("PORT", 5432j),
+        ("PORT", _Opaque()),
+    ],
+    ids=[
+        "HOST bytes",
+        "HOST list",
+        "HOST int",
+        "HOST with code",
+        "PORT bytes",
+        "PORT list",
+        "PORT complex",
+        "PORT with code",
+    ],
+)
+def test_server_aliases_with_a_host_or_port_of_another_type_are_not_compared(
+    key: str, value: object
+) -> None:
+    """A ``HOST`` that is not a ``str`` or ``None``, or a ``PORT`` that is
+    none of those, an ``int`` nor a ``float``, is not compared: two aliases
+    with the same such value build, and no code of the value runs; the
+    backend meets it when it connects (ADR 0034 Decision 2)."""
+    shared = _server(key, value)
+    assert configure(
+        [*HOSTED, LEDGER, BILLING], _databases(ledger=shared, billing=dict(shared))
+    )
 
 
 @pytest.mark.parametrize("name", [":memory:", Path(":memory:")], ids=["str", "path"])

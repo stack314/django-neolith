@@ -16,7 +16,7 @@ The comparison also hashed `HOST` and `PORT` as given. A `HOST` that is a `list`
 Every other message was checked for the same class: each other row of 0009's table, 0022's rows for `NEOLITH["DATABASES"]`, `neolith.E005` and `setting_changed`, the rows of 0014 and 0023, and each refusal the builder, `neolith/_databases.py` and Boot build. Two of 0022's Boot rows do not name only an alias, a key or a type:
 
 - `neolith.E018`, `database <alias>: no database at <path>; …`, shows the path a SQLite `NAME` opens, or, for a `file:` URI with no path, the whole `NAME`, its query included. That is the case this record gives as its reason. Decision 3 narrows it.
-- `neolith.E012`, `database <alias> cannot be read: <error>`, shows the error the driver raised, within 0022's bound. A server driver's error can name the host or the user it tried, as the same error does under Django's own `migrate`. It is not a value the host prints from `DATABASES`, and it is the one place the deployer learns why the database cannot be read, such as a refused password or an unknown host. It is left as it is; SQLite's errors name no path.
+- `neolith.E012`, `database <alias> cannot be read: <error>`, shows the error the driver raised, within 0022's bound. A server driver's error can name the host or the user it tried, as the same error does under Django's own `migrate`. It is not a value the host prints from `DATABASES`, and it is where the deployer learns why the database cannot be read, such as a refused password or an unknown host. It is left as it is; SQLite's errors name no path. The migrate step carries the same driver's error in two messages of its failure report, `app <label>: database <alias>: the migrate step failed: <error>` and `failed: <label>, whose migrations cannot be read: <error>` (also after `partly migrated:`), and they are left as they are for the same reason.
 
 ## Options
 
@@ -37,13 +37,25 @@ The message of the row "Two aliases on one database" now reads:
 
 The keys compared are named. No value of them is shown, in whole or in part. What is compared does not change.
 
-### 2. A `HOST` or `PORT` of another type is not compared
+### 2. `HOST` and `PORT` are compared as the backends read them
 
 0009 Decision 5 says: "For server backends, `(ENGINE, HOST, PORT, NAME)`, with a `NAME` that is not empty."
 
-**The narrowing.** That sentence now ends: "when `HOST` is a `str` and `PORT` a `str`, an `int` or a `float`, a subclass included, each compared as that type reads it. An alias with another `HOST` or `PORT` is not compared, and its backend meets the value when it connects." Django's backends read a `str` of any subclass as `HOST`, and MySQL and Oracle read `int(PORT)` (`mysql/base.py`, `oracle/utils.py`), so these forms are compared. The value is read through the base type's own method (`str.__str__`, `int.__int__`, `float.__float__`), so no code of a subclass runs, and a value of another type is never hashed, so the builder does not raise. A `PORT` of `3306` and one of `3306.0` compare equal, as `int()` reads them. A project's own backend may read still other forms; those are one more case the best-effort check of Decision 5 does not see.
+**The narrowing.** That sentence now ends: "when `HOST` is `None` or a `str`, and `PORT` is `None`, a `str`, an `int` or a `float`, a subclass included. A `HOST` or `PORT` that is `None` or false is compared as not set, as an absent key is; any other `PORT` as the number `int()` reads from it, or as its type reads it when `int()` reads none; any other `HOST` as a `str`. An alias with a `HOST` or `PORT` of another type is not compared, and its backend meets the value when it connects."
 
-Alternative weighed: **refuse a `HOST` that is not a `str`, as `NAME` is refused.** It fails earlier. It also narrows "Django's own mapping for `DATABASES[alias]`, passed on unchanged", and a project's own backend may read another form.
+What Django 5.2 and 6.1 read, and what the check does with each form:
+
+| Form | Django | The check |
+|---|---|---|
+| Absent | `ConnectionHandler.configure_settings` sets `""` (`db/utils.py`). | Not set. |
+| `None`, or a false `str`, `int` or `float` (`""`, `0`, `0.0`, `False`) | PostgreSQL and MySQL skip a false `HOST` and `PORT`, and Oracle a false `PORT` (`if settings_dict["PORT"]` in `postgresql/base.py`, `mysql/base.py` and `oracle/utils.py`), so the driver connects to its default. MySQL calls `HOST.startswith`, and Oracle `HOST.strip()` when `PORT` is set, so a `None` `HOST` raises there when it connects. | Not set, all forms equal. |
+| A `str` of any subclass | Each backend passes `HOST` on as it is; MySQL and Oracle read `int(PORT)`, and PostgreSQL passes `PORT` to libpq, which reads the same decimal number. | `HOST` as an exact `str`. `PORT` as `int()` reads it: `"5432"`, `" 5432 "` and `5432` are equal; a `str` that `int()` refuses is compared as that `str`. |
+| An `int` or `float`, a subclass included (`bool` too) | As above: `int(PORT)` on MySQL and Oracle. | `PORT` as `int()` reads it: `3306`, `3306.0` and `3306.5` are equal; `nan` and the infinities as the `float`. A `HOST` of these types is not compared. |
+| Anything else (`bytes`, a `list`, a `Decimal`, an object of a project's own) | The backend or the driver meets it when it connects. | Not compared; it is never hashed, so the builder does not raise. |
+
+A `HOST` or `PORT` is read through the base type's own method (`str.__str__`, `int.__int__`, `float.__float__`), so no code of a subclass runs. Forms a driver reads as one value beyond these are not seen: a host name's case, an Oracle `HOST` of spaces, or one Oracle ignores when `PORT` is not set (`dsn` gives `NAME` alone). A project's own backend may read still other forms. Those are cases the best-effort check of Decision 5 does not see.
+
+Alternative weighed: **refuse a `HOST` that is not a `str` or `None`, as `NAME` is refused.** It fails earlier. It also narrows "Django's own mapping for `DATABASES[alias]`, passed on unchanged", and a project's own backend may read another form.
 
 ### 3. `neolith.E018` names the alias and the rule
 
@@ -56,6 +68,6 @@ Alternative weighed: **refuse a `HOST` that is not a `str`, as `NAME` is refused
 - 0009 gains `Narrowed by 0034 (Decisions 1 and 2)` under its status, and 0022 `Narrowed by 0034 (Decision 3)`. Nothing else in either changes.
 - The builder, `neolith.E001` and every other caller of the mapping's check show the new message. A deployer finds the shared database by reading the two aliases the message names.
 - A test puts a marker string in every value under an alias, changes one place at a time to values of several types, and finds the marker in no message of the mapping's check, of the builder, or of `neolith.E005`. Another puts it in a SQLite `NAME` in each state Boot refuses, and finds it in no message of `neolith.E007` or `neolith.E018`, which `migrateapps --check` prints too.
-- No sentence of the specification states this message, and no requirement ID changes.
+- The conformance case `lifecycle_a_database_with_no_schema_stops_boot` said the diagnostic names "the file's path". It now says the diagnostic names the alias and says there is no database at its `NAME`, showing no part of the path. No requirement ID changes.
 
 Follows principles 6 (*visible failure over transparent calls*) and 10 (*Django-native over framework-new*).

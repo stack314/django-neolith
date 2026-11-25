@@ -14,7 +14,8 @@ What is compared for "one database" (ADR 0009 Decision 5):
   and resolved the same way, with the query ignored, since Django opens
   SQLite with ``uri=True``. Only the literal ``:memory:`` is exempt, being
   one database per connection.
-- Any other backend: ``(ENGINE, HOST, PORT, NAME)``.
+- Any other backend: ``(ENGINE, HOST, PORT, NAME)``, with ``HOST`` and
+  ``PORT`` read as Django's backends read them (ADR 0034 Decision 2).
 
 A refusal names the alias, or the two aliases, and the rule. It never shows
 a value under an alias, in whole or in part (ADR 0033 Decision 7, ADR 0034).
@@ -113,36 +114,63 @@ def sqlite_path(name: object) -> str | None:
     return os.path.realpath(os.path.abspath(text))
 
 
-def _plain(value: object, kinds: tuple[type, ...]) -> object:
-    """``value`` as the first of ``kinds`` it is an instance of reads it: an
-    exact ``str``, ``int`` or ``float``, made by that type's own method, so
-    no code of a subclass runs. ``None`` when it is none of them.
+def _host(value: object) -> str | None:
+    """``HOST`` as Django's backends read it: ``""`` for one not set, as an
+    absent key, ``None`` and an empty ``str`` read (``if settings_dict["HOST"]``),
+    and a ``str`` of any subclass as an exact ``str``, made by ``str.__str__``
+    so no code of the subclass runs. ``None`` for any other value, which is
+    not compared.
     """
-    for kind in kinds:
-        if issubclass(type(value), kind):
-            if kind is str:
-                return str.__str__(cast("str", value))
-            if kind is int:
-                return int.__int__(cast("int", value))
-            return float.__float__(cast("float", value))
+    if value is None:
+        return ""
+    if issubclass(type(value), str):
+        return str.__str__(cast("str", value))
     return None
+
+
+def _port(value: object) -> object:
+    """``PORT`` as Django's backends read it: ``""`` for one not set, as
+    ``None`` and every false ``str``, ``int`` or ``float`` read
+    (``if settings_dict["PORT"]``); otherwise the number ``int()`` reads, as
+    MySQL's and Oracle's backends do, or the value as its base type reads it
+    when ``int()`` reads none. Each is read through the base type's own
+    method, so no code of a subclass runs. ``None`` for a value of any other
+    type, which is not compared.
+    """
+    if value is None:
+        return ""
+    kind = type(value)
+    plain: str | float
+    if issubclass(kind, str):
+        plain = str.__str__(cast("str", value))
+    elif issubclass(kind, int):
+        plain = int.__int__(cast("int", value))
+    elif issubclass(kind, float):
+        plain = float.__float__(cast("float", value))
+    else:
+        return None
+    if not plain:
+        return ""
+    try:
+        return int(plain)
+    except (ValueError, OverflowError):  # a str int() refuses, nan, inf
+        return plain
 
 
 def _identity(engine: str, entry: Mapping[str, Any]) -> tuple[object, ...] | None:
     """What two aliases on one database share, led by the rule their refusal
-    states; ``None`` for one exempt, or for a server alias whose ``HOST`` is
-    not a ``str`` or whose ``PORT`` is not a ``str``, an ``int`` or a
-    ``float``.
+    states; ``None`` for one exempt, or for a server alias whose ``HOST`` or
+    ``PORT`` is of a type not compared (ADR 0034 Decision 2).
     """
     name = entry.get("NAME")
     if is_sqlite(engine):
         path = sqlite_path(name)
         return None if path is None else (_ONE_FILE, path)
-    host = _plain(entry.get("HOST", ""), (str,))
-    port = _plain(entry.get("PORT", ""), (str, int, float))
+    host = _host(entry.get("HOST", ""))
+    port = _port(entry.get("PORT", ""))
     if host is None or port is None:
         # Not compared (ADR 0034 Decision 2): its backend meets the value
-        # when it connects, and no value's own code runs here.
+        # when it connects, and no code of a HOST or PORT value runs here.
         return None
     return (_ONE_SERVER, engine, host, port, name)
 
