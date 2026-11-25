@@ -365,7 +365,8 @@ def remote_problems(
     list of two or more entries gets no advice to name ``local-first``,
     which would contradict that refusal and be refused in turn by the
     ``ROUTING_POLICIES`` row of Resolve; the identity is refused all the
-    same, with Resolve's message (ADR 0031, the Resolve rows).
+    same, with Resolve's message (ADR 0031, the Resolve rows; ADR 0036
+    Decision 1).
 
     Every problem found is returned, those under a refused key included. A
     refused ``url`` is never shown, in whole or in part (ADR 0014 Decision
@@ -517,7 +518,7 @@ def routing_problems(value: object, refused: Collection[str] = ()) -> list[str]:
     An identity in ``refused`` is one Resolve refuses with "remove it",
     whatever its value (``refused_identities``): a value that is not a
     policy gets no advice to name ``local-first``, which Resolve would
-    refuse in turn (ADR 0031, the Resolve rows).
+    refuse in turn (ADR 0031, the Resolve rows; ADR 0036 Decision 1).
 
     Every problem found is returned, those under a refused key included. A
     refused value is never shown; a refused key is shown as
@@ -696,12 +697,18 @@ def remote_warnings(neolith: object) -> list[str]:
     ]
 
 
-def unsigned_problems(neolith: object, hosted: Sequence[Declaration]) -> list[str]:
+def unsigned_problems(
+    neolith: object, hosted: Sequence[Declaration], *, refused: Collection[str] = ()
+) -> list[str]:
     """Each hosted app that requires a contract ``NEOLITH["REMOTE_PROVIDERS"]``
     names and has no entry in ``NEOLITH["SIGNING_SECRETS"]``, with the
     message its call would get (ADR 0027 Decision 9). Nothing when
     ``SIGNING_SECRETS`` is not a ``dict``, which ``neolith.E001`` reports,
     since which apps it names cannot be read.
+
+    An identity in ``refused`` is one Resolve refuses with "remove the
+    entry" (``_host.refused_identities``): it is never called over HTTP, so
+    no app is told it lacks a key to call it (ADR 0036 Decision 2).
     """
     remote = remote_identities(neolith)
     if not remote:
@@ -716,7 +723,7 @@ def unsigned_problems(neolith: object, hosted: Sequence[Declaration]) -> list[st
         for declaration in hosted
         if not _naming.holds(named, declaration.label)
         for contract in declaration.requires
-        if contract.identity in remote
+        if contract.identity in remote and contract.identity not in refused
     )
 
 

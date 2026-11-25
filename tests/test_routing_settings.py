@@ -638,8 +638,11 @@ def test_no_identity_is_told_both_to_go_and_to_name_local_first(
     _, refusals = resolve(
         declarations, _checks.remote_identities(neolith), _checks.routed(neolith)
     )
-    lines = refusals + _checks.neolith_problems(
-        neolith, declarations, refused=refused_identities(declarations, neolith)
+    refused = refused_identities(declarations, neolith)
+    lines = (
+        refusals
+        + _checks.neolith_problems(neolith, declarations, refused=refused)
+        + _checks.unsigned_problems(neolith, declarations, refused=refused)
     )
 
     def removed(identity: str) -> bool:
@@ -659,6 +662,14 @@ def test_no_identity_is_told_both_to_go_and_to_name_local_first(
     for identity, policy in policies.items():
         advised = f'{ROUTING}["{identity}"]: {NOT_A_POLICY.format(identity)}' in lines
         assert advised == (policy != "local-first" and not removed(identity))
+    # No app is told it cannot call over HTTP an identity Resolve removes:
+    # with no signing key, each other required remote identity is named.
+    required = {c.identity for d in declarations for c in d.requires}
+    for identity in counts:
+        unsigned = [
+            line for line in lines if line.endswith(f" call {identity} over HTTP")
+        ]
+        assert bool(unsigned) == (identity in required and not removed(identity))
 
 
 # override_settings, W002 (ADR 0031, the admitted set).
