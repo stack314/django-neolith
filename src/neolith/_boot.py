@@ -94,6 +94,9 @@ _NO_FILE: Final = (
     "the database is in memory, or nothing has created it yet (the migrate "
     "step creates the aliases it migrates)"
 )
+# E018 names the alias and the rule, never the NAME or the path it opens: a
+# value in DATABASES (ADR 0033 Decision 7, ADR 0034 Decision 3).
+_NO_DATABASE: Final = f"no database at its NAME; {_NO_FILE}"
 _IN_MEMORY: Final = (
     "an in-memory SQLite database is empty on a new thread, or gone once its "
     "last connection closes; a host that serves needs a file or a server"
@@ -751,11 +754,7 @@ def _state(
         return False
     if not path or not os.path.isfile(path) or os.path.getsize(path) == 0:
         messages.append(
-            checks.Error(
-                f"database {alias}: no database at "
-                f"{path or _naming.shown(name)}; {_NO_FILE}",
-                id="neolith.E018",
-            )
+            checks.Error(f"database {alias}: {_NO_DATABASE}", id="neolith.E018")
         )
         return False
     wrapper = load_backend(entry["ENGINE"]).DatabaseWrapper(entry, alias)
@@ -777,10 +776,7 @@ def _state(
         _close(wrapper)
     if not entries:
         messages.append(
-            checks.Error(
-                f"database {alias}: no database at {path}; {_NO_FILE}",
-                id="neolith.E018",
-            )
+            checks.Error(f"database {alias}: {_NO_DATABASE}", id="neolith.E018")
         )
         return False
     return True
