@@ -70,11 +70,31 @@ def test_the_places_of_using_are_those_of_the_installed_transaction_module() -> 
                 places[f"{module.__name__}.{name}"] = parameters.index("using")
     # Every public function of the module takes using, on both versions.
     assert len(places) == (16 if django.VERSION >= (6, 1) else 15)
-    expected = dict(USING)
-    if django.VERSION < (6, 1):
-        del expected["django.db.transaction.savepoint_create"]
-    assert places == expected
-    assert set(USING) == {f"django.db.transaction.{name}" for name in _TRANSACTION}
+    assert places == dict(USING)
+    # The listed names hold every supported version's; the set holds the
+    # installed one's.
+    missing = set() if django.VERSION >= (6, 1) else {"savepoint_create"}
+    assert {f"django.db.transaction.{name}" for name in _TRANSACTION} == set(USING) | {
+        f"django.db.transaction.{name}" for name in missing
+    }
+
+
+def test_a_transaction_function_the_installed_django_lacks_is_not_judged() -> None:
+    # savepoint_create on Django 5.2: the call is an AttributeError there,
+    # never a use of default.
+    missing = [
+        name
+        for name in _TRANSACTION
+        if not callable(getattr(django.db.transaction, name, None))
+    ]
+    assert missing == ([] if django.VERSION >= (6, 1) else ["savepoint_create"])
+    for name in missing:
+        for imports, callee in _SPELLINGS:
+            code = f"{imports.format(f=name)}\n{callee.format(f=name)}()\n"
+            assert _judge(code) == [], code
+            decorator = callee.format(f=name)
+            code = f"{imports.format(f=name)}\n@{decorator}\ndef f():\n    pass\n"
+            assert _judge(code) == [], code
 
 
 # Every way to bind and name a function of transaction: the import lines and
@@ -114,6 +134,7 @@ _ALIASES: dict[str, object] = {
     "'replica'": "replica",
     "alias": _Unknown(),
     "1": 1,
+    "lambda r: r": lambda r: r,
 }
 
 
@@ -121,22 +142,11 @@ def _bound_using(name: str, arguments: str) -> object:
     """What the interpreter binds to ``using`` for ``arguments`` given to
     the transaction function ``name``, or what Django reads it as.
     """
-    function = getattr(django.db.transaction, name, None)
-    signature = (
-        inspect.signature(function)
-        if function is not None
-        # savepoint_create on Django 5.2, as 6.1 defines it.
-        else inspect.Signature(
-            [
-                inspect.Parameter(
-                    "using", inspect.Parameter.POSITIONAL_OR_KEYWORD, default=None
-                )
-            ]
-        )
-    )
+    signature = inspect.signature(getattr(django.db.transaction, name))
     namespace: dict[str, Any] = {
         "_bind": signature.bind,
         "alias": _Unknown(),
+        "view": lambda request: request,
         "DEFAULT_DB_ALIAS": django.db.DEFAULT_DB_ALIAS,
         "utils": django.db.utils,
     }
@@ -144,7 +154,20 @@ def _bound_using(name: str, arguments: str) -> object:
     return call.arguments.get("using")
 
 
-def _flagged(using: object, app: App = _APP) -> bool:
+# The functions of transaction that read a callable in the place of using
+# as the function they decorate, on default (their callable(using) branch).
+_READERS = frozenset(
+    node.name
+    for node in ast.parse(inspect.getsource(django.db.transaction)).body
+    if isinstance(node, ast.FunctionDef)
+    and not node.name.startswith("_")
+    and "callable(using)" in ast.unparse(node)
+)
+
+
+def _flagged(using: object, app: App = _APP, name: str = "") -> bool:
+    if callable(using):
+        return name in _READERS
     if isinstance(using, _Unknown) or (using is not None and type(using) is not str):
         return False
     return using is None or using == "default" or using in app.aliases
@@ -168,10 +191,40 @@ def test_every_call_of_a_transaction_function_is_judged_by_the_alias_it_binds() 
                 f"    {callee.format(f=name)}({arguments})\n"
             )
             line = code.count("\n")
-            flagged = _flagged(_bound_using(name, arguments))
+            flagged = _flagged(_bound_using(name, arguments), name=name)
             assert _lines(code) == ([(line, "neolith.E109")] if flagged else []), code
             checked += 1
     assert checked == len(USING) * len(_SPELLINGS) * (1 + 2 * len(_ALIASES))
+
+
+def test_every_transaction_function_as_a_bare_decorator_is_judged_by_its_call() -> None:
+    # A bare decorator calls the function with the decorated one alone:
+    # using is left out, which is default, or is the function itself, which
+    # only the readers take as default.
+    checked = 0
+    for qualified, (imports, callee) in itertools.product(sorted(USING), _SPELLINGS):
+        name = qualified.rpartition(".")[2]
+        try:
+            using = _bound_using(name, "view")
+        except TypeError:
+            using = _Unknown()
+        flagged = _flagged(using, name=name)
+        for target in ["def f():", "async def f():", "class C:"]:
+            decorator = callee.format(f=name)
+            code = f"{imports.format(f=name)}\n\n\n@{decorator}\n{target}\n    pass\n"
+            expected = [(4, "neolith.E109")] if flagged else []
+            assert _lines(code) == expected, code
+            checked += 1
+    assert checked == len(USING) * len(_SPELLINGS) * 3
+    # The decorator forms the rule reports are those that leave using out
+    # and the two readers.
+    flagged_names = {
+        name.rpartition(".")[2]
+        for name, place in USING.items()
+        if place > 0 or name.rpartition(".")[2] in _READERS
+    }
+    assert {"on_commit", "atomic", "non_atomic_requests"} <= flagged_names
+    assert "get_autocommit" not in flagged_names
 
 
 def test_a_call_with_no_alias_names_the_default_and_the_hint_the_own_alias() -> None:
@@ -292,16 +345,7 @@ def test_atomic_and_non_atomic_requests_as_bare_decorators_mean_default(
 def test_the_bare_decorators_are_those_that_read_a_callable_as_the_view() -> None:
     # atomic and non_atomic_requests are the functions of transaction whose
     # first parameter, using, takes the decorated function itself.
-    source = inspect.getsource(django.db.transaction)
-    tree = ast.parse(source)
-    readers = {
-        node.name
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef)
-        and not node.name.startswith("_")
-        and "callable(using)" in ast.unparse(node)
-    }
-    assert readers == {"atomic", "non_atomic_requests"}
+    assert {"atomic", "non_atomic_requests"} == _READERS
 
 
 @pytest.mark.parametrize(

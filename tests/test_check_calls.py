@@ -243,6 +243,9 @@ def test_a_sender_named_by_a_string_of_another_app_is_e111() -> None:
         ("post_save.connect(f, sender='auth.User')", "auth.User"),
         ("receiver(post_save, sender='desk.Note')", "desk.Note"),
         ("anything(sender='legacy.Thing')", "legacy.Thing"),
+        # Another keyword before sender=, as Signal.connect takes them.
+        ("post_save.connect(f, weak=False, sender='auth.User')", "auth.User"),
+        ("receiver(post_save, dispatch_uid='x', sender='desk.Note')", "desk.Note"),
         ("post_save.connect(f, sender='shop.Item')", None),
         ("post_save.connect(f, sender='nosuch.Item')", None),
         ("post_save.connect(f, sender='auth')", None),
@@ -272,11 +275,12 @@ def test_a_sender_named_by_a_string_of_another_app_is_e111() -> None:
 def test_get_user_model_is_e111_when_auth_user_model_is_another_app_s(
     imports: str, callee: str
 ) -> None:
-    # (AUTH_USER_MODEL, what follows its app in the message, or None).
+    # (AUTH_USER_MODEL, whether it is reported). A label no installed app
+    # has is Django's error at run time, as get_model's is.
     cases = [
-        ("auth.User", ""),
-        ("desk.Member", ""),
-        ("gone.User", ", which this host does not hold"),
+        ("auth.User", True),
+        ("desk.Member", True),
+        ("gone.User", None),
         ("shop.User", None),
         ("User", None),
         ("a.b.c", None),
@@ -293,7 +297,7 @@ def test_get_user_model_is_e111_when_auth_user_model_is_another_app_s(
                     6,
                     "neolith.E111",
                     f"get_user_model() names AUTH_USER_MODEL {user_model!r}, a "
-                    f"model of app {str(user_model).partition('.')[0]}{note}",
+                    f"model of app {str(user_model).partition('.')[0]}",
                     _RECORDS_HINT,
                 )
             ]
@@ -344,6 +348,94 @@ def test_every_way_to_call_testing_boot_is_found(imports: str, callee: str) -> N
         tree = ast.parse(code)
         followed = bound(tree, symtable.symtable(code, "m.py", "exec"), "")
         assert booted(tree, followed) == [], other
+
+
+# Calls and attributes spread over lines, whose finding writes no value: the
+# code, and the name called or loaded, whose line is the finding's.
+_SPREAD_NAMES = [
+    (
+        "from django.db import transaction\n"
+        "x = (transaction\n     .on_commit(\n         print))\n",
+        "on_commit",
+    ),
+    (
+        "from django.db import transaction\nx = (\n    transaction\n"
+        "    .atomic\n    (\n    )\n)\n",
+        "atomic",
+    ),
+    (
+        "from django.contrib.auth import get_user_model\n"
+        "x = (\n     get_user_model\n     (\n     ))\n",
+        "get_user_model",
+    ),
+    (
+        "from django.contrib import auth\nx = (auth\n     .get_user_model())\n",
+        "get_user_model",
+    ),
+    ("import django.db\nx = (django.db\n     .connection)\n", "connection"),
+]
+
+
+def _line_of(code: str, text: str) -> int:
+    """The line of the last occurrence of ``text`` in ``code``."""
+    return 1 + code.count("\n", 0, code.rindex(text))
+
+
+@pytest.mark.parametrize(("code", "name"), _SPREAD_NAMES)
+def test_a_finding_without_a_written_value_is_on_the_line_of_its_name(
+    code: str, name: str
+) -> None:
+    # For a method call spread over lines, that is the line a traceback
+    # gives; for a call through an imported name CPython gives the line the
+    # call starts on, which changes with how the name was imported.
+    [found] = _judge(code)
+    assert found.line == _line_of(code, name) > 2
+
+
+def test_w103_is_on_the_line_of_the_name_called() -> None:
+    code = "from neolith import testing\n(testing\n .boot())\n"
+    tree = ast.parse(code)
+    followed = bound(tree, symtable.symtable(code, "m.py", "exec"), "")
+    assert booted(tree, followed) == [3]
+
+
+# Findings on a written value spread over lines: the code and the value.
+_SPREAD_VALUES = [
+    (
+        "from django.db.models import Q\nx = (Q()\n     .filter(a=1)\n"
+        "     .filter(b=2)\n     .using('desk'))\n",
+        "'desk'",
+    ),
+    ("from django.db import connections\nconnections[\n    'desk'\n]\n", "'desk'"),
+    ("item.save(\n    force=True,\n    using='default',\n)\n", "'default'"),
+    (
+        "from django.db import transaction\ntransaction.atomic(\n    lambda r: r,\n)\n",
+        "lambda",
+    ),
+    ("from django.db import transaction\ntransaction.atomic(\n    None)\n", "None"),
+    ("from neolith import connect\nconnect(\n    'stock.v1',\n)\n", "'stock.v1'"),
+    (
+        "from neolith import command_scope\ncommand_scope(\n    'desk',\n)\n",
+        "'desk'",
+    ),
+    (
+        "from django.apps import apps\napps.get_model(\n    'auth',\n    'User',\n)\n",
+        "'auth'",
+    ),
+    ("from django.apps import apps\napps.get_app_config(\n    'desk',\n)\n", "'desk'"),
+    (
+        "post_save.connect(\n    f,\n    weak=False,\n    sender='auth.User',\n)\n",
+        "'auth.User'",
+    ),
+]
+
+
+@pytest.mark.parametrize(("code", "value"), _SPREAD_VALUES)
+def test_a_finding_on_a_written_value_is_on_the_value_s_line(
+    code: str, value: str
+) -> None:
+    [found] = _judge(code)
+    assert found.line == 1 + code.count("\n", 0, code.index(value)) > 2
 
 
 # A host of three hosted apps, shop (which provides shop.v1 and whose model
@@ -513,6 +605,9 @@ def host(tmp_path_factory: pytest.TempPathFactory) -> list[list[Any]]:
         "shop/tests.py", _BOOTS + "\nfrom neolith import connect\nconnect('stock.v1')\n"
     )
     project.write("shop/setup_host.py", _BOOTS)
+    # A module of a hosted app that does not compile is E112's, not these
+    # rules'.
+    project.write("shop/broken.py", _BOOTS + "return\n")
     project.app(
         "desk",
         models="from django.db import models\n\n\nclass Note(models.Model):\n"
