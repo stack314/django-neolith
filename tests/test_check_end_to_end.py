@@ -16,9 +16,11 @@ under ``tmp_path`` (``tests/checking.py``).
 - One project with every row of ADR 0030's findings table at once: each
   printed once, sorted by path, line and id, ``neolith.E113`` after them, the
   summary counting each, the same lines under both entries, and no database
-  file created.
+  file created; and every family reads that project's source from one
+  reading, so each file is parsed once.
 """
 
+import json
 import py_compile
 import re
 from pathlib import Path
@@ -437,6 +439,70 @@ def test_every_row_at_once_under_both_entries(every_row: Host) -> None:
     assert every_row.no_database_file()
 
 
+# The entry run with ``ast.parse`` counted per file, the counts printed to
+# standard error however the entry ends.
+_COUNTED: Final = """\
+import ast, collections, json, sys
+
+seen = collections.Counter()
+parse = ast.parse
+
+
+def counted(source, filename="<unknown>", *args, **kwargs):
+    seen[filename] += 1
+    return parse(source, filename, *args, **kwargs)
+
+
+ast.parse = counted
+try:
+    if sys.argv[1] == "check":
+        from neolith._cli import main
+
+        status = main(sys.argv[1:])
+    else:
+        from django.core.management import execute_from_command_line
+
+        execute_from_command_line(["django", *sys.argv[1:]])
+        status = 0
+finally:
+    print("PARSED " + json.dumps(seen), file=sys.stderr)
+sys.exit(status)
+"""
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["check", "shop", "post", "bare", "desk", "--settings", "deployer"],
+        ["checkapps", "--settings=settings"],
+    ],
+    ids=_ENTRIES,
+)
+def test_every_family_reads_one_reading_of_the_source(
+    every_row: Host, arguments: list[str]
+) -> None:
+    every_row.pyproject("[tool.neolith]\nboundary-report-only = ['bare']\n")
+    ran = every_row.run("-c", _COUNTED, *arguments)
+    assert ran.status == 1, ran.stdout + ran.stderr
+    counts = json.loads(ran.errors[-1].removeprefix("PARSED "))
+    parsed = {
+        Path(name).resolve().relative_to(every_row.root.resolve()).as_posix(): times
+        for name, times in counts.items()
+        if name != "<unknown>"
+    }
+    # Every file of the hosted apps is read, and every file the families
+    # read, the chain's helper and the undeclared app's included, is parsed
+    # once, however many families judge it.
+    hosted = {
+        path.relative_to(every_row.root).as_posix()
+        for app in every_row.hosted
+        for path in (every_row.root / app).rglob("*.py")
+    }
+    assert hosted <= set(parsed), sorted(hosted - set(parsed))
+    assert {"helpers.py", "legacy/views.py"} <= set(parsed)
+    assert {name: times for name, times in parsed.items() if times != 1} == {}
+
+
 @pytest.mark.spec("APP-71")
 def test_every_row_with_every_failing_app_report_only(every_row: Host) -> None:
     every_row.pyproject(
@@ -494,4 +560,148 @@ def test_a_listed_app_whose_only_findings_are_warnings_is_a_stale_entry(
     assert placeless == ["neolith.E113"]
     assert ran.findings[-1].startswith("neolith.E113 app desk: ")
     assert _counts(ran) == (1, 0, 4)
+    assert ran.status == 1
+
+
+# The contract package's edges that the guide states (docs/django-host.md).
+
+_PING: Final = """\
+from typing import Protocol
+
+from neolith import action, contract
+from pydantic import BaseModel
+
+
+class Ping(BaseModel):
+    n: int
+
+
+@contract("{name}")
+class Contract(Protocol):
+    @action
+    def ping(self, request: Ping) -> Ping: ...
+"""
+
+_PONG: Final = """\
+from {package}.contracts import Ping
+
+
+class Service:
+    def ping(self, request: Ping) -> Ping:
+        return request
+"""
+
+
+def _provider(project: Project, name: str, label: str, contract: str) -> None:
+    """A hosted app ``name`` that provides ``contract`` from its
+    ``contracts.py``, implemented in ``services.py``.
+    """
+    base = name.replace(".", "/")
+    project.write(f"{base}/contracts.py", _PING.format(name=contract))
+    project.write(f"{base}/services.py", _PONG.format(package=name))
+    project.app(
+        name,
+        label=label,
+        imports=(
+            f"from neolith import Provided\nfrom {name}.contracts import Contract\n"
+        ),
+        config=f"""\
+        provides = (
+            Provided(
+                Contract,
+                implementation="{name}.services.Service",
+                principal_from=(),
+            ),
+        )
+        """,
+    )
+
+
+def _through_an_undeclared_app(project: Project) -> list[str]:
+    # A chain through an undeclared app's code: it is code in no hosted
+    # app, for E103 and for E104 alike.
+    _provider(project, "shop", "shop", "shop.v1")
+    project.write(
+        "shop/contracts.py", "import legacy.util\n" + _PING.format(name="shop.v1")
+    )
+    project.write("shop/helpers.py", "Y = 1\n")
+    project.app("desk")
+    project.write("desk/views.py", "import legacy.util\n")
+    project.write("legacy/__init__.py")
+    project.write("legacy/apps.py", _LEGACY_APP)
+    project.write("legacy/util.py", "import shop.helpers\n")
+    project.deployer(
+        "shop",
+        "desk",
+        neolith={
+            "DATABASES": project.databases("shop", "desk"),
+            "UNDECLARED_APPS": ["legacy"],
+        },
+        below=_SILENCED,
+    )
+    return ["shop", "desk"]
+
+
+def _through_a_package_in_no_app(project: Project) -> list[str]:
+    # A package __init__.py in no app, above a contract module, is code in
+    # no app: a chain goes through it.
+    project.write("org/__init__.py", "def later():\n    import billing.services\n")
+    _provider(project, "org.shop", "shop", "shop.v1")
+    project.app("billing")
+    project.write("billing/services.py", "X = 1\n")
+    project.app("desk")
+    project.write("desk/views.py", "import helpers\n")
+    project.write("helpers.py", "import org.shop.contracts\n")
+    project.deployer("shop", "billing", "desk", below=_SILENCED)
+    return ["org.shop", "billing", "desk"]
+
+
+def _above_a_nested_app(project: Project) -> list[str]:
+    # An app with no contract package of its own: its __init__.py above a
+    # nested app's contract module is part of the nested app's, and its
+    # other modules are part of none.
+    project.app("shop")
+    project.write("shop/__init__.py", "X = 1\n")
+    _provider(project, "shop.desk", "desk", "desk.v1")
+    project.app("billing")
+    project.write("billing/views.py", "from shop import X\nimport shop.models\n")
+    project.deployer("shop", "desk", "billing", below=_SILENCED)
+    return ["shop", "shop.desk", "billing"]
+
+
+_EDGES: Final = {
+    "through an undeclared app": (
+        _through_an_undeclared_app,
+        [
+            ("desk/views.py", 1, "neolith.E103", False),
+            ("legacy/util.py", 1, "neolith.W105", False),
+            ("shop/contracts.py", 1, "neolith.E104", False),
+        ],
+    ),
+    "through a package in no app": (
+        _through_a_package_in_no_app,
+        [
+            ("desk/views.py", 1, "neolith.E103", False),
+            ("org/shop/__init__.py", 1, "neolith.E103", False),
+        ],
+    ),
+    "above a nested app": (
+        _above_a_nested_app,
+        [("billing/views.py", 2, "neolith.E101", False)],
+    ),
+}
+
+
+@pytest.mark.spec("APP-66")
+@pytest.mark.parametrize("case", sorted(_EDGES))
+def test_the_contract_package_s_edges_the_guide_states(
+    tmp_path: Path, case: str
+) -> None:
+    write, expected = _EDGES[case]
+    project = Project(tmp_path)
+    hosted = write(project)
+    ran = project.check(*hosted)
+    located, placeless = _parsed(ran)
+    assert located == expected, ran.stdout + ran.stderr
+    assert placeless == []
     assert ran.status == 1
