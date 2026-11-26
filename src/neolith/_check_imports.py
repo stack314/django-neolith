@@ -25,9 +25,11 @@ statements and the literal dynamic imports) of a module ``t``:
 
 Python runs every package above a module before the module itself
 (``importlib._bootstrap._find_and_load_unlocked``), so for E103 and E104 an
-import of ``t`` is also an import of each package above ``t``. For E103 that
-includes the packages above the importing module too: Python ran them
-before it, and they are code the app cannot run without.
+import of ``t`` is also an import of each package above ``t`` that is not
+above the importing module, which ran before it. A package in no hosted app
+above ``<a>``'s own package runs before any module of ``<a>``, whatever the
+modules import: E103 judges those packages once per app, at the app's
+``__init__.py``, line 1.
 
 For each module ``m`` of a contract package that lies in a hosted app
 ``<c>``, ``neolith.E104`` when it imports ``t``, or a package above ``t`` not
@@ -264,20 +266,54 @@ class _Rules:
                 hit = self.hit(label, target)
                 if hit is not None:
                     found.append(self.direct(label, module, line, hit))
-                starts = [
-                    each
-                    for each in [*_above(target), target]
-                    if self.is_node(each) and self.hit(label, each) is None
-                ]
+                starts = self.starts(label, self.runs(target, module.file.module))
                 if starts:
                     pending.append((module, line, target, starts))
+        package = self.hosted[label].name
+        first = self.starts(label, _above(package))
         chains = _Chains(self, label)
-        chains.grow(each for *_, starts in pending for each in starts)
+        chains.grow([*first, *(each for *_, starts in pending for each in starts)])
+        chain = chains.shortest(first) if first else None
+        if chain is not None:
+            found.append(self.before(label, package, chain))
         for module, line, target, starts in pending:
             chain = chains.shortest(starts)
             if chain is not None:
                 found.append(self.chained(label, module, line, target, chain))
         return found
+
+    def starts(self, label: str, names: list[str]) -> list[str]:
+        """Those of ``names`` a chain of E103 for hosted app ``label`` starts
+        at: first-party code in no hosted app that E102 does not report.
+        """
+        return [
+            each
+            for each in names
+            if self.is_node(each) and self.hit(label, each) is None
+        ]
+
+    def before(
+        self, label: str, package: str, chain: tuple[list[str], _Hit]
+    ) -> Finding:
+        """E103 for a package in no hosted app above hosted app ``label``'s
+        package ``package``: Python runs it before any module of the app, so
+        it is judged once, at the app's ``__init__.py``, line 1.
+        """
+        through, hit = chain
+        message = checks.Error(
+            f"app {shown(label)}: package {shown(package)}: Python runs "
+            f"{shown(through[0])} before it; through first-party code in no "
+            f"hosted app ({' -> '.join(shown(each) for each in through)}), it "
+            f"reaches {self.described(hit)}",
+            hint=_CHAIN_HINT,
+            id="neolith.E103",
+        )
+        if package in self.files:
+            path: str | None = self.files[package][1].path
+        else:
+            placed = self.source.map().get(package)
+            path = None if placed is None else placed.path
+        return Finding(message, label, place(path), 1)
 
     def direct(self, label: str, module: Module, line: int, hit: _Hit) -> Finding:
         name = shown(module.file.module)
@@ -426,8 +462,12 @@ class _Rules:
 
     def place_of(self, name: str, out: LeftOut) -> tuple[str | None, int]:
         """The file of the module ``name`` and the first line in it of a
-        model or an implementation it holds, or line 1.
+        model it defines (where ``inspect`` finds the class) or of the
+        ``class`` or ``def`` of an implementation it holds, in any block at
+        module scope; line 1 when neither is found.
         """
+        from django.apps import apps as global_apps
+
         file = self.files[name][1] if name in self.files else None
         if file is None:
             placed = self.source.map().get(name)
@@ -436,17 +476,14 @@ class _Rules:
             file = File(placed.path, name, name, placed.source)
         if not file.source:
             return file.path, 1
-        tree = self.source.read(file).tree
-        if tree is None:
-            return file.path, 1
-        models = {each.rpartition(".")[2] for each in out.models}
-        held = {each.rpartition(".")[2] for each in out.implementations}
         lines = [
-            node.lineno
-            for node in ast.walk(tree)
-            if isinstance(node, ast.ClassDef) and node.name in models
+            _check_models._source(global_apps.get_model(label))[1]
+            for label in out.models
         ]
-        lines += [node.lineno for node in tree.body if _binds(node) & held]
+        tree = self.source.read(file).tree
+        if tree is not None:
+            held = {each.rpartition(".")[2] for each in out.implementations}
+            lines += _defined(tree, held)
         return file.path, min(lines, default=1)
 
     def undeclared_apps(self) -> list[Finding]:
@@ -529,20 +566,29 @@ def _is_model(value: object) -> bool:
     return issubclass(type(value), type) and issubclass(value, models.Model)  # type: ignore[arg-type]
 
 
-def _binds(node: ast.stmt) -> set[str]:
-    """The names a module-level statement binds by definition, assignment
-    or import.
+_DEFINITIONS: Final = (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+
+
+def _defined(tree: ast.Module, names: set[str]) -> list[int]:
+    """The lines of each ``class`` or ``def`` named in ``names`` at module
+    scope: in the module's body or in any block of it (``if``, ``try``,
+    ``with``, ``for``, ``while``, ``match`` and their other branches), never
+    inside a ``class`` or a ``def``.
     """
-    if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
-        return {node.name}
-    if isinstance(node, (ast.Import, ast.ImportFrom)):
-        return {alias.asname or alias.name.partition(".")[0] for alias in node.names}
-    targets: list[ast.expr] = []
-    if isinstance(node, ast.Assign):
-        targets = node.targets
-    elif isinstance(node, ast.AnnAssign):
-        targets = [node.target]
-    return {target.id for target in targets if isinstance(target, ast.Name)}
+    lines: list[int] = []
+    pending: list[ast.AST] = list(reversed(tree.body))
+    while pending:
+        node = pending.pop()
+        if isinstance(node, _DEFINITIONS):
+            if node.name in names:
+                lines.append(node.lineno)
+            continue
+        for child in reversed(list(ast.iter_child_nodes(node))):
+            if isinstance(child, ast.stmt):
+                pending.append(child)
+            elif isinstance(child, (ast.excepthandler, ast.match_case)):
+                pending.extend(reversed(child.body))
+    return lines
 
 
 class _Chains:

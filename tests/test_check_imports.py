@@ -12,10 +12,12 @@ refused (``tests/checking.py``). A host with undeclared apps, contrib apps
 among them, has a real ``default``.
 """
 
+import ast
 from pathlib import Path
 
 import pytest
 
+from neolith._check_imports import _defined
 from tests.checking import Project
 
 pytestmark = pytest.mark.spec("APP-66")
@@ -596,7 +598,12 @@ class Ping(BaseModel):
     n: int
 
 
-def thing():
+class Holder:
+    class Thing:
+        pass
+
+
+def things():
     from django.db import models
 
     class Thing(models.Model):
@@ -605,7 +612,90 @@ def thing():
         class Meta:
             app_label = "mm"
 
+    class Other(models.Model):
+        name = models.CharField(max_length=10)
+
+        class Meta:
+            app_label = "mm"
+
+    return Thing, Other
+"""
+
+# A module that holds the implementation in a block at module scope: in an
+# if statement, before a model; in a try statement.
+_IFS = """\
+from typing import Protocol
+
+from pydantic import BaseModel
+
+from neolith import action, contract
+
+
+class Ping(BaseModel):
+    n: int
+
+
+@contract("ifs.v1")
+class Ifs(Protocol):
+    @action
+    def ping(self, request: Ping) -> Ping: ...
+
+
+if Ping:
+
+    class Service:
+        def ping(self, request: Ping) -> Ping:
+            return request
+
+
+def thing():
+    from django.db import models
+
+    class Thing(models.Model):
+        name = models.CharField(max_length=10)
+
+        class Meta:
+            app_label = "ifs"
+
     return Thing
+"""
+
+_TRY = """\
+from typing import Protocol
+
+from pydantic import BaseModel
+
+from neolith import action, contract
+
+
+class Ping(BaseModel):
+    n: int
+
+
+@contract("tr.v1")
+class Tr(Protocol):
+    @action
+    def ping(self, request: Ping) -> Ping: ...
+
+
+try:
+    import json
+
+    class Service:
+        def ping(self, request: Ping) -> Ping:
+            return request
+
+except ImportError:
+    json = None
+"""
+
+_PP_API = """\
+from pp.api.records import Ping
+
+
+class Service:
+    def ping(self, request: Ping) -> Ping:
+        return request
 """
 
 _OUTER_INIT = """\
@@ -660,8 +750,25 @@ def packages(tmp_path_factory: pytest.TempPathFactory) -> tuple[Project, list[st
         "mm.contracts",
         "Plain",
         "mm.services.Service",
-        models="from mm.records import thing\n\nThing = thing()\n",
+        models="from mm.records import things\n\nThing, Other = things()\n",
     )
+    project.write("ifs/contracts.py", _IFS)
+    provider(
+        project,
+        "ifs",
+        "ifs.contracts",
+        "Ifs",
+        "ifs.contracts.Service",
+        models="from ifs.contracts import thing\n\nThing = thing()\n",
+    )
+    project.write("tr/contracts.py", _TRY)
+    provider(project, "tr", "tr.contracts", "Tr", "tr.contracts.Service")
+    # A package above two modules of the contract package holds the
+    # implementation.
+    project.write("pp/api/__init__.py", _PP_API)
+    project.write("pp/api/contracts.py", contract("pp.v1", "pp.api.records"))
+    project.write("pp/api/records.py", RECORDS)
+    provider(project, "pp", "pp.api.contracts", "Plain", "pp.api.Service")
     # A hosted app nested in another: the package modules above its
     # contract module, its own and the outer app's, import internals.
     project.app("outer")
@@ -680,7 +787,33 @@ def packages(tmp_path_factory: pytest.TempPathFactory) -> tuple[Project, list[st
         "Plain",
         "outer.inner.services.Service",
     )
-    hosted = ["shop", "pk", "pm", "joined", "mm", "outer", "outer.inner"]
+    # A second nested app, whose contract package also holds the outer
+    # app's __init__.py: E104 names the first app in sorted order.
+    project.write("outer/inner2/records.py", RECORDS)
+    project.write(
+        "outer/inner2/contracts.py", contract("inner2.v1", "outer.inner2.records")
+    )
+    project.write("outer/inner2/services.py", service("outer.inner2.records"))
+    provider(
+        project,
+        "outer.inner2",
+        "outer.inner2.contracts",
+        "Plain",
+        "outer.inner2.services.Service",
+    )
+    hosted = [
+        "shop",
+        "pk",
+        "pm",
+        "joined",
+        "mm",
+        "ifs",
+        "tr",
+        "pp",
+        "outer",
+        "outer.inner",
+        "outer.inner2",
+    ]
     labels = [name.rpartition(".")[2] for name in hosted]
     project.settings(
         hosted,
@@ -769,6 +902,10 @@ def test_a_module_left_out_of_the_contract_package_is_e105(
     project, found = packages
     joined = line_of(project, "joined/contracts.py", "class Service")
     pm = line_of(project, "pm/api/__init__.py", "class Service")
+    mm = line_of(project, "mm/records.py", "class Thing(models.Model)")
+    ifs = line_of(project, "ifs/contracts.py", "class Service")
+    assert ifs < line_of(project, "ifs/contracts.py", "class Thing")
+    pp = line_of(project, "pp/api/__init__.py", "class Service")
     assert sorted(_of(found, "neolith.E105")) == sorted(
         [
             f"joined/contracts.py:{joined}: "
@@ -776,10 +913,28 @@ def test_a_module_left_out_of_the_contract_package_is_e105(
             "the contract package and also holds the implementation "
             "joined.contracts.Service, so it is not part of the contract package; "
             f"{_LEFT_OUT_HINT}",
-            f"mm/records.py:{line_of(project, 'mm/records.py', 'class Thing')}: "
+            # The first line of its models, where inspect finds the class,
+            # not a class of the same name elsewhere.
+            f"mm/records.py:{mm}: "
             "neolith.E105 app mm: module mm.records defines Ping of the contract "
-            "package and also defines the model mm.Thing, so it is not part of the "
+            "package and also defines the models mm.Other, mm.Thing, so it is not "
+            f"part of the contract package; {_LEFT_OUT_HINT}",
+            # An implementation in a block at module scope, before a model.
+            f"ifs/contracts.py:{ifs}: "
+            "neolith.E105 app ifs: module ifs.contracts defines Ifs, Ping of the "
+            "contract package and also defines the model ifs.Thing and holds the "
+            "implementation ifs.contracts.Service, so it is not part of the "
             f"contract package; {_LEFT_OUT_HINT}",
+            f"tr/contracts.py:{line_of(project, 'tr/contracts.py', 'class Service')}: "
+            "neolith.E105 app tr: module tr.contracts defines Ping, Tr of the "
+            "contract package and also holds the implementation "
+            "tr.contracts.Service, so it is not part of the contract package; "
+            f"{_LEFT_OUT_HINT}",
+            f"pp/api/__init__.py:{pp}: "
+            "neolith.E105 app pp: module pp.api, a package above the contract "
+            "modules pp.api.contracts, pp.api.records, which Python runs before "
+            "them, holds the implementation pp.api.Service, so it is not part of "
+            f"the contract package; {_LEFT_OUT_HINT}",
             # A package module above that defines nothing of the contract
             # package names the contract module below it.
             f"pm/api/__init__.py:{pm}: "
@@ -810,6 +965,34 @@ def test_a_contract_package_that_stands_alone_gives_nothing(
         each.startswith(("shop/", "outer/inner/contracts.py")) for each in found
     )
     assert _of(found, "neolith.E104", "neolith.E105") == found, "\n".join(found)
+
+
+# Each block at module scope, with ``class Service`` at each ``@`` (or a
+# ``def Service``) on the line marked ``#>``; inside a def or a class,
+# nothing.
+_BLOCKS = {
+    "if": "if a:\n    pass\nelif b:\n    pass\nelse:\n    @\n",
+    "try": "try:\n    @\nexcept ImportError:\n    pass\n",
+    "except": "try:\n    pass\nexcept ImportError:\n    @\n",
+    "try-else": "try:\n    pass\nexcept E:\n    pass\nelse:\n    @\n",
+    "finally": "try:\n    pass\nfinally:\n    def Service(): ...  #>\n",
+    "try-star": "try:\n    pass\nexcept* E:\n    @\n",
+    "with": "with a:\n    async def Service(): ...  #>\n",
+    "for": "for x in y:\n    pass\nelse:\n    @\n",
+    "while": "while a:\n    @\n",
+    "match": "match a:\n    case 1:\n        pass\n    case _:\n        @\n",
+    "nested": "if a:\n    with b:\n        for c in d:\n            @\n",
+    "in-def": "def f():\n    class Service: ...\n",
+    "in-class": "class Holder:\n    class Service: ...\n",
+    "other-name": "class Other: ...\nService = Other\nimport Service\n",
+}
+
+
+@pytest.mark.parametrize("form", sorted(_BLOCKS))
+def test_an_implementation_is_found_in_every_block_at_module_scope(form: str) -> None:
+    text = "import a\n\n" + _BLOCKS[form].replace("@", "class Service: ...  #>")
+    expected = [n for n, each in enumerate(text.splitlines(), 1) if each.endswith("#>")]
+    assert _defined(ast.parse(text), {"Service"}) == expected
 
 
 _PERSON = """\

@@ -155,10 +155,19 @@ _HELPERS = {
     "helpers/rel/bad.py": "import billing.services\n",
     "helpers/rel2.py": "from .deep import x\n",
     "helpers/deep.py": "import billing.services\nx = 1\n",
+    # A module that imports two internals: the first in sorted order is
+    # named, whatever the order of the file.
+    "helpers/two.py": "import billing.zeta\nimport billing.alpha\n",
+    # Two modules at the same distance: the first in sorted order is named.
+    "helpers/fork.py": "import helpers.fz\nimport helpers.fa\n",
+    "helpers/fz.py": "import billing.services\n",
+    "helpers/fa.py": "import billing.services\n",
     # Back into the internals of the app whose contract package imports it.
     "helpers/back.py": "import till.services\n",
     "helpers/up.py": "import helpers.upper\n",
     "helpers/upper.py": "import till.services\n",
+    # Back into the contract package that imports it: an ordinary cycle.
+    "helpers/cycle.py": "import till.contracts\n",
     # Through a module of an undeclared first-party app.
     "legacy/util.py": "import billing.services\n",
 }
@@ -172,12 +181,21 @@ import helpers.users
 import helpers.broken
 import helpers.pkg.mod
 import helpers.a2
+import helpers.two
+import helpers.fork
 import helpers.rel
 import helpers.rel2
 import legacy.util
 import proj.store.contracts
 import vendorlib.bridge
 import shop.contracts
+"""
+
+_SIDE_VIEWS = """\
+from . import helpers
+from .helpers import x
+import proj.side.helpers
+from proj.store.contracts import Plain
 """
 
 _LEGACY_APP = """\
@@ -214,6 +232,8 @@ def chains(tmp_path_factory: pytest.TempPathFactory) -> tuple[Project, list[str]
     project.write("billing/records.py", RECORDS)
     project.write("billing/contracts.py", contract("billing.v1", "billing.records"))
     project.write("billing/services.py", service("billing.records"))
+    project.write("billing/alpha.py")
+    project.write("billing/zeta.py")
     provider(
         project, "billing", "billing.contracts", "Plain", "billing.services.Service"
     )
@@ -236,17 +256,20 @@ def chains(tmp_path_factory: pytest.TempPathFactory) -> tuple[Project, list[str]
         "Plain",
         "proj.store.services.Service",
     )
-    # A hosted app inside that package: each import of a module under it is
-    # an import of the package too.
+    # Hosted apps inside that package: Python runs it before any of their
+    # modules, whatever they import, one app importing only the standard
+    # library and one importing its own modules in several ways.
+    project.app("proj.quiet")
+    project.write("proj/quiet/views.py", "import json\n")
     project.app("proj.side")
-    project.write(
-        "proj/side/views.py",
-        "import proj.side.helpers\nfrom proj.store.contracts import Plain\n",
-    )
-    project.write("proj/side/helpers.py")
+    project.write("proj/side/views.py", _SIDE_VIEWS)
+    project.write("proj/side/forms.py", "from .helpers import x\n")
+    project.write("proj/side/helpers.py", "x = 1\n")
     # A contract package that reaches its own app's internals through code
     # in no app: a record module, and the package above the contract module.
-    project.write("till/records.py", f"{RECORDS}\nimport helpers.back\n")
+    project.write(
+        "till/records.py", f"{RECORDS}\nimport helpers.back\nimport helpers.cycle\n"
+    )
     project.write("till/contracts.py", contract("till.v1", "till.records"))
     project.write("till/services.py", service("till.records"))
     provider(project, "till", "till.contracts", "Plain", "till.services.Service")
@@ -256,10 +279,10 @@ def chains(tmp_path_factory: pytest.TempPathFactory) -> tuple[Project, list[str]
     project.write("legacy/__init__.py")
     project.write("legacy/apps.py", _LEGACY_APP)
     project.settings(
-        ["shop", "billing", "till", "proj.store", "proj.side"],
+        ["shop", "billing", "till", "proj.store", "proj.side", "proj.quiet"],
         neolith={
             "DATABASES": project.databases(
-                "default", "shop", "billing", "till", "store", "side"
+                "default", "shop", "billing", "till", "store", "side", "quiet"
             ),
             "UNDECLARED_APPS": [
                 "django.contrib.contenttypes",
@@ -307,6 +330,15 @@ def test_a_chain_through_first_party_code_in_no_hosted_app_is_e103(
             # a chain and inside one.
             _e103(project, "helpers.pkg.mod", "helpers.pkg", _SERVICES),
             _e103(project, "helpers.a2", "helpers.a2 -> helpers.pkg", _SERVICES),
+            # Of two internals one module imports, and of two modules at the
+            # same distance, the first in sorted order.
+            _e103(
+                project,
+                "helpers.two",
+                "helpers.two",
+                "billing.alpha, a module of app billing outside its contract package",
+            ),
+            _e103(project, "helpers.fork", "helpers.fork -> helpers.fa", _SERVICES),
             # Relative imports resolve from a package module's own package and
             # from a plain module's package.
             _e103(project, "helpers.rel", "helpers.rel -> helpers.rel.bad", _SERVICES),
@@ -322,18 +354,16 @@ def test_a_chain_through_first_party_code_in_no_hosted_app_is_e103(
                 "proj.store.services, a module of app store outside its contract "
                 "package",
             ),
-            # A hosted app inside that package: Python runs it before the
-            # app's modules, and each import of a module under it imports it
-            # too.
+            # Hosted apps inside that package: Python runs it before any of
+            # their modules, so each app is judged once, at its __init__.py,
+            # whatever its modules import; an import of a module under the
+            # package runs nothing more.
             *(
-                f"proj/side/views.py:{line}: neolith.E103 app side: module "
-                f"proj.side.views: imports {imported}; through first-party code "
-                "in no hosted app (proj), it reaches proj.store.services, a "
+                f"proj/{app}/__init__.py:1: neolith.E103 app {app}: package "
+                f"proj.{app}: Python runs proj before it; through first-party "
+                "code in no hosted app (proj), it reaches proj.store.services, a "
                 f"module of app store outside its contract package; {_CHAIN_HINT}"
-                for line, imported in [
-                    (1, "proj.side.helpers"),
-                    (2, "proj.store.contracts"),
-                ]
+                for app in ["quiet", "side"]
             ),
         ]
     ), "\n".join(found)
