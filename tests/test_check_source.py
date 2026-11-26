@@ -940,14 +940,18 @@ def test_a_computed_argument_is_w101(tmp_path: Path, entry: str) -> None:
         "write it as a literal where it is fixed; the check does not judge this "
         "call otherwise"
     )
+    # The literal is judged by the rules on calls (E108), never W101.
     assert ran.findings == [
+        "shop/services.py:6: neolith.E108 app shop: module shop.services: "
+        "connect('shop.orders.v1') names a contract version the app does not "
+        "require; list the contract in the app's requires",
         "shop/services.py:8: neolith.W101 app shop: module shop.services: connect() "
         f"is called with a computed argument, which the check cannot read; {hint}",
         "shop/services.py:8: neolith.W101 app shop: module shop.services: get_model() "
         f"is called with a computed argument, which the check cannot read; {hint}",
     ], ran.stdout + ran.stderr
-    assert _SUMMARY.fullmatch(ran.summary).groups() == ("0", "0", "2")  # type: ignore[union-attr]
-    assert ran.status == 0
+    assert _SUMMARY.fullmatch(ran.summary).groups() == ("1", "0", "2")  # type: ignore[union-attr]
+    assert ran.status == 1
 
 
 # The settings module's directory is first-party under both entries.
@@ -1062,6 +1066,13 @@ def test_an_import_of_a_hosted_app_s_module_does_not_depend_on_what_is_loaded(
         ran = project.check("shop", "billing", env=env)
     else:
         ran = project.checkapps(env=env)
-    assert ran.status == 0, ran.stdout + ran.stderr
+    # The same edge, and so the same finding, whether or not it is loaded.
+    assert ran.findings == [
+        "shop/views.py:1: neolith.E101 app shop: module shop.views: imports "
+        "billing.services, a module of app billing outside its contract package, "
+        "and app billing provides no contract; import only that app's contract "
+        "package, and reach the rest through a contract it provides"
+    ], ran.stdout + ran.stderr
+    assert ran.status == 1, ran.stdout + ran.stderr
     assert f"loaded: {loaded}" in ran.errors, ran.stderr
     assert "edges: billing.services:1" in ran.errors, ran.stderr

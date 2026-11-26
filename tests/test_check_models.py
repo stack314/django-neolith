@@ -201,6 +201,17 @@ def _at(source: str, name: str) -> int:
     )
 
 
+def _model_rows(ran: Ran) -> list[str]:
+    """The findings of the rules on models; every other finding of the run
+    must be one of the rules on imports, for the imports a fixture needs to
+    name another app's model (a proxy or a parent class, for one).
+    """
+    rows = [line for line in ran.findings if re.search(r" neolith\.E10[67] ", line)]
+    others = {line.split()[1] for line in ran.findings if line not in rows}
+    assert others <= {"neolith.E101", "neolith.E102"}, ran.stdout
+    return rows
+
+
 def _summary(ran: Ran) -> tuple[int, int, int]:
     found = _SUMMARY.fullmatch(ran.summary)
     assert found is not None, ran.stdout
@@ -320,11 +331,13 @@ def test_each_relation_to_another_app_is_reported_and_none_inside_one(
         "has the table 'LEGACY_thing', the table of legacy.Thing, a model of app "
         f"legacy, compared without regard to case; {_TABLE_HINT}",
     ]
-    assert sorted(ran.findings) == sorted(relations + stored), ran.stdout + ran.stderr
+    assert sorted(_model_rows(ran)) == sorted(relations + stored), (
+        ran.stdout + ran.stderr
+    )
     assert ran.findings == sorted(
         ran.findings, key=lambda line: (line.split(":")[0], int(line.split(":")[1]))
     )
-    assert _summary(ran) == (len(relations) + len(stored), 0, 0)
+    assert _summary(ran) == (len(ran.findings), 0, 0)
     assert ran.status == 1
     assert ran.errors == []
 
@@ -442,8 +455,8 @@ def test_records_stored_where_another_hosted_app_s_are_are_reported(
         table("shop.Item", shop_line, "shop_item", "desk.Unmanaged"),
         table("shop.Item", shop_line, "shop_item", "desk.Tagger_tags"),
     ]
-    assert sorted(ran.findings) == sorted(expected), ran.stdout + ran.stderr
-    assert _summary(ran) == (len(expected), 0, 0)
+    assert sorted(_model_rows(ran)) == sorted(expected), ran.stdout + ran.stderr
+    assert _summary(ran) == (len(ran.findings), 0, 0)
     assert ran.status == 1
 
 
