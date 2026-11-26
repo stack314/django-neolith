@@ -38,7 +38,7 @@ importing ``t``, runs first-party code in no hosted app from which a chain,
 as for E103, reaches such a module of ``<c>``: importing a contract package
 never loads its app's internals (ADR 0030 Decision 2). For each module the contract
 package of ``<b>`` leaves out, ``neolith.E105``: it defines a contract or a
-record, or is a package above one, and also defines a model or holds the
+record or enum, or is a package above one, and also defines a model or holds the
 implementation of a contract ``<b>`` provides.
 
 For each undeclared app ``<c>`` whose package is first-party,

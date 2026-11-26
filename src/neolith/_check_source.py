@@ -1217,6 +1217,23 @@ class Source:
             module = self._modules[file.path] = read(file)
         return module
 
+    def placed(self, dotted: str) -> Module | None:
+        """The first-party module ``dotted`` of the map as read once in this
+        run, so a family that reads a first-party file reads the same
+        reading as every other; ``None`` when the map holds no file with
+        source for it.
+        """
+        placed = self.map().get(dotted)
+        if placed is None or placed.path is None or not placed.source:
+            return None
+        parts = split(os.path.basename(placed.path))
+        package = (
+            dotted
+            if parts is not None and parts[0] == "__init__"
+            else dotted.rpartition(".")[0]
+        )
+        return self.read(File(placed.path, dotted, package))
+
     def modules(self, label: str) -> Iterator[Module]:
         """The read source files of the hosted app ``label``."""
         for file in self.files()[label]:

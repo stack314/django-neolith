@@ -20,7 +20,8 @@ the project's around one of those, are. The finding is placed at the
 innermost such code: a function's first line in the file its code was
 compiled from, or a class's first line in the file of the module it names
 (as ``label_of`` judges it), each at line 1 when that file does not hold
-it. Each such file is parsed at most once in a run.
+it. Such a file is read as every family of the run reads it, once
+(``Source.placed``), so it is parsed at most once in a run.
 
 Not reported, as blind spots:
 
@@ -55,7 +56,7 @@ import itertools
 import os
 import sys
 import types
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from importlib import import_module
 from typing import TYPE_CHECKING, Any, Final, NamedTuple
 
@@ -139,8 +140,9 @@ def findings(source: Source) -> list[Finding]:
             hint=_HINT,
             id="neolith.W102",
         )
+        tree = functools.partial(_tree, source, str(code.module))
         found.append(
-            Finding(message, None, place(path), _line(code.thing, path, classes))
+            Finding(message, None, place(path), _line(code.thing, path, classes, tree))
         )
     return found
 
@@ -286,25 +288,44 @@ def _named(code: Code) -> str:
     return f"{code.module}.{_serving._CODE.__get__(code.thing).co_qualname}"
 
 
-def _line(thing: object, path: str, classes: dict[str, _Classes | None]) -> int:
+def _tree(source: Source, module: str) -> ast.Module | None:
+    """The tree of the first-party module ``module`` as the run read it;
+    ``None`` when it has no source or cannot be read or compiled.
+    """
+    read = source.placed(module)
+    return None if read is None else read.tree
+
+
+def _line(
+    thing: object,
+    path: str,
+    classes: dict[str, _Classes | None],
+    tree: Callable[[], ast.Module | None],
+) -> int:
     """The first line of a function or a class in the file ``path``; 1 when
     that file does not hold it. ``classes`` keeps each file's class
-    statements, read once for a run.
+    statements, taken once for a run from ``tree``, the file's tree as the
+    run read it.
     """
     if type(thing) is not types.FunctionType:
-        return _class_line(thing, path, classes)  # type: ignore[arg-type]
+        return _class_line(thing, path, classes, tree)  # type: ignore[arg-type]
     found = _serving._CODE.__get__(thing)
     return max(found.co_firstlineno, 1) if _same(found.co_filename, path) else 1
 
 
-def _class_line(klass: type, path: str, classes: dict[str, _Classes | None]) -> int:
+def _class_line(
+    klass: type,
+    path: str,
+    classes: dict[str, _Classes | None],
+    tree: Callable[[], ast.Module | None],
+) -> int:
     """The first line of the class ``klass`` in the file ``path``, its first
     decorator's if it has one: of the one definition there with its
     qualified name that agrees with the class, by its ``__firstlineno__``
     (Python 3.13 and later) and by the lines of the functions defined in its
     body; 1 when no definition or more than one agrees, when such a
-    function was compiled from another file, or when the file cannot be read
-    or parsed.
+    function was compiled from another file, or when ``tree`` gives none:
+    the file cannot be read or compiled.
     """
     held = _naming.namespace(klass)
     qualname = _naming.qualname(klass, None)
@@ -321,7 +342,7 @@ def _class_line(klass: type, path: str, classes: dict[str, _Classes | None]) -> 
             return 1
         lines.append(code.co_firstlineno)
     if path not in classes:
-        classes[path] = _read(path)
+        classes[path] = _held(tree())
     held_classes = classes[path]
     if held_classes is None:
         return 1
@@ -335,14 +356,9 @@ def _class_line(klass: type, path: str, classes: dict[str, _Classes | None]) -> 
     return found[0][0] if len(found) == 1 else 1
 
 
-def _read(path: str) -> _Classes | None:
-    """The class statements of the file ``path``; ``None`` when it cannot be
-    read or parsed.
-    """
-    try:
-        with open(path, "rb") as file:
-            tree = ast.parse(file.read())
-    except (OSError, SyntaxError):  # SyntaxError for NUL too, from 3.12
+def _held(tree: ast.Module | None) -> _Classes | None:
+    """The class statements of ``tree``; ``None`` when there is no tree."""
+    if tree is None:
         return None
     held: _Classes = {}
     for qualname, start, end in _definitions(tree):

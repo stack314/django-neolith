@@ -133,16 +133,18 @@ class Same(models.Model):
         db_table = "SHOP_ITEM"
 """
 
+# The same import on two lines, printed on each.
 _DESK_VIEWS: Final = """\
 import helpers
 import legacy.models
+from shop.services import Service
 from shop.services import Service
 """
 
 # The same finding twice on one line, printed once.
 _DESK_CALLS: Final = """\
 from django.apps import apps
-from django.db import transaction
+from django.db import connections, transaction
 from neolith import command_scope, connect
 
 
@@ -151,7 +153,7 @@ def run(name):
     connect(name)
     with transaction.atomic():
         pass
-    command_scope("shop")
+    command_scope("shop"), connections["default"]
     return apps.get_model("shop", "Item")
 """
 
@@ -164,6 +166,33 @@ def home(request):
 
 
 urlpatterns = [path("", home)]
+"""
+
+# Two class-based views of the project's in one file, which is parsed once.
+_PROJECT_URLS: Final = """\
+from django.urls import path
+from django.views import View
+
+
+def home(request):
+    return None
+
+
+class First(View):
+    def get(self, request):
+        return None
+
+
+class Second(View):
+    def get(self, request):
+        return None
+
+
+urlpatterns = [
+    path("", home),
+    path("first", First.as_view()),
+    path("second", Second.as_view()),
+]
 """
 
 _WSGI: Final = """\
@@ -324,8 +353,8 @@ def every_row(tmp_path_factory: pytest.TempPathFactory) -> Host:
     """A project whose code gives every row of ADR 0030's findings table:
     the hosted apps ``shop`` (a contract package that imports its app's
     internals), ``desk`` (every row about an app's own code), ``post`` (an
-    implementation in its contract module) and ``bare`` (no finding, listed
-    as report-only), the undeclared first-party app ``legacy``, and the
+    implementation in its contract module), ``bare`` and ``bare0`` (no
+    finding, listed as report-only), the undeclared first-party app ``legacy``, and the
     project's code in no app.
     """
     project = Host(tmp_path_factory.mktemp("every_row"))
@@ -353,6 +382,7 @@ def every_row(tmp_path_factory: pytest.TempPathFactory) -> Host:
         """,
     )
     project.app("bare")
+    project.app("bare0")
     project.app("desk", models=_DESK_MODELS)
     project.write("desk/views.py", _DESK_VIEWS)
     project.write("desk/calls.py", _DESK_CALLS)
@@ -369,9 +399,9 @@ def every_row(tmp_path_factory: pytest.TempPathFactory) -> Host:
     project.write("legacy/models.py")
     project.write("legacy/views.py", "import shop.services\n")
     project.write("helpers.py", "import shop.services\n")
-    project.write("urls.py", _URLS)
+    project.write("urls.py", _PROJECT_URLS)
     project.write("wsgi.py", _WSGI)
-    project.hosted = ["shop", "post", "bare", "desk"]
+    project.hosted = ["shop", "post", "bare", "bare0", "desk"]
     project.databases_of = list(project.hosted)
     project.undeclared = ["legacy"]
     project.write_hosts()
@@ -389,6 +419,8 @@ def _every_row(project: Host) -> list[tuple[str, int, str]]:
         (calls, at(calls, 'connect("shop.v1")'), "E108"),
         (calls, at(calls, "connect(name)"), "W101"),
         (calls, at(calls, "with transaction.atomic()"), "E109"),
+        # One line, whose ids sort apart from their messages.
+        (calls, at(calls, "command_scope"), "E109"),
         (calls, at(calls, "command_scope"), "E110"),
         (calls, at(calls, "return apps.get_model"), "E111"),
         ("desk/broken.py", 1, "E112"),
@@ -398,11 +430,14 @@ def _every_row(project: Host) -> list[tuple[str, int, str]]:
         ("desk/views.py", 1, "E103"),
         ("desk/views.py", 2, "E102"),
         ("desk/views.py", 3, "E101"),
+        ("desk/views.py", 4, "E101"),
         ("legacy/views.py", 1, "W105"),
         ("post/contracts.py", at("post/contracts.py", "class Service"), "E105"),
         ("shop/models.py", at("shop/models.py", "class Item"), "E107"),
         ("shop/records.py", at("shop/records.py", "import shop.services"), "E104"),
         ("urls.py", at("urls.py", "def home"), "W102"),
+        ("urls.py", at("urls.py", "class First"), "W102"),
+        ("urls.py", at("urls.py", "class Second"), "W102"),
         ("wsgi.py", at("wsgi.py", "testing.boot()"), "W103"),
     ]
 
@@ -413,7 +448,7 @@ def _sorted(rows: list[tuple[str, int, str]]) -> list[tuple[str, int, str]]:
 
 @pytest.mark.spec("APP-66", "APP-67", "APP-68", "APP-69", "APP-70", "APP-71", "TRN-41")
 def test_every_row_at_once_under_both_entries(every_row: Host) -> None:
-    every_row.pyproject("[tool.neolith]\nboundary-report-only = ['bare']\n")
+    every_row.pyproject("[tool.neolith]\nboundary-report-only = ['bare', 'bare0']\n")
     script = every_row.entry("neolith check")
     command = every_row.entry("manage.py checkapps")
     assert script.stdout == command.stdout
@@ -430,10 +465,12 @@ def test_every_row_at_once_under_both_entries(every_row: Host) -> None:
         (path, line, f"neolith.{kind}") for path, line, kind in _sorted(rows)
     ], script.stdout
     assert not any(marked for *_, marked in located)
-    assert placeless == ["neolith.E113"]
-    assert script.findings[-1].startswith("neolith.E113 app bare: ")
+    # By app, though by message "app bare0:" sorts before "app bare:".
+    assert placeless == ["neolith.E113", "neolith.E113"]
+    assert script.findings[-2].startswith("neolith.E113 app bare: ")
+    assert script.findings[-1].startswith("neolith.E113 app bare0: ")
     assert len(set(script.findings)) == len(script.findings)
-    errors = sum(1 for _, _, kind in rows if kind.startswith("E")) + 1
+    errors = sum(1 for _, _, kind in rows if kind.startswith("E")) + 2
     warnings = sum(1 for _, _, kind in rows if kind.startswith("W"))
     assert _counts(script) == (errors, 0, warnings)
     assert every_row.no_database_file()
@@ -473,7 +510,7 @@ sys.exit(status)
 @pytest.mark.parametrize(
     "arguments",
     [
-        ["check", "shop", "post", "bare", "desk", "--settings", "deployer"],
+        ["check", "shop", "post", "bare", "bare0", "desk", "--settings", "deployer"],
         ["checkapps", "--settings=settings"],
     ],
     ids=_ENTRIES,
@@ -481,14 +518,15 @@ sys.exit(status)
 def test_every_family_reads_one_reading_of_the_source(
     every_row: Host, arguments: list[str]
 ) -> None:
-    every_row.pyproject("[tool.neolith]\nboundary-report-only = ['bare']\n")
+    every_row.pyproject("[tool.neolith]\nboundary-report-only = ['bare', 'bare0']\n")
     ran = every_row.run("-c", _COUNTED, *arguments)
     assert ran.status == 1, ran.stdout + ran.stderr
     counts = json.loads(ran.errors[-1].removeprefix("PARSED "))
+    # A parse with no file name would be one this count cannot place.
+    assert "<unknown>" not in counts, counts
     parsed = {
         Path(name).resolve().relative_to(every_row.root.resolve()).as_posix(): times
         for name, times in counts.items()
-        if name != "<unknown>"
     }
     # Every file of the hosted apps is read, and every file the families
     # read, the chain's helper and the undeclared app's included, is parsed
@@ -499,7 +537,7 @@ def test_every_family_reads_one_reading_of_the_source(
         for path in (every_row.root / app).rglob("*.py")
     }
     assert hosted <= set(parsed), sorted(hosted - set(parsed))
-    assert {"helpers.py", "legacy/views.py"} <= set(parsed)
+    assert {"helpers.py", "legacy/views.py", "urls.py"} <= set(parsed)
     assert {name: times for name, times in parsed.items() if times != 1} == {}
 
 
