@@ -13,7 +13,8 @@ how each view is composed, not from the rule.
 The matrix: a view's owner (the hosted app, the undeclared first-party
 app, the project in no app, a library, Django's generic and plain views,
 ``static.serve``, and a contrib app) in each form it can take (a function,
-``as_view()``, a bound method, a callable instance), under every sequence
+``as_view()`` of a plain view and of one whose ``dispatch`` is decorated, a
+bound method, a callable instance), under every sequence
 of up to two wrappers (none, ``functools.wraps`` and ``wraps(assigned=())``
 in a library, ``partial``, Django's ``csrf_exempt``, contrib's
 ``login_required``, and a wrapper of the project's, of the hosted app's and
@@ -39,14 +40,17 @@ _HINT: Final = (
     "that app's root"
 )
 
-# The same views in each owner's module: a function, a class-based view, a
-# class with a handler method and a callable class. The wrapper is used for
+# The same views in each owner's module: a function, a class-based view, one
+# whose own dispatch is decorated, a class with a handler method and a
+# callable class. The wrapper is used for
 # the owners that wrap others too.
 _VIEWS: Final = """\
 import functools
 
 from django.http import HttpResponse
+from django.utils.decorators import method_decorator
 from django.views import View
+from django.views.decorators.csrf import csrf_exempt
 
 
 def page(request, *args, **kwargs):
@@ -56,6 +60,12 @@ def page(request, *args, **kwargs):
 class Page(View):
     def get(self, request, *args, **kwargs):
         return HttpResponse("")
+
+
+class Guarded(View):
+    @method_decorator(csrf_exempt)
+    def dispatch(self, request, *args, **kwargs):
+        return super().dispatch(request, *args, **kwargs)
 
 
 class Handler:
@@ -125,6 +135,7 @@ for owner, module in {
 }.items():
     BASES[f"{owner}-function"] = module.page
     BASES[f"{owner}-as_view"] = module.Page.as_view()
+    BASES[f"{owner}-decorated"] = module.Guarded.as_view()
     BASES[f"{owner}-method"] = module.Handler().handle
     BASES[f"{owner}-instance"] = module.Callable()
 BASES["django-function"] = bad_request
@@ -312,7 +323,7 @@ print(json.dumps({
 """
 
 _OWNERS: Final = ("hosted", "legacy", "project", "library")
-_FORMS: Final = ("function", "as_view", "method", "instance")
+_FORMS: Final = ("function", "as_view", "decorated", "method", "instance")
 _BASES: Final = (
     *(f"{owner}-{form}" for owner in _OWNERS for form in _FORMS),
     "django-function",
@@ -349,6 +360,8 @@ _BASE_APP: Final[dict[str, str | None]] = {
 _PROJECT_CODE: Final = {
     "function": ("def page(", "site_views.page"),
     "as_view": ("class Page(", "site_views.Page"),
+    # as_view copies a decorated dispatch's __wrapped__ onto the view.
+    "decorated": ("class Guarded(", "site_views.Guarded"),
     "method": ("    def handle(", "site_views.Handler.handle"),
     "instance": ("class Callable:", "site_views.Callable"),
 }
