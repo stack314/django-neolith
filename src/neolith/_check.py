@@ -14,9 +14,12 @@ command. Its phases, in order:
    ``boundary-report-only`` is a hosted app, status 2 otherwise;
 4. Boot's checks that read no database (``neolith._boot.static_messages``),
    whose refusals and warnings print as the host prints them;
-5. the boundary pass over the registry's models (``neolith._check_models``)
-   and the hosted apps' source (``neolith._check_source``), whose findings
-   print one per line on standard output, sorted, then the summary line.
+5. the boundary pass, whose findings print one per line on standard
+   output, sorted, then the summary line: the rules on models, read from
+   the registry (``neolith._check_models``), and, over one reading of the
+   hosted apps' source (``neolith._check_source``), the findings of reading
+   itself, the rules on imports (``neolith._check_imports``), on calls
+   (``neolith._check_calls``) and on views (``neolith._check_views``).
 
 A refusal in phases 2 and 3 ends the run with status 1 in the form the
 entry gives it. Phases 4 and 5 both run and are reported together. The exit
@@ -341,12 +344,26 @@ def _boot_checks() -> bool:
 
 
 def _boundary(hosted: Sequence[str]) -> list[Finding]:
-    """Phase 5: every finding of the boundary pass."""
-    from neolith import _check_models, _check_source
+    """Phase 5: every finding of the boundary pass, from each family of
+    rules over one reading of the source, so each file is parsed once.
+    """
+    from neolith import (
+        _check_calls,
+        _check_imports,
+        _check_models,
+        _check_source,
+        _check_views,
+    )
 
     configs = {label: global_apps.get_app_config(label) for label in hosted}
     source = _check_source.Source(configs, _owner, settings_module=_settings_module())
-    return [*_check_models.findings(configs), *_check_source.findings(source)]
+    return [
+        *_check_models.findings(configs),
+        *_check_source.findings(source),
+        *_check_imports.findings(source),
+        *_check_calls.findings(source),
+        *_check_views.findings(source),
+    ]
 
 
 @contextlib.contextmanager
