@@ -586,7 +586,7 @@ def _defined(tree: ast.Module, names: set[str]) -> list[int]:
         for child in reversed(list(ast.iter_child_nodes(node))):
             if isinstance(child, ast.stmt):
                 pending.append(child)
-            elif isinstance(child, (ast.excepthandler, ast.match_case)):
+            elif isinstance(child, (ast.ExceptHandler, ast.match_case)):
                 pending.extend(reversed(child.body))
     return lines
 
