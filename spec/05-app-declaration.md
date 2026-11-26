@@ -1,6 +1,6 @@
 # 05. App declaration and lifecycle
 
-**Status:** outline, except the form of a declaration, Resolve and Validate, the checks before Serve, Configure, Boot, Serve and Drain, the schema step, an app's database and a request's principal, which are specified.
+**Status:** draft. Specified are the declaration (Name, Contracts, What a host refuses), the lifecycle (Before Serve, Configure, Boot, Serve and Drain, the schema step, an app's database, Resolve and Validate, Connectors before Serve), a request's principal, the check before deployment and the operational settings.
 
 ## Declaration
 

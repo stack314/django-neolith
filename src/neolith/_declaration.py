@@ -245,8 +245,37 @@ class NeolithAppConfig(AppConfig):
     Django picks this class from its ``apps`` module, so they are written in
     the body of the class that sets ``name``.
 
+    The check runs at Declare, when the class is defined, from
+    ``__init_subclass__``. It reads the names each class holds, not what
+    code does. Code in a mixin, a base class, a metaclass or a decorator can
+    still give the class a ``path`` or ``default`` that no body writes, and
+    nothing refuses it. Django reads ``path`` on the config instance, so a
+    ``path`` can come from code such as an ``__init__``, a ``__getattr__``,
+    an ``__init_subclass__``, a private method Django calls such as
+    ``_path_from_module``, a metaclass's ``__init__``, a class decorator, or
+    a later rebinding; a metaclass property does not reach the instance.
+    Django reads ``default`` from the class only, so a ``default`` counts
+    only when class-level code changes it, such as an ``__init_subclass__``,
+    a metaclass (its ``__init__``, a property or ``__getattribute__``), a
+    class decorator, a body helper's ``__set_name__``, or a later rebinding
+    of the declaring class itself. A ``default`` that only an instance
+    holds, or that a mixin gets later, behind the ``default`` the declaring
+    class holds, has no effect. Past the check, neolith reads neither value,
+    and the snapshot holds neither. Such a ``path`` changes only where
+    Django looks for the app's templates, static files, locale files,
+    fixtures and commands, and where ``makemigrations`` puts the app's
+    migrations package when it does not exist yet. A class ``default`` that
+    reads false when the host's settings builder reads the app works as
+    ``default = False`` written in the body: Django picks another config
+    class in the ``apps`` module if one qualifies, or else a plain config,
+    and the builder refuses the app as having no declaration unless the
+    class Django picks declares it.
+
     A declaration outside this form raises ``DeclarationError`` when the class
-    is defined, listing every refusal.
+    is defined, listing every refusal. So does a class whose metaclass keeps
+    neolith from setting ``default`` or the snapshot on it, such as one with
+    a ``default`` property that has no setter, naming the attribute and the
+    error raised.
 
     The four fields are not set on this class. A declaring class sets those
     it has an entry for, and its snapshot holds an empty tuple for each one
@@ -255,7 +284,8 @@ class NeolithAppConfig(AppConfig):
     Attributes:
         default: Django's option: whether Django picks this config for its
             app on its own. ``False`` on this class and on a base class;
-            ``True`` on a declaring class unless its own body sets it.
+            ``True`` on a declaring class unless its own body sets it or
+            class-level code changes it, as described above.
         provides: The contracts the app provides, one ``Provided`` each.
         requires: The contract classes the app calls. The host finds each
             one's provider: the app of the host that provides it, or the
@@ -270,7 +300,8 @@ class NeolithAppConfig(AppConfig):
 
     Raises:
         DeclarationError: When a subclass is defined whose declaration is
-            outside this form.
+            outside this form, or whose metaclass keeps neolith from setting
+            ``default`` or the snapshot on it.
     """
 
     default = False
@@ -289,13 +320,13 @@ class NeolithAppConfig(AppConfig):
                 "\n".join(sorted(f"app {app}: {refusal}" for refusal in refusals))
             )
         if snapshot is None:
-            cls.default = False
+            _give(cls, "default", False)
             return
         # Every key of the class's own body is exactly a str, or it was
         # refused above.
         if "default" not in _naming.namespace(cls):
-            cls.default = True
-        setattr(cls, _SNAPSHOT_ATTR, snapshot)
+            _give(cls, "default", True)
+        _give(cls, _SNAPSHOT_ATTR, snapshot)
 
     def import_models(self) -> None:
         """Check this instance against the snapshot, then load the models.
@@ -362,6 +393,29 @@ class NeolithAppConfig(AppConfig):
         if refusals:
             raise DeclarationError("\n".join(sorted(refusals)))
         super().import_models()
+
+
+def _give(cls: type[NeolithAppConfig], attribute: str, value: object) -> None:
+    """Set an attribute neolith gives a new subclass, or refuse the class.
+
+    Setting it runs code of the class's metaclass, such as a ``default``
+    property with no setter or a ``__setattr__``, which can raise. The class
+    is then refused with the cause (K2), as every other refusal at Declare
+    is, and not with the raw exception.
+    """
+    try:
+        setattr(cls, attribute, value)
+    except Exception as error:
+        what = (
+            "the checked declaration"
+            if attribute == _SNAPSHOT_ATTR
+            else f"{attribute} = {value!r}"
+        )
+        raise DeclarationError(
+            f"app {_class_name(cls)}: {attribute}: neolith sets {what} on the "
+            f"class, and setting it raised {_naming.cause(error)}; the class's "
+            "metaclass must let neolith set it"
+        ) from error
 
 
 def _check(cls: type[NeolithAppConfig]) -> tuple[list[str], Declaration | None]:

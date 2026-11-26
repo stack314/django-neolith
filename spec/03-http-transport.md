@@ -1,6 +1,6 @@
 # 03. HTTP transport
 
-**Status:** outline.
+**Status:** draft. The call context, errors, sending a call and reading its response, receiving a call, projection, the calling app and the principal, shared-secret tokens and health are specified. Addressing is described.
 
 **HTTP-1.** This is the default network transport, REQUIRED in every implementation.
 
@@ -215,8 +215,6 @@ For example, with the example secret `000102030405060708090a0b0c0d0e0f1011121314
 ```
 Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6Im5lb2xpdGgrand0Iiwia2lkIjoib3JkZXJzLTEifQ.eyJpc3MiOiJvcmRlcnMiLCJhdWQiOiJpbnZlbnRvcnkudjEiLCJpYXQiOjE3NjcyMjU2MDAsImV4cCI6MTc2NzIyNTkwMH0.AhMk-cm_SInC6ek-6CLP8pN7ciQFHuGb-i2MSGu3efU
 ```
-
-The rest of this section becomes requirements, with IDs and tests, with the HTTP transport in roadmap step 5 (#12). The allow-list joins the app declaration in step 4 (#11).
 
 ## Health
 

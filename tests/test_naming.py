@@ -20,7 +20,7 @@ import re
 import sys
 import types
 from collections.abc import Callable, Iterator
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, NoReturn, Protocol, cast
 
 import pytest
@@ -470,6 +470,8 @@ def test_settings_checks_given_hostile_values_name_them(key: str) -> None:
     assert _databases.databases_problems(value, [])
     assert _configure.databases_difference(value, {})
     assert _configure.databases_difference({value: {}}, {})
+    entry = {"ENGINE": "django.db.backends.postgresql", "NAME": value}
+    assert _databases.databases_problems({"default": entry}, [])
 
 
 # A check that looks a name up, or compares a class, runs none of the
@@ -576,6 +578,82 @@ def test_settings_keys_and_values_that_run_code_are_refused() -> None:
     assert _databases.databases_problems(
         {"default": {"ENGINE": sqlite, "NAME": Hostile()}}, []
     ) == ["database default: NAME: expected a str or a path, got Hostile"]
+
+
+def test_a_settings_key_that_runs_code_is_never_looked_up() -> None:
+    """A lookup in the deployer's mapping would run the key's own __eq__."""
+    server = {"ENGINE": "django.db.backends.postgresql", "NAME": "x"}
+    assert _databases.databases_problems({Trap("billing"): server}, ["billing"]) == [
+        'NEOLITH["DATABASES"]: an alias is a str, got Trap',
+        "app billing: no connection settings for its database",
+    ]
+    assert _checks.neolith_problems({Trap("DATABASES"): {}}, ()) == [
+        "NEOLITH: unknown key of type Trap; the keys are "
+        + ", ".join(sorted(_checks.KEYS))
+    ]
+    assert _configure._open_problems({Trap("DATABASES"): {"default": {}}}) == []
+    assert _configure._open_problems({"DATABASES": {Trap("default"): {}}}) == []
+
+
+class _TrapText(PurePosixPath):
+    """A path whose own text is a Trap, which raises when compared."""
+
+    def __str__(self) -> str:
+        return Trap("n")
+
+    __fspath__ = __str__
+
+
+@pytest.mark.parametrize(
+    "engine", ["django.db.backends.sqlite3", "django.db.backends.postgresql"]
+)
+def test_a_path_whose_own_text_runs_code_is_refused_by_type(engine: str) -> None:
+    """A subclass of a path is refused by its type, and its own text is
+    never read or compared (rule K2)."""
+    entry = {"ENGINE": engine, "NAME": _TrapText("/srv/n")}
+    other = {**entry, "NAME": _TrapText("/srv/n")}
+    assert _databases.databases_problems(
+        {"default": entry, "billing": other}, ["billing"]
+    ) == [
+        f"database {alias}: NAME: _TrapText is a subclass of a pathlib path; give "
+        "a str or a path of pathlib's own classes"
+        for alias in ("default", "billing")
+    ]
+
+
+def test_a_cache_entry_key_that_runs_code_is_never_looked_up() -> None:
+    entry = {Trap("BACKEND"): "django.core.cache.backends.db.DatabaseCache"}
+    assert _checks._database_caches({"default": entry}) == []
+
+
+def test_a_backend_vendor_that_is_not_exactly_a_str_is_not_compared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``vendor`` of a ``str`` subclass is not SQLite's, and its own
+    ``__eq__`` never runs."""
+    base = types.ModuleType("trap_vendor.base")
+    base.DatabaseWrapper = type(  # type: ignore[attr-defined]
+        "Wrapper", (), {"vendor": Trap("sqlite")}
+    )
+    monkeypatch.setitem(sys.modules, "trap_vendor", types.ModuleType("trap_vendor"))
+    monkeypatch.setitem(sys.modules, "trap_vendor.base", base)
+    assert _databases.is_sqlite("trap_vendor") is False
+
+
+def test_a_backend_class_is_read_without_its_metaclass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Whether a backend opens SQLite is read from its classes' own
+    namespaces, so a metaclass that raises on every read never runs."""
+
+    for name, vendor in (("sqlitelike", "sqlite"), ("serverlike", "postgresql")):
+        base = types.ModuleType(f"hostile_{name}.base")
+        base.DatabaseWrapper = HostileMeta(  # type: ignore[attr-defined]
+            "Wrapper", (), {"vendor": vendor}
+        )
+        monkeypatch.setitem(sys.modules, f"hostile_{name}", types.ModuleType(name))
+        monkeypatch.setitem(sys.modules, f"hostile_{name}.base", base)
+        assert _databases.is_sqlite(f"hostile_{name}") is (vendor == "sqlite")
 
 
 def test_a_lazy_mapping_is_still_judged_by_what_it_wraps() -> None:

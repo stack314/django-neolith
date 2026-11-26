@@ -475,7 +475,11 @@ Go through the items below on the live page. Where a value comes "from the tag",
   ```
   Expected: `Would install ... django-neolith-<VERSION> ...`.
 - [ ] *Get started*: the link to the release's README is `https://pypi.org/project/django-neolith/<VERSION>/`.
-- [ ] The code example is identical to the README's example at the tag, and its label names the release. The README's example runs against the release in section 6, so an identical copy runs too.
+- [ ] The code example is the text the README marks between `<!-- neolith-example:start -->` and `<!-- neolith-example:end -->` at the tag, copied as it stands, and its label names the release. Print what the markers enclose (Markdown: a heading, prose and fenced blocks) and compare it with the page's example by code block and paragraph, both ways and in order; the page is HTML, so the heading, the fences, inline code marks and line wrapping differ. The README's example runs against the release in section 6, so an identical copy runs too.
+  ```
+  git show "v${VERSION}:README.md" | sed -n '/^<!-- neolith-example:start -->$/,/^<!-- neolith-example:end -->$/p' | sed '1d;$d'
+  ```
+  Expected: the page's example has the same code blocks and paragraphs as the output, in the same order, each word for word: none missing, none added. Only the heading, the fences, inline code marks and line wrapping differ. No marker line is in the output.
 - [ ] The notes under the example and the figures ("planned for 0.1", "only in-process is built", "the settings format is not final") are still true.
 - [ ] Every external link on the page answers.
   ```
@@ -532,14 +536,14 @@ Run these in your own clone, not in the worktrees under `$WORK`.
   gh api -X PATCH "repos/${REPO}/pulls/<number>" -f base="$NEXT_BRANCH" -q .base.ref
   ```
   Expected: `refs/heads/release/<VERSION>`, `open`, then `release/<NEXT_VERSION>`. Make the branch once for all of them. Its creation starts a CI run on an old commit, which can be ignored.
-- [ ] Run CI again for each pull request moved or recovered. After a retarget, the checks it earlier passed do not count for the new base: GitHub lists the required checks as "expected" (seen on #147 on 2026-11-21). Closing and reopening starts a new run, as a push would. A run of a fork's pull request that is still waiting for approval ends when the pull request is closed (the run from #147's first reopen did, with no jobs), which is why the next step approves the new run.
+- [ ] Run CI again for each pull request moved or recovered, in this order: retarget first, then close and reopen ([G7](../CONTRIBUTING.md#commits-and-pull-requests)). After a retarget, the checks it earlier passed do not count for the new base: GitHub lists the required checks as "expected" (seen on #147 on 2026-11-21). Closing and reopening starts a new `pull_request` run, which tests the pull request on the base it has at that moment; a re-run of an old run would test the old base, since a re-run keeps the commit of the event that started it. On #147 (2026-11-21) the approval stayed through the close and reopen, and the pull request merged on it. A base change can dismiss an approval while the head stays the same: on #100 (2026-11-18), GitHub's automatic base change dismissed its approval with "The base branch was changed.", at an unchanged head, and a new review was needed. Check the review after the retarget. A run of a fork's pull request that is still waiting for approval ends when the pull request is closed (the run from #147's first reopen did, with no jobs), which is why the next step approves the new run.
   ```
   gh api -X PATCH "repos/${REPO}/pulls/<number>" -f state=closed -q .state
   gh api -X PATCH "repos/${REPO}/pulls/<number>" -f state=open -q .state
   gh run list --repo "$REPO" --workflow ci.yml --event pull_request --limit 3 --json databaseId,status,conclusion,createdAt
   ```
-  Expected: `closed`, `open`, then a run created just now, `queued` or `in_progress`.
-- [ ] Approve the run if it waits. A run for a pull request from a fork can wait for a maintainer's approval before it starts: GitHub asks for this from first-time contributors, and the run reports `action_required` with no jobs. Read the fork's changes first, since the run executes its code.
+  Expected: `closed`, `open`, then a run created just now, on the new base, with status `queued` or `in_progress`; for a first-time contributor's fork, status `completed` with conclusion `action_required` and no jobs: the run waits for the approval the next step gives.
+- [ ] Approve the run if it waits. A run for a pull request from a fork can wait for a maintainer's approval before it starts: GitHub asks for this from first-time contributors, and the run reports status `completed` with conclusion `action_required` and no jobs. Read the fork's changes first, since the run executes its code.
   ```
   gh run list --repo "$REPO" --workflow ci.yml --status action_required --json databaseId,headSha,createdAt
   gh api -X POST "repos/${REPO}/actions/runs/<run id>/approve"
@@ -548,9 +552,9 @@ Run these in your own clone, not in the worktrees under `$WORK`.
   Expected: the run's `headSha` is the pull request's head; the approval prints nothing (HTTP 201); then the lint job and the four test jobs pass. No output from the first command means the run did not need approval.
 - [ ] Leave a comment for the contributor of each pull request moved or recovered, so a closed or retargeted pull request is not read as a decision about the change. For a recovered one:
   ```
-  gh api "repos/${REPO}/issues/<number>/comments" -f body="GitHub closed this pull request when release/${VERSION} was deleted after the release; that was not a decision about the change. It is reopened against ${NEXT_BRANCH}, and CI has run again. Nothing is needed from you." -q .html_url
+  gh api "repos/${REPO}/issues/<number>/comments" -f body="GitHub closed this pull request when release/${VERSION} was deleted after the release; that was not a decision about the change. It is reopened against ${NEXT_BRANCH}, then closed and reopened once more only to run CI on that branch. Nothing is needed from you." -q .html_url
   ```
-  For a moved one, which was never closed by GitHub, use this body instead: `The release branch was deleted after the release, so this pull request now targets ${NEXT_BRANCH}, and CI has run again. Nothing is needed from you.` Expected: the comment's URL.
+  For a moved one, which was never closed by GitHub, use this body instead: `The release branch was deleted after the release, so this pull request now targets ${NEXT_BRANCH}; it was closed and reopened only to run CI on that branch. Nothing is needed from you.` Expected: the comment's URL.
 - [ ] Once every recovered pull request has its new run, delete the old release branch again.
   ```
   gh api -X DELETE "repos/${REPO}/git/refs/heads/${BRANCH}"
@@ -664,6 +668,8 @@ For reference, and for checking when something in section 5 fails.
 - **Branch rulesets** (Settings, Rules):
   - `release/*`, which covers each release branch from the moment it is made: no force push; changes by pull request only, one approving review, stale approvals dismissed on push; the lint job and the four test jobs required. Squash merges and merge commits are allowed: every pull request is squash-merged except the one that brings `main` in after a hotfix (section 9). Deletion is not restricted, so that GitHub can delete a release branch when its release pull request merges; a rule or ruleset that restricts it keeps GitHub from doing so. The cost: anyone with write access can delete the open release branch, and GitHub then closes every open pull request into it instead of moving them, since it moves them only when the deleted branch is a merged pull request's head.
   - `main` (the default branch): no deletion or force push; changes by pull request only, merge commits only, one approving review, stale approvals dismissed on push; the same five jobs required. A second ruleset for `main`, which would let only admins update it, exists and is disabled.
+  - **No merge queue, and no "Require branches to be up to date before merging"**: [G7](../CONTRIBUTING.md#commits-and-pull-requests) takes their place. A merge queue takes one merge method, while [G5](../CONTRIBUTING.md#commits-and-pull-requests) needs a merge commit into the open release branch after a hotfix. With stale approvals dismissed on push, forcing each pull request up to date with its base would cost a review round each time.
+  - **Checking G7**: the tip has passed when `gh run list --repo "$REPO" --workflow ci.yml --event push --branch release/<VERSION> -L 1 --json headSha,conclusion,createdAt` shows a `headSha` equal to the branch tip and conclusion `success`; a pull request's checks came from a run made after the tip landed when its latest run, from the same command with `--event pull_request --branch <head branch>`, has a later `createdAt` than that tip run.
 - **Merge settings** (Settings, General): squash merging and merge commits allowed, rebase merging off. Both take the pull request's title and description as the commit's message. Head branches are deleted after merge: a release branch goes when its release pull request merges, and the open pull requests that targeted it are moved to `main` or closed (section 8).
 - **Release branches**: nothing is set per branch. Section 8 makes each release's branch from `main` once the previous release is published, and section 9 makes a hotfix's.
 - **CI** (`.github/workflows/ci.yml`) runs on every pull request and on every push to `main` and to a release branch (`release/**`).

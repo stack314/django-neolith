@@ -37,6 +37,7 @@ from neolith._declaration import (
     _DJANGO_OPTIONS,
     _EVENT_FIELDS,
     _FIELDS,
+    _SNAPSHOT_ATTR,
     ADMITTED_NAMES,
     RESOURCE_KINDS,
     SHARED_NAMES,
@@ -466,6 +467,108 @@ def test_a_base_class_whose_default_was_rebound_is_refused_in_a_subclass() -> No
 
 def test_a_declaring_class_keeps_the_default_it_sets() -> None:
     assert _declare(_valid(default=False)).default is False
+
+
+class _ReadOnlyDefault(type):
+    @property
+    def default(cls) -> bool:
+        return False
+
+
+class _RefusedDefault(type):
+    @property
+    def default(cls) -> bool:
+        return False
+
+    @default.setter
+    def default(cls, value: bool) -> None:
+        raise TypeError("default is fixed")
+
+
+class _RefusesEverySet(type):
+    def __setattr__(cls, name: str, value: object) -> None:
+        raise RuntimeError(f"{name} is fixed")
+
+
+class _RefusesTheSnapshot(type):
+    def __setattr__(cls, name: str, value: object) -> None:
+        if name == _SNAPSHOT_ATTR:
+            raise RuntimeError("no new attributes")
+        super().__setattr__(name, value)
+
+
+def _mixin(metaclass: type) -> type:
+    return cast("type", metaclass("Mixin", (), {"__module__": __name__}))
+
+
+_DEFAULT_SET = "neolith sets default = {} on the class, and setting it raised "
+_LET_IT = "; the class's metaclass must let neolith set it"
+_NO_SETTER = (
+    "AttributeError: property 'default' of '_ReadOnlyDefault' object has no setter"
+)
+
+
+@pytest.mark.spec("APP-6")
+@pytest.mark.parametrize(
+    ("metaclass", "namespace", "name", "refusal"),
+    [
+        (
+            _ReadOnlyDefault,
+            _valid(),
+            "StockConfig",
+            "default: " + _DEFAULT_SET.format(True) + _NO_SETTER + _LET_IT,
+        ),
+        (
+            _ReadOnlyDefault,
+            {},
+            "Base",
+            "default: " + _DEFAULT_SET.format(False) + _NO_SETTER + _LET_IT,
+        ),
+        (
+            _RefusedDefault,
+            _valid(),
+            "StockConfig",
+            "default: "
+            + _DEFAULT_SET.format(True)
+            + "TypeError: default is fixed"
+            + _LET_IT,
+        ),
+        (
+            _RefusesEverySet,
+            _valid(),
+            "StockConfig",
+            "default: "
+            + _DEFAULT_SET.format(True)
+            + "RuntimeError: default is fixed"
+            + _LET_IT,
+        ),
+        (
+            _RefusesTheSnapshot,
+            _valid(default=True),
+            "StockConfig",
+            f"{_SNAPSHOT_ATTR}: neolith sets the checked declaration on the "
+            "class, and setting it raised RuntimeError: no new attributes" + _LET_IT,
+        ),
+    ],
+    ids=[
+        "read-only default, declaring class",
+        "read-only default, base class",
+        "default setter that raises",
+        "__setattr__ that raises",
+        "__setattr__ that refuses the snapshot",
+    ],
+)
+def test_a_metaclass_that_refuses_what_neolith_sets_is_refused_by_name(
+    metaclass: type, namespace: Namespace, name: str, refusal: str
+) -> None:
+    """Every attribute __init_subclass__ sets on a new class is set through
+    the metaclass, which can raise; the class is refused at Declare with a
+    DeclarationError that names the app, the attribute and the cause (K2),
+    never the metaclass's own exception."""
+    with pytest.raises(DeclarationError) as raised:
+        _declare(namespace, _mixin(metaclass), name=name)
+    assert str(raised.value) == f"app {__name__}.{name}: {refusal}"
+    assert type(raised.value.__cause__) is not DeclarationError
 
 
 @pytest.mark.spec("APP-6", "APP-7")
@@ -1713,6 +1816,406 @@ def test_a_config_class_kept_outside_the_apps_module_is_not_a_hosted_app(
         with pytest.raises(ImproperlyConfigured) as raised:
             configure([entry, _COURIERS], {"NEOLITH": {}})
         assert str(raised.value) == refusal
+
+
+# The check reads the names each class holds, not what code does (ADR 0021
+# Decision 2). Code in a mixin, a base class, a metaclass or a decorator can
+# still give a declaring class a path or default its body never writes. The
+# tests below run every way the NeolithAppConfig docstring names through the
+# reader Django has for it (AppConfig.create reads default on the class,
+# AppConfig.__init__ reads path on the instance) and pin what then holds: the
+# host refuses a default that reads false unless Django picks another
+# declaring class (ADR 0022, the Hosted apps row), and a path set by code
+# leaves the snapshot alone.
+
+_HEADER = "class StockConfig(NeolithAppConfig):"
+
+
+def _declaring(hook: str, bases: str = "NeolithAppConfig") -> str:
+    """``_APPS`` with ``hook`` before the declaring class and ``bases`` as
+    its bases; a ``hook`` may end with a decorator line."""
+    return f"{hook}\nclass StockConfig({bases}):"
+
+
+_DEFAULT_FALSE_FROM_A_MIXIN = """
+class Quiet:
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        cls.default = False
+"""
+
+_DEFAULT_FALSE_BEFORE_THE_CHECK = """
+class Quiet:
+    def __init_subclass__(cls, **kwargs):
+        cls.default = False
+        super().__init_subclass__(**kwargs)
+"""
+
+_DEFAULT_FALSE_FROM_A_METACLASS_PROPERTY = """
+class Quiet(type(NeolithAppConfig)):
+    @property
+    def default(cls):
+        return False
+
+    @default.setter
+    def default(cls, value):
+        pass
+
+
+class Base(NeolithAppConfig, metaclass=Quiet):
+    pass
+"""
+
+_DEFAULT_FALSE_FROM_A_METACLASS_INIT = """
+class Quiet(type(NeolithAppConfig)):
+    def __init__(cls, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        cls.default = False
+
+
+class Base(NeolithAppConfig, metaclass=Quiet):
+    pass
+"""
+
+_DEFAULT_FALSE_FROM_A_METACLASS_GETATTRIBUTE = """
+class Quiet(type(NeolithAppConfig)):
+    def __getattribute__(cls, name):
+        if name == "default":
+            return False
+        return super().__getattribute__(name)
+
+
+class Base(NeolithAppConfig, metaclass=Quiet):
+    pass
+"""
+
+_DEFAULT_FALSE_FROM_A_DECORATOR = """
+def quiet(cls):
+    cls.default = False
+    return cls
+
+
+@quiet"""
+
+_DEFAULT_FALSE_FROM_SET_NAME = """
+class Quiet:
+    def __set_name__(self, owner, name):
+        owner.default = False
+"""
+
+
+@pytest.mark.parametrize(
+    ("header", "after"),
+    [
+        (_declaring(_DEFAULT_FALSE_FROM_A_MIXIN, "Quiet, NeolithAppConfig"), ""),
+        (_declaring(_DEFAULT_FALSE_BEFORE_THE_CHECK, "Quiet, NeolithAppConfig"), ""),
+        (_declaring(_DEFAULT_FALSE_FROM_A_METACLASS_PROPERTY, "Base"), ""),
+        (_declaring(_DEFAULT_FALSE_FROM_A_METACLASS_INIT, "Base"), ""),
+        (_declaring(_DEFAULT_FALSE_FROM_A_METACLASS_GETATTRIBUTE, "Base"), ""),
+        (_declaring(_DEFAULT_FALSE_FROM_A_DECORATOR), ""),
+        (_declaring(_DEFAULT_FALSE_FROM_SET_NAME) + "\n    _quiet = Quiet()", ""),
+        (_HEADER, "\nStockConfig.default = False\n"),
+    ],
+    ids=[
+        "mixin's __init_subclass__",
+        "__init_subclass__ before super()",
+        "base class's metaclass property",
+        "base class's metaclass __init__",
+        "base class's metaclass __getattribute__",
+        "class decorator",
+        "body helper's __set_name__",
+        "rebinding the declaring class",
+    ],
+)
+def test_a_default_that_code_makes_false_is_refused_as_no_declaration(
+    make_app: MakeApp, header: str, after: str
+) -> None:
+    """ADR 0021 Decision 2 checks names, not code, so class-level code can
+    make the declaring class's default read false; Django then gives the
+    package a plain config, and the Hosted apps row of ADR 0022 refuses
+    it."""
+    from neolith._configure import configure
+
+    package = make_app(_APPS.replace(_HEADER, header) + after)
+    config = _config_class(package)
+    assert declaration_of(config) is not None
+    assert config.default is False
+    assert type(AppConfig.create(package)) is AppConfig
+    with pytest.raises(ImproperlyConfigured) as raised:
+        configure([package, _COURIERS], _neolith(package))
+    assert str(raised.value) == f"app {package}: has no declaration"
+
+
+_DEFAULT_READ_ONLY_FROM_A_METACLASS = """
+class QuietMeta(type):
+    @property
+    def default(cls):
+        return False
+
+
+class Quiet(metaclass=QuietMeta):
+    pass
+"""
+
+
+@pytest.mark.spec("APP-6")
+def test_a_metaclass_default_with_no_setter_is_refused_by_name_at_configure(
+    make_app: MakeApp,
+) -> None:
+    """A read-only metaclass default keeps neolith from setting default on
+    the declaring class; the builder stops with the DeclarationError that
+    names it, not the metaclass's AttributeError behind "cannot be read"."""
+    from neolith._configure import configure
+
+    header = _declaring(_DEFAULT_READ_ONLY_FROM_A_METACLASS, "Quiet, NeolithAppConfig")
+    package = make_app(_APPS.replace(_HEADER, header))
+    with pytest.raises(DeclarationError) as raised:
+        configure([package, _COURIERS], _neolith(package))
+    assert str(raised.value) == (
+        f"app {package}.apps.StockConfig: default: neolith sets default = True "
+        "on the class, and setting it raised AttributeError: property 'default' "
+        "of 'QuietMeta' object has no setter; the class's metaclass must let "
+        "neolith set it"
+    )
+
+
+# The declaring class of _APPS, renamed, for a second class in one module.
+_OTHER_DECLARING = "class OtherConfig(NeolithAppConfig):" + _APPS.split(_HEADER)[1]
+
+_OTHER_PLAIN = """
+from django.apps import AppConfig
+
+
+class OtherConfig(AppConfig):
+    name = "{package}"
+"""
+
+
+def test_a_default_made_false_lets_django_pick_another_declaring_class(
+    make_app: MakeApp,
+) -> None:
+    """A class default made false works as ``default = False`` in the body:
+    Django picks the other class of the ``apps`` module, and when that one
+    declares the app the host admits it with that declaration (ADR 0022,
+    the Hosted apps row)."""
+    from neolith._configure import configure
+
+    package = make_app(
+        _APPS + "\n" + _OTHER_DECLARING + "\n\nStockConfig.default = False\n"
+    )
+    created = AppConfig.create(package)
+    assert type(created).__name__ == "OtherConfig"
+    assert declaration_of(type(created)) is not None
+    deployer = {
+        **_neolith(package),
+        "MIDDLEWARE": [
+            "neolith.middleware.RootMiddleware",
+            "neolith.middleware.PrincipalMiddleware",
+        ],
+    }
+    assert package in configure([package, _COURIERS], deployer)["INSTALLED_APPS"]
+
+
+def test_a_default_made_false_lets_django_pick_a_plain_class_it_refuses(
+    make_app: MakeApp,
+) -> None:
+    """When the class Django picks instead is a plain config, the Hosted
+    apps row of ADR 0022 refuses the app as having no declaration."""
+    from neolith._configure import configure
+
+    package = make_app(_APPS + _OTHER_PLAIN + "\n\nStockConfig.default = False\n")
+    created = AppConfig.create(package)
+    assert type(created).__name__ == "OtherConfig"
+    assert declaration_of(type(created)) is None
+    with pytest.raises(ImproperlyConfigured) as raised:
+        configure([package, _COURIERS], _neolith(package))
+    assert str(raised.value) == f"app {package}: has no declaration"
+
+
+_DEFAULT_FALSE_ON_THE_INSTANCE = """
+class Quiet:
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.default = False
+
+    def __getattr__(self, name):
+        if name == "default":
+            return False
+        raise AttributeError(name)
+"""
+
+_DEFAULT_FALSE_ON_A_MIXIN_LATER = """
+class Quiet:
+    pass
+"""
+
+
+@pytest.mark.parametrize(
+    ("hook", "after"),
+    [
+        (_DEFAULT_FALSE_ON_THE_INSTANCE, ""),
+        (_DEFAULT_FALSE_ON_A_MIXIN_LATER, "\nQuiet.default = False\n"),
+    ],
+    ids=["__init__ and __getattr__", "rebinding a mixin"],
+)
+def test_a_default_that_code_makes_false_off_the_class_has_no_effect(
+    make_app: MakeApp, hook: str, after: str
+) -> None:
+    """Django picks a config by the class's default, so a default only an
+    instance holds, or one a mixin gets after the declaring class wrote
+    ``default = True`` into its own body, changes nothing: the host admits
+    the app (ADR 0022, the Hosted apps row)."""
+    from neolith._configure import configure
+
+    package = make_app(
+        _APPS.replace(_HEADER, _declaring(hook, "Quiet, NeolithAppConfig")) + after
+    )
+    config = _config_class(package)
+    assert config.default is True
+    created = AppConfig.create(package)
+    assert type(created) is config
+    deployer = {
+        **_neolith(package),
+        "MIDDLEWARE": [
+            "neolith.middleware.RootMiddleware",
+            "neolith.middleware.PrincipalMiddleware",
+        ],
+    }
+    assert package in configure([package, _COURIERS], deployer)["INSTALLED_APPS"]
+
+
+_PATH_FROM_A_PRIVATE_METHOD = """
+class Elsewhere:
+    def _path_from_module(self, module):
+        return "/elsewhere"
+"""
+
+_PATH_BEFORE_THE_CHECK = """
+class Elsewhere:
+    def __init_subclass__(cls, **kwargs):
+        cls.path = "/elsewhere"
+        super().__init_subclass__(**kwargs)
+"""
+
+_PATH_FROM_INIT = """
+class Elsewhere:
+    def __init__(self, *args, **kwargs):
+        self.path = "/elsewhere"
+        super().__init__(*args, **kwargs)
+"""
+
+_PATH_FROM_GETATTR = """
+class Elsewhere:
+    def __getattr__(self, name):
+        if name == "path":
+            return "/elsewhere"
+        raise AttributeError(name)
+"""
+
+_PATH_FROM_A_METACLASS_INIT = """
+class Moved(type(NeolithAppConfig)):
+    def __init__(cls, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Only the declaring class: a mixin holding path is refused.
+        if "name" in vars(cls):
+            cls.path = "/elsewhere"
+
+
+class Elsewhere(metaclass=Moved):
+    pass
+"""
+
+_PATH_FROM_A_DECORATOR = """
+class Elsewhere:
+    pass
+
+
+def moved(cls):
+    cls.path = "/elsewhere"
+    return cls
+
+
+@moved"""
+
+
+@pytest.mark.parametrize(
+    ("hook", "after"),
+    [
+        (_PATH_FROM_A_PRIVATE_METHOD, ""),
+        (_PATH_BEFORE_THE_CHECK, ""),
+        (_PATH_FROM_INIT, ""),
+        (_PATH_FROM_GETATTR, ""),
+        (_PATH_FROM_A_METACLASS_INIT, ""),
+        (_PATH_FROM_A_DECORATOR, ""),
+        ("class Elsewhere:\n    pass\n", '\nStockConfig.path = "/elsewhere"\n'),
+    ],
+    ids=[
+        "_path_from_module",
+        "__init_subclass__ before super()",
+        "__init__",
+        "__getattr__",
+        "metaclass __init__",
+        "class decorator",
+        "rebinding the declaring class",
+    ],
+)
+def test_a_path_that_code_sets_leaves_the_snapshot_alone(
+    make_app: MakeApp, hook: str, after: str
+) -> None:
+    """ADR 0021 Decision 2 checks names, not code, so code can give the
+    declaring class a path; the snapshot, all the host reads (ADR 0022, the
+    Hosted apps row), is the same as without that code."""
+    from neolith._configure import configure
+
+    package = make_app(
+        _APPS.replace(_HEADER, _declaring(hook, "Elsewhere, NeolithAppConfig")) + after,
+        plain=_APPS,
+    )
+    deployer = {
+        **_neolith(package),
+        "MIDDLEWARE": [
+            "neolith.middleware.RootMiddleware",
+            "neolith.middleware.PrincipalMiddleware",
+        ],
+    }
+    assert package in configure([package, _COURIERS], deployer)["INSTALLED_APPS"]
+    config = _config_class(package)
+    found = declaration_of(config)
+    expected = declaration_of(_config_class(package, "plain"))
+    assert found is not None
+    assert expected is not None
+    # Field by field: the snapshot also names its class, which differs.
+    for field in ("name", "label", *_FIELDS):
+        assert getattr(found, field) == getattr(expected, field)
+    # Django uses the path the code gave.
+    assert Apps([package]).get_app_config(package).path == "/elsewhere"
+
+
+_PATH_FROM_A_METACLASS_PROPERTY = """
+class Moved(type(NeolithAppConfig)):
+    @property
+    def path(cls):
+        return "/elsewhere"
+
+
+class Base(NeolithAppConfig, metaclass=Moved):
+    pass
+"""
+
+
+def test_a_metaclass_property_does_not_give_the_app_a_path(
+    make_app: MakeApp,
+) -> None:
+    """Django reads ``path`` on the config instance, and an instance lookup
+    never reaches the metaclass, so a metaclass property leaves the app at
+    its package directory."""
+    package = make_app(
+        _APPS.replace(_HEADER, _declaring(_PATH_FROM_A_METACLASS_PROPERTY, "Base"))
+    )
+    config = _config_class(package)
+    assert config.path == "/elsewhere"
+    found = Apps([package]).get_app_config(package).path
+    assert found == os.path.dirname(sys.modules[package].__file__ or "")
 
 
 @pytest.mark.spec("APP-1")

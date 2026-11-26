@@ -14,14 +14,30 @@ What is compared for "one database" (ADR 0009 Decision 5):
   and resolved the same way, with the query ignored, since Django opens
   SQLite with ``uri=True``. Only the literal ``:memory:`` is exempt, being
   one database per connection.
-- Any other backend: ``(ENGINE, HOST, PORT, NAME)``.
+- Any other backend: ``(ENGINE, HOST, PORT, NAME)``, with ``HOST`` and
+  ``PORT`` read as Django's backends read them (ADR 0034 Decision 2), and a
+  path ``NAME`` as ``pathlib`` compares paths: by its flavour and its text,
+  lower-cased for a Windows path.
+
+No code of the deployer's runs while the mapping is read: a key is looked
+up only once it is exactly a ``str``, and a path ``NAME`` is one of
+``pathlib``'s own classes, and every slot it holds is an exact ``str``,
+``int`` or ``bool``, or a list or tuple of exact ``str``, so ``str()`` runs
+only ``pathlib``'s code. A subclass is refused, since ``PurePath.__str__``
+reads attributes any subclass may replace. A ``NAME`` whose text, or the
+path it opens, cannot be read is refused.
+
+A refusal names the alias, or the two aliases, and the rule. It never shows
+a value under an alias, in whole or in part (ADR 0033 Decision 7, ADR 0034).
 """
 
+import decimal
 import os
 import pathlib
+import types
 import urllib.parse
-from collections.abc import Iterable, Mapping
-from typing import Any, Final
+from collections.abc import Callable, Iterable, Mapping
+from typing import Any, Final, cast
 
 from neolith import _naming
 
@@ -38,6 +54,13 @@ DEFAULT: Final = "default"
 MEMORY: Final = ":memory:"
 _DUMMY: Final = frozenset({"django.db.backends.dummy", "django.db.backends."})
 _KEY: Final = 'NEOLITH["DATABASES"]'
+# The refusal of two aliases on one database names the rule, never a value
+# compared (ADR 0034): those are connection settings.
+_ONE_FILE: Final = "both name one SQLite file; each alias needs a database of its own"
+_ONE_SERVER: Final = (
+    "both name one database, with the same ENGINE, HOST, PORT and NAME; each "
+    "alias needs a database of its own"
+)
 
 
 def _type(value: object) -> str:
@@ -45,8 +68,8 @@ def _type(value: object) -> str:
 
 
 def _shown(value: object) -> str:
-    """A name or a value for a message: an exact ``str`` within a bound, and
-    anything else by its type, so no author code runs.
+    """An alias, a key the deployer chose, for a message: an exact ``str``
+    within a bound, and anything else by its type, so no author code runs.
     """
     if type(value) is str:
         text: str = value
@@ -69,55 +92,227 @@ def is_sqlite(engine: object) -> bool:
         wrapper = load_backend(engine).DatabaseWrapper
     except Exception:  # Django reports it at the first connection
         return False
-    return getattr(wrapper, "vendor", None) == "sqlite"
+    if not issubclass(type(wrapper), type):
+        return False
+    # Read from the classes' own namespaces, so no metaclass code runs.
+    vendor = _naming.find(wrapper, "vendor")
+    return type(vendor) is str and vendor == "sqlite"
 
 
-def _is_memory(name: object) -> bool:
-    """The literal ``:memory:``, as a ``str`` or a path."""
-    if type(name) is str:
-        return name == MEMORY
-    return _naming.is_a(name, pathlib.PurePath) and str(name) == MEMORY
+class _NotAPath(ValueError):
+    """A ``NAME`` whose text, or the path it opens, cannot be read."""
 
 
-def sqlite_path(name: object) -> str | None:
-    """The path a SQLite ``NAME`` opens, as ADR 0009 Decision 5 compares it,
-    or ``None`` for the literal ``:memory:``.
+# pathlib's own classes, compared by identity: no subclass, whose methods
+# and attributes would be the deployer's code.
+_PATHS: Final = (
+    pathlib.PurePath,
+    pathlib.PurePosixPath,
+    pathlib.PureWindowsPath,
+    pathlib.Path,
+    pathlib.PosixPath,
+    pathlib.WindowsPath,
+)
+_WINDOWS: Final = (pathlib.PureWindowsPath, pathlib.WindowsPath)
 
-    A ``file:`` URI with an empty path gives ``""``, SQLite's private
-    temporary database, which names no file.
+
+def _slots() -> tuple[types.MemberDescriptorType, ...]:
+    """Each slot ``PurePath`` and its bases declare, as its member
+    descriptor: the parts a path holds, which ``str()`` parses or returns.
+    Only ``PurePath``'s own, since ``__str__`` reads no slot a subclass of it
+    declares (such as ``Path``'s ``_info`` on Python 3.14).
     """
-    if _is_memory(name):
+    found: list[types.MemberDescriptorType] = []
+    for klass in _naming.mro(pathlib.PurePath):
+        space = _naming.namespace(klass)
+        slots = _naming.entry(space, "__slots__", ())
+        for slot in (slots,) if type(slots) is str else cast("Iterable[str]", slots):
+            member = _naming.entry(space, slot)
+            if type(member) is types.MemberDescriptorType:
+                found.append(member)
+    return tuple(found)
+
+
+_SLOTS: Final = _slots()
+
+
+def _plain(held: object) -> bool:
+    """An exact ``str``, ``int`` or ``bool``, or an exact ``list`` or
+    ``tuple`` of exact ``str``: values whose methods are the built-in ones.
+    """
+    if _naming.one_of(type(held), (str, int, bool)):
+        return True
+    if _naming.one_of(type(held), (list, tuple)):
+        items: list[object] | tuple[object, ...] = held  # type: ignore[assignment]
+        return all(type(item) is str for item in items)
+    return False
+
+
+def _text(name: object) -> str | None:
+    """The text of a ``NAME``: an exact ``str`` as itself, and a path of one
+    of ``pathlib``'s own classes, every slot of which holds an exact ``str``,
+    ``int`` or ``bool``, or a list or tuple of exact ``str``, as ``str()``
+    makes it, which then runs only ``pathlib``'s code. ``None`` for any
+    other value: a subclass of a path, or a path whose parts are not exact
+    text, such as one built from a ``str`` subclass.
+    """
+    if type(name) is str:
+        return name
+    if not _naming.one_of(type(name), _PATHS):
         return None
-    text = str(name) if _naming.is_a(name, pathlib.PurePath) else name
-    if type(text) is not str:
-        return ""
+    for member in _SLOTS:
+        try:
+            held = member.__get__(name, type(name))
+        except AttributeError:  # not computed yet
+            continue
+        if not _plain(held):
+            return None
+    text = str(name)
+    return text if type(text) is str else None
+
+
+def _resolved(name: object) -> str | None:
+    """The path a SQLite ``NAME`` opens, or ``None`` for the literal
+    ``:memory:``; raises ``_NotAPath`` for a ``NAME`` whose text, or the
+    path it gives, cannot be read, such as one that holds a NUL.
+    """
+    text = _text(name)
+    if text is None:
+        raise _NotAPath
+    if text == MEMORY:
+        return None
     if text.startswith("file:"):
         rest = text[len("file:") :].partition("#")[0].partition("?")[0]
         if rest.startswith("//"):
             # file://<authority>/<path>: the authority is empty or localhost.
             rest = "/" + rest[2:].partition("/")[2]
-        path = urllib.parse.unquote(rest)
-        if not path:
+        text = urllib.parse.unquote(rest)
+        if not text:
             return ""
-        return os.path.realpath(os.path.abspath(path))
-    return os.path.realpath(os.path.abspath(text))
+    try:
+        return os.path.realpath(os.path.abspath(text))
+    # A NUL or a lone surrogate, no working directory, or, on Python 3.12,
+    # RecursionError for a long chain of symbolic links: only the standard
+    # library's code runs here, on an exact str.
+    except Exception as error:
+        raise _NotAPath from error
+
+
+def sqlite_path(name: object) -> str | None:
+    """The path a SQLite ``NAME`` opens, as ADR 0009 Decision 5 compares it,
+    or ``None`` for the literal ``:memory:``, as a ``str`` or a path.
+
+    A ``file:`` URI with an empty path gives ``""``, SQLite's private
+    temporary database, which names no file; so does a ``NAME`` that cannot
+    be read as a path, which the mapping's check refuses.
+    """
+    try:
+        return _resolved(name)
+    except _NotAPath:
+        return ""
+
+
+_OTHER: Final = object()
+# Other types whose truth the backends test (``if settings_dict["HOST"]``),
+# each with its base type's own method, so no code of a subclass runs.
+_SIZED: Final[tuple[tuple[type, Callable[[Any], object]], ...]] = (
+    (bytes, bytes.__len__),
+    (bytearray, bytearray.__len__),
+    (list, list.__len__),
+    (tuple, tuple.__len__),
+    (dict, dict.__len__),
+    (set, set.__len__),
+    (frozenset, frozenset.__len__),
+    (complex, complex.__bool__),
+    (decimal.Decimal, decimal.Decimal.__bool__),
+)
+
+
+def _read(value: object) -> object:
+    """``HOST`` or ``PORT`` as its base type reads it: ``None`` as ``""``,
+    which is how Django leaves an absent key, and a ``str``, ``int`` or
+    ``float`` of any subclass as an exact value, made by the base type's own
+    method so no code of the subclass runs. A false value of a type in
+    ``_SIZED``, which a backend reads as not set too, as ``""``. ``_OTHER``
+    for any other value.
+    """
+    if value is None:
+        return ""
+    kind = type(value)
+    if issubclass(kind, str):
+        return str.__str__(cast("str", value))
+    if issubclass(kind, int):
+        return int.__int__(cast("int", value))
+    if issubclass(kind, float):
+        return float.__float__(cast("float", value))
+    for base, truth in _SIZED:
+        if issubclass(kind, base):
+            return _OTHER if truth(value) else ""
+    return _OTHER
+
+
+def _host(value: object) -> str | None:
+    """``HOST`` as Django's backends read it: ``""`` for one not set, as every
+    value ``_read`` makes false reads (``if settings_dict["HOST"]``), and a
+    ``str`` as itself. ``None`` for any other value, which is not compared.
+    """
+    plain = _read(value)
+    if not plain:
+        return ""
+    return plain if type(plain) is str else None
+
+
+def _port(value: object) -> object:
+    """``PORT`` as Django's backends read it: ``""`` for one not set, as every
+    value ``_read`` makes false reads (``if settings_dict["PORT"]``), and as
+    ``0`` from ``int()`` reads, which MySQL's client takes as its default;
+    otherwise the number ``int()`` reads, as MySQL's and Oracle's backends
+    do, or the value itself when ``int()`` reads none. ``None`` for a value
+    of another type, which is not compared.
+    """
+    plain = _read(value)
+    if plain is _OTHER:
+        return None
+    try:
+        return int(cast("str | float", plain)) or ""
+    except (ValueError, OverflowError):  # "", a str int() refuses, nan, inf
+        return plain
 
 
 def _identity(engine: str, entry: Mapping[str, Any]) -> tuple[object, ...] | None:
-    """What two aliases on one database share; ``None`` for one exempt."""
+    """What two aliases on one database share, led by the rule their refusal
+    states; ``None`` for one exempt, or for a server alias whose ``HOST`` or
+    ``PORT`` is of a type not compared (ADR 0034 Decision 2). Every part is
+    an exact ``str``, ``int``, ``float`` or ``bool``, or a tuple of them, so
+    hashing and comparing it runs no code of the deployer's. Raises
+    ``_NotAPath`` for a SQLite ``NAME`` whose path cannot be read.
+    """
     name = entry.get("NAME")
     if is_sqlite(engine):
-        path = sqlite_path(name)
-        return None if path is None else ("sqlite", path)
-    return (engine, entry.get("HOST", ""), entry.get("PORT", ""), name)
+        path = _resolved(name)
+        return None if path is None else (_ONE_FILE, path)
+    host = _host(entry.get("HOST", ""))
+    port = _port(entry.get("PORT", ""))
+    if host is None or port is None:
+        # Not compared (ADR 0034 Decision 2): its backend meets the value
+        # when it connects, and no code of a HOST or PORT value runs here.
+        return None
+    return (_ONE_SERVER, engine, host, port, _server_name(name))
 
 
-def _named(engine: str, entry: Mapping[str, Any]) -> str:
-    name = entry.get("NAME")
-    if is_sqlite(engine):
-        return f"{engine} {sqlite_path(name)}"
-    host, port = entry.get("HOST", ""), entry.get("PORT", "")
-    return f"{engine} {_shown(name)} on {_shown(host)}:{_shown(port)}"
+def _server_name(name: object) -> object:
+    """A server ``NAME`` as ``str`` and ``pathlib`` compare it: a ``str`` as
+    itself, never equal to a path, and a path, one of ``pathlib``'s own
+    classes, by its flavour and its text, lower-cased for a Windows path,
+    as ``PurePath.__eq__`` compares them.
+    """
+    if type(name) is str:
+        return name
+    text = _text(name)
+    if text is None:  # judged by _entry_problems
+        raise _NotAPath
+    windows = _naming.one_of(type(name), _WINDOWS)
+    return ("path", windows, text.lower() if windows else text)
 
 
 def databases_problems(value: object, with_database: Iterable[str]) -> list[str]:
@@ -131,6 +326,9 @@ def databases_problems(value: object, with_database: Iterable[str]) -> list[str]
     if not entries:
         return [f"{_KEY}: is empty; leave the key out"]
     labels = list(dict.fromkeys(with_database))
+    # Compared with the aliases that are exactly str, so that no key's own
+    # __eq__ runs.
+    aliases = {alias for alias in entries if type(alias) is str}
     problems: list[str] = []
     compared: dict[tuple[object, ...], str] = {}
     for alias, entry in entries.items():
@@ -146,20 +344,26 @@ def databases_problems(value: object, with_database: Iterable[str]) -> list[str]
             continue
         settings: dict[str, Any] = entry  # type: ignore[assignment]  # judged above
         engine: str = settings["ENGINE"]
-        identity = _identity(engine, settings)
+        try:
+            identity = _identity(engine, settings)
+        except _NotAPath:
+            problems.append(_unreadable(alias, settings["NAME"]))
+            continue
         if identity is None:
             continue
         first = compared.setdefault(identity, alias)
         if first != alias:
-            problems.append(
-                f"databases {first} and {alias}: both name {_named(engine, settings)}"
-            )
+            problems.append(f"databases {first} and {alias}: {identity[0]}")
     problems.extend(
         f"app {label}: no connection settings for its database"
         for label in labels
-        if label not in entries
+        if label not in aliases
     )
     return problems
+
+
+def _unreadable(alias: str, name: object) -> str:
+    return f"database {alias}: NAME: a {_type(name)} that cannot be read as a path"
 
 
 def _entry_problems(alias: str, entry: object) -> list[str]:
@@ -183,8 +387,16 @@ def _entry_problems(alias: str, entry: object) -> list[str]:
             f"{where}: ENGINE is required; the dummy backend is not a database"
         )
     name = settings.get("NAME", "")
-    if type(name) is not str and not _naming.is_a(name, pathlib.PurePath):
+    # By type, so no code of the value runs.
+    if type(name) is not str and not issubclass(type(name), pathlib.PurePath):
         problems.append(f"{where}: NAME: expected a str or a path, got {_type(name)}")
+    elif type(name) is not str and not _naming.one_of(type(name), _PATHS):
+        problems.append(
+            f"{where}: NAME: {_type(name)} is a subclass of a pathlib path; give a "
+            "str or a path of pathlib's own classes"
+        )
+    elif _text(name) is None:
+        problems.append(_unreadable(alias, name))
     elif type(name) is str and not name:
         problems.append(
             f"{where}: NAME is required; a service or option file alone is not "
@@ -200,6 +412,12 @@ def _entry_problems(alias: str, entry: object) -> list[str]:
         test = settings["TEST"]
         if type(test) is not dict:
             problems.append(f"{where}: TEST: expected a dict, got {_type(test)}")
+        elif any(type(key) is not str for key in test):
+            # Before any key is looked up, so that no key's own __eq__ runs.
+            kind = next(_type(key) for key in test if type(key) is not str)
+            problems.append(
+                f"{where}: TEST: a key of type {kind} is not a setting's name"
+            )
         else:
             if "MIRROR" in test:
                 problems.append(

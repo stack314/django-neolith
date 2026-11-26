@@ -17,14 +17,16 @@ through a set-up that refuses; the ``setting_changed`` receiver through
 
 import copy
 import json
+import ntpath
 import os
 import subprocess
 import sys
 import textwrap
 import types
 from collections.abc import Callable, Iterator
-from pathlib import Path
-from typing import Any, cast
+from decimal import Decimal
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
+from typing import Any, NoReturn, cast
 
 import pytest
 from django.apps import AppConfig
@@ -33,11 +35,13 @@ from django.apps.registry import Apps
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.test import override_settings
+from django.utils.functional import SimpleLazyObject
 from hypothesis import given
 from hypothesis import strategies as st
 
 from neolith import DeclarationError, _checks, _host
 from neolith._configure import configure
+from neolith._databases import databases_problems, sqlite_path
 from neolith._declaration import declaration_of
 from tests import host_apps
 from tests.hosting import NEOLITH_KEYS, in_built_host, in_fresh_process
@@ -394,12 +398,100 @@ def test_a_host_error_cannot_be_silenced(silenced: object, message: str) -> None
 # NEOLITH["DATABASES"]: ADR 0009's rows before Django imports a model.
 
 
+class _EqualsRaises(str):
+    """A key whose own ``__eq__`` would raise if a lookup ran it."""
+
+    __slots__ = ()
+
+    def __eq__(self, other: object) -> bool:
+        raise AssertionError("a lookup ran the key's own __eq__")
+
+    __hash__ = str.__hash__
+
+
+class _LoudPath(PurePosixPath):
+    """A path whose own methods would raise if the check ran them."""
+
+    def __str__(self) -> str:
+        raise AssertionError("the check ran the path's own __str__")
+
+    def __fspath__(self) -> str:
+        raise AssertionError("the check ran the path's own __fspath__")
+
+    def __hash__(self) -> int:
+        raise AssertionError("the check ran the path's own __hash__")
+
+    def __eq__(self, other: object) -> bool:
+        raise AssertionError("the check ran the path's own __eq__")
+
+
+class _PathMeta(type):
+    """A metaclass that raises for every read of a class attribute that is
+    not a special name, as ``PurePath.__str__`` reads ``parser``."""
+
+    def __getattribute__(cls, name: str) -> object:
+        if not name.startswith("__"):
+            raise AssertionError(f"the check read {name} through the metaclass")
+        return type.__getattribute__(cls, name)
+
+
+class _MetaPath(PurePosixPath, metaclass=_PathMeta):
+    pass
+
+
+class _FoldedPath(PurePosixPath):
+    """A POSIX path that pathlib compares as a Windows path."""
+
+    parser = _flavour = ntpath
+
+
+class _CachedPath(PurePosixPath):
+    """A path whose text is a property of its own."""
+
+    @property
+    def _str(self) -> str:
+        raise AssertionError("the check ran the path's own _str")
+
+
+class _AttributePath(PurePosixPath):
+    """A path whose attribute reads run its own code."""
+
+    def __getattribute__(self, name: str) -> object:
+        raise AssertionError(f"the check read the path's own {name}")
+
+
+def _text_not_str() -> PurePosixPath:
+    """One of pathlib's own paths whose cached text is a ``str`` subclass."""
+    path = PurePosixPath("n")
+    path._str = _EqualsRaises("n")  # type: ignore[attr-defined]
+    return path
+
+
 def _databases(**aliases: object) -> dict[str, Any]:
     return deployer(NEOLITH={"DATABASES": aliases})
 
 
 def _db_refusal(**aliases: object) -> list[str]:
     return refusal([*HOSTED, LEDGER, BILLING], _databases(**aliases)).splitlines()
+
+
+@pytest.mark.parametrize("key", ["MIRROR", "DEPENDENCIES", "NAME", "CHARSET"])
+def test_a_test_key_that_is_not_exactly_a_str_is_refused_before_any_lookup(
+    key: str,
+) -> None:
+    """Looking ``MIRROR``, ``DEPENDENCIES`` or ``NAME`` up in ``TEST`` would
+    run the ``__eq__`` of a ``str``-subclass key with the same hash (rule
+    K2); the key is refused by its type first, and the same key as an exact
+    ``str`` is judged by its own row.
+    """
+    entry = {**sqlite("b"), "TEST": {_EqualsRaises(key): None}}
+    assert databases_problems({"billing": entry}, ["billing"]) == [
+        "database billing: TEST: a key of type _EqualsRaises is not a setting's name"
+    ]
+    plain = databases_problems(
+        {"billing": {**sqlite("b"), "TEST": {key: None}}}, ["billing"]
+    )
+    assert len(plain) == (0 if key == "CHARSET" else 1)
 
 
 @pytest.mark.parametrize(
@@ -424,6 +516,15 @@ def _db_refusal(**aliases: object) -> list[str]:
         (
             {"billing": sqlite(b"b")},
             "database billing: NAME: expected a str or a path, got bytes",
+        ),
+        (
+            {"billing": sqlite(_LoudPath("b"))},
+            "database billing: NAME: _LoudPath is a subclass of a pathlib path; "
+            "give a str or a path of pathlib's own classes",
+        ),
+        (
+            {"billing": sqlite(_text_not_str())},
+            "database billing: NAME: a PurePosixPath that cannot be read as a path",
         ),
         (
             {"billing": {**sqlite("b"), "ATOMIC_REQUESTS": False}},
@@ -452,6 +553,11 @@ def _db_refusal(**aliases: object) -> list[str]:
             {"billing": {**sqlite("b"), "TEST": {"NAME": "t"}}},
             "database billing: TEST.NAME is not admitted yet; Django names the test "
             "database from NAME",
+        ),
+        (
+            {"billing": {**sqlite("b"), "TEST": {_EqualsRaises("NAME"): "t"}}},
+            "database billing: TEST: a key of type _EqualsRaises is not a "
+            "setting's name",
         ),
     ],
 )
@@ -535,31 +641,555 @@ def _pair(tmp_path: Path) -> list[tuple[str, object, object]]:
     ]
 
 
+# The rule two aliases on one database break, and no value compared (ADR 0034).
+_ONE_FILE = "both name one SQLite file; each alias needs a database of its own"
+_ONE_SERVER = (
+    "both name one database, with the same ENGINE, HOST, PORT and NAME; each "
+    "alias needs a database of its own"
+)
+
+
 def test_two_aliases_on_one_database_are_refused(tmp_path: Path) -> None:
     for case, first, second in _pair(tmp_path):
         aliases = {"ledger": sqlite(first), "billing": sqlite(second)}
         found = _db_refusal(**aliases)
-        assert len(found) == 1, case
-        assert found[0].startswith(
-            f"databases ledger and billing: both name {SQLITE} "
-        ), case
+        assert found == [f"databases ledger and billing: {_ONE_FILE}"], case
 
 
+_SERVER = {
+    "ENGINE": "django.db.backends.postgresql",
+    "NAME": "n",
+    "HOST": "h",
+    "PORT": "5",
+}
+
+
+@pytest.mark.spec("APP-18")
 def test_two_server_aliases_on_one_database_are_refused() -> None:
-    server = {
-        "ENGINE": "django.db.backends.postgresql",
-        "NAME": "n",
-        "HOST": "h",
-        "PORT": "5",
-    }
-    assert _db_refusal(ledger=server, billing=dict(server)) == [
-        "databases ledger and billing: both name django.db.backends.postgresql n on h:5"
+    assert _db_refusal(ledger=_SERVER, billing=dict(_SERVER)) == [
+        f"databases ledger and billing: {_ONE_SERVER}"
     ]
-    # Another NAME on the same server is another database.
+
+
+@pytest.mark.spec("APP-18")
+@pytest.mark.parametrize(
+    ("key", "other"),
+    [
+        ("ENGINE", "django.db.backends.mysql"),
+        ("HOST", "g"),
+        ("PORT", "6"),
+        ("NAME", "m"),
+    ],
+)
+def test_server_aliases_that_differ_in_one_key_are_two_databases(
+    key: str, other: str
+) -> None:
+    """Each of ``ENGINE``, ``HOST``, ``PORT`` and ``NAME`` is compared: two
+    aliases that differ in any one of them build (ADR 0009 Decision 5)."""
     assert configure(
         [*HOSTED, LEDGER, BILLING],
-        _databases(ledger=server, billing={**server, "NAME": "m"}),
+        _databases(ledger=_SERVER, billing={**_SERVER, key: other}),
     )
+
+
+class _Text(str):
+    __slots__ = ()
+
+
+class _Host(str):
+    """A ``HOST`` whose own code would raise if the comparison ran it."""
+
+    __slots__ = ()
+
+    def __hash__(self) -> int:
+        raise AssertionError("the comparison ran the value's own __hash__")
+
+    def __eq__(self, other: object) -> bool:
+        raise AssertionError("the comparison ran the value's own __eq__")
+
+    def __str__(self) -> str:
+        raise AssertionError("the comparison ran the value's own __str__")
+
+
+class _Port(int):
+    """A ``PORT`` whose own code would raise if the comparison ran it."""
+
+    __slots__ = ()
+
+    def __hash__(self) -> int:
+        raise AssertionError("the comparison ran the value's own __hash__")
+
+    def __eq__(self, other: object) -> bool:
+        raise AssertionError("the comparison ran the value's own __eq__")
+
+    def __int__(self) -> int:
+        raise AssertionError("the comparison ran the value's own __int__")
+
+
+@pytest.mark.parametrize(
+    ("host", "port"),
+    [
+        (_Text("h"), "5"),
+        (_Host("h"), 5),
+        ("h", 5.0),
+        ("h", _Port(5)),
+        ("h", True),
+    ],
+    ids=["str subclass", "str subclass with code", "float", "int subclass", "bool"],
+)
+def test_two_server_aliases_are_compared_whatever_form_of_host_and_port(
+    host: object, port: object
+) -> None:
+    """A Django backend reads a ``HOST`` that is a ``str`` of any subclass,
+    and MySQL and Oracle read ``int(PORT)``. Such forms are compared as the
+    base type reads them, so no value's own code runs (ADR 0034 Decision 2)."""
+    server = {
+        "ENGINE": "django.db.backends.mysql",
+        "NAME": "n",
+        "HOST": host,
+        "PORT": port,
+    }
+    assert _db_refusal(ledger=server, billing=dict(server)) == [
+        f"databases ledger and billing: {_ONE_SERVER}"
+    ]
+
+
+class _Float(float):
+    """A ``PORT`` whose own code would raise if the comparison ran it."""
+
+    __slots__ = ()
+
+    def __hash__(self) -> int:
+        raise AssertionError("the comparison ran the value's own __hash__")
+
+    def __eq__(self, other: object) -> bool:
+        raise AssertionError("the comparison ran the value's own __eq__")
+
+    def __float__(self) -> float:
+        raise AssertionError("the comparison ran the value's own __float__")
+
+    def __int__(self) -> int:
+        raise AssertionError("the comparison ran the value's own __int__")
+
+
+class _Sealed:
+    """A value whose own comparison and hash would raise if they ran."""
+
+    def __hash__(self) -> int:
+        raise AssertionError("the comparison ran the value's own __hash__")
+
+    def __eq__(self, other: object) -> bool:
+        raise AssertionError("the comparison ran the value's own __eq__")
+
+
+class _Bytes(bytes):
+    """An empty ``bytes`` whose own truth would raise if the check ran it."""
+
+    def __len__(self) -> int:
+        raise AssertionError("the comparison ran the value's own __len__")
+
+    def __bool__(self) -> bool:
+        raise AssertionError("the comparison ran the value's own __bool__")
+
+
+# False values of other types, which the backends read as not set too.
+_FALSE_OTHERS: list[object] = [
+    b"",
+    _Bytes(),
+    bytearray(),
+    [],
+    (),
+    {},
+    set(),
+    frozenset(),
+    0j,
+    Decimal(0),
+    Decimal("-0.0"),
+]
+
+
+_ABSENT = object()
+
+# Forms of HOST and PORT that each backend reads as one value: every form in
+# a group is compared equal (ADR 0034 Decision 2).
+_HOSTS: dict[str, list[object]] = {
+    "not set": [
+        _ABSENT,
+        None,
+        "",
+        _Text(""),
+        False,
+        0,
+        0.0,
+        _Port(0),
+        _Float(0.0),
+        *_FALSE_OTHERS,
+    ],
+    "db": ["db", _Text("db"), _Host("db")],
+}
+_PORTS: dict[str, list[object]] = {
+    "not set": [
+        _ABSENT,
+        None,
+        "",
+        0,
+        0.0,
+        False,
+        _Text(""),
+        _Port(0),
+        _Float(0.0),
+        "0",
+        " 0 ",
+        _Host("0"),
+        0.5,
+        *_FALSE_OTHERS,
+    ],
+    "5432": [
+        "5432",
+        " 5432 ",
+        _Host("5432"),
+        5432,
+        5432.0,
+        _Port(5432),
+        _Float(5432.0),
+    ],
+    "1": ["1", 1, True, 1.0, 1.5],
+    "a str int() refuses": ["5432.0", _Host("5432.0")],
+    "infinite": [float("inf"), _Float(float("inf"))],
+}
+
+
+def _forms(groups: dict[str, list[object]]) -> list[tuple[str, object, object]]:
+    """Each form beside itself and, both ways round, beside the group's
+    first: the comparison is by hash and equality, so that covers each pair."""
+    return [
+        (group, *pair)
+        for group, forms in groups.items()
+        for form in forms
+        for pair in [(form, form), (form, forms[0]), (forms[0], form)][
+            : 1 if form is forms[0] else 3
+        ]
+    ]
+
+
+def _server(key: str, value: object) -> dict[str, object]:
+    entry: dict[str, object] = {"ENGINE": "django.db.backends.postgresql", "NAME": "n"}
+    entry["HOST" if key == "PORT" else "PORT"] = "5"
+    if value is not _ABSENT:
+        entry[key] = value
+    return entry
+
+
+@pytest.mark.spec("APP-18")
+@pytest.mark.parametrize(
+    ("key", "group", "first", "second"),
+    [("HOST", *form) for form in _forms(_HOSTS)]
+    + [("PORT", *form) for form in _forms(_PORTS)],
+    # By type for a subclass, so that no code of the value runs for its id.
+    ids=lambda value: (
+        type(value).__name__ if type(value).__module__ == __name__ else None
+    ),
+)
+def test_server_aliases_with_forms_a_backend_reads_as_one_value_are_refused(
+    key: str, group: str, first: object, second: object
+) -> None:
+    """Django leaves an absent ``HOST`` or ``PORT`` as ``""``, and its
+    backends connect to the default for any false value, of any type (``if
+    settings_dict["HOST"]`` and ``if settings_dict["PORT"]`` in
+    ``postgresql/base.py`` and ``mysql/base.py``, the latter in
+    ``oracle/utils.py``); MySQL and Oracle read ``int(PORT)``, and MySQL's
+    client takes port ``0`` as its default. Two aliases
+    whose forms read as one value are refused, and no code of a subclass
+    runs (ADR 0034 Decision 2)."""
+    found = _db_refusal(ledger=_server(key, first), billing=_server(key, second))
+    assert found == [f"databases ledger and billing: {_ONE_SERVER}"], group
+
+
+@pytest.mark.spec("APP-18")
+@pytest.mark.parametrize(
+    ("key", "first", "second"),
+    [
+        ("HOST", None, "db"),
+        ("HOST", "", "db"),
+        ("HOST", "db", "DB2"),
+        ("PORT", None, "5432"),
+        ("PORT", 0, 5432),
+        ("HOST", False, "db"),
+        ("HOST", 0, "db"),
+        ("PORT", "", "1"),
+        ("PORT", None, "5432.0"),
+        ("PORT", "a", "b"),
+        ("PORT", float("inf"), float("-inf")),
+        ("PORT", "5432", "5433"),
+        ("PORT", 5432, 5433.0),
+        ("PORT", "5432", "5432.0"),
+    ],
+)
+def test_server_aliases_with_forms_read_as_two_values_build(
+    key: str, first: object, second: object
+) -> None:
+    """The nearest forms that read as two values are two databases."""
+    assert configure(
+        [*HOSTED, LEDGER, BILLING],
+        _databases(ledger=_server(key, first), billing=_server(key, second)),
+    )
+
+
+@pytest.mark.spec("APP-18")
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("HOST", b"db"),
+        ("HOST", ["db"]),
+        ("HOST", 5),
+        ("HOST", 5.0),
+        ("HOST", True),
+        ("HOST", _Sealed()),
+        ("PORT", b"5432"),
+        ("PORT", ["5432"]),
+        ("PORT", 5432j),
+        ("PORT", Decimal(5432)),
+        ("PORT", _Sealed()),
+    ],
+    ids=[
+        "HOST bytes",
+        "HOST list",
+        "HOST int",
+        "HOST float",
+        "HOST true",
+        "HOST with code",
+        "PORT bytes",
+        "PORT list",
+        "PORT complex",
+        "PORT Decimal",
+        "PORT with code",
+    ],
+)
+def test_server_aliases_with_a_host_or_port_of_another_type_are_not_compared(
+    key: str, value: object
+) -> None:
+    """A ``HOST`` that is not a ``str`` or ``None``, or a ``PORT`` that is
+    none of those, an ``int`` nor a ``float``, is not compared: two aliases
+    with the same such value build, and no code of the value runs; the
+    backend meets it when it connects (ADR 0034 Decision 2)."""
+    shared = _server(key, value)
+    assert configure(
+        [*HOSTED, LEDGER, BILLING], _databases(ledger=shared, billing=dict(shared))
+    )
+
+
+@pytest.mark.parametrize("path", [PurePosixPath, Path])
+def test_a_path_name_is_compared_by_its_text(path: type[PurePosixPath]) -> None:
+    """Two paths of one text are one database; a path and a ``str`` of the
+    same text are not, as ``PurePath.__eq__`` and ``str.__eq__`` say."""
+    server = {"ENGINE": "django.db.backends.postgresql", "NAME": path("n")}
+    assert _db_refusal(ledger=server, billing={**server, "NAME": path("n")}) == [
+        f"databases ledger and billing: {_ONE_SERVER}"
+    ]
+    assert configure(
+        [*HOSTED, LEDGER, BILLING],
+        _databases(ledger=server, billing={**server, "NAME": "n"}),
+    )
+
+
+def test_a_path_name_is_compared_as_paths_compare() -> None:
+    """Windows paths are equal ignoring case, and never equal a POSIX path
+    of the same text, as pathlib compares them.
+    """
+    server = {"ENGINE": "django.db.backends.postgresql"}
+    (found,) = _db_refusal(
+        ledger={**server, "NAME": PureWindowsPath("A")},
+        billing={**server, "NAME": PureWindowsPath("a")},
+    )
+    assert found.startswith("databases ledger and billing: both name ")
+    assert configure(
+        [*HOSTED, LEDGER, BILLING],
+        _databases(
+            ledger={**server, "NAME": PurePosixPath("a")},
+            billing={**server, "NAME": PureWindowsPath("a")},
+        ),
+    )
+
+
+_PATH_SUBCLASSES = {
+    "_LoudPath": _LoudPath,
+    "_MetaPath": _MetaPath,
+    "_FoldedPath": _FoldedPath,
+    "_CachedPath": _CachedPath,
+    "_AttributePath": _AttributePath,
+}
+
+
+@pytest.mark.parametrize(("kind", "path"), _PATH_SUBCLASSES.items())
+@pytest.mark.parametrize("engine", [SQLITE, "django.db.backends.postgresql"])
+def test_a_subclass_of_a_path_is_refused_without_running_its_code(
+    engine: str, kind: str, path: type[PurePosixPath]
+) -> None:
+    """``PurePath.__str__`` reads attributes and methods any subclass may
+    replace, so a ``NAME`` that is a subclass of a path is refused by its
+    type, and none of its code runs (rule K2), with the alias's other
+    refusals; one of ``pathlib``'s own classes is admitted.
+    """
+    entry = {"ENGINE": engine, "NAME": path("n"), "TEST": {"NAME": "t"}}
+    test_name = (
+        "database default: TEST.NAME is not admitted yet; Django names the test "
+        "database from NAME"
+    )
+    assert databases_problems({"default": entry}, []) == [
+        f"database default: NAME: {kind} is a subclass of a pathlib path; give a "
+        "str or a path of pathlib's own classes",
+        test_name,
+    ]
+    own = {**entry, "NAME": Path("n")}
+    assert databases_problems({"default": own}, []) == [test_name]
+
+
+class _Probe(str):
+    """Text whose own code records each call, and raises."""
+
+    __slots__ = ()
+    calls: list[str] = []  # noqa: RUF012  # one list shared by every probe
+
+    def _ran(self, *args: object) -> NoReturn:
+        _Probe.calls.append("ran")
+        raise RuntimeError("the check ran the text's own code")
+
+    __bool__ = __len__ = __getitem__ = __eq__ = __ne__ = __iter__ = _ran
+    __hash__ = str.__hash__
+
+
+def _tampered(slot: str, value: object) -> Callable[[], PurePosixPath]:
+    def build() -> PurePosixPath:
+        path = PurePosixPath("n")
+        setattr(path, slot, value)
+        return path
+
+    return build
+
+
+# A path of pathlib's own class whose parts are not exact text: what its
+# ordinary constructors keep, and slots set by hand.
+_HELD: dict[str, Callable[[], PurePath]] = {
+    "constructor": lambda: PurePosixPath(_Probe("db.sqlite3")),
+    "join": lambda: Path("data") / _Probe("db.sqlite3"),
+    "_drv": _tampered("_drv", _Probe("")),
+    "_tail_cached": _tampered("_tail_cached", [_Probe("n")]),
+    "tail list subclass": _tampered("_tail_cached", type("Tail", (list,), {})()),
+    "_str": _tampered("_str", _Probe("n")),
+}
+
+
+@pytest.mark.parametrize("held", _HELD.values(), ids=_HELD.keys())
+@pytest.mark.parametrize("engine", [SQLITE, "django.db.backends.postgresql"])
+def test_a_path_holding_text_that_is_not_exactly_a_str_is_refused(
+    engine: str, held: Callable[[], PurePath]
+) -> None:
+    """An exact ``pathlib`` class does not make what it holds exact:
+    ``str()`` parses the parts the constructor kept. Each slot is judged by
+    its type before the text is read, so none of their code runs (rule K2),
+    in the check and in ``sqlite_path``, which Boot calls."""
+    _Probe.calls.clear()
+    name = held()
+    kind = type(name).__name__
+    assert databases_problems({"default": {"ENGINE": engine, "NAME": name}}, []) == [
+        f"database default: NAME: a {kind} that cannot be read as a path"
+    ]
+    assert sqlite_path(name) == ""
+    assert _Probe.calls == []
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: Path.cwd(),
+        lambda: Path("a") / "b" / "c.sqlite3",
+        lambda: Path.cwd().resolve().parent,
+        lambda: PureWindowsPath("C:/data/db"),
+        lambda: next(iter(Path(__file__).parent.iterdir())),
+        lambda: next(Path(__file__).parent.glob("*.py")),
+    ],
+    ids=["cwd", "joined", "resolved parent", "windows", "iterdir", "glob"],
+)
+def test_ordinary_paths_are_admitted(build: Callable[[], PurePath]) -> None:
+    """The nearest admitted shapes: paths that pathlib builds itself, read
+    once already, hashed, or not."""
+    for touch in (lambda path: None, str, hash):
+        path = build()
+        touch(path)
+        server = {"ENGINE": "django.db.backends.postgresql", "NAME": path}
+        assert databases_problems({"default": server}, []) == []
+        assert databases_problems({"default": sqlite(path)}, []) == []
+
+
+def test_posix_paths_that_differ_only_in_case_are_two_databases() -> None:
+    """``PurePath.__eq__`` folds case for a Windows path only."""
+    server = {"ENGINE": "django.db.backends.postgresql"}
+    assert configure(
+        [*HOSTED, LEDGER, BILLING],
+        _databases(
+            ledger={**server, "NAME": PurePosixPath("/srv/A")},
+            billing={**server, "NAME": PurePosixPath("/srv/a")},
+        ),
+    )
+
+
+@pytest.mark.parametrize("engine", [SQLITE, "django.db.backends.postgresql"])
+def test_a_path_whose_cached_text_is_not_a_str_is_refused(engine: str) -> None:
+    entry = {"ENGINE": engine, "NAME": _text_not_str()}
+    assert databases_problems({"default": entry}, []) == [
+        "database default: NAME: a PurePosixPath that cannot be read as a path"
+    ]
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["a\x00b", "file:a%00b", "\ud800", PurePosixPath("a\x00b")],
+    ids=["NUL", "NUL in a file URI", "lone surrogate", "path"],
+)
+def test_a_sqlite_name_that_cannot_be_resolved_is_refused(name: object) -> None:
+    """SQLite opens no file for such a name, and resolving it raises; the
+    same text on a server backend is compared as written.
+    """
+    kind = type(name).__name__
+    assert databases_problems({"default": sqlite(name)}, []) == [
+        f"database default: NAME: a {kind} that cannot be read as a path"
+    ]
+    server = {"ENGINE": "django.db.backends.postgresql", "NAME": name}
+    assert databases_problems({"default": server}, []) == []
+
+
+@pytest.mark.parametrize("error", [RecursionError, OSError, ValueError])
+def test_a_sqlite_name_whose_resolution_raises_is_refused(
+    monkeypatch: pytest.MonkeyPatch, error: type[Exception]
+) -> None:
+    """On Python 3.12, ``os.path.realpath`` raises ``RecursionError`` for a
+    long chain of symbolic links; any error while resolving is a refusal.
+    """
+
+    def realpath(path: str, **options: object) -> str:
+        raise error
+
+    monkeypatch.setattr(os.path, "realpath", realpath)
+    assert databases_problems({"default": sqlite("n")}, []) == [
+        "database default: NAME: a str that cannot be read as a path"
+    ]
+
+
+def test_a_lazy_path_name_is_refused_by_type_without_being_evaluated() -> None:
+    """A proxy is judged by its own type, so its set-up never runs; SQLite
+    cannot open it either (``os.fspath`` refuses it).
+    """
+    calls: list[int] = []
+
+    def setup() -> Path:
+        calls.append(1)
+        return Path("/srv/x.db")
+
+    found = databases_problems({"default": sqlite(SimpleLazyObject(setup))}, [])
+    assert found == [
+        "database default: NAME: expected a str or a path, got SimpleLazyObject"
+    ]
+    assert calls == []
 
 
 @pytest.mark.parametrize("name", [":memory:", Path(":memory:")], ids=["str", "path"])
@@ -575,7 +1205,7 @@ def test_default_is_compared_with_the_app_aliases(tmp_path: Path) -> None:
     path = str(tmp_path / "x")
     assert _db_refusal(
         default=sqlite(path), ledger=sqlite(path), billing=sqlite(path + "b")
-    ) == [f"databases default and ledger: both name {SQLITE} {os.path.realpath(path)}"]
+    ) == [f"databases default and ledger: {_ONE_FILE}"]
 
 
 def test_every_database_refusal_reaches_the_diagnostic(tmp_path: Path) -> None:
@@ -1336,6 +1966,115 @@ def test_no_value_under_an_alias_is_shown_in_a_difference(
             assert problems[0].startswith(
                 "settings: DATABASES differs from what the host builds: "
             ), (path, change)
+
+
+def _refusals(databases: dict[str, Any]) -> list[str]:
+    """Every message for ``NEOLITH["DATABASES"]`` set to ``databases``: the
+    judgement of the mapping, which ``neolith.E001`` reports too, and the
+    builder's refusal, none when it builds."""
+    from neolith._databases import databases_problems
+
+    messages = databases_problems(databases, ["ledger", "billing"])
+    try:
+        configure([*HOSTED, LEDGER, BILLING], _databases(**databases))
+    except (ImproperlyConfigured, DeclarationError) as error:
+        messages.append(str(error))
+    return messages
+
+
+def _sqlite_marked(name: object) -> dict[str, Any]:
+    """``_marked`` on SQLite: ``ENGINE`` must name it for its path to be
+    compared, and ``NAME`` is ``name``."""
+    return {**_marked("ledger"), "ENGINE": SQLITE, "NAME": name}
+
+
+def _one_database(tmp_path: Path) -> list[tuple[dict[str, Any], str]]:
+    """Two aliases on one database, with the marker in every leaf, and the
+    rule their refusal states."""
+    path = tmp_path / _MARKER
+    names: list[object] = [
+        str(path),
+        path,
+        f"file:{path}?{_MARKER}={_MARKER}",
+        f"file://localhost{path}?mode=ro#{_MARKER}",
+        f"file:{str(path).replace(' ', '%20')}",
+    ]
+    server = _marked("ledger")
+    pairs = [({"ledger": server, "billing": copy.deepcopy(server)}, _ONE_SERVER)]
+    for name in names:
+        marked = _sqlite_marked(name)
+        pairs.append(({"ledger": marked, "billing": copy.deepcopy(marked)}, _ONE_FILE))
+        pairs.append(({"default": marked, "ledger": copy.deepcopy(marked)}, _ONE_FILE))
+    return pairs
+
+
+@pytest.mark.spec("APP-18")
+def test_two_aliases_on_one_database_show_no_value_compared(tmp_path: Path) -> None:
+    """The refusal names the two aliases and the rule. Neither ``ENGINE``,
+    ``HOST``, ``PORT`` nor ``NAME``, nor the path a SQLite ``NAME`` opens,
+    is shown, whatever form ``NAME`` takes (ADR 0034)."""
+    for databases, rule in _one_database(tmp_path):
+        first, second = list(databases)
+        if "billing" not in databases:
+            databases["billing"] = _marked("billing")
+        messages = _refusals(databases)
+        assert _MARKER not in "\n".join(messages), databases
+        assert messages[0] == f"databases {first} and {second}: {rule}", databases
+        assert messages[1:] == [messages[0]], databases
+
+
+# Inputs 0009 refuses under an alias, each holding the marker.
+_REFUSED = [
+    ("ENGINE",),
+    ("NAME",),
+    ("ATOMIC_REQUESTS",),
+    ("TEST",),
+    ("TEST", "MIRROR"),
+    ("TEST", "DEPENDENCIES"),
+    ("TEST", "NAME"),
+]
+
+
+def _held(value: object) -> list[object]:
+    """Values of other types that hold ``value``, or are made from it."""
+    text = str(value)
+    return [
+        text,
+        _Name(text),
+        Path(text),
+        text.encode(),
+        [text],
+        {"x": text},
+        (text,),
+        "",
+    ]
+
+
+@pytest.mark.spec("APP-18")
+def test_no_value_under_an_alias_is_shown_in_a_refusal(tmp_path: Path) -> None:
+    """``NEOLITH["DATABASES"]`` with the marker in every leaf, then changed
+    at one place at a time: each leaf, and each key 0009 refuses, set to a
+    value of each type that holds the marker, on an alias of its own and on
+    one that names the database of another. No message of the mapping's
+    judgement or of the builder shows the marker (ADR 0033 Decision 7)."""
+    bases = [
+        {alias: _marked(alias) for alias in ("default", "ledger", "billing")},
+        *(databases for databases, _ in _one_database(tmp_path)[:2]),
+    ]
+    for base in bases:
+        base.setdefault("billing", _marked("billing"))
+        places = [*_paths(base["ledger"]), *_REFUSED]
+        for path in places:
+            for value in _held(f"{_MARKER}, changed"):
+                found = copy.deepcopy(base)
+                holder: Any = found["ledger"]
+                for part in path[:-1]:
+                    if type(holder) is dict and part not in holder:
+                        holder[part] = {}
+                    holder = holder[part]
+                holder[path[-1]] = value
+                messages = _refusals(found)
+                assert _MARKER not in "\n".join(messages), (path, value)
 
 
 class _Loud:

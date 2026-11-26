@@ -276,7 +276,7 @@ def neolith_problems(
             problems.extend(remote_problems(item, local_first(entries), refused))
         elif key == _ROUTING_KEY:
             problems.extend(routing_problems(item, refused))
-    if "DATABASES" not in entries:
+    if not _naming.holds(entries, "DATABASES"):
         problems.extend(
             f"app {label}: no connection settings for its database"
             for label in with_database(hosted)
@@ -1002,7 +1002,8 @@ def _database_caches(caches: object) -> list[str]:
     for alias, entry in entries.items():
         if type(alias) is not str or type(entry) is not dict:
             continue
-        backend = entry.get("BACKEND")
+        # Read with _naming.entry, so that no key's own __eq__ runs.
+        backend = _naming.entry(cast("dict[object, object]", entry), "BACKEND")
         if type(backend) is not str:
             continue
         try:
