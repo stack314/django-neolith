@@ -291,7 +291,7 @@ def _class_line(klass: type, path: str) -> int:
     qualname = _naming.qualname(klass, None)
     lines: list[int] = []
     for value in list(held.values()):
-        if type(value) in (staticmethod, classmethod):
+        if _naming.one_of(type(value), (staticmethod, classmethod)):
             value = value.__func__
         if type(value) is not types.FunctionType:
             continue
