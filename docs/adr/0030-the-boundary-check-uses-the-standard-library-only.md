@@ -1,6 +1,7 @@
 # 0030. `neolith check` derives the boundary from the declarations and Django's app registry, reads source with Python's own parser, and fails per app unless the repository marks the app report-only
 
 - **Status:** Accepted
+- Narrowed by [0035](0035-the-boundary-check-reads-every-name-python-imports.md) (Decision 1)
 - **Accepted:** 2026-11-19
 - **Date:** 2026-11-18
 

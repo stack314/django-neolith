@@ -371,7 +371,7 @@ def _check(arguments: argparse.Namespace) -> int:
         _check.say(sys.stderr, f"neolith: {problem}")
     if problems:
         return 2
-    with _check.guarded():
+    with _check.guarded(), _check.deployer(arguments.settings):
         _set_up(arguments, serving=False, checking=True)
         # The command exits with the check's status itself when it is not 0.
         call_command("checkapps", stdout=sys.stdout, stderr=sys.stderr)

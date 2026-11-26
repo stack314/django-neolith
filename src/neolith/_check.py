@@ -14,8 +14,9 @@ command. Its phases, in order:
    ``boundary-report-only`` is a hosted app, status 2 otherwise;
 4. Boot's checks that read no database (``neolith._boot.static_messages``),
    whose refusals and warnings print as the host prints them;
-5. the boundary pass, whose findings print one per line on standard output,
-   sorted, then the summary line.
+5. the boundary pass over the registry's models (``neolith._check_models``)
+   and the hosted apps' source (``neolith._check_source``), whose findings
+   print one per line on standard output, sorted, then the summary line.
 
 A refusal in phases 2 and 3 ends the run with status 1 in the form the
 entry gives it. Phases 4 and 5 both run and are reported together. The exit
@@ -37,6 +38,7 @@ its own: other threads' new connections are refused while it runs.
 """
 
 import contextlib
+import contextvars
 import dataclasses
 import logging
 import os
@@ -60,6 +62,7 @@ from neolith._declaration import declaration_of
 __all__ = [
     "Finding",
     "command",
+    "deployer",
     "guarded",
     "label_problems",
     "place",
@@ -78,6 +81,11 @@ _connect: object = None
 _logs = 0
 _handler: logging.Handler | None = None
 _SHOWN: Final = 300
+# The deployer's module that ``neolith check`` built the settings from;
+# Django's own SETTINGS_MODULE is unset after settings.configure().
+_DEPLOYER: Final[contextvars.ContextVar[str | None]] = contextvars.ContextVar(
+    "neolith_check_deployer", default=None
+)
 _PYPROJECT: Final = "pyproject.toml"
 _TABLE: Final = "[tool.neolith]"
 _KEY: Final = "boundary-report-only"
@@ -334,10 +342,45 @@ def _boot_checks() -> bool:
 
 def _boundary(hosted: Sequence[str]) -> list[Finding]:
     """Phase 5: every finding of the boundary pass."""
-    from neolith import _check_models
+    from neolith import _check_models, _check_source
 
     configs = {label: global_apps.get_app_config(label) for label in hosted}
-    return _check_models.findings(configs)
+    source = _check_source.Source(configs, _owner, settings_module=_settings_module())
+    return [*_check_models.findings(configs), *_check_source.findings(source)]
+
+
+@contextlib.contextmanager
+def deployer(name: str) -> Iterator[None]:
+    """Name the deployer's module ``name`` as the settings module of the
+    run inside the block (``neolith check``, ADR 0030 Decision 3).
+    """
+    token = _DEPLOYER.set(name)
+    try:
+        yield
+    finally:
+        _DEPLOYER.reset(token)
+
+
+def _settings_module() -> str | None:
+    """The settings module: the deployer's module under ``neolith check``,
+    and the one Django loaded under ``manage.py checkapps``; ``None`` when
+    settings were configured without one.
+    """
+    from django.conf import settings
+
+    named = _DEPLOYER.get()
+    if named is not None:
+        return named
+    name = getattr(settings, "SETTINGS_MODULE", None)
+    return name if type(name) is str else None
+
+
+def _owner(name: str) -> str | None:
+    """The label of the installed app that holds the dotted name ``name``,
+    as Django's registry gives it (``Apps.get_containing_app_config``).
+    """
+    config = global_apps.get_containing_app_config(name)
+    return None if config is None else config.label
 
 
 def _report(

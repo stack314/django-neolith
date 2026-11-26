@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- The check before deployment reads each hosted app's source once, with Python's own parser ([ADR 0030](docs/adr/0030-the-boundary-check-uses-the-standard-library-only.md) Decision 3, [ADR 0035](docs/adr/0035-the-boundary-check-reads-every-name-python-imports.md)), migrations and other modules whose names are not identifiers included: a file that cannot be read or compiled is `neolith.E112`, a module with no Python source `neolith.W104`, and a call of `connect`, `command_scope`, `import_module`, `__import__`, `import_string`, `get_model` or `get_app_config` with a computed argument `neolith.W101`.
+
 ## [0.1.0a3] - 2026-11-19
 
 ### Added
