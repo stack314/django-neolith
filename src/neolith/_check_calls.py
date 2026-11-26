@@ -16,8 +16,10 @@ the object it resolves to, never by its spelling:
   ``.using(...)`` or ``.db_manager(...)``, and the subscript of
   ``django.db.connections``. And the forms that mean ``default`` by leaving
   the alias out: a function of ``django.db.transaction`` that takes
-  ``using`` called with no alias or with ``None``; ``atomic`` or
-  ``non_atomic_requests`` used as a bare decorator; ``django.db.connection``
+  ``using`` called with no alias or with ``None``, as a call or as a bare
+  decorator, which calls it with the decorated function alone; ``atomic``
+  or ``non_atomic_requests`` used as a decorator, bare or applied by a call
+  to a ``lambda``, which both read as ``default``; ``django.db.connection``
   at its import or at an attribute access. An alias the host does not
   hold, the alias of a hosted app without a database among them, is
   Django's error at run time, and a computed alias is not judged.
@@ -26,8 +28,12 @@ the object it resolves to, never by its spelling:
   by a string: ``get_model(...)`` and ``get_app_config("<label>")`` on any
   receiver, a migration's registry parameter included; any keyword
   ``sender="<label>.<Model>"``; and ``get_user_model()`` when
-  ``AUTH_USER_MODEL`` names another app's model, judged by its text as
-  ``neolith.E106`` judges a relation Django never resolved.
+  ``AUTH_USER_MODEL`` names a model of another installed app. A label no
+  installed app has is not reported: Django refuses it at run time.
+
+Each finding is on the line of what was written: the alias, identity,
+label or model as a literal, or, for a form that writes none, the name it
+calls or loads (for an attribute, the line of the attribute's own name).
 
 And ``neolith.W103``: every first-party module of the map, in an app or in
 no app, other than a test module, that calls ``neolith.testing.boot()``.
@@ -42,6 +48,7 @@ import os
 from collections.abc import Iterator, Mapping
 from typing import Final, NamedTuple
 
+import django.db.transaction
 from django.core import checks
 
 from neolith._check import Finding, place, shown
@@ -69,8 +76,8 @@ DEFAULT: Final = "default"
 # The place of ``using`` in each public function of django.db.transaction
 # that takes it, as inspect.signature reads the installed module: the first
 # parameter, or the second after a callback or a savepoint id. Django 6.1
-# adds savepoint_create (tests/test_check_aliases.py compares the set with
-# the installed module).
+# adds savepoint_create, so the set holds the names the installed module
+# defines (tests/test_check_aliases.py compares it with the module).
 _SECOND: Final = frozenset(
     {
         "on_commit",
@@ -83,6 +90,7 @@ _SECOND: Final = frozenset(
 USING: Final[Mapping[str, int]] = {
     f"django.db.transaction.{name}": 1 if name in _SECOND else 0
     for name in _TRANSACTION
+    if callable(getattr(django.db.transaction, name, None))
 }
 # The two that read a callable in the place of using as the function they
 # decorate, on the alias default (``callable(using)``, db/transaction.py).
@@ -166,6 +174,23 @@ def _none(argument: object) -> bool:
     )
 
 
+def _line(node: ast.expr) -> int:
+    """The line of the name a call calls or an expression loads: for an
+    attribute, the line of its own name, which is where a traceback places a
+    method call spread over lines.
+    """
+    if isinstance(node, ast.Call):
+        node = node.func
+    if isinstance(node, ast.Attribute) and node.end_lineno is not None:
+        return node.end_lineno
+    return node.lineno
+
+
+def _written(argument: object, call: ast.Call) -> int:
+    """The line of an argument as written, or of the call without one."""
+    return argument.lineno if isinstance(argument, ast.expr) else _line(call)
+
+
 def _model(text: str | None) -> tuple[str, str] | None:
     """``<label>.<Model>`` split as Django splits it (``str.split(".")``
     into two, in ``Apps.get_model`` and ``make_model_tuple``), with neither
@@ -193,11 +218,11 @@ def judged(
         elif isinstance(node, ast.Subscript):
             if _object(node.value, followed) == _CONNECTIONS:
                 found += _alias(
-                    node.slice, node.lineno, "connections[...]", followed, app
+                    node.slice, node.slice.lineno, "connections[...]", followed, app
                 )
         elif isinstance(node, ast.Attribute):
             if _object(node, followed) == _CONNECTION:
-                found.append(_connection(node.lineno, app))
+                found.append(_connection(_line(node), app))
         elif isinstance(node, ast.ImportFrom):
             if any(
                 dotted is not None and canonical(dotted) == _CONNECTION
@@ -207,9 +232,19 @@ def judged(
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             for decorator in node.decorator_list:
                 target = _object(decorator, followed)
-                if target is not None and target in _BARE:
-                    found.append(_default(decorator.lineno, f"@{_short(target)}", app))
+                if target is not None and _decorated(target):
+                    found.append(_default(_line(decorator), f"@{_short(target)}", app))
     return found
+
+
+def _decorated(target: str) -> bool:
+    """Whether a function of transaction, as a bare decorator, runs on
+    ``default``: it is called with the decorated function alone, which
+    leaves ``using`` out when ``using`` is not its first parameter, and
+    which ``atomic`` and ``non_atomic_requests`` read as the function they
+    decorate.
+    """
+    return target in _BARE or USING.get(target, 0) > 0
 
 
 def _alias_hint(app: App) -> str:
@@ -275,7 +310,6 @@ def _alias(
 
 def _call(node: ast.Call, followed: Mapping[str, str], app: App) -> list[Judged]:
     found: list[Judged] = []
-    line = node.lineno
     callee = _object(node.func, followed)
     method = node.func.attr if isinstance(node.func, ast.Attribute) else None
     # Each place an alias is read, once: a keyword using=, and the place of
@@ -284,6 +318,7 @@ def _call(node: ast.Call, followed: Mapping[str, str], app: App) -> list[Judged]
     for keyword in node.keywords:
         if keyword.arg == "using":
             places[id(keyword.value)] = (keyword.value, "using=")
+    line = _line(node)
     if method == "using":
         argument = _argument(node, 0, "alias")
         places.setdefault(id(argument), (argument, ".using()"))
@@ -293,18 +328,19 @@ def _call(node: ast.Call, followed: Mapping[str, str], app: App) -> list[Judged]
     if callee is not None and callee in USING:
         name = f"{_short(callee)}()"
         given = _argument(node, USING[callee], "using")
-        if _none(given):
-            found.append(_default(line, name, app))
+        if _none(given) or (callee in _BARE and isinstance(given, ast.Lambda)):
+            found.append(_default(_written(given, node), name, app))
         else:
             places.setdefault(id(given), (given, name))
     for written, where in places.values():
-        found += _alias(written, line, where, followed, app)
+        found += _alias(written, _written(written, node), where, followed, app)
     if callee == CONNECT:
-        identity = _text(_argument(node, 0, None))
+        argument = _argument(node, 0, None)
+        identity = _text(argument)
         if identity is not None and identity not in app.requires:
             found.append(
                 Judged(
-                    line,
+                    _written(argument, node),
                     "neolith.E108",
                     f"connect({shown(repr(identity))}) names a contract version "
                     "the app does not require",
@@ -312,11 +348,12 @@ def _call(node: ast.Call, followed: Mapping[str, str], app: App) -> list[Judged]
                 )
             )
     elif callee == COMMAND_SCOPE:
-        label = _text(_argument(node, 0, "app"))
+        argument = _argument(node, 0, "app")
+        label = _text(argument)
         if label is not None and label != app.label and label in app.installed:
             found.append(
                 Judged(
-                    line,
+                    _written(argument, node),
                     "neolith.E110",
                     f"command_scope({shown(repr(label))}) opens a root for app "
                     f"{shown(label)}",
@@ -331,16 +368,14 @@ def _call(node: ast.Call, followed: Mapping[str, str], app: App) -> list[Judged]
 
 def _user_model(line: int, app: App) -> list[Judged]:
     named = _model(app.user_model)
-    if named is None or named[0] == app.label:
+    if named is None or named[0] == app.label or named[0] not in app.installed:
         return []
-    absent = "" if named[0] in app.installed else ", which this host does not hold"
     return [
         Judged(
             line,
             "neolith.E111",
             f"get_user_model() names AUTH_USER_MODEL "
-            f"{shown(repr(app.user_model))}, a model of app {shown(named[0])}"
-            f"{absent}",
+            f"{shown(repr(app.user_model))}, a model of app {shown(named[0])}",
             _RECORDS_HINT,
         )
     ]
@@ -352,7 +387,6 @@ def _named(node: ast.Call, method: str | None, app: App) -> list[Judged]:
     ``sender=``.
     """
     found: list[Judged] = []
-    line = node.lineno
 
     def other(label: str) -> bool:
         return label != app.label and label in app.installed
@@ -363,18 +397,19 @@ def _named(node: ast.Call, method: str | None, app: App) -> list[Judged]:
             text = shown(repr(".".join(named)))
             found.append(
                 Judged(
-                    line,
+                    _written(_argument(node, 0, "app_label"), node),
                     "neolith.E111",
                     f"get_model() names {text}, a model of app {shown(named[0])}",
                     _RECORDS_HINT,
                 )
             )
     elif method == "get_app_config":
-        label = _text(_argument(node, 0, "app_label"))
+        argument = _argument(node, 0, "app_label")
+        label = _text(argument)
         if label is not None and other(label):
             found.append(
                 Judged(
-                    line,
+                    _written(argument, node),
                     "neolith.E111",
                     f"get_app_config({shown(repr(label))}) names the config of "
                     f"app {shown(label)}",
@@ -389,7 +424,7 @@ def _named(node: ast.Call, method: str | None, app: App) -> list[Judged]:
         if named is not None and other(named[0]):
             found.append(
                 Judged(
-                    line,
+                    keyword.value.lineno,
                     "neolith.E111",
                     f"sender={shown(repr(sender))} names a model of app "
                     f"{shown(named[0])}",
@@ -420,7 +455,7 @@ def _get_model(node: ast.Call) -> tuple[str, str] | None:
 def booted(tree: ast.Module, followed: Mapping[str, str]) -> list[int]:
     """The line of each call of ``neolith.testing.boot()`` in a module."""
     return [
-        node.lineno
+        _line(node)
         for node in _iterate(tree)
         if isinstance(node, ast.Call) and _object(node.func, followed) == _BOOT
     ]
