@@ -476,8 +476,11 @@ def test_every_row_at_once_under_both_entries(every_row: Host) -> None:
     assert every_row.no_database_file()
 
 
-# The entry run with ``ast.parse`` counted per file, the counts printed to
-# standard error however the entry ends.
+# The entry run with each ``ast.parse`` that neolith's own code makes
+# counted per file, the counts printed to standard error however the entry
+# ends. Other code's parses are not counted: on Python 3.12 the standard
+# library parses with no file name, as ``inspect.findsource`` does a
+# class's whole module.
 _COUNTED: Final = """\
 import ast, collections, json, sys
 
@@ -486,7 +489,9 @@ parse = ast.parse
 
 
 def counted(source, filename="<unknown>", *args, **kwargs):
-    seen[filename] += 1
+    caller = sys._getframe(1).f_globals.get("__name__", "")
+    if caller == "neolith" or caller.startswith("neolith."):
+        seen[filename] += 1
     return parse(source, filename, *args, **kwargs)
 
 
@@ -522,7 +527,8 @@ def test_every_family_reads_one_reading_of_the_source(
     ran = every_row.run("-c", _COUNTED, *arguments)
     assert ran.status == 1, ran.stdout + ran.stderr
     counts = json.loads(ran.errors[-1].removeprefix("PARSED "))
-    # A parse with no file name would be one this count cannot place.
+    # A parse of neolith's with no file name would be one this count cannot
+    # place.
     assert "<unknown>" not in counts, counts
     parsed = {
         Path(name).resolve().relative_to(every_row.root.resolve()).as_posix(): times
