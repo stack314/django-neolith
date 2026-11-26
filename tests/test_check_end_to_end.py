@@ -137,6 +137,7 @@ import legacy.models
 from shop.services import Service
 """
 
+# The same finding twice on one line, printed once.
 _DESK_CALLS: Final = """\
 from django.apps import apps
 from django.db import transaction
@@ -144,7 +145,7 @@ from neolith import command_scope, connect
 
 
 def run(name):
-    connect("shop.v1")
+    connect("shop.v1"), connect("shop.v1")
     connect(name)
     with transaction.atomic():
         pass
@@ -457,3 +458,40 @@ def test_every_row_with_every_failing_app_report_only(every_row: Host) -> None:
     warnings = len(rows) - errors
     assert _counts(script) == (0, errors, warnings)
     assert every_row.no_database_file()
+
+
+@pytest.mark.spec("APP-71")
+@pytest.mark.parametrize("entry", _ENTRIES)
+def test_a_listed_app_whose_only_findings_are_warnings_is_a_stale_entry(
+    tmp_path: Path, entry: str
+) -> None:
+    project = Host(tmp_path)
+    project.write("desk/calls.py", "from neolith import connect\n\nconnect(NAME)\n")
+    project.write("desk/setup_host.py", _WSGI)
+    project.write("desk/old.py", "x = 1\n")
+    py_compile.compile(
+        str(project.root / "desk" / "old.py"),
+        cfile=str(project.root / "desk" / "old.pyc"),
+        doraise=True,
+    )
+    (project.root / "desk" / "old.py").unlink()
+    project.write("legacy/__init__.py")
+    project.write("legacy/apps.py", _LEGACY_APP)
+    project.write("legacy/views.py", "import desk.calls\n")
+    project.undeclared = ["legacy"]
+    project.pyproject("[tool.neolith]\nboundary-report-only = ['desk']\n")
+    project.write_hosts()
+    ran = project.entry(entry)
+    located, placeless = _parsed(ran)
+    assert located == [
+        ("desk/calls.py", 3, "neolith.W101", False),
+        ("desk/old.pyc", 1, "neolith.W104", False),
+        ("desk/setup_host.py", 3, "neolith.W103", False),
+        ("legacy/views.py", 1, "neolith.W105", False),
+    ], ran.stdout + ran.stderr
+    # Each warning names desk, and none is an error of desk's.
+    assert all(" app desk: " in line for line in ran.findings[:-1])
+    assert placeless == ["neolith.E113"]
+    assert ran.findings[-1].startswith("neolith.E113 app desk: ")
+    assert _counts(ran) == (1, 0, 4)
+    assert ran.status == 1
