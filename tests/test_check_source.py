@@ -12,8 +12,10 @@ import importlib.machinery
 import itertools
 import os
 import pkgutil
+import py_compile
 import re
 import string
+import subprocess
 import symtable
 import sys
 import textwrap
@@ -24,7 +26,7 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-from neolith import _check_source
+from neolith import _check, _check_source
 from neolith._check_source import File, app_files, read, split
 from tests.checking import Project, Ran
 
@@ -155,6 +157,79 @@ def test_a_symbolic_link_to_a_directory_is_not_followed(tmp_path: Path) -> None:
     (package / "linked_file.py").symlink_to(tmp_path / "elsewhere" / "m.py")
     files, _ = app_files("p", [str(package)])
     assert sorted(file.module for file in files) == ["p.kept", "p.linked_file"]
+
+
+def test_a_name_python_loads_no_file_for_is_not_listed(tmp_path: Path) -> None:
+    # A directory named as a source file, and a broken link to bytecode
+    # with no source beside it: the path finder loads neither.
+    (tmp_path / "folder.py").mkdir()
+    (tmp_path / "folder.py" / "m.py").write_text("")
+    (tmp_path / "gone.pyc").symlink_to(tmp_path / "nothing")
+    (tmp_path / "kept.py").write_text("")
+    files, failed = app_files("p", [str(tmp_path)])
+    assert [file.module for file in files] == ["p.kept"]
+    assert failed == []
+    assert _origins(tmp_path, ["folder", "gone"]) == {"folder": None, "gone": None}
+
+
+def test_a_name_no_directory_loads_is_given_its_first_source_file(
+    tmp_path: Path,
+) -> None:
+    # Broken links in both directories of a package's __path__: the first
+    # is the one that cannot be read (E112).
+    first, second = tmp_path / "a", tmp_path / "b"
+    for directory in (first, second):
+        directory.mkdir()
+        (directory / "x.py").symlink_to(tmp_path / "nothing")
+    files, _ = app_files("p", [str(first), str(second)])
+    assert [(file.module, file.path) for file in files] == [
+        ("p.x", str(first / "x.py"))
+    ]
+
+
+def test_the_package_s_init_is_the_first_directory_s_and_relative_to_itself(
+    tmp_path: Path,
+) -> None:
+    first, second = tmp_path / "a", tmp_path / "b"
+    for directory in (first, second):
+        (directory / "sub").mkdir(parents=True)
+        (directory / "__init__.py").write_text("")
+    (first / "sub" / "__init__.py").write_text("")
+    files, _ = app_files("p", [str(first), str(second)])
+    assert [(file.path, file.module, file.package) for file in files] == [
+        (str(first / "__init__.py"), "p", "p"),
+        (str(first / "sub" / "__init__.py"), "p.sub", "p.sub"),
+    ]
+
+
+def test_the_app_walk_knows_each_name_python_imports_from_it(tmp_path: Path) -> None:
+    for file in ["__init__.py", "m.py", "pkg/__init__.py", "ns/deeper/x.py"]:
+        (tmp_path / file).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / file).write_text("")
+    (tmp_path / "elsewhere").mkdir()
+    (tmp_path / "elsewhere" / "__init__.py").write_text("")
+    (tmp_path / "linked").symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+    (tmp_path / "dangling.py").symlink_to(tmp_path / "nothing")
+    _, _, names = _check_source._app_walk("p", [str(tmp_path)])
+    # Not a linked package, a blind spot, nor a name Python loads no file for.
+    assert sorted(names) == [
+        "p",
+        "p.elsewhere",
+        "p.m",
+        "p.ns",
+        "p.ns.deeper",
+        "p.ns.deeper.x",
+        "p.pkg",
+    ]
+
+
+def test_the_app_walk_reads_a_directory_holding_pyvenv_cfg(tmp_path: Path) -> None:
+    # Only the map's walk skips a virtual environment (ADR 0030 Decision 3).
+    (tmp_path / "env").mkdir()
+    (tmp_path / "env" / "pyvenv.cfg").write_text("")
+    (tmp_path / "env" / "m.py").write_text("")
+    files, _ = app_files("p", [str(tmp_path)])
+    assert [file.module for file in files] == ["p.env.m"]
 
 
 def test_a_namespace_directory_inside_an_app_is_read(tmp_path: Path) -> None:
@@ -413,7 +488,12 @@ def test_each_file_that_cannot_be_read_or_compiled_is_e112(
         ("shop/link.py", 1, "shop.link", "cannot be read: "),
         ("shop/migrations/0002_broken.py", 1, "shop.migrations.0002_broken", "c"),
         ("shop/nul.py", 1, "shop.nul", "cannot be compiled: "),
-        ("shop/returns.py", 2, "shop.returns", "cannot be compiled: SyntaxError: "),
+        (
+            "shop/returns.py",
+            2,
+            "shop.returns",
+            "cannot be compiled: SyntaxError: 'return' outside function; ",
+        ),
         ("shop/sub/deeper.py", 4, "shop.sub.deeper", "cannot be compiled: "),
         ("shop/syntax.py", 2, "shop.syntax", "cannot be compiled: SyntaxError: "),
     ]
@@ -434,14 +514,21 @@ def test_each_file_that_cannot_be_read_or_compiled_is_e112(
 @pytest.mark.parametrize("entry", _ENTRIES)
 def test_a_module_file_without_source_is_w104(tmp_path: Path, entry: str) -> None:
     shop = Shop(tmp_path)
-    shop.write("shop/alone.pyc", "")
-    shop.write(f"shop/fast{_EXTENSION}", "")
+    # Real bytecode and an extension's bytes, neither of which parses as
+    # Python, so a sourceless file read as source would also be E112; the
+    # app's own __init__ exists only as bytecode, which Python imports.
+    _bytecode(shop.root / "shop" / "__init__.py", keep=False)
+    shop.write("shop/alone.py", "x = 1\n")
+    _bytecode(shop.root / "shop" / "alone.py", keep=False)
+    (shop.root / "shop" / f"fast{_EXTENSION}").write_bytes(b"\x7fELF\x02\x01\x01\0")
     # Admitted: bytecode beside its source, and Python's own cache.
     shop.write("shop/kept.py", "x = 1\n")
-    shop.write("shop/kept.pyc", "")
+    _bytecode(shop.root / "shop" / "kept.py", keep=True)
     shop.write("shop/__pycache__/kept.cpython-313.pyc", "")
     ran = shop.entry(entry)
     assert ran.findings == [
+        f"shop/__init__.pyc:1: neolith.W104 app shop: module shop: has no Python "
+        f"source, so the check cannot read it; {_SOURCELESS_HINT}",
         f"shop/alone.pyc:1: neolith.W104 app shop: module shop.alone: has no Python "
         f"source, so the check cannot read it; {_SOURCELESS_HINT}",
         f"shop/fast{_EXTENSION}:1: neolith.W104 app shop: module shop.fast: has no "
@@ -449,9 +536,41 @@ def test_a_module_file_without_source_is_w104(tmp_path: Path, entry: str) -> Non
     ], ran.stderr
     assert (
         ran.summary
-        == "neolith check: 0 errors, 0 errors in report-only apps, 2 warnings"
+        == "neolith check: 0 errors, 0 errors in report-only apps, 3 warnings"
     )
     assert ran.status == 0
+
+
+def _bytecode(source: Path, *, keep: bool) -> None:
+    """Compile ``source`` to bytecode beside it, as Python loads a module
+    with no source, and remove the source unless ``keep``.
+    """
+    py_compile.compile(str(source), cfile=str(source.with_suffix(".pyc")), doraise=True)
+    if not keep:
+        source.unlink()
+
+
+@pytest.mark.parametrize("entry", _ENTRIES)
+def test_a_first_party_directory_that_cannot_be_listed_is_skipped(
+    tmp_path: Path, entry: str
+) -> None:
+    # The project's root, the settings module's directory, holds a database
+    # volume another user owns; a literal dynamic import builds the map.
+    shop = Shop(tmp_path)
+    shop.write(
+        "shop/services.py", "import importlib\nimportlib.import_module('json')\n"
+    )
+    volume = shop.root / "pgdata"
+    shop.write("pgdata/base/m.py", "def (\n")
+    volume.chmod(0)
+    try:
+        if os.access(volume, os.R_OK):
+            pytest.skip("this user reads a directory whatever its mode")
+        ran = shop.entry(entry)
+    finally:
+        volume.chmod(0o755)
+    assert ran.findings == [], ran.stdout + ran.stderr
+    assert ran.status == 0, ran.stderr
 
 
 def test_a_directory_of_an_app_that_cannot_be_listed_is_e112(tmp_path: Path) -> None:
@@ -636,6 +755,9 @@ def _calls(text: str) -> tuple[list[tuple[str, int]], list[tuple[str, str, int]]
         ("__import__('m', None, None, [], 1)", []),
         ("__import__('m', level=1)", []),
         ("__import__('m', globals(), None, [], 5)", []),
+        ("__import__('m', globals(), None, [], True)", ["pkg.sub.m"]),
+        # A level Python refuses.
+        ("__import__('m', globals(), None, [], 'x')", []),
         ("__import__('')", []),
         (
             "from django.utils.module_loading import import_string\n"
@@ -714,12 +836,23 @@ def test_each_literal_dynamic_import_gives_its_edge(
             "from importlib import import_module\nimport_module('x', package=name)",
             ("import_module", "package"),
         ),
+        (
+            "from importlib import import_module\nimport_module('.x', self.package)",
+            ("import_module", "package"),
+        ),
         ("__import__(name)", ("__import__", "argument")),
         ("__import__('pkg', fromlist=names)", ("__import__", "argument")),
         ("__import__('pkg', None, None, [name])", ("__import__", "argument")),
         ("__import__('pkg', None, None, [], level)", ("__import__", "argument")),
         ("__import__('m', scope, None, [], 1)", ("__import__", "argument")),
         ("__import__('pkg', *rest)", ("__import__", "argument")),
+        ("__import__('m', globals(), None, [], -1)", ("__import__", "argument")),
+        ("__import__('pkg', fromlist=1)", ("__import__", "argument")),
+        ("__import__('pkg', fromlist=[1])", ("__import__", "argument")),
+        ("__import__('m', locals(), None, [], 1)", ("__import__", "argument")),
+        ("__import__('m', ns.globals(), None, [], 1)", ("__import__", "argument")),
+        ("__import__('m', globals(ns), None, [], 1)", ("__import__", "argument")),
+        ("__import__('m', globals(k=1), None, [], 1)", ("__import__", "argument")),
         (
             "from django.utils.module_loading import import_string\n"
             "import_string(dotted_path=path)",
@@ -760,10 +893,30 @@ def test_each_computed_form_is_unread(text: str, unread: tuple[str, str]) -> Non
         "from neolith import connect\nconnect = other\nconnect(name)",
         "def f(connect):\n    connect(name)",
         "get_model(label)",
+        # Calls on what is not a name, and a literal that is not text.
+        "'-'.join(parts)",
+        "make()()",
+        "handlers[0](name)",
+        "from importlib import import_module\nimport_module(1)",
     ],
 )
 def test_the_nearest_admitted_shapes_are_read(text: str) -> None:
     assert _calls(text)[1] == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Python refuses each: no package to resolve against, no name.
+        "from importlib import import_module\nimport_module('.x', name)",
+        "from importlib import import_module\nimport_module('')",
+        # A listed call whose literal names no module.
+        "from neolith import connect\nconnect('shop.orders.v1')",
+        "from neolith import command_scope\ncommand_scope('shop.desk')",
+    ],
+)
+def test_a_literal_that_names_no_module_gives_no_edge(text: str) -> None:
+    assert _calls(text)[0] == []
 
 
 @pytest.mark.parametrize("entry", _ENTRIES)
@@ -836,3 +989,79 @@ def test_the_settings_module_s_directory_is_first_party(
     after = lines[lines.index("first-party:") + 1 :]
     found = list(itertools.takewhile(os.path.isabs, after))
     assert found == [str(shop.root), str(library)], ran.stderr
+
+
+def test_the_deployer_s_module_is_the_settings_module_only_inside_its_block() -> None:
+    # Leaving the block restores the settings module, so a later checkapps
+    # in the same process reads Django's own.
+    before = _check._settings_module()
+    with _check.deployer("deploy.elsewhere"):
+        assert _check._settings_module() == "deploy.elsewhere"
+    assert _check._settings_module() == before != "deploy.elsewhere"
+
+
+# An import of a hosted app's module names that module whatever the process
+# has loaded, also for an app installed in a library directory.
+
+_EDGES_PROBE = """\
+import sys
+from neolith import _check_source
+
+_findings = _check_source.findings
+
+
+def findings(source):
+    for module in source.modules("shop"):
+        if module.file.module == "shop.views":
+            edges = [f"{edge.target}:{edge.line}" for edge in source.edges(module)]
+            print("edges:", *edges, file=sys.stderr)
+    print("loaded:", "billing.services" in sys.modules, file=sys.stderr)
+    return _findings(source)
+
+
+_check_source.findings = findings
+"""
+
+
+@pytest.mark.parametrize("loaded", [False, True])
+@pytest.mark.parametrize("entry", _ENTRIES)
+def test_an_import_of_a_hosted_app_s_module_does_not_depend_on_what_is_loaded(
+    tmp_path: Path, entry: str, loaded: bool
+) -> None:
+    base = tmp_path / "userbase"
+    probe_site = subprocess.run(
+        [sys.executable, "-c", "import site; print(site.getusersitepackages())"],
+        capture_output=True,
+        text=True,
+        check=True,
+        env={**os.environ, "PYTHONUSERBASE": str(base)},
+    )
+    library = Path(probe_site.stdout.strip())
+    library.mkdir(parents=True)
+    project = Project(tmp_path / "project")
+    project.app("shop")
+    ready = "def ready(self):\n    import billing.services  # noqa: F401\n"
+    project.app("billing", config=ready if loaded else "")
+    project.write("billing/services.py", "x = 1\n")
+    (project.root / "billing").rename(library / "billing")
+    project.write("shop/views.py", "from billing import services\n")
+    project.deployer("shop", "billing")
+    project.settings(
+        ["shop", "billing"], neolith={"DATABASES": project.databases("shop", "billing")}
+    )
+    probe = tmp_path / "probe"
+    probe.mkdir()
+    (probe / "sitecustomize.py").write_text(_EDGES_PROBE)
+    env = {
+        "PYTHONUSERBASE": str(base),
+        "PYTHONPATH": os.pathsep.join(
+            [str(probe), str(project.root), str(library), *sys.path]
+        ),
+    }
+    if entry == "neolith check":
+        ran = project.check("shop", "billing", env=env)
+    else:
+        ran = project.checkapps(env=env)
+    assert ran.status == 0, ran.stdout + ran.stderr
+    assert f"loaded: {loaded}" in ran.errors, ran.stderr
+    assert "edges: billing.services:1" in ran.errors, ran.stderr

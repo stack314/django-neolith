@@ -283,6 +283,12 @@ def test_a_name_the_rule_follows_reaches_what_it_imports_wherever_it_is_read() -
         ),
         # A relative import Python refuses, of the same name.
         ("from neolith import connect\nif x:\n    from . import connect\n", False),
+        # Two listed objects under one name.
+        (
+            "from neolith import connect\nif x:\n"
+            "    from neolith import command_scope as connect\n",
+            False,
+        ),
         # A star import after an import of the same name.
         ("from neolith import connect\nfrom other import *\n", False),
         # The nearest admitted shapes: the same import twice, and one in a

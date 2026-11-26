@@ -10,6 +10,7 @@ generated layouts, and the two must place every name alike.
 import functools
 import importlib
 import importlib.machinery
+import importlib.util
 import json
 import os
 import site
@@ -19,7 +20,7 @@ import sysconfig
 import textwrap
 from collections.abc import Iterator
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 from hypothesis import HealthCheck, given, settings
@@ -373,6 +374,20 @@ def test_first_party_directories_follow_the_path_and_leave_out_libraries(
     assert found == [str(other), str(project)]
 
 
+def test_a_directory_below_a_library_directory_is_a_library(tmp_path: Path) -> None:
+    # A .pth file can put such a directory on the path, as a vendored tree.
+    library = tmp_path / "lib"
+    spec = SimpleNamespace(
+        submodule_search_locations=[str(library / "vendored" / "installed")],
+        origin=None,
+    )
+    modules = {"installed": SimpleNamespace(__spec__=spec)}
+    assert first_party(["installed"], modules, [], [str(library)]) == []
+    assert first_party(["installed"], modules, [], [str(tmp_path / "x")]) == [
+        str(library / "vendored")
+    ]
+
+
 _USER_SITE = """\
 import json, sys
 import mine, theirs
@@ -515,8 +530,9 @@ def test_a_library_directory_reached_through_a_link_is_a_library(
         # A package or module loses to one earlier on the path.
         (["json/__init__.py"], "json", False),
         (["json.py"], "json", False),
-        # A built-in module, wherever it stands.
+        # A built-in module and a frozen one, wherever they stand.
         (["sys.py"], "sys", True),
+        (["abc.py"], "abc", True),
     ],
 )
 def test_a_name_python_imports_from_elsewhere_is_not_first_party(
@@ -528,6 +544,9 @@ def test_a_name_python_imports_from_elsewhere_is_not_first_party(
     (tmp_path / "shop").mkdir()
     (tmp_path / "shop" / "__init__.py").write_text("")
     path = [str(tmp_path), *sys.path] if first else [*sys.path, str(tmp_path)]
+    if first:
+        found = _oracle([str(tmp_path)], [name])[name]
+        assert found is None or str(tmp_path) not in json.dumps(found)
     placed = module_map([str(tmp_path)], path)
     assert name not in placed
     assert "shop" in placed
@@ -549,7 +568,9 @@ def test_a_namespace_shared_with_a_library_is_placed_as_python_places_it(
     ]:
         file.parent.mkdir(parents=True, exist_ok=True)
         file.write_text("")
-    path = [str(library), str(project)]
+    # A directory on the path that holds no part of the name adds none.
+    (tmp_path / "empty").mkdir()
+    path = [str(library), str(tmp_path / "empty"), str(project)]
     placed = module_map([str(project)], path)
     found = _oracle(path, ["acme", "acme.billing", "acme.common", "acme.own"])
     assert found["acme"] == [
@@ -627,6 +648,8 @@ def test_the_source_of_a_run_reads_its_host(
             return "desk"
         return "billing" if name.startswith("acme.billing") else None
 
+    # A module loaded under the app's package with no file is not known.
+    sys.modules["acme.billing.gone"] = ModuleType("acme.billing.gone")
     source = Source({"billing": config}, owner, settings_module="deploy.prod")  # type: ignore[dict-item]
     assert source.first_party() == [str(project), str(settings_dir)]
     assert sorted(file.module for file in source.files()["billing"]) == [
@@ -680,3 +703,32 @@ def test_an_import_of_a_library_module_in_a_shared_namespace_keeps_its_name(
     assert source.first_party() == [str(project)]
     (views,) = [m for m in source.modules("billing") if m.file.module.endswith("views")]
     assert source.edges(views) == [Edge("acme.common", 1), Edge("acme.common", 2)]
+
+
+def test_an_app_imported_from_a_directory_off_the_path_is_mapped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clean_modules: None
+) -> None:
+    # An editable install through setuptools' import finder imports the
+    # package from a directory sys.path does not hold.
+    source = tmp_path / "src"
+    for file in ["mine/__init__.py", "mine/views.py"]:
+        (source / file).parent.mkdir(parents=True, exist_ok=True)
+        (source / file).write_text("")
+    spec = importlib.util.spec_from_file_location(
+        "mine",
+        source / "mine" / "__init__.py",
+        submodule_search_locations=[str(source / "mine")],
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    package = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, "mine", package)
+    spec.loader.exec_module(package)
+    assert str(source) not in sys.path
+    assert importlib.util.find_spec("mine.views").origin == str(  # type: ignore[union-attr]
+        source / "mine" / "views.py"
+    )
+    config = SimpleNamespace(name="mine", module=package, path=str(source / "mine"))
+    found = Source({"mine": config}, lambda name: "mine")  # type: ignore[dict-item]
+    assert found.first_party() == [str(source)]
+    assert found.map()["mine.views"].path == str(source / "mine" / "views.py")

@@ -330,8 +330,20 @@ def app_files(
     name, such as ``x.py`` beside a package ``x``, is not listed, nor is
     anything under a symbolic link to a directory.
     """
+    files, failed, _ = _app_walk(name, directories)
+    return files, failed
+
+
+def _app_walk(
+    name: str, directories: Sequence[str]
+) -> tuple[list[File], list[tuple[str, OSError]], set[str]]:
+    """``app_files``, with every dotted name the walk finds a module or a
+    package for, read from disk alone: the package ``name`` itself and each
+    module, regular package and namespace package below it.
+    """
     files: list[File] = []
     failed: list[tuple[str, OSError]] = []
+    names = {name}
     for directory in directories:
         init = _init_file(directory)
         if init is not None:
@@ -355,6 +367,8 @@ def app_files(
         below: list[tuple[str, list[_Location]]] = []
         for stem, chosen in _choose(locations, scanned).items():
             module = f"{prefix}.{stem}"
+            if chosen.kind in (_PACKAGE, _MODULE, _NAMESPACE):
+                names.add(module)
             if chosen.file is not None and chosen.kind != _LINKED:
                 # A package's relative imports start from itself; a
                 # module's from the package it is in.
@@ -364,7 +378,7 @@ def app_files(
             if chosen.kind in (_PACKAGE, _NAMESPACE):
                 below.append((module, chosen.below))
         stack.extend(reversed(below))
-    return files, failed
+    return files, failed, names
 
 
 @dataclasses.dataclass(slots=True)
@@ -897,6 +911,9 @@ def _dunder_import(
         return [], False
     text = _text(name)
     depth = level.value if isinstance(level, ast.Constant) else 0
+    if type(depth) is bool:
+        # Python reads a bool level as the int it is.
+        depth = int(depth)
     if text is None or type(depth) is not int or depth < 0:
         return [], True
     if depth:
@@ -1157,6 +1174,8 @@ class Source:
         self._settings = settings_module
         self._modules: dict[str, Module] = {}
         self._files: dict[str, list[File]] | None = None
+        self._names: set[str] = set()
+        self._packages = tuple(f"{config.name}." for config in self.hosted.values())
         self._failed: dict[str, list[tuple[str, OSError]]] = {}
         self._directories: list[str] | None = None
         self._map: dict[str, Placed] | None = None
@@ -1174,8 +1193,9 @@ class Source:
         found: dict[str, list[File]] = {label: [] for label in self.hosted}
         listed: set[str] = set()
         for label, config in self.hosted.items():
-            listing, failed = app_files(config.name, _directories(config))
+            listing, failed, names = _app_walk(config.name, _directories(config))
             self._failed[label] = failed
+            self._names |= names
             for file in listing:
                 owner = self._owner(file.module)
                 if file.path in listed or owner not in found:
@@ -1225,11 +1245,18 @@ class Source:
         return self._map
 
     def known(self, name: str) -> bool:
-        """Whether ``name`` is a module the check knows of: a first-party
-        name the map holds, or a module loaded in this process, such as a
-        library module in a namespace package that first-party code shares.
+        """Whether ``name`` is a module the check knows of, read from disk:
+        a first-party name the map holds, or a module or package of a hosted
+        app, wherever the app is installed. A module loaded in this process
+        counts only for a name in neither and in no hosted app's package,
+        such as a library module in a namespace package that first-party
+        code shares; no rule judges such a name.
         """
-        return name in self.map() or name in self._loaded
+        placed = self.map()
+        self.files()
+        if name in placed or name in self._names:
+            return True
+        return name in self._loaded and not name.startswith(self._packages)
 
     def bound(self, module: Module) -> dict[str, str]:
         """The names ``module`` binds by top-level imports alone."""
