@@ -28,7 +28,7 @@ MODELS_HINT = (
     "keep that app's models out of this app's code, and reach its records "
     "through a contract"
 )
-_ALONE_HINT = (
+ALONE_HINT = (
     "a contract package stands alone: move what it needs into the contract "
     "package or into code in no app"
 )
@@ -703,7 +703,7 @@ def _e104(
     return (
         f"{path}:{line}: neolith.E104 app {app}: module {module}, in the contract "
         f"package of app {of or app}: imports {target}{runs}, a module of app "
-        f"{app} outside its contract package; {_ALONE_HINT}"
+        f"{app} outside its contract package; {ALONE_HINT}"
     )
 
 
@@ -843,3 +843,107 @@ def test_a_library_app_s_relation_to_a_hosted_app_is_not_w105(tmp_path: Path) ->
         below='AUTH_USER_MODEL = "shop.Person"\n',
     )
     assert rules(project) == []
+
+
+# Corners: a module under a models package that no model names (E102), a
+# contract module that imports another app's internals (E101, not E104), an
+# undeclared app nested in another (W105 for the innermost), and a
+# multi-table child of a model with a generic relation (W105 once).
+
+_PARENT = """\
+from django.contrib.contenttypes.fields import GenericRelation
+from django.db import models
+
+
+class Parent(models.Model):
+    generic = GenericRelation("billing.Item", related_query_name="+")
+
+
+class Child(Parent):
+    pass
+"""
+
+_SUB_APP = """\
+from django.apps import AppConfig
+
+
+class SubConfig(AppConfig):
+    name = "legacy.sub"
+    label = "sub"
+    default_auto_field = "django.db.models.AutoField"
+"""
+
+_ITEM = """\
+from django.db import models
+
+
+class Item(models.Model):
+    name = models.CharField(max_length=10)
+"""
+
+
+@pytest.fixture(scope="module")
+def corners(tmp_path_factory: pytest.TempPathFactory) -> tuple[Project, list[str]]:
+    project = Project(tmp_path_factory.mktemp("corners"))
+    project.write("billing/records.py", RECORDS)
+    project.write("billing/contracts.py", contract("billing.v1", "billing.records"))
+    project.write("billing/services.py", service("billing.records"))
+    provider(
+        project,
+        "billing",
+        "billing.contracts",
+        "Plain",
+        "billing.services.Service",
+        models=_ITEM,
+    )
+    project.write("shop/records.py", RECORDS)
+    project.write(
+        "shop/contracts.py",
+        contract("shop.v1", "shop.records")
+        + "\n\nfrom billing.services import Service as _Other\n",
+    )
+    project.write("shop/services.py", service("shop.records"))
+    project.write("shop/views.py", "import legacy.models.helpers\n")
+    provider(project, "shop", "shop.contracts", "Plain", "shop.services.Service")
+    project.write("legacy/__init__.py")
+    project.write("legacy/apps.py", _LEGACY_APP)
+    project.write("legacy/models/__init__.py", _PARENT)
+    project.write("legacy/models/helpers.py", "import json\n")
+    project.write("legacy/sub/__init__.py")
+    project.write("legacy/sub/apps.py", _SUB_APP)
+    project.write("legacy/sub/views.py", "import billing.services\n")
+    project.settings(
+        ["shop", "billing"],
+        neolith={
+            "DATABASES": project.databases("default", "shop", "billing"),
+            "UNDECLARED_APPS": ["django.contrib.contenttypes", "legacy", "legacy.sub"],
+        },
+        below='SILENCED_SYSTEM_CHECKS = ["neolith.W004"]\n',
+    )
+    return project, rules(project)
+
+
+def test_corners_of_e101_e102_and_w105(corners: tuple[Project, list[str]]) -> None:
+    project, found = corners
+    contracts = line_of(project, "shop/contracts.py", "from billing.services")
+    parent = line_of(project, "legacy/models/__init__.py", "class Parent(")
+    assert found == sorted(
+        [
+            # A contract module that imports another app's internals: E101,
+            # and no E104, which is about its own app.
+            _e101("shop.contracts", "shop/contracts.py", contracts, "billing.services"),
+            # Every module under an undeclared app's models package.
+            _e102("shop.views", "shop/views.py", 1, "legacy.models.helpers", "legacy"),
+            # The innermost undeclared app holds the module.
+            "legacy/sub/views.py:1: neolith.W105 app billing: module "
+            "legacy.sub.views of app sub, which has no declaration: imports "
+            "billing.services, a module of app billing outside its contract "
+            f"package; {_UNDECLARED_HINT}",
+            # The multi-table child inherits the relation, reported once.
+            f"legacy/models/__init__.py:{parent}: neolith.W105 app billing: model "
+            "legacy.Parent of app legacy, which has no declaration: field generic "
+            "is a relation to billing.Item, a model of app billing; "
+            f"{_UNDECLARED_HINT}",
+        ],
+        key=lambda line: (line.split(":")[0], int(line.split(":")[1])),
+    ), "\n".join(found)

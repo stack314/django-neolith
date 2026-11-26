@@ -21,6 +21,7 @@ from hypothesis import strategies as st
 from neolith._check_imports import _Chains, _Hit
 from tests.checking import Project
 from tests.test_check_imports import (
+    ALONE_HINT,
     INTERNAL_HINT,
     MODELS_HINT,
     RECORDS,
@@ -147,6 +148,17 @@ _HELPERS = {
     # A package that imports the internals runs before its module.
     "helpers/pkg/__init__.py": "import billing.services\n",
     "helpers/pkg/mod.py": "",
+    # ... also when the module is imported inside the chain.
+    "helpers/a2.py": "import helpers.pkg.mod\n",
+    # Relative imports, in a package module and in a plain module.
+    "helpers/rel/__init__.py": "from . import bad\n",
+    "helpers/rel/bad.py": "import billing.services\n",
+    "helpers/rel2.py": "from .deep import x\n",
+    "helpers/deep.py": "import billing.services\nx = 1\n",
+    # Back into the internals of the app whose contract package imports it.
+    "helpers/back.py": "import till.services\n",
+    "helpers/up.py": "import helpers.upper\n",
+    "helpers/upper.py": "import till.services\n",
     # Through a module of an undeclared first-party app.
     "legacy/util.py": "import billing.services\n",
 }
@@ -159,6 +171,9 @@ import helpers.public
 import helpers.users
 import helpers.broken
 import helpers.pkg.mod
+import helpers.a2
+import helpers.rel
+import helpers.rel2
 import legacy.util
 import proj.store.contracts
 import vendorlib.bridge
@@ -221,20 +236,30 @@ def chains(tmp_path_factory: pytest.TempPathFactory) -> tuple[Project, list[str]
         "Plain",
         "proj.store.services.Service",
     )
-    # A hosted app inside that package: Python runs it before every module
-    # of the app, so the app's imports of its own modules start no chain.
+    # A hosted app inside that package: each import of a module under it is
+    # an import of the package too.
     project.app("proj.side")
-    project.write("proj/side/views.py", "import proj.side.helpers\n")
+    project.write(
+        "proj/side/views.py",
+        "import proj.side.helpers\nfrom proj.store.contracts import Plain\n",
+    )
     project.write("proj/side/helpers.py")
+    # A contract package that reaches its own app's internals through code
+    # in no app: a record module, and the package above the contract module.
+    project.write("till/records.py", f"{RECORDS}\nimport helpers.back\n")
+    project.write("till/contracts.py", contract("till.v1", "till.records"))
+    project.write("till/services.py", service("till.records"))
+    provider(project, "till", "till.contracts", "Plain", "till.services.Service")
+    project.write("till/__init__.py", "import helpers.up\n")
     for path, text in _HELPERS.items():
         project.write(path, text)
     project.write("legacy/__init__.py")
     project.write("legacy/apps.py", _LEGACY_APP)
     project.settings(
-        ["shop", "billing", "proj.store", "proj.side"],
+        ["shop", "billing", "till", "proj.store", "proj.side"],
         neolith={
             "DATABASES": project.databases(
-                "default", "shop", "billing", "store", "side"
+                "default", "shop", "billing", "till", "store", "side"
             ),
             "UNDECLARED_APPS": [
                 "django.contrib.contenttypes",
@@ -278,8 +303,14 @@ def test_a_chain_through_first_party_code_in_no_hosted_app_is_e103(
                 "django.contrib.auth.models, a models module of app auth, which "
                 "has no declaration",
             ),
-            # A package above the module imported runs first.
+            # A package above the module imported runs first, at the start of
+            # a chain and inside one.
             _e103(project, "helpers.pkg.mod", "helpers.pkg", _SERVICES),
+            _e103(project, "helpers.a2", "helpers.a2 -> helpers.pkg", _SERVICES),
+            # Relative imports resolve from a package module's own package and
+            # from a plain module's package.
+            _e103(project, "helpers.rel", "helpers.rel -> helpers.rel.bad", _SERVICES),
+            _e103(project, "helpers.rel2", "helpers.rel2 -> helpers.deep", _SERVICES),
             # A module of an undeclared first-party app is first-party code in
             # no hosted app.
             _e103(project, "legacy.util", "legacy.util", _SERVICES),
@@ -290,6 +321,53 @@ def test_a_chain_through_first_party_code_in_no_hosted_app_is_e103(
                 "proj",
                 "proj.store.services, a module of app store outside its contract "
                 "package",
+            ),
+            # A hosted app inside that package: Python runs it before the
+            # app's modules, and each import of a module under it imports it
+            # too.
+            *(
+                f"proj/side/views.py:{line}: neolith.E103 app side: module "
+                f"proj.side.views: imports {imported}; through first-party code "
+                "in no hosted app (proj), it reaches proj.store.services, a "
+                f"module of app store outside its contract package; {_CHAIN_HINT}"
+                for line, imported in [
+                    (1, "proj.side.helpers"),
+                    (2, "proj.store.contracts"),
+                ]
+            ),
+        ]
+    ), "\n".join(found)
+
+
+def _e104(path: str, module: str, imported: str, through: str) -> str:
+    return (
+        f"{path}: neolith.E104 app till: module {module}, in the contract package "
+        f"of app till: imports {imported}; through first-party code in no hosted "
+        f"app ({through}), it reaches till.services, a module of app till outside "
+        f"its contract package; {ALONE_HINT}"
+    )
+
+
+def test_a_contract_package_reaching_its_own_app_through_a_chain_is_e104(
+    chains: tuple[Project, list[str]],
+) -> None:
+    # Importing a contract package never loads the app's internals, through
+    # code in no app either (ADR 0030 Decision 2).
+    project, found = chains
+    line = line_of(project, "till/records.py", "import helpers.back")
+    assert sorted(each for each in found if " neolith.E104 " in each) == sorted(
+        [
+            _e104(
+                "till/__init__.py:1",
+                "till",
+                "helpers.up",
+                "helpers.up -> helpers.upper",
+            ),
+            _e104(
+                f"till/records.py:{line}",
+                "till.records",
+                "helpers.back",
+                "helpers.back",
             ),
         ]
     ), "\n".join(found)
@@ -318,7 +396,11 @@ def test_a_chain_is_not_followed_into_a_hosted_app_or_a_library(
         f"billing.services, a module of app billing outside its contract package; "
         f"{INTERNAL_HINT}"
     ) in found
-    # The modules of store and side run proj too, as a package above them,
-    # before they import anything: no chain.
-    assert not any(each.startswith("proj/") for each in found), "\n".join(found)
+    # store's own modules run proj before they import anything, and proj
+    # reaches store's own internals: judged for the apps that import store.
+    assert not any(each.startswith("proj/store/") for each in found), "\n".join(found)
+    # A chain into the importing app's own internals is no E103.
+    assert not any(
+        each.startswith("till/") and " neolith.E103 " in each for each in found
+    )
     assert MODELS_HINT not in "\n".join(found)

@@ -25,12 +25,16 @@ statements and the literal dynamic imports) of a module ``t``:
 
 Python runs every package above a module before the module itself
 (``importlib._bootstrap._find_and_load_unlocked``), so for E103 and E104 an
-import of ``t`` is also an import of each package above ``t``, other than
-those above the importing module, which ran before it.
+import of ``t`` is also an import of each package above ``t``. For E103 that
+includes the packages above the importing module too: Python ran them
+before it, and they are code the app cannot run without.
 
 For each module ``m`` of a contract package that lies in a hosted app
-``<c>``, ``neolith.E104`` when it imports ``t``, or a package above ``t``,
-that is a module of ``<c>`` and not public. For each module the contract
+``<c>``, ``neolith.E104`` when it imports ``t``, or a package above ``t`` not
+above ``m``, that is a module of ``<c>`` and not public; or when Python,
+importing ``t``, runs first-party code in no hosted app from which a chain,
+as for E103, reaches such a module of ``<c>``: importing a contract package
+never loads its app's internals (ADR 0030 Decision 2). For each module the contract
 package of ``<b>`` leaves out, ``neolith.E105``: it defines a contract or a
 record, or is a package above one, and also defines a model or holds the
 implementation of a contract ``<b>`` provides.
@@ -44,7 +48,7 @@ to a model of ``<a>``.
 import ast
 import os
 from collections import deque
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from typing import Any, Final, NamedTuple
 
 from django.apps import AppConfig
@@ -146,6 +150,7 @@ class _Rules:
                 self.files.setdefault(file.module, (label, file))
         self._owners: dict[str, str | None] = {}
         self._nodes: dict[str, list[tuple[str, int]]] = {}
+        self._own: dict[str, _Chains] = {}
 
     # What a dotted name is.
 
@@ -181,6 +186,14 @@ class _Rules:
             return None if name in self.public else _Hit("internal", name, owner)
         models = self.models_of(name)
         return None if models is None else _Hit(_MODELS, name, models)
+
+    def own(self, app: str, name: str) -> _Hit | None:
+        """What E104 reports when a contract package of hosted app ``app``
+        reaches ``name``: a module of ``app`` that is not public.
+        """
+        if self.owner(name) == app and name not in self.public:
+            return _Hit("internal", name, app)
+        return None
 
     def is_node(self, name: str) -> bool:
         """Whether a chain goes through ``name``: first-party code in no
@@ -247,14 +260,13 @@ class _Rules:
         found: list[Finding] = []
         pending: list[tuple[Module, int, str, list[str]]] = []
         for module in self.modules(label):
-            name = module.file.module
             for target, line in self.edges(module):
                 hit = self.hit(label, target)
                 if hit is not None:
                     found.append(self.direct(label, module, line, hit))
                 starts = [
                     each
-                    for each in self.runs(target, name)
+                    for each in [*_above(target), target]
                     if self.is_node(each) and self.hit(label, each) is None
                 ]
                 if starts:
@@ -329,18 +341,42 @@ class _Rules:
                     for each in self.runs(target, name)
                     if self.owner(each) == app and each not in self.public
                 ]
-                if not inside:
-                    continue
-                runs = "" if target in inside else f", which runs {shown(inside[0])}"
-                message = checks.Error(
+                head = (
                     f"app {shown(app)}: module {shown(name)}, in the contract "
-                    f"package of app {shown(of)}: imports {shown(target)}{runs}, "
-                    f"a module of app {shown(app)} outside its contract package",
-                    hint=_ALONE_HINT,
-                    id="neolith.E104",
+                    f"package of app {shown(of)}: imports {shown(target)}"
                 )
+                if inside:
+                    runs = (
+                        "" if target in inside else f", which runs {shown(inside[0])}"
+                    )
+                    text = (
+                        f"{head}{runs}, a module of app {shown(app)} outside its "
+                        "contract package"
+                    )
+                else:
+                    starts = [
+                        each for each in self.runs(target, name) if self.is_node(each)
+                    ]
+                    chain = self.reaching(app).shortest(starts) if starts else None
+                    if chain is None:
+                        continue
+                    through, hit = chain
+                    text = (
+                        f"{head}; through first-party code in no hosted app "
+                        f"({' -> '.join(shown(each) for each in through)}), it "
+                        f"reaches {self.described(hit)}"
+                    )
+                message = checks.Error(text, hint=_ALONE_HINT, id="neolith.E104")
                 found.append(Finding(message, app, place(file.path), line))
         return found
+
+    def reaching(self, app: str) -> "_Chains":
+        """The chains from code in no app to the internals of hosted app
+        ``app``, for E104.
+        """
+        if app not in self._own:
+            self._own[app] = _Chains(self, app, lambda name: self.own(app, name))
+        return self._own[app]
 
     def left_out(self) -> list[Finding]:
         """E105 for each module a contract package leaves out."""
@@ -511,12 +547,19 @@ def _binds(node: ast.stmt) -> set[str]:
 
 class _Chains:
     """The shortest chains, for one hosted app, from first-party code in no
-    hosted app to a module that E101 or E102 reports for it.
+    hosted app to a module that E101 or E102 reports for it, or, given
+    ``hit``, to a module that ``hit`` reports.
     """
 
-    def __init__(self, rules: _Rules, app: str) -> None:
+    def __init__(
+        self,
+        rules: _Rules,
+        app: str,
+        hit: Callable[[str], _Hit | None] | None = None,
+    ) -> None:
         self.rules = rules
         self.app = app
+        self.hit = hit if hit is not None else lambda name: rules.hit(app, name)
         self._distance: dict[str, int] = {}
         self._hits: dict[str, list[_Hit]] = {}
         self._follows: dict[str, list[str]] = {}
@@ -537,7 +580,7 @@ class _Chains:
             hits: list[_Hit] = []
             follows: set[str] = set()
             for target, _ in self.rules.node(name):
-                hit = self.rules.hit(self.app, target)
+                hit = self.hit(target)
                 if hit is not None:
                     hits.append(hit)
                 follows.update(
