@@ -111,7 +111,7 @@ If `PY_FLOOR` or `PY_NEWEST` is not installed, use the closest Python you have, 
   git grep -nwiE "alpha|beta|${PREVIOUS}|--pre|no release yet|Development Status|draft 0\.1" \
     -- ':!CHANGELOG.md' ':!tests' ':!docs/adr' ':!spec/0*' ':!docs/releasing.md'
   ```
-  Expected: lines only in the files listed below (`README.md`, `pyproject.toml`, `docs/site/index.md`, `CONTRIBUTING.md`, `SECURITY.md` and `spec/README.md`). If a line appears in another file, add that file to this list in the same pull request.
+  Expected: lines only in the files listed below (`README.md`, `pyproject.toml`, `docs/site/index.md`, `CONTRIBUTING.md`, `SECURITY.md` and `spec/README.md`). If a line appears in another file, add that file to this list in the same pull request. `scripts/spec_trace.py` and `scripts/spec_trace_plugin.py` match too: they show the format of a status line and of a trace report, and say nothing about this release.
 - [ ] `src/neolith/__init__.py`: `__version__ = "<VERSION>"`. This is the only place the version is set; the build reads it, and the release workflow checks the tag against it.
 - [ ] `CHANGELOG.md` ([Keep a Changelog](https://keepachangelog.com/en/1.1.0/)):
   - [ ] `## [Unreleased]` becomes `## [<VERSION>] - <YYYY-MM-DD>`, dated the day you expect to tag.
