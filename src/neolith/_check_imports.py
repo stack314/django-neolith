@@ -477,7 +477,7 @@ class _Rules:
         if not file.source:
             return file.path, 1
         lines = [
-            _check_models._source(global_apps.get_model(label))[1]
+            _check_models.place_of(global_apps.get_model(label), self.source)[1]
             for label in out.models
         ]
         tree = self.source.read(file).tree
@@ -555,7 +555,7 @@ class _Rules:
                 obj=model,
                 id="neolith.W105",
             )
-            path, line = _check_models._source(model)
+            path, line = _check_models.place_of(model, self.source)
             found.append(Finding(message, other, place(path), line))
         return found
 

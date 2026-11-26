@@ -66,6 +66,8 @@ __all__ = [
     "bound",
     "calls",
     "canonical",
+    "class_statements",
+    "file_of",
     "findings",
     "first_party",
     "imports",
@@ -381,6 +383,20 @@ def _app_walk(
     return files, failed, names
 
 
+def file_of(path: str, dotted: str) -> File:
+    """The source file ``path`` of the module ``dotted``, with the package
+    its relative imports resolve against: itself for a package's
+    ``__init__``, the package it is in otherwise.
+    """
+    parts = split(os.path.basename(path))
+    package = (
+        dotted
+        if parts is not None and parts[0] == "__init__"
+        else dotted.rpartition(".")[0]
+    )
+    return File(path, dotted, package)
+
+
 @dataclasses.dataclass(slots=True)
 class Module:
     """A file as the check reads it: its tree and symbol table, or the
@@ -445,6 +461,26 @@ def read(file: File) -> Module:
     module.tree = tree
     module.table = table
     return module
+
+
+def class_statements(tree: ast.AST) -> Iterator[tuple[str, int, int]]:
+    """The qualified name and the first and last lines of each class
+    statement in ``tree``, from its first decorator.
+    """
+    stack: list[tuple[ast.AST, str]] = [(tree, "")]
+    while stack:
+        node, prefix = stack.pop()
+        for child in ast.iter_child_nodes(node):
+            inner = prefix
+            if isinstance(child, ast.ClassDef):
+                inner = f"{prefix}{child.name}"
+                starts = [d.lineno for d in child.decorator_list]
+                end = child.end_lineno or child.lineno
+                yield inner, min([child.lineno, *starts]), end
+                inner += "."
+            elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                inner = f"{prefix}{child.name}.<locals>."
+            stack.append((child, inner))
 
 
 class Edge(NamedTuple):
@@ -1226,13 +1262,7 @@ class Source:
         placed = self.map().get(dotted)
         if placed is None or placed.path is None or not placed.source:
             return None
-        parts = split(os.path.basename(placed.path))
-        package = (
-            dotted
-            if parts is not None and parts[0] == "__init__"
-            else dotted.rpartition(".")[0]
-        )
-        return self.read(File(placed.path, dotted, package))
+        return self.read(file_of(placed.path, dotted))
 
     def modules(self, label: str) -> Iterator[Module]:
         """The read source files of the hosted app ``label``."""

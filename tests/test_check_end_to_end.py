@@ -476,11 +476,11 @@ def test_every_row_at_once_under_both_entries(every_row: Host) -> None:
     assert every_row.no_database_file()
 
 
-# The entry run with each ``ast.parse`` that neolith's own code makes
-# counted per file, the counts printed to standard error however the entry
-# ends. Other code's parses are not counted: on Python 3.12 the standard
-# library parses with no file name, as ``inspect.findsource`` does a
-# class's whole module.
+# The entry run with each ``ast.parse`` that neolith's code causes counted
+# per file, the counts printed to standard error however the entry ends. A
+# parse is neolith's when any frame of neolith's is on the stack, whoever
+# calls ``ast.parse``: on Python 3.12, ``inspect.findsource`` parses a
+# class's whole module with no file name.
 _COUNTED: Final = """\
 import ast, collections, json, sys
 
@@ -488,9 +488,18 @@ seen = collections.Counter()
 parse = ast.parse
 
 
+def ours():
+    frame = sys._getframe(2)
+    while frame is not None:
+        name = frame.f_globals.get("__name__", "")
+        if name == "neolith" or name.startswith("neolith."):
+            return True
+        frame = frame.f_back
+    return False
+
+
 def counted(source, filename="<unknown>", *args, **kwargs):
-    caller = sys._getframe(1).f_globals.get("__name__", "")
-    if caller == "neolith" or caller.startswith("neolith."):
+    if ours():
         seen[filename] += 1
     return parse(source, filename, *args, **kwargs)
 
@@ -527,8 +536,8 @@ def test_every_family_reads_one_reading_of_the_source(
     ran = every_row.run("-c", _COUNTED, *arguments)
     assert ran.status == 1, ran.stdout + ran.stderr
     counts = json.loads(ran.errors[-1].removeprefix("PARSED "))
-    # A parse of neolith's with no file name would be one this count cannot
-    # place.
+    # A parse that neolith causes with no file name is one this count
+    # cannot place, so there is none.
     assert "<unknown>" not in counts, counts
     parsed = {
         Path(name).resolve().relative_to(every_row.root.resolve()).as_posix(): times

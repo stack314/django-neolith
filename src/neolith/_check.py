@@ -358,7 +358,7 @@ def _boundary(hosted: Sequence[str]) -> list[Finding]:
     configs = {label: global_apps.get_app_config(label) for label in hosted}
     source = _check_source.Source(configs, _owner, settings_module=_settings_module())
     return [
-        *_check_models.findings(configs),
+        *_check_models.findings(configs, source),
         *_check_source.findings(source),
         *_check_imports.findings(source),
         *_check_calls.findings(source),

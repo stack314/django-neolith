@@ -28,10 +28,13 @@ For each model of a hosted app ``<a>``:
 Another app is any installed app other than ``<a>``: another hosted app, an
 app without a declaration, a contrib app such as ``auth``, and the app that
 ``AUTH_USER_MODEL`` names (ADR 0004). A model's place is its class's first
-line; a many-to-many table's is the model that creates it.
+line; a many-to-many table's is the model that creates it. The line is
+taken as ``inspect`` takes it, from the run's one reading of the file
+(``neolith._check_source.Source``), never a parse of its own.
 """
 
 import inspect
+import linecache
 import sys
 from collections.abc import Mapping
 from typing import Any, Final
@@ -41,8 +44,9 @@ from django.core import checks
 
 from neolith import _naming
 from neolith._check import Finding, place, shown
+from neolith._check_source import Source, class_statements, file_of
 
-__all__ = ["findings"]
+__all__ = ["findings", "place_of"]
 
 _RELATION_HINT: Final = (
     "keep the other record's identifier in a plain field, and reach that "
@@ -61,8 +65,10 @@ _ASCII_LOWER: Final = str.maketrans(
 _QUOTES: Final = ('"', "`")
 
 
-def findings(hosted: Mapping[str, AppConfig]) -> list[Finding]:
-    """Every ``neolith.E106`` and ``neolith.E107`` of the hosted apps."""
+def findings(hosted: Mapping[str, AppConfig], source: Source) -> list[Finding]:
+    """Every ``neolith.E106`` and ``neolith.E107`` of the hosted apps, each
+    placed from ``source``, the run's reading of the files.
+    """
     from django.apps import apps as global_apps
 
     tables: dict[str, list[type[Any]]] = {}
@@ -73,8 +79,8 @@ def findings(hosted: Mapping[str, AppConfig]) -> list[Finding]:
     for label, config in hosted.items():
         for model in config.get_models(include_auto_created=True):
             if not model._meta.auto_created:
-                found += _relations(label, model)
-            found += _stored(label, model, tables)
+                found += _relations(label, model, source)
+            found += _stored(label, model, tables, source)
     return found
 
 
@@ -90,7 +96,7 @@ def _folded(table: str) -> str:
     return table.translate(_ASCII_LOWER)
 
 
-def _relations(label: str, model: type[Any]) -> list[Finding]:
+def _relations(label: str, model: type[Any], source: Source) -> list[Finding]:
     options = model._meta
     # A concrete parent's private fields are copied into each child with
     # mti_inherited set (ModelBase.__new__); they are judged on the parent.
@@ -114,7 +120,13 @@ def _relations(label: str, model: type[Any]) -> list[Finding]:
         elif resting:
             note = f", which the GenericForeignKeys {', '.join(resting)} rest on"
         found += _across(
-            label, model, field.name, _kind(field), field.remote_field.model, note
+            label,
+            model,
+            field.name,
+            _kind(field),
+            field.remote_field.model,
+            note,
+            source=source,
         )
         if field.many_to_many:
             through = field.remote_field.through
@@ -127,11 +139,17 @@ def _relations(label: str, model: type[Any]) -> list[Finding]:
                     field.name,
                     "a many-to-many relation through",
                     through,
+                    source=source,
                 )
     for field in private:
         if field.is_relation and field.related_model is not None:
             found += _across(
-                label, model, field.name, "a generic relation to", field.related_model
+                label,
+                model,
+                field.name,
+                "a generic relation to",
+                field.related_model,
+                source=source,
             )
     return found
 
@@ -162,6 +180,8 @@ def _across(
     kind: str,
     target: object,
     note: str = "",
+    *,
+    source: Source,
 ) -> list[Finding]:
     from django.db.models.fields.related import resolve_relation
 
@@ -188,11 +208,14 @@ def _across(
         obj=model,
         id="neolith.E106",
     )
-    return [_at(message, label, model)]
+    return [_at(message, label, model, source)]
 
 
 def _stored(
-    label: str, model: type[Any], tables: Mapping[str, list[type[Any]]]
+    label: str,
+    model: type[Any],
+    tables: Mapping[str, list[type[Any]]],
+    source: Source,
 ) -> list[Finding]:
     options = model._meta
     if options.proxy:
@@ -207,7 +230,7 @@ def _stored(
             obj=model,
             id="neolith.E107",
         )
-        return [_at(message, label, model)]
+        return [_at(message, label, model, source)]
     found: list[Finding] = []
     for other in tables.get(_folded(options.db_table), []):
         if other._meta.app_label == label:
@@ -221,29 +244,56 @@ def _stored(
             obj=model,
             id="neolith.E107",
         )
-        found.append(_at(message, label, model))
+        found.append(_at(message, label, model, source))
     return found
 
 
-def _at(message: checks.CheckMessage, label: str, model: type[Any]) -> Finding:
+def _at(
+    message: checks.CheckMessage, label: str, model: type[Any], source: Source
+) -> Finding:
     """The finding at the first line of the model's class, or of the model
     that created it (an automatic many-to-many table).
     """
     owner = model._meta.auto_created or model
-    path, line = _source(owner)
+    path, line = place_of(owner, source)
     return Finding(message, label, place(path), line)
 
 
-def _source(model: type[Any]) -> tuple[str | None, int]:
-    """The file and first line of a model's class, as ``inspect`` reads it;
-    the module's file and line 1 when the class has no source there.
+def place_of(model: type[Any], source: Source) -> tuple[str | None, int]:
+    """The file and first line of a model's class as ``inspect`` gives
+    them, with the class statements taken from ``source``, the run's one
+    reading of the file, not from a parse of its own: the class's
+    ``__firstlineno__`` (Python 3.13 and later, which ``inspect.findsource``
+    reads), or else the first class statement of the file with the class's
+    qualified name, from its first decorator, as ``inspect.findsource``
+    finds it on 3.12. The module's file and line 1 when the class has no
+    source there, or the file cannot be read or compiled.
     """
+    name = _naming.module(model)
     try:
         path = inspect.getsourcefile(model)
-        _, line = inspect.getsourcelines(model)
     except (OSError, TypeError):
-        name = _naming.module(model)
+        path = None
+    line = None
+    if path is not None and name is not None:
+        line = _first_line(model, path, name, source)
+    if line is None:
         module = sys.modules.get(name) if name is not None else None
         file = getattr(module, "__file__", None)
         return (file if type(file) is str else None), 1
     return path, max(line, 1)
+
+
+def _first_line(model: type[Any], path: str, name: str, source: Source) -> int | None:
+    lines = linecache.getlines(path)
+    if not lines:
+        return None
+    if sys.version_info >= (3, 13):
+        first = _naming.entry(_naming.namespace(model), "__firstlineno__")
+        return first if type(first) is int and first <= len(lines) else None
+    tree = source.read(file_of(path, name)).tree
+    if tree is None:
+        return None
+    qualname = _naming.qualname(model, None)
+    starts = [start for held, start, _ in class_statements(tree) if held == qualname]
+    return min(starts) if starts else None

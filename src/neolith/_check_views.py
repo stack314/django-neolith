@@ -65,7 +65,7 @@ from django.core import checks
 
 from neolith import _naming, _serving
 from neolith._check import Finding, place, shown
-from neolith._check_source import Source
+from neolith._check_source import Source, class_statements
 
 if TYPE_CHECKING:
     from django.urls import URLResolver
@@ -361,29 +361,9 @@ def _held(tree: ast.Module | None) -> _Classes | None:
     if tree is None:
         return None
     held: _Classes = {}
-    for qualname, start, end in _definitions(tree):
+    for qualname, start, end in class_statements(tree):
         held.setdefault(qualname, []).append((start, end))
     return held
-
-
-def _definitions(tree: ast.AST) -> Iterator[tuple[str, int, int]]:
-    """The qualified name and the first and last lines of each class
-    statement in ``tree``, from its first decorator.
-    """
-    stack: list[tuple[ast.AST, str]] = [(tree, "")]
-    while stack:
-        node, prefix = stack.pop()
-        for child in ast.iter_child_nodes(node):
-            inner = prefix
-            if isinstance(child, ast.ClassDef):
-                inner = f"{prefix}{child.name}"
-                starts = [d.lineno for d in child.decorator_list]
-                end = child.end_lineno or child.lineno
-                yield inner, min([child.lineno, *starts]), end
-                inner += "."
-            elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                inner = f"{prefix}{child.name}.<locals>."
-            stack.append((child, inner))
 
 
 def _same(file: str, path: str) -> bool:

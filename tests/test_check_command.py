@@ -763,7 +763,7 @@ import sys
 
 import neolith._check_models
 
-def broken(hosted):
+def broken(hosted, source):
     raise {error}
 
 neolith._check_models.findings = broken
@@ -845,7 +845,7 @@ run()
 findings = neolith._check_models.findings
 
 
-def stopped(hosted):
+def stopped(hosted, source):
     assert BaseDatabaseWrapper.connect is not original
     raise KeyboardInterrupt
 
