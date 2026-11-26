@@ -14,7 +14,7 @@ The matrix: a view's owner (the hosted app, the undeclared first-party
 app, the project in no app, a library, Django's generic and plain views,
 ``static.serve``, and a contrib app) in each form it can take (a function,
 ``as_view()`` of a plain view and of one whose ``dispatch`` is decorated, a
-bound method, a callable instance), under every sequence
+bound method, a callable instance, a class), under every sequence
 of up to two wrappers (none, ``functools.wraps`` and ``wraps(assigned=())``
 in a library, ``partial``, Django's ``csrf_exempt``, contrib's
 ``login_required``, and a wrapper of the project's, of the hosted app's and
@@ -138,6 +138,7 @@ for owner, module in {
     BASES[f"{owner}-decorated"] = module.Guarded.as_view()
     BASES[f"{owner}-method"] = module.Handler().handle
     BASES[f"{owner}-instance"] = module.Callable()
+    BASES[f"{owner}-class"] = module.Callable
 BASES["django-function"] = bad_request
 BASES["django-as_view"] = TemplateView.as_view(template_name="page.html")
 BASES["django-method"] = RedirectView(url="/").get
@@ -168,10 +169,15 @@ for base, view in BASES.items():
 
 _URLS: Final = """\
 from django.contrib import admin
-from django.urls import include, path
+from django.urls import URLPattern, include, path
+from django.urls.resolvers import RoutePattern
+from django.views.generic import TemplateView
 
-import site_admin  # noqa: F401
+import site_admin
+import site_api
+import site_more
 import site_views
+from shop import views as shop_views
 
 
 class Odd:
@@ -181,15 +187,188 @@ class Odd:
         return None
 
 
+class Unnamed(RoutePattern):
+    \"\"\"A route that cannot be read.\"\"\"
+
+    def __str__(self):
+        raise RuntimeError("no route")
+
+
+class Endless:
+    \"\"\"Patterns that include a new URLconf like this one each time.\"\"\"
+
+    def __iter__(self):
+        return iter([path("a/", include(Lazy())), path("p/", site_views.page)])
+
+
+class Lazy:
+    def __init__(self):
+        self.urlpatterns = Endless()
+
+
+# A function of site_views's whose code was compiled from no file.
+made = {"__name__": "site_views"}
+exec(compile("\\n" * 5 + "def made(request):\\n    pass\\n", "<m>", "exec"), made)
+
+# as_view's function, with a view_class that is not a class.
+odd_view_class = site_views.Page.as_view()
+odd_view_class.view_class = site_views.page
+
 urlpatterns = [
     path("composed/", include("composed")),
     path("nested/", include("nested")),
     path("listed/", include([path("page/", site_views.page)])),
     path("loop/", include("loop")),
+    path("self/", include("urls")),
+    path("a/", include("twice")),
+    path("b/", include("twice")),
     path("deep/", include("deep")),
     path("admin/", admin.site.urls),
+    path("unregistered/", site_admin.OTHER.other),
+    path("partial/project/", site_more.Part(TemplateView.as_view())),
+    path("partial/hosted/", site_more.Part(shop_views.page)),
+    path("twice/called/", site_more.Twice()),
+    path("twice/bare/", site_more.Bare),
+    path("kept/", site_more.Kept),
+    path("factory/", site_more.factory()),
+    path("outer/", site_more.Outer.Inner),
+    path("again/", site_more.Again),
+    path("gone/", site_more.Gone),
+    path("moved/methods/", site_api.Moved.as_view()),
+    path("moved/bare/", site_api.Plain),
+    path("made/", made["made"]),
+    path("odd-view-class/", odd_view_class),
+    path("empty/", include("empty")),
+    URLPattern(Unnamed("unnamed/", is_endpoint=True), site_views.page),
+    path("lazy/", include(Lazy())),
     Odd(),
 ]
+"""
+
+# Classes that the project defines twice, and a partial of its own.
+_MORE: Final = """\
+import functools
+
+
+class Part(functools.partial):
+    pass
+
+
+class Twice:
+    pass
+
+
+if True:
+
+    class Twice:  # noqa: F811
+        def __call__(self, request):
+            return None
+
+
+class Bare:
+    pass
+
+
+if True:
+
+    class Bare:  # noqa: F811
+        pass
+
+
+def keep(cls):
+    return cls
+
+
+@keep
+class Kept:
+    pass
+
+
+def factory():
+    class Made:
+        def __call__(self, request):
+            return None
+
+    return Made
+
+
+class Outer:
+    class Inner:
+        pass
+
+
+# Defined twice, and its __module__ set again, which drops the
+# __firstlineno__ that Python 3.13 keeps: told apart by its methods only, or
+# not at all.
+class Again:
+    pass
+
+
+if True:
+
+    class Again:  # noqa: F811
+        @staticmethod
+        def helper():
+            return None
+
+
+Again.__module__ = __name__
+
+
+class Gone:
+    pass
+
+
+if True:
+
+    class Gone:  # noqa: F811
+        pass
+
+
+Gone.__module__ = __name__
+"""
+
+# Classes defined in one module that name another as theirs; the other is
+# long enough to hold their lines, and defines a class of one's name.
+_IMPL: Final = """\
+from django.views import View
+
+
+class Moved(View):
+    def get(self, request):
+        return None
+
+
+class Plain:
+    pass
+"""
+
+_API: Final = (
+    """\
+# A class of Moved's name, whose lines hold those of Moved's method.
+
+class Moved:
+    \"\"\"Not the class that site_impl defines.
+
+    It is replaced below.
+    \"\"\"
+
+
+from site_impl import Moved, Plain  # noqa: E402, F811
+
+Moved.__module__ = "site_api"
+Plain.__module__ = "site_api"
+"""
+    + "\n".join(f"LINE_{n} = {n}" for n in range(5, 15))
+    + "\n"
+)
+
+_TWICE: Final = """\
+from django.urls import path
+
+import site_views
+
+urlpatterns = [path("p/", site_views.page)]
 """
 
 _NESTED: Final = """\
@@ -211,7 +390,7 @@ import site_views
 urlpatterns = [path("leaf/", site_views.Page.as_view())]
 """
 
-# A URLconf that includes itself, which Django never finishes resolving.
+# A URLconf that includes itself, which Django serves at every depth.
 _LOOP: Final = """\
 from django.urls import include, path
 
@@ -226,10 +405,11 @@ from django.urls import path
 
 import site_views
 import vendorlib.wrap
+from neolith._serving import _LINKS
+from shop import views as shop_views
 
 
-def layered(count):
-    view = site_views.page
+def layered(count, view=site_views.page):
     for _ in range(count):
         view = vendorlib.wrap.wrapped(view)
     return view
@@ -238,23 +418,55 @@ def layered(count):
 urlpatterns = [
     path("inside/", layered(60)),
     path("past/", layered(70)),
+    path("edge/project/", layered(_LINKS)),
+    path("edge/hosted/", layered(_LINKS, shop_views.page)),
+    path("beyond/project/", layered(_LINKS + 1)),
+    path("beyond/hosted/", layered(_LINKS + 1, shop_views.page)),
 ]
 """
 
 # An admin class of the project's that overrides a view, so the link
-# Django's admin wrapper keeps leads to the project's code.
+# Django's admin wrapper keeps leads to the project's code, and adds views of
+# its own; and one that no site registers, which W001 does not report.
 _ADMIN: Final = """\
 from django.contrib import admin
+from django.urls import path
 
 from legacy.models import Thing
 
 
-class ThingAdmin(admin.ModelAdmin):
+class Mixin:
+    def mixed(self, request):
+        return None
+
+
+class ThingAdmin(Mixin, admin.ModelAdmin):
     def changelist_view(self, request, extra_context=None):
         return super().changelist_view(request, extra_context)
 
+    def get_urls(self):
+        def inner(request):
+            return None
+
+        return [
+            path("extra/", self.admin_site.admin_view(self.extra)),
+            path("bound/", self.extra),
+            path("mixed/", self.mixed),
+            path("inner/", inner),
+            *super().get_urls(),
+        ]
+
+    def extra(self, request):
+        return None
+
+
+class OtherAdmin(admin.ModelAdmin):
+    def other(self, request):
+        return None
+
 
 admin.site.register(Thing, ThingAdmin)
+OTHER = OtherAdmin(Thing, admin.site)
 """
 
 _LEGACY_APP: Final = """\
@@ -299,6 +511,11 @@ hosted = {
 source = _check_source.Source(hosted, _check._owner, settings_module="settings")
 found = _check_views.findings(source)
 again = _check_views.findings(source)
+full = [route for route, _ in _check_views.patterns(settings.ROOT_URLCONF)]
+entries = _check_views._ENTRIES
+_check_views._ENTRIES = 7
+capped = [route for route, _ in _check_views.patterns(settings.ROOT_URLCONF)]
+_check_views._ENTRIES = entries
 routes = {}
 for route, view in _check_views.patterns(settings.ROOT_URLCONF):
     walked = _check_views.codes(view)
@@ -310,7 +527,7 @@ for route, view in _check_views.patterns(settings.ROOT_URLCONF):
         ],
     })
 skipped = {}
-for value in ("broken", "absent", 5, None):
+for value in ("broken", "absent", 5, None, "no_patterns"):
     settings.ROOT_URLCONF = value
     skipped[repr(value)] = [f.message.msg for f in _check_views.findings(source)]
 print(json.dumps({
@@ -319,11 +536,14 @@ print(json.dumps({
     "apps": sorted({str(f.app) for f in found}),
     "routes": routes,
     "skipped": skipped,
+    "full": full[:20],
+    "capped": capped,
+    "depth": _check_views._DEPTH,
 }))
 """
 
 _OWNERS: Final = ("hosted", "legacy", "project", "library")
-_FORMS: Final = ("function", "as_view", "decorated", "method", "instance")
+_FORMS: Final = ("function", "as_view", "decorated", "method", "instance", "class")
 _BASES: Final = (
     *(f"{owner}-{form}" for owner in _OWNERS for form in _FORMS),
     "django-function",
@@ -364,6 +584,7 @@ _PROJECT_CODE: Final = {
     "decorated": ("class Guarded(", "site_views.Guarded"),
     "method": ("    def handle(", "site_views.Handler.handle"),
     "instance": ("class Callable:", "site_views.Callable"),
+    "class": ("class Callable:", "site_views.Callable"),
 }
 _WRAPPER: Final = ("    @functools.wraps(view)", "site_views.wrap.<locals>.wrapper")
 
@@ -404,9 +625,9 @@ def _line_of(text: str, start: str) -> int:
     return found[0]
 
 
-def _finding(route: str, line: int, name: str) -> str:
+def _finding(route: str, line: int, name: str, file: str = "site_views.py") -> str:
     return (
-        f"site_views.py:{line}: neolith.W102 URL pattern {route!r}: view {name} is "
+        f"{file}:{line}: neolith.W102 URL pattern {route!r}: view {name} is "
         "the project's code in no installed app; a request it serves has no "
         f"calling app, and a contract call from it is refused; {_HINT}"
     )
@@ -425,6 +646,12 @@ def ran(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
     project.write("legacy/views.py", _VIEWS)
     project.write("site_views.py", _VIEWS)
     project.write("site_admin.py", _ADMIN)
+    project.write("site_more.py", _MORE)
+    project.write("site_impl.py", _IMPL)
+    project.write("site_api.py", _API)
+    project.write("twice.py", _TWICE)
+    project.write("empty.py", "# A URLconf with no patterns.\n")
+    project.write("no_patterns.py", "import site_views  # noqa: F401\n")
     project.write("composed.py", _COMPOSED)
     project.write("nested.py", _NESTED)
     project.write("deeper.py", _DEEPER)
@@ -458,6 +685,8 @@ def ran(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
     assert done.status == 0, done.stderr
     result: dict[str, Any] = json.loads(done.stdout)
     result["site_views"] = project.root.joinpath("site_views.py").read_text()
+    result["site_more"] = project.root.joinpath("site_more.py").read_text()
+    result["site_admin"] = project.root.joinpath("site_admin.py").read_text()
     result["database files"] = sorted(p.name for p in project.root.glob("*.sqlite3"))
     return result
 
@@ -526,12 +755,24 @@ def test_the_walk_ends_where_label_of_ends(ran: dict[str, Any]) -> None:
             assert (walked[-1] is None) == (one["label"] is None), route
 
 
-def test_includes_are_followed_with_the_whole_route(ran: dict[str, Any]) -> None:
+def test_every_other_pattern_is_reported_at_its_innermost_project_code(
+    ran: dict[str, Any],
+) -> None:
+    """Includes are followed with the whole route, one URLconf included at
+    two prefixes is reported at both, and a class is placed at the one
+    definition that is the class, or at line 1 of the module it names when
+    that file does not hold it.
+    """
     text = ran["site_views"]
+    more = ran["site_more"]
     page = _line_of(text, "def page(")
     view = _line_of(text, "class Page(")
+    callable_ = _line_of(text, "class Callable:")
+    bare = _line_of(more, "    class Bare:") if sys.version_info >= (3, 13) else 1
     others = sorted(
-        line for line in ran["lines"] if " URL pattern 'composed/" not in line
+        line
+        for line in ran["lines"]
+        if " URL pattern 'composed/" not in line and " URL pattern 'lazy/" not in line
     )
     assert others == sorted(
         [
@@ -539,9 +780,63 @@ def test_includes_are_followed_with_the_whole_route(ran: dict[str, Any]) -> None
             _finding("nested/deeper/leaf/", view, "site_views.Page"),
             _finding("listed/page/", page, "site_views.page"),
             _finding("loop/leaf/", page, "site_views.page"),
+            _finding("a/p/", page, "site_views.page"),
+            _finding("b/p/", page, "site_views.page"),
             _finding("deep/inside/", page, "site_views.page"),
+            _finding("deep/edge/project/", page, "site_views.page"),
+            _finding(
+                "unregistered/",
+                _line_of(ran["site_admin"], "    def other("),
+                "site_admin.OtherAdmin.other",
+                "site_admin.py",
+            ),
+            _finding(
+                "partial/project/",
+                _line_of(more, "class Part("),
+                "site_more.Part",
+                "site_more.py",
+            ),
+            _finding(
+                "partial/hosted/",
+                _line_of(more, "class Part("),
+                "site_more.Part",
+                "site_more.py",
+            ),
+            _finding(
+                "twice/called/",
+                _line_of(more, "    class Twice:"),
+                "site_more.Twice",
+                "site_more.py",
+            ),
+            _finding("twice/bare/", bare, "site_more.Bare", "site_more.py"),
+            _finding(
+                "kept/", _line_of(more, "@keep"), "site_more.Kept", "site_more.py"
+            ),
+            _finding(
+                "outer/",
+                _line_of(more, "    class Inner:"),
+                "site_more.Outer.Inner",
+                "site_more.py",
+            ),
+            _finding(
+                "again/",
+                _line_of(more, "    class Again:"),
+                "site_more.Again",
+                "site_more.py",
+            ),
+            _finding("gone/", 1, "site_more.Gone", "site_more.py"),
+            _finding(
+                "factory/",
+                _line_of(more, "    class Made:"),
+                "site_more.factory.<locals>.Made",
+                "site_more.py",
+            ),
+            _finding("moved/methods/", 1, "site_api.Moved", "site_api.py"),
+            _finding("moved/bare/", 1, "site_api.Plain", "site_api.py"),
+            _finding("made/", 1, "site_views.made"),
         ]
     )
+    assert callable_ > 1
 
 
 def test_an_include_of_a_urlconf_inside_itself_is_read_once(
@@ -549,6 +844,26 @@ def test_an_include_of_a_urlconf_inside_itself_is_read_once(
 ) -> None:
     loop = sorted(route for route in ran["routes"] if route.startswith("loop/"))
     assert loop == ["loop/leaf/"]
+    assert not [route for route in ran["routes"] if route.startswith("self/")]
+
+
+def test_the_walk_ends_at_its_bounds(ran: dict[str, Any]) -> None:
+    """A URLconf built anew at each include is followed ``_DEPTH`` includes
+    deep, and the walk reads no more than ``_ENTRIES`` entries: here 7, the
+    first an include.
+    """
+    lazy = sorted(route for route in ran["routes"] if route.startswith("lazy/"))
+    assert lazy == sorted("lazy/" + "a/" * k + "p/" for k in range(ran["depth"]))
+    assert ran["capped"] == ran["full"][:6]
+
+
+def test_an_entry_that_cannot_be_read_is_passed_over(ran: dict[str, Any]) -> None:
+    """An include of a URLconf with no patterns, and a route that cannot be
+    shown, are passed over; the patterns around them are still reported.
+    """
+    assert not [r for r in ran["routes"] if r.startswith(("empty/", "unnamed/"))]
+    assert "made/" in ran["routes"]
+    assert "lazy/p/" in ran["routes"]
 
 
 def test_a_walk_past_the_links_label_of_follows_is_not_reported(
@@ -560,12 +875,26 @@ def test_a_walk_past_the_links_label_of_follows_is_not_reported(
     assert inside["label"] is None
     assert inside["walked"] is not None
     assert inside["walked"][-1] is None
+    # At the bound exactly: label_of still reads the innermost code, and so
+    # does the walk; one link past it, neither does.
+    for owner, label in (("project", None), ("hosted", "shop")):
+        [edge] = ran["routes"][f"deep/edge/{owner}/"]
+        assert edge["label"] == label
+        assert edge["walked"] is not None
+        assert edge["walked"][-1] == label
+        assert ran["routes"][f"deep/beyond/{owner}/"] == [
+            {"label": None, "walked": None}
+        ]
 
 
 def test_admin_views_are_left_to_w001(ran: dict[str, Any]) -> None:
     """Django's admin views of a project admin class serve as no app and are
     ``neolith.W001``'s; its own views serve as the admin app. None is
-    reported here, though the project's class overrides a view.
+    reported here, though the project's class overrides a view and adds its
+    own: a method behind the admin site's wrapper or bare, one it inherits
+    from a class that is not an admin, and a function defined in the class.
+    An admin class no site registers is not W001's, and its method is
+    reported (above).
     """
     admin = {
         route: seen
@@ -579,6 +908,9 @@ def test_admin_views_are_left_to_w001(ran: dict[str, Any]) -> None:
         for one in seen
     ]
     assert changelist == [{"label": None, "walked": None}]
+    for added in ("extra", "bound", "mixed", "inner"):
+        [seen] = admin[f"admin/legacy/thing/{added}/"]
+        assert seen == {"label": None, "walked": None}, added
     assert not [line for line in ran["lines"] if "'admin/" in line]
 
 
@@ -590,8 +922,14 @@ def test_a_second_run_gives_the_same_lines(ran: dict[str, Any]) -> None:
     assert ran["again"] == ran["lines"]
 
 
-def test_nothing_is_reported_when_root_urlconf_is_missing_or_does_not_import(
+def test_nothing_is_reported_when_root_urlconf_is_missing_or_unreadable(
     ran: dict[str, Any],
 ) -> None:
-    assert ran["skipped"] == {"'broken'": [], "'absent'": [], "5": [], "None": []}
+    assert ran["skipped"] == {
+        "'broken'": [],
+        "'absent'": [],
+        "5": [],
+        "None": [],
+        "'no_patterns'": [],
+    }
     assert ran["database files"] == []

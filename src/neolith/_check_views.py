@@ -16,24 +16,39 @@ callable its own or its type's code. So Django's generic views,
 ``static.serve`` and a library's views are not reported, while a view of the
 project's, under any wrapper, and a wrapper of the project's around one of
 those, are. The finding is placed at the innermost such code: a function's
-first line, or a class's.
+first line in the file its code was compiled from, or a class's first line
+in the file of the module it names (as ``label_of`` judges it), each at line
+1 when that file does not hold it.
 
-Not reported: an admin view Django builds for a ``ModelAdmin``, which
-``neolith.W001`` reports when its class is the project's; a walk deeper than
-``label_of`` follows; an entry of a URLconf that is neither Django's
-``URLPattern`` nor its ``URLResolver``; and an include of a URLconf inside
-itself, which Django never finishes resolving either. Nothing is reported
-when ``ROOT_URLCONF`` is not set or does not import, which the host's own
-check reports (ADR 0030 Decision 7, phase 4).
+Not reported, as blind spots:
+
+- an admin's view that ``neolith.W001`` reports: one Django builds for a
+  ``ModelAdmin``, a method bound to an admin whose class W001 names, and a
+  function defined in such a class;
+- a walk deeper than ``label_of`` follows;
+- an entry of a URLconf that is neither Django's ``URLPattern`` nor its
+  ``URLResolver``, and one whose route, view or patterns cannot be read
+  (Django raises at the first request that reaches it);
+- an include of a URLconf inside itself: the walk reads it once, under its
+  shortest route, though Django serves it at every depth;
+- an include nested more than ``_DEPTH`` deep, and every entry after the
+  first ``_ENTRIES`` read, so that a URLconf built lazily without end does
+  not keep the walk going.
+
+Nothing is reported when ``ROOT_URLCONF`` is not set or does not import,
+which the host's own check reports (ADR 0030 Decision 7, phase 4), nor when
+its patterns cannot be read, which Django raises at the first request.
 """
 
+import ast
 import functools
-import inspect
+import itertools
 import os
+import sys
 import types
 from collections.abc import Iterator
 from importlib import import_module
-from typing import Any, Final, NamedTuple
+from typing import TYPE_CHECKING, Any, Final, NamedTuple
 
 from django.apps import apps as global_apps
 from django.core import checks
@@ -42,9 +57,16 @@ from neolith import _naming, _serving
 from neolith._check import Finding, place, shown
 from neolith._check_source import Source
 
+if TYPE_CHECKING:
+    from django.urls import URLResolver
+
 __all__ = ["Code", "codes", "findings", "patterns"]
 # The end of a list of patterns, as the walk reads it.
 _END: Final = object()
+# The deepest include the walk follows, and the most entries it reads.
+_DEPTH: Final = 64
+_ENTRIES: Final = 100_000
+_ADMIN_CLASS: Final = ": admin class"
 _HINT: Final = (
     "move the view into the app whose work it does, so that its requests run "
     "in that app's root"
@@ -75,11 +97,12 @@ def findings(source: Source) -> list[Finding]:
     except Exception:  # reported by the host's own check, phase 4
         return []
     first_party = source.map()
+    admins = _reported_admins()
     found: list[Finding] = []
     for route, view in patterns(name):
         if _serving.label_of(view) is not None:
             continue
-        walked = codes(view)
+        walked = codes(view, admins)
         if walked is None:
             continue
         own = [
@@ -108,50 +131,76 @@ def findings(source: Source) -> list[Finding]:
 def patterns(urlconf: str) -> Iterator[tuple[str, object]]:
     """Each URL pattern reachable from the URLconf ``urlconf``, as its whole
     route and its view, in the order Django tries them. An include of a
-    URLconf inside itself is not followed again.
+    URLconf inside itself is not followed again; an entry that cannot be
+    read is passed over; the walk ends at the bounds the module states.
     """
     from django.urls import URLPattern, URLResolver, get_resolver
 
-    root = get_resolver(urlconf)
+    try:
+        root = get_resolver(urlconf)
+        first = _entries(root)
+        start = (id(root.urlconf_module),)
+    except Exception:  # Django raises it when it serves
+        return
     # Each entry: the patterns left to read, the route so far, and the
     # URLconfs it is included from. The walk keeps its own stack, so no
     # depth of includes ends it with RecursionError.
-    stack: list[tuple[Iterator[object], str, tuple[int, ...]]] = [
-        (iter(list(root.url_patterns)), "", (id(root.urlconf_module),))
-    ]
-    while stack:
-        entries, prefix, within = stack[-1]
-        entry = next(entries, _END)
-        if entry is _END:
+    stack: list[tuple[Iterator[object], str, tuple[int, ...]]] = [(first, "", start)]
+    for _ in range(_ENTRIES):
+        found: tuple[str, object] | None = None
+        while stack:
+            entries, prefix, within = stack[-1]
+            entry = next(entries, _END)
+            if entry is not _END:
+                break
             stack.pop()
-            continue
-        if isinstance(entry, URLPattern):
-            yield f"{prefix}{entry.pattern}", entry.callback
-        elif isinstance(entry, URLResolver):
-            module = entry.urlconf_module
-            if id(module) in within:
-                continue
-            stack.append(
-                (
-                    iter(list(entry.url_patterns)),
-                    f"{prefix}{entry.pattern}",
-                    (*within, id(module)),
-                )
-            )
+        else:
+            return
+        try:
+            if isinstance(entry, URLPattern):
+                found = f"{prefix}{entry.pattern}", entry.callback
+            elif isinstance(entry, URLResolver) and len(stack) <= _DEPTH:
+                module = entry.urlconf_module
+                if id(module) not in within:
+                    stack.append(
+                        (
+                            _entries(entry),
+                            f"{prefix}{entry.pattern}",
+                            (*within, id(module)),
+                        )
+                    )
+        except Exception:  # Django raises it when it serves
+            found = None
+        if found is not None:
+            yield found
 
 
-def codes(view: object) -> list[Code] | None:
+def _entries(resolver: "URLResolver") -> Iterator[object]:
+    """The patterns of ``resolver``, read once and never more than the walk
+    reads in all.
+    """
+    return iter(list(itertools.islice(resolver.url_patterns, _ENTRIES)))
+
+
+def codes(view: object, admins: frozenset[str] | None = None) -> list[Code] | None:
     """The code a request to ``view`` runs, outermost first, read along the
     links ``label_of`` follows and ending where it ends; ``None`` for an
-    admin view Django builds for a ``ModelAdmin``, and for a walk deeper
-    than ``label_of`` follows.
+    admin's view that ``neolith.W001`` reports and for a walk deeper than
+    ``label_of`` follows. ``admins`` holds the classes W001 names, as
+    ``_reported_admins`` gives them; ``None`` reads them now.
     """
+    if admins is None:
+        admins = _reported_admins()
     walked: list[Code] = []
     # As label_of: one link per step, and the step past its bound has no
     # app.
     for _ in range(_serving._LINKS + 1):
         kind = type(view)
         if kind is types.MethodType:
+            if admins:
+                owner = _serving.admin_code(view.__self__)[1]  # type: ignore[attr-defined]
+                if owner is not None and owner.removesuffix(_ADMIN_CLASS) in admins:
+                    return None
             view = view.__func__  # type: ignore[attr-defined]
             continue
         if kind is functools.partial:
@@ -165,7 +214,11 @@ def codes(view: object) -> list[Code] | None:
             return walked
         function: types.FunctionType = view  # type: ignore[assignment]
         attributes = vars(function)  # safe read: an exact function's own dict
-        walked.append(Code(_serving._globals_name(function), function))
+        module = _serving._globals_name(function)
+        name = f"{module}.{_serving._CODE.__get__(function).co_qualname}"
+        if any(name.startswith(f"{admin}.") for admin in admins):
+            return None
+        walked.append(Code(module, function))
         if _serving._app_code(function):
             return walked
         if _serving._CODE.__get__(function) is _serving._AS_VIEW:
@@ -185,6 +238,27 @@ def codes(view: object) -> list[Code] | None:
     return None
 
 
+def _reported_admins() -> frozenset[str]:
+    """``<module>.<qualname>`` of each admin class that ``neolith.W001``
+    names: of an admin registered on an admin site whose code is in no
+    installed app, read as ``_checks.admin_check`` reads it.
+    """
+    sites = sys.modules.get("django.contrib.admin.sites")
+    if sites is None:
+        return frozenset()
+    found: set[str] = set()
+    held = _naming.module_dict(sites) or {}
+    for site in list(_naming.entry(held, "all_sites", ())):  # type: ignore[call-overload]
+        registry = _naming.entry(_naming.instance_dict(site) or {}, "_registry")
+        if type(registry) is not dict:
+            continue
+        for admin in list(registry.values()):
+            label, code = _serving.admin_code(admin)
+            if label is None and code is not None:
+                found.add(code.removesuffix(_ADMIN_CLASS))
+    return frozenset(found)
+
+
 def _named(code: Code) -> str:
     """``<module>.<qualname>`` of a function or a class. A function is named
     by its code, which ``functools.wraps`` never changes, not by the
@@ -197,20 +271,75 @@ def _named(code: Code) -> str:
 
 def _line(thing: object, path: str) -> int:
     """The first line of a function or a class in the file ``path``; 1 when
-    it is not read from that file.
+    that file does not hold it.
     """
-    if type(thing) is types.FunctionType:
-        found = _serving._CODE.__get__(thing)
-        file, line = found.co_filename, found.co_firstlineno
-    else:
-        try:
-            file = inspect.getsourcefile(thing)  # type: ignore[arg-type]
-            line = inspect.getsourcelines(thing)[1]  # type: ignore[arg-type]
-        except (OSError, TypeError, SyntaxError, ValueError):
-            # inspect reads the file again, which may have changed since.
+    if type(thing) is not types.FunctionType:
+        return _class_line(thing, path)  # type: ignore[arg-type]
+    found = _serving._CODE.__get__(thing)
+    return max(found.co_firstlineno, 1) if _same(found.co_filename, path) else 1
+
+
+def _class_line(klass: type, path: str) -> int:
+    """The first line of the class ``klass`` in the file ``path``, its first
+    decorator's if it has one: of the one definition there with its
+    qualified name that agrees with the class, by its ``__firstlineno__``
+    (Python 3.13 and later) and by the lines of the functions defined in its
+    body; 1 when no definition or more than one agrees, or when such a
+    function was compiled from another file.
+    """
+    held = _naming.namespace(klass)
+    qualname = _naming.qualname(klass, None)
+    lines: list[int] = []
+    for value in list(held.values()):
+        if type(value) in (staticmethod, classmethod):
+            value = value.__func__
+        if type(value) is not types.FunctionType:
+            continue
+        code = _serving._CODE.__get__(value)
+        if not code.co_qualname.startswith(f"{qualname}."):
+            continue
+        if not _same(code.co_filename, path):
             return 1
+        lines.append(code.co_firstlineno)
     try:
-        same = file is not None and os.path.samefile(file, path)
+        with open(path, "rb") as file:
+            tree = ast.parse(file.read())
+    except (OSError, SyntaxError, ValueError):
+        return 1
+    first = _naming.entry(held, "__firstlineno__")
+    found = [
+        (start, end)
+        for start, end in _definitions(tree, qualname)
+        if (type(first) is not int or start == first)
+        and all(start <= line <= end for line in lines)
+    ]
+    return found[0][0] if len(found) == 1 else 1
+
+
+def _definitions(tree: ast.AST, qualname: str) -> Iterator[tuple[int, int]]:
+    """The first and last lines of each class statement in ``tree`` with the
+    qualified name ``qualname``, from its first decorator.
+    """
+    stack: list[tuple[ast.AST, str]] = [(tree, "")]
+    while stack:
+        node, prefix = stack.pop()
+        for child in ast.iter_child_nodes(node):
+            inner = prefix
+            if isinstance(child, ast.ClassDef):
+                inner = f"{prefix}{child.name}"
+                if inner == qualname:
+                    starts = [d.lineno for d in child.decorator_list]
+                    end = child.end_lineno or child.lineno
+                    yield min([child.lineno, *starts]), end
+                inner += "."
+            elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                inner = f"{prefix}{child.name}.<locals>."
+            stack.append((child, inner))
+
+
+def _same(file: object, path: str) -> bool:
+    """Whether ``file`` names the file at ``path``."""
+    try:
+        return type(file) is str and os.path.samefile(file, path)
     except (OSError, ValueError):
-        same = False
-    return max(line, 1) if same else 1
+        return False
