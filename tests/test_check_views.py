@@ -671,6 +671,9 @@ urlpatterns = [path("again/", include("loop")), path("leaf/", site_views.page)]
 
 # A chain of library wrappers inside and past the links label_of follows.
 _DEEP: Final = """\
+import functools
+import types
+
 from django.urls import path
 
 import site_views
@@ -689,10 +692,14 @@ def parted(request):
     return None
 
 
-# The project's function, then _LINKS library wrappers: the view is one
-# link past them. (Exact partials cannot make the chain: a partial of a
-# partial is flattened into one.)
-parted.__wrapped__ = layered(_LINKS)
+# The project's function, then _LINKS links that are not functions: bound
+# methods and exact partials in turn (a partial of a partial is flattened
+# into one, a partial of a bound method is not). The view is one link past
+# them, so the walk holds only this function when the bound runs out.
+chain = site_views.page
+for i in range(_LINKS):
+    chain = functools.partial(chain) if i % 2 else types.MethodType(chain, object())
+parted.__wrapped__ = chain
 
 
 urlpatterns = [
@@ -1330,9 +1337,9 @@ def test_a_walk_past_the_links_label_of_follows_is_not_reported(
         assert ran["routes"][f"deep/beyond/{owner}/"] == [
             {"label": None, "walked": None}
         ]
-    # A project function, then library wrappers past the bound: the walk
-    # holds that one function of the project's when the bound runs out, and
-    # still reports nothing.
+    # A project function, then bound methods and partials past the bound:
+    # the walk holds that one function when the bound runs out, and still
+    # reports nothing.
     assert ran["routes"]["deep/beyond/partials/"] == [{"label": None, "walked": None}]
     assert not [line for line in ran["lines"] if "'deep/beyond/" in line]
 
