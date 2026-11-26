@@ -115,7 +115,7 @@ _BOOT_HINT: Final = (
 )
 
 
-@dataclasses.dataclass(frozen=True, slots=True)
+@dataclasses.dataclass(slots=True)
 class App:
     """What one hosted app's code is judged against.
 
