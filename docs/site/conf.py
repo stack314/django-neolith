@@ -17,7 +17,8 @@ from scripts import docs  # noqa: E402
 project = "Neolith"
 copyright = "django-neolith contributors"
 version = release = neolith.__version__
-development = ".dev" in neolith.__version__
+# A development build carries noindex and the banner; publish always builds one.
+development = docs.development_version(neolith.__version__)
 
 extensions = [
     "myst_parser",

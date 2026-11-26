@@ -37,9 +37,9 @@ from dataclasses import dataclass, field
 from typing import Any, NoReturn, final
 
 from neolith import _naming
-from neolith._crossing import _DEPTH, _deeper_than
 from neolith._frozen import once
 from neolith._jcs import canonical, canonical_text
+from neolith._nesting import deeper_than
 from neolith._portable import SAFE_INTEGER_MAX, text_problem
 
 __all__ = ["CallContext", "Principal", "UsageError"]
@@ -243,7 +243,7 @@ def read_principal(form: bytes) -> Principal:
         raise ValueError("the principal is not UTF-8 text") from None
     # Judged before the json module reads it, which recurses on the C stack,
     # so no thread's stack decides the outcome (#125).
-    if _deeper_than(form, _DEPTH):
+    if deeper_than(form):
         raise ValueError("the principal is not a principal object")
     try:
         value = json.loads(

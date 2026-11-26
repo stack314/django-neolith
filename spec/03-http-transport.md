@@ -1,6 +1,6 @@
 # 03. HTTP transport
 
-**Status:** outline.
+**Status:** draft. The call context, errors, sending a call and reading its response, receiving a call, projection, the calling app and the principal, shared-secret tokens and health are specified. Addressing is described.
 
 **HTTP-1.** This is the default network transport, REQUIRED in every implementation.
 
@@ -71,7 +71,7 @@ A *contract path* is the path of an action of a contract version the host provid
 
 **HTTP-19.** A connector MUST take an error's kind from a neolith error body only, never from the status. A response whose status is not a success (2xx) and that carries no neolith error body therefore fails the call with `unavailable`. Examples are a 404 from a host that does not provide that contract version, which is not a contract path, a redirect, or an error page from a proxy. A success response is a reply only as 200 with the reply's JSON text, for an action whose reply is not empty, or as 204, for an action whose reply is empty ([ADR 0011](../docs/adr/0011-the-host-serves-contract-endpoints-itself.md) Decision 4). Any other success response, and one whose body is not a valid reply, fails the call with `internal` (TRN-18), and so does a neolith error body that cannot be read against the contract (CON-49), apart from an error of a kind the caller does not know (CON-28).
 
-A caller reads a reply and a neolith error body as a network receiver reads any text (CON-42), before it reads them against the contract. A body that is not UTF-8, or is nested deeper than the caller's JSON reader admits (RFC 8259, sections 8.1 and 9), is not JSON text to the caller, so it carries no neolith error body. Whether a body carries one is judged on its members as written, so a body with `kind` written twice, once as a string, carries one that cannot be read. A neolith error body has exactly the members `kind`, `message` and, for an error that carries a detail, `data`, whose value is the detail record's JSON text as the provider wrote it. One that is not I-JSON, holds another member, or has no `message` that is a string cannot be read. For a kind the caller does not know, a body without `data` is that error without a detail, and a `data` that is not a JSON object, `null` included, is a detail that breaks CON-30, so the caller receives `internal` (CON-49).
+A caller reads a reply and a neolith error body as a network receiver reads any text (CON-42), before it reads them against the contract. A body that is not UTF-8, or is nested deeper than the caller's JSON reader admits (RFC 8259, sections 8.1 and 9; CON-52), is not JSON text to the caller, so it carries no neolith error body. Whether a body carries one is judged on its members as written, so a body with `kind` written twice, once as a string, carries one that cannot be read. A neolith error body has exactly the members `kind`, `message` and, for an error that carries a detail, `data`, whose value is the detail record's JSON text as the provider wrote it. One that is not I-JSON, holds another member, or has no `message` that is a string cannot be read. For a kind the caller does not know, a body without `data` is that error without a detail, and a `data` that is not a JSON object, `null` included, is a detail that breaks CON-30, so the caller receives `internal` (CON-49).
 
 ## Sending a call and reading its response
 
@@ -215,8 +215,6 @@ For example, with the example secret `000102030405060708090a0b0c0d0e0f1011121314
 ```
 Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6Im5lb2xpdGgrand0Iiwia2lkIjoib3JkZXJzLTEifQ.eyJpc3MiOiJvcmRlcnMiLCJhdWQiOiJpbnZlbnRvcnkudjEiLCJpYXQiOjE3NjcyMjU2MDAsImV4cCI6MTc2NzIyNTkwMH0.AhMk-cm_SInC6ek-6CLP8pN7ciQFHuGb-i2MSGu3efU
 ```
-
-The rest of this section becomes requirements, with IDs and tests, with the HTTP transport in roadmap step 5 (#12). The allow-list joins the app declaration in step 4 (#11).
 
 ## Health
 

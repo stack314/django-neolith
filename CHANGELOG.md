@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.0a4] - 2026-11-26
+
+### Added
+
+- The check before deployment (roadmap step 7, spec 05, [ADR 0030](docs/adr/0030-the-boundary-check-uses-the-standard-library-only.md), [ADR 0035](docs/adr/0035-the-boundary-check-reads-every-name-python-imports.md)): `neolith check <app> [<app> ...] --settings <module>`, or `manage.py checkapps` in a host built by a settings module, sets the host up, runs Boot's checks that read no database, and reports what the hosted apps do across an app boundary, one line per finding and a summary line, with status 0, 1 or 2. It opens no database connection itself and refuses any while it runs (under `manage.py checkapps`, only once Django has loaded the apps), adds no dependency, and reads each hosted app's source once with Python's own parser. It reports, as errors, an import of another hosted app's modules outside its contract package (`neolith.E101`), of an undeclared app's models, a contrib app's included (`neolith.E102`), or of first-party code in no hosted app, an undeclared app's included, that reaches either (`neolith.E103`); a contract package that imports its own app's internals, directly or through such code (`neolith.E104`); a module that defines a contract, record or enum, or a package `__init__.py` above one, and also defines a model or holds an implementation, which leaves it out of the contract package (`neolith.E105`); a relation to another app's model (`neolith.E106`) and a proxy of another app's model or a table name equal to its table (`neolith.E107`); `connect()` naming a contract version outside `requires` (`neolith.E108`); a database alias of another hosted app or `default`, named or left out (`neolith.E109`); `command_scope()` for another app (`neolith.E110`); another app's model or config named by a string (`neolith.E111`); and a file or directory that cannot be read, or a file that cannot be compiled (`neolith.E112`). It warns of a call it cannot read because of a computed argument (`neolith.W101`), the project's own views in no app (`neolith.W102`), `neolith.testing.boot()` outside a test module (`neolith.W103`), a module with no Python source (`neolith.W104`), and an undeclared app's reach into a hosted app (`neolith.W105`). An app listed in `[tool.neolith] boundary-report-only` in `pyproject.toml` has its errors printed without failing the check, and a listed app with no error finding is `neolith.E113`.
+
+### Fixed
+
+- Every JSON text from a network is judged by one nesting scan before the `json` module reads it: bodies and the `Neolith-Principal` header at 256 levels (CON-52), a token's header and claims at 64 (HTTP-7).
+- The refusal of two database aliases that name one database, and `neolith.E018`, no longer print connection settings or a SQLite path. Two server aliases whose `HOST` or `PORT` differ only in a form the backends read alike (`PORT` `"5432"` and `5432`, or `"0"` and absent) are refused, and a `HOST` that is not a string no longer makes the builder raise `TypeError`.
+- A `str`-subclass key in a database `TEST` dict, a `NAME` that is a subclass of a `pathlib` path, and a SQLite `NAME` whose path cannot be resolved are refused, instead of raising or running their code.
+- A settings difference inside a list whose entries raise when compared is reported by its path alone, instead of the entry's exception.
+- For an identity Resolve tells you to remove, set-up no longer also suggests naming `local-first` or adding a signing key to call it.
+- A config class whose metaclass keeps neolith from setting `default`, such as a read-only `default` property, is refused with a `DeclarationError` that names the attribute, not a raw `AttributeError`.
+
 ## [0.1.0a3] - 2026-11-19
 
 ### Added
@@ -70,7 +85,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Each app's database (spec 05, [ADR 0009](docs/adr/0009-one-database-alias-per-app.md)): a hosted app that declares the `database` resource lives on its own alias, named by its label. `neolith.routers.AppRouter` keeps its models there and sends every other label to `default`, from labels alone: reads, writes and migrations go to the label's home, and relations are allowed only within one home, so two apps cannot share a transaction. Set-up refuses a hosted app with models and no `database` (`neolith.E014`) and a table name that `default`'s backend shortened (`neolith.E017`).
 - Runtime dependency on Pydantic v2 ([ADR 0006](docs/adr/0006-contracts-are-typed-and-published-as-openapi.md)).
 
-[Unreleased]: https://github.com/stack314/django-neolith/compare/v0.1.0a3...main
+[Unreleased]: https://github.com/stack314/django-neolith/compare/v0.1.0a4...main
+[0.1.0a4]: https://github.com/stack314/django-neolith/releases/tag/v0.1.0a4
 [0.1.0a3]: https://github.com/stack314/django-neolith/releases/tag/v0.1.0a3
 [0.1.0a2]: https://github.com/stack314/django-neolith/releases/tag/v0.1.0a2
 [0.1.0a1]: https://github.com/stack314/django-neolith/releases/tag/v0.1.0a1

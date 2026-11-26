@@ -1,6 +1,6 @@
 # 01. Contracts
 
-**Status:** draft. Identity, actions, the portable type system, errors, publication and checking are specified. How the provider's host and the connectors deliver errors follows [ADR 0008](../docs/adr/0008-typed-contract-errors-in-both-modes.md); a principal with no valid sent form fails the call at the caller (CON-51); one that cannot be resolved joins that requirement with the host that resolves principals (roadmap step 4, #11).
+**Status:** draft. Identity, actions, the portable type system, errors, publication and checking are specified. How the provider's host and the connectors deliver errors follows [ADR 0008](../docs/adr/0008-typed-contract-errors-in-both-modes.md); a principal with no valid sent form fails the call at the caller (CON-51); one that cannot be resolved fails the same way (APP-54, APP-55).
 
 ## Identity and versioning
 
@@ -97,6 +97,8 @@ Values travel as JSON text (RFC 8259), with each form written as below ([ADR 001
 
 **CON-42.** A receiver MUST refuse a body that holds a duplicate member name, a lone surrogate or a number outside the range of a double.
 
+**CON-52.** A receiver MUST refuse a body whose arrays and objects nest more than 256 levels deep, and judge that depth before a reader that recurses reads the body (RFC 8259, section 9, lets a parser limit nesting). A receiver whose reader admits less refuses a shallower body too.
+
 Text may hold a noncharacter, such as U+FFFF, as CON-25 and CON-30 allow, although I-JSON (RFC 7493, section 2.1) excludes it.
 
 ## Errors
@@ -154,7 +156,7 @@ The provider's host and the connectors deliver errors as [ADR 0008](../docs/adr/
 
 **CON-49.** A caller MUST receive as `internal` an error that arrives but cannot be read against its contract: a standard kind with a detail, a declared kind without a detail its record reads, an unknown kind whose detail breaks CON-30, or a kind or a message that breaks CON-22 or CON-25.
 
-**CON-51.** A caller's host MUST fail a call whose principal has no valid sent form ([03](03-http-transport.md)) with `internal`, at the step [ADR 0017](../docs/adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md) Decision 9 gives, so the call is never sent, in any mode. The message is that of CON-46, and the caller's host records the cause with the trace identifier. Whether a principal is valid is decided once for a scope, so every call made from it gets the same answer. A principal that cannot be resolved fails the same way; that joins this requirement with the host that resolves principals (roadmap step 4, #11).
+**CON-51.** A caller's host MUST fail a call whose principal has no valid sent form ([03](03-http-transport.md)) with `internal`, at the step [ADR 0017](../docs/adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md) Decision 9 gives, so the call is never sent, in any mode. The message is that of CON-46, and the caller's host records the cause with the trace identifier. Whether a principal is valid is decided once for a scope, so every call made from it gets the same answer. A principal that cannot be resolved fails the same way (APP-54, APP-55).
 
 Decision record: [0008](../docs/adr/0008-typed-contract-errors-in-both-modes.md).
 

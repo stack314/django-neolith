@@ -22,7 +22,7 @@
 
 </div>
 
-**Status: alpha (0.1.0a3). The API may change before 0.1.**
+**Status: alpha (0.1.0a4). The API may change before 0.1.**
 
 ```
 pip install --pre django-neolith
@@ -48,8 +48,11 @@ What this version does. The [changelog](https://github.com/stack314/django-neoli
 - **`local-first` routing.** `NEOLITH["ROUTING_POLICIES"]` can name `local-first` for a contract version with two or more providers, tried in order; an idempotent call moves to the next on `unavailable`, within its one deadline.
 - **Conformance suite.** Spec 06's suite runs each contract case over the in-process and the HTTP transports and checks that they give one outcome.
 - **One app alone.** `neolith run <app>` boots apps from their declarations and serves them, and `neolith migrate <app>` applies each app's migrations to its own database.
+- **Boundary check.** `neolith check <app> [<app> ...] --settings <module>`, or `manage.py checkapps` in a host built by a settings module, reports before deployment what the hosted apps do across an app boundary, such as a relation to another app's model; it opens no database connection itself and refuses any while it runs (under `manage.py checkapps`, only once Django has loaded the apps). An app listed in `[tool.neolith] boundary-report-only` in `pyproject.toml` is reported without failing the check.
 
-Not yet in this version: the boundary check (`neolith check`) and events. See the roadmap below.
+Not yet in this version: events. See the roadmap below.
+
+<!-- neolith-example:start -->
 
 ## A short example
 
@@ -172,6 +175,8 @@ $ neolith run inventory shop --settings deploy --bind 127.0.0.1:8000
 ```
 
 `neolith run` uses Django's development server, which is not for production; in production, serve a settings module like the one above with any WSGI or ASGI server. On `SIGINT` or `SIGTERM` it stops taking requests and gives each request in flight until `NEOLITH["REQUEST_DEADLINE"]`, or 30 seconds when that is `None`. Under another server, give its graceful shutdown a timeout no shorter than the request deadline. In a host built by a settings module, `manage.py migrateapps` is the migrate step, and `manage.py migrateapps --check` reports what the host would refuse at start-up.
+
+<!-- neolith-example:end -->
 
 ## Roadmap
 

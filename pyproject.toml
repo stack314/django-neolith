@@ -51,6 +51,9 @@ Changelog = "https://github.com/stack314/django-neolith/blob/main/CHANGELOG.md"
 # trustme: the HTTP client's TLS tests make a test authority at run time, so no
 # key is committed (ADR 0028 Decision 9). Test only; pinned so the
 # certificates it issues cannot drift.
+# grimp: the boundary check's import edges are compared with grimp's on
+# Django's package (ADR 0030). Test only; pinned so its reading cannot drift,
+# and only where it ships wheels, CPython 3.11 to 3.15.
 test = [
     "pytest>=8.4",
     "pytest-django>=4.11",
@@ -64,6 +67,7 @@ test = [
     "rfc3339-validator>=0.1.4",
     "griffe==2.4.1",
     "trustme==1.2.1",
+    "grimp==3.19; platform_python_implementation == 'CPython' and python_version < '3.16'",
 ]
 # sphinx, myst-parser and pydata-sphinx-theme: the documentation site, built
 # by scripts/docs.py (ADR 0024). Sphinx 9.2 needs Python 3.13, so on an older
@@ -106,6 +110,7 @@ include = [
     "/CONTRIBUTING.md",
     "/CODE_OF_CONDUCT.md",
     "/SECURITY.md",
+    "/wrangler.json",
 ]
 
 [tool.pytest.ini_options]

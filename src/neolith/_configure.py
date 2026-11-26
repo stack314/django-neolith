@@ -111,7 +111,7 @@ def configure(
     pairs = [(path, found) for path, found in read if type(found) is Declaration]
     _refuse(problems + _compared(pairs))
     declarations = [declaration for _, declaration in pairs]
-    from neolith._host import resolve
+    from neolith._host import refused_identities, resolve
 
     settings_given: dict[object, object] | None = (
         deployer if type(deployer) is dict else None
@@ -131,7 +131,9 @@ def configure(
         if settings_given is None:
             refusals.append(_not_settings(deployer))
         else:
-            refusals += _checks.neolith_problems(neolith, declarations)
+            refusals += _checks.neolith_problems(
+                neolith, declarations, refused=refused_identities(declarations, neolith)
+            )
     if refusals:
         raise DeclarationError("\n".join(sorted(refusals)))
     names, problems = _names(deployer)
@@ -279,8 +281,9 @@ def _deployer_problems(
 
 def _open_problems(neolith: object) -> list[str]:
     """The refusal of a ``default`` database in a host that must be closed."""
-    databases = neolith.get("DATABASES") if type(neolith) is dict else None
-    if type(databases) is dict and _databases.DEFAULT in databases:
+    # Read with _naming.entry, so that no key's own __eq__ runs.
+    databases = _naming.entry(neolith, "DATABASES") if type(neolith) is dict else None
+    if type(databases) is dict and _naming.holds(databases, _databases.DEFAULT):
         return [
             f"database {_databases.DEFAULT}: neolith run hosts declared apps only "
             "in 0.1"
@@ -447,7 +450,11 @@ def _difference(
             return f"{where or 'it'} is a {_type(found)}, the host builds a list"
         items: list[object] = found
         for index, (have, want) in enumerate(zip(items, expected, strict=False)):
-            if type(have) is not type(want) or have != want:
+            try:
+                different = type(have) is not type(want) or bool(have != want)
+            except Exception:
+                return f"{where}[{index}] is not the value the host builds"
+            if different:
                 if where:
                     return _inside(f"{where}[{index}]", have, want)
                 return f"entry {index} is {_repr(have)}, the host builds {want!r}"

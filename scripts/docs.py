@@ -6,6 +6,7 @@ Usage::
     python scripts/docs.py build   # stage, then build the HTML with Sphinx
     python scripts/docs.py check   # build, then check the HTML against the site rules
     python scripts/docs.py serve   # build, then serve it on http://127.0.0.1:8000/
+    python scripts/docs.py publish # check, then assemble the site under build/docs/site
 
 Building needs the ``docs`` dependency group, which needs Python 3.13 or newer.
 Staging and the checks need only the ``test`` group.
@@ -54,11 +55,24 @@ CSS, a link or anchor that leads nowhere, and a ``<main>`` without a heading
 or text (the search page is exempt). On pages the site writes or generates,
 it also refuses ``neolith._``, the word "official", the names and GitHub
 handles of the people the repository records, words about how the code is
-written, a command that installs the package or a requirement on it on a
-development build, a citation of an unknown or withdrawn requirement, record
-or document, and words about planned behaviour outside a ``{planned}``
-block, which exempts its text from that rule only. The word rules state
-forms, read case-insensitively, and are a backstop for review, not a proof.
+written, a command that installs the package or a requirement on it while
+``__version__`` is a ``.dev`` one, a citation of an unknown or withdrawn
+requirement, record or document, and words about planned behaviour outside
+a ``{planned}`` block, which exempts its text from that rule only. The word
+rules state forms, read case-insensitively, and are a backstop for review,
+not a proof.
+
+**Publish** is what Workers Builds runs for the ``neolith-docs`` Worker, whose
+configuration is ``wrangler.json``: it checks a development build, whatever
+``__version__`` says, since ``main`` carries a release's version (so a page
+of ``main`` may show the command that installs that release), and
+assembles the directory the Worker serves at ``BASE_PATH``. The HTML goes
+under ``dev/``, and the files of ``root_files`` at the top: ``_redirects``
+(the URL contract of ``REDIRECTS``), ``versions.json``, ``llms.txt`` and
+``404.html``. It then checks them: each file is there, each redirect line is
+valid, each URL of ``old_urls`` and each rule's source leads to a page, each
+link of ``llms.txt``, ``versions.json`` and ``404.html`` leads to a page, and
+``404.html`` and ``llms.txt`` meet the rules of pages the site writes.
 """
 
 from __future__ import annotations
@@ -82,6 +96,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from html import escape
 from html.parser import HTMLParser
 from pathlib import Path, PurePosixPath
 from typing import Final
@@ -144,6 +159,63 @@ INVENTORIES = {
 FOOTER = "Neolith is not affiliated with or endorsed by the Django Software Foundation."
 #: The banner every page of a development build carries.
 BANNER = "Development version. Not released."
+#: Where the Worker serves the site (``assets.base_path`` in ``wrangler.json``),
+#: and the site's public address.
+BASE_PATH = "/neolith"
+SITE_URL = "https://docs.stack314.com/neolith/"
+#: Where the development version is published, under ``BASE_PATH``.
+DEV = "dev"
+#: Set to "1", it makes a build a development build whatever the version is.
+DEVELOPMENT_VARIABLE = "NEOLITH_DOCS_DEVELOPMENT"
+#: The URL contract's redirects, in order: source, destination, status. A
+#: rule fires whether or not a file matches, the first match wins, and static
+#: rules come before splats. Until the first release, ``/neolith/`` and
+#: ``latest`` lead to ``dev`` with a 302. The pages of the site this one
+#: replaces move with a 301 to ``latest``, so they reach a release once there
+#: is one; record 0011's old name among them. Each static source ending in a
+#: slash has its twin without the slash just before it, with the same
+#: destination and code: the old site answers both forms, and no file answers
+#: these paths, so the Worker adds no slash first.
+REDIRECTS: tuple[tuple[str, str, int], ...] = (
+    ("/neolith", "/neolith/dev/", 302),
+    ("/neolith/", "/neolith/dev/", 302),
+    ("/neolith/latest", "/neolith/dev/", 302),
+    ("/neolith/latest/", "/neolith/dev/", 302),
+    (
+        "/neolith/decisions/0011-django-ninja-for-contract-endpoints",
+        "/neolith/latest/adr/0011-the-host-serves-contract-endpoints-itself/",
+        301,
+    ),
+    (
+        "/neolith/decisions/0011-django-ninja-for-contract-endpoints/",
+        "/neolith/latest/adr/0011-the-host-serves-contract-endpoints-itself/",
+        301,
+    ),
+    ("/neolith/decisions", "/neolith/latest/adr/", 301),
+    ("/neolith/decisions/", "/neolith/latest/adr/", 301),
+    ("/neolith/spec", "/neolith/latest/spec/", 301),
+    ("/neolith/spec/", "/neolith/latest/spec/", 301),
+    ("/neolith/reference", "/neolith/latest/reference/", 301),
+    ("/neolith/reference/", "/neolith/latest/reference/", 301),
+    (
+        "/neolith/reference/django-host",
+        "{repository}/blob/main/docs/django-host.md",
+        301,
+    ),
+    (
+        "/neolith/reference/django-host/",
+        "{repository}/blob/main/docs/django-host.md",
+        301,
+    ),
+    ("/neolith/tutorial", "/neolith/latest/", 301),
+    ("/neolith/tutorial/", "/neolith/latest/", 301),
+    ("/neolith/how-to", "/neolith/latest/", 301),
+    ("/neolith/how-to/", "/neolith/latest/", 301),
+    ("/neolith/latest/*", "/neolith/dev/:splat", 302),
+    ("/neolith/decisions/*", "/neolith/latest/adr/:splat", 301),
+    ("/neolith/spec/*", "/neolith/latest/spec/:splat", 301),
+    ("/neolith/project/*", "/neolith/latest/project/:splat", 301),
+)
 
 _MARKDOWN = MarkdownIt("commonmark").enable(["table", "strikethrough"])
 _EMAIL = re.compile(r"[\w.%+-]+@[\w-]+(?:\.[\w-]+)+")
@@ -736,6 +808,29 @@ def development(root: Path) -> bool:
         DocsError: ``src/neolith/__init__.py`` cannot be read or has no
             ``__version__``.
     """
+    return development_version(source_version(root))
+
+
+def unreleased(root: Path) -> bool:
+    """Whether the source's version is not a release: a ``.dev`` one.
+
+    Unlike ``development``, ``DEVELOPMENT_VARIABLE`` does not change it, so a
+    development build of ``main``, which carries a release's version, may
+    show the command that installs that release.
+
+    Raises:
+        DocsError: ``src/neolith/__init__.py`` cannot be read or has no
+            ``__version__``.
+    """
+    return ".dev" in source_version(root)
+
+
+def source_version(root: Path) -> str:
+    """``__version__`` as ``src/neolith/__init__.py`` sets it.
+
+    Raises:
+        DocsError: The file cannot be read or has no ``__version__``.
+    """
     try:
         text = (root / "src" / "neolith" / "__init__.py").read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as error:
@@ -743,7 +838,16 @@ def development(root: Path) -> bool:
     found = re.search(r'^__version__ = "([^"]+)"$', text, re.MULTILINE)
     if found is None:
         raise DocsError("src/neolith/__init__.py: no __version__")
-    return ".dev" in found[1]
+    return found[1]
+
+
+def development_version(version: str) -> bool:
+    """Whether a build of ``version`` is a development build.
+
+    It is when ``version`` is a ``.dev`` one, or when ``DEVELOPMENT_VARIABLE``
+    is "1", as ``publish`` sets it.
+    """
+    return ".dev" in version or os.environ.get(DEVELOPMENT_VARIABLE) == "1"
 
 
 def inventory_file(name: str, cache: Path = CACHE) -> Path:
@@ -1351,6 +1455,7 @@ def check_html(
     root: Path = ROOT,
     development: bool = True,
     planned: Mapping[str, Collection[str]] | None = None,
+    unreleased: bool | None = None,
 ) -> list[str]:
     """Check every built file and page against the site rules.
 
@@ -1362,15 +1467,19 @@ def check_html(
         html: The built site.
         root: The repository root.
         development: Whether this is a development build, which carries
-            ``noindex`` and the banner and shows no install command.
+            ``noindex`` and the banner.
         planned: The ids of the ``{planned}`` blocks on each page; by default,
             what the extension recorded beside ``html``.
+        unreleased: Whether the version built is not a release, so pages show
+            no install command; by default, ``development``.
 
     Returns:
         One line per problem.
     """
     from scripts import citations
 
+    if unreleased is None:
+        unreleased = development
     problems: list[str] = []
     try:
         records: citations.Records | None = citations.Records(root)
@@ -1403,7 +1512,7 @@ def check_html(
             if page is not None and rel not in mirrored:
                 problems.extend(
                     f"{rel}: {said}"
-                    for said in _site_problems(page, rel, development, named, records)
+                    for said in _site_problems(page, rel, unreleased, named, records)
                 )
         except Exception as error:  # reported, and the rest checked
             problems.append(f"{rel}: cannot be checked: {error!r}")
@@ -1451,7 +1560,7 @@ def _file_problems(
 def _site_problems(
     page: _Page,
     rel: str,
-    development: bool,
+    unreleased: bool,
     named: re.Pattern[str] | None,
     records: object,
 ) -> Iterator[str]:
@@ -1469,7 +1578,7 @@ def _site_problems(
             "describes planned behaviour outside a {planned} block",
         ),
     ]
-    if development:
+    if unreleased:
         rules.append(
             (_INSTALL, everything, "shows an install command before a release")
         )
@@ -1557,15 +1666,412 @@ def check(
     built = build(root, out, extra)
     problems = list(built.problems)
     try:
-        is_development = development(root)
+        version = source_version(root)
     except DocsError as error:
         problems.append(f"{error}; checked as a development build")
-        is_development = True
+        version = ".dev"
     if built.path.is_dir():
-        problems.extend(check_html(built.path, root, is_development))
+        problems.extend(
+            check_html(
+                built.path,
+                root,
+                development_version(version),
+                unreleased=".dev" in version,
+            )
+        )
     else:
         problems.append(f"{built.path}: no HTML was built")
     return problems
+
+
+# Publishing
+
+
+@dataclass(frozen=True)
+class Redirect:
+    """One rule of ``_redirects``.
+
+    Attributes:
+        source: The public path it matches; a final ``*`` matches the rest.
+        destination: Where it leads; ``:splat`` stands for what ``*`` matched.
+        code: The status of the redirect.
+        line: Its line in the file.
+    """
+
+    source: str
+    destination: str
+    code: int
+    line: int
+
+
+def redirects_file(root: Path) -> str:
+    """The ``_redirects`` file: the rules of ``REDIRECTS``, one per line."""
+    repository = repo_url(root)
+    lines = [
+        "# The URL contract (ADR 0024), written by scripts/docs.py publish.",
+        f"# Paths are public paths, under the Worker's base path {BASE_PATH}.",
+    ]
+    lines += [
+        f"{source} {destination.format(repository=repository)} {code}"
+        for source, destination, code in REDIRECTS
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def versions_file() -> str:
+    """``versions.json``: each published version, in pydata-sphinx-theme's form.
+
+    It is the form its version switcher reads. Until the first release, it
+    lists only ``dev``.
+    """
+    versions = [
+        {"name": "dev (not released)", "version": DEV, "url": f"{BASE_PATH}/{DEV}/"}
+    ]
+    return json.dumps(versions, indent=2) + "\n"
+
+
+#: The pages ``llms.txt`` lists, under ``dev/``: title and what each holds.
+_LLMS_PAGES = (
+    ("Docs", "", "Home", "what this version does, and where to read next"),
+    ("Docs", "concepts/", "Concepts", "apps, contracts, connectors and modes"),
+    ("Docs", "reference/", "API reference", "every name the neolith package exports"),
+    (
+        "Docs",
+        "spec/",
+        "Specification",
+        "what any implementation does, with an ID for each requirement",
+    ),
+    ("Docs", "adr/", "Decision records", "why the design is as it is"),
+    (
+        "Optional",
+        "project/",
+        "Project",
+        "vision, principles, roadmap, open questions and how to contribute",
+    ),
+    ("Optional", "project/changelog/", "Changelog", "every change, by version"),
+)
+
+
+def llms_file() -> str:
+    """``llms.txt``, in the form llmstxt.org describes: the development pages."""
+    lines = [
+        "# Neolith",
+        "",
+        "> Neolith lets a Django app run inside a shared process or as its own "
+        "service without changing its code. django-neolith is the reference "
+        "implementation of its specification.",
+        "",
+        "Every page listed here is the development version, built from the main "
+        "branch of the repository: it is not released.",
+    ]
+    section = ""
+    for heading, path, title, holds in _LLMS_PAGES:
+        if heading != section:
+            lines += ["", f"## {heading}", ""]
+            section = heading
+        lines.append(f"- [{title}]({SITE_URL}{DEV}/{path}): {holds}")
+    return "\n".join(lines) + "\n"
+
+
+def not_found_file() -> str:
+    """``404.html``: a page that loads nothing, so it reads the same at any depth.
+
+    The Worker serves it for any path under ``BASE_PATH`` with no file.
+    """
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Page not found - Neolith</title>
+</head>
+<body>
+<div class="bd-header-announcement">{BANNER}</div>
+<main>
+<h1>Page not found</h1>
+<p>No page of the Neolith documentation is at this address. The
+<a href="{BASE_PATH}/{DEV}/">home page of the development version</a> leads to
+every part of it.</p>
+</main>
+<footer><p>{FOOTER}</p></footer>
+</body>
+</html>
+"""
+
+
+def root_files(root: Path) -> dict[str, str]:
+    """The files at the top of the published site, by name."""
+    return {
+        "_redirects": redirects_file(root),
+        "versions.json": versions_file(),
+        "llms.txt": llms_file(),
+        "404.html": not_found_file(),
+    }
+
+
+def redirect_rules(text: str) -> tuple[list[Redirect], list[str]]:
+    """Read ``_redirects`` as the Worker does, refusing what this site avoids.
+
+    Each rule is ``source destination code``, with the code 301 or 302. The
+    source is a public path under ``BASE_PATH`` that ends in a slash, or in
+    ``*``, its only splat, or is another source without its slash; the
+    destination is such a path or an ``https``
+    URL, and uses ``:splat`` only after a splat. Static rules come first, and
+    no source is repeated.
+
+    Returns:
+        The rules, and one line per problem.
+    """
+    rules: list[Redirect] = []
+    problems: list[str] = []
+    sources: dict[str, int] = {}
+    splats = False
+    lines = text.splitlines()
+    slashed = {fields[0] for fields in map(str.split, lines) if fields}
+    for number, line in enumerate(lines, 1):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        said: list[str] = []
+        fields = line.split()
+        if len(fields) == 2:
+            said.append("no status code")
+        elif len(fields) != 3:
+            said.append("not source, destination and code")
+        source, destination, code = (*fields, "", "")[:3]
+        if code and not (code.isdigit() and int(code) in (301, 302)):
+            said.append(f"status {code} is not a redirect: use 301 or 302")
+        if not (source + "/").startswith(BASE_PATH + "/"):
+            said.append(f"{source} is not under {BASE_PATH}/")
+        elif "*" in source.removesuffix("*"):
+            said.append(f"{source}: a splat only at the end")
+        elif not source.endswith(("/", "*")) and source + "/" not in slashed:
+            said.append(f"{source} does not end in a slash")
+        if not destination.startswith((BASE_PATH + "/", "https://")):
+            said.append(
+                f"{destination} is neither a path under {BASE_PATH}/ nor a URL "
+                "over https"
+            )
+        if ":splat" in destination and not source.endswith("*"):
+            said.append(f"{destination}: :splat without a splat")
+        if source.endswith("*"):
+            splats = True
+        elif splats:
+            said.append("a static rule after a splat; static rules come first")
+        if source in sources:
+            said.append(f"{source} is already a source on line {sources[source]}")
+        sources.setdefault(source, number)
+        problems += [f"_redirects line {number}: {problem}" for problem in said]
+        if not said:
+            rules.append(Redirect(source, destination, int(code), number))
+    return rules, problems
+
+
+#: How many redirects ``follow`` takes before it calls the chain a loop.
+_HOPS = 5
+
+
+def follow(rules: Sequence[Redirect], path: str) -> tuple[list[tuple[int, str]], str]:
+    """Follow the rules from ``path`` as a browser does.
+
+    Returns:
+        Each redirect, as its status and location, and where they end.
+
+    Raises:
+        DocsError: The chain is longer than five redirects.
+    """
+    hops: list[tuple[int, str]] = []
+    while not path.startswith("https://"):
+        for rule in rules:
+            if rule.source.endswith("*"):
+                prefix = rule.source.removesuffix("*")
+                if path.startswith(prefix):
+                    splat = path.removeprefix(prefix)
+                    break
+            elif path == rule.source:
+                splat = ""
+                break
+        else:
+            break
+        if len(hops) == _HOPS:
+            raise DocsError(f"more than {_HOPS} redirects from {hops[0][1]}")
+        path = rule.destination.replace(":splat", splat)
+        hops.append((rule.code, path))
+    return hops, path
+
+
+def asset(site: Path, path: str) -> Path | None:
+    """The file the Worker serves for the public ``path``, or None.
+
+    A path ending in a slash serves its ``index.html``; any other serves the
+    file of that name (a directory gets a redirect to its slash first).
+    """
+    rel = path.removeprefix(BASE_PATH + "/")
+    if rel == path or {".", ".."} & set(rel.split("/")):
+        return None
+    target = site / rel / "index.html" if rel == "" or rel.endswith("/") else site / rel
+    return target if target.is_file() else None
+
+
+def served(site: Path, path: str) -> Path | None:
+    """The page a reader of the public ``path`` gets, or None.
+
+    It is the asset of ``path``; for a path without its slash that has none,
+    it is the asset of the path with its slash, to which the Worker's
+    ``html_handling = "auto-trailing-slash"`` answers with a 307.
+    """
+    found = asset(site, path)
+    if found is None and not path.endswith("/"):
+        found = asset(site, path + "/")
+    return found
+
+
+def old_urls(root: Path) -> list[str]:
+    """The URLs the contract keeps: the pages of the site this one replaces.
+
+    Each record, specification and project document is among them by its old
+    name, and so is record 0011's name before it was renamed. Each is listed
+    with its slash and without it, as the old site answers both.
+    """
+    urls = [
+        "/neolith/",
+        "/neolith/latest/",
+        "/neolith/tutorial/",
+        "/neolith/how-to/",
+        "/neolith/reference/",
+        "/neolith/reference/django-host/",
+        "/neolith/decisions/",
+        "/neolith/spec/",
+        "/neolith/decisions/0011-django-ninja-for-contract-endpoints/",
+    ]
+    for staged in mirror_table(root).values():
+        section, _, name = staged.removesuffix(".md").partition("/")
+        old = "decisions" if section == "adr" else section
+        if name != "index":
+            urls.append(f"/neolith/{old}/{name}/")
+    return [form for url in urls for form in (url.removesuffix("/"), url)]
+
+
+def root_problems(root: Path, site: Path) -> list[str]:
+    """Check the root files of a published site.
+
+    Returns:
+        One line per problem: a file missing, a bad redirect line, a URL of
+        ``old_urls`` or a rule's source that leads to no page, a link of
+        ``versions.json``, ``llms.txt`` or ``404.html`` that leads to no page,
+        and what the rules of pages the site writes refuse in ``404.html`` and
+        ``llms.txt``.
+    """
+    problems: list[str] = []
+    text: dict[str, str] = {}
+    for name in root_files(root):
+        try:
+            text[name] = (site / name).read_text(encoding="utf-8")
+        except FileNotFoundError:
+            problems.append(f"{name}: missing")
+        except (OSError, UnicodeDecodeError) as error:
+            problems.append(f"{name}: cannot be read: {error!r}")
+    if "_redirects" in text:
+        rules, said = redirect_rules(text["_redirects"])
+        problems += said
+        starts = [rule.source.removesuffix("*") for rule in rules]
+        for url in dict.fromkeys([*old_urls(root), *starts]):
+            try:
+                _, end = follow(rules, url)
+            except DocsError as error:
+                problems.append(f"_redirects: {error}")
+                continue
+            if not end.startswith("https://") and served(site, end) is None:
+                problems.append(f"_redirects: {url} leads to {end}, no page")
+    if "versions.json" in text:
+        urls: list[str] = []
+        try:
+            versions = _strict_json(text["versions.json"])
+            if not isinstance(versions, list):
+                raise TypeError("not a list")
+            urls = [str(version["url"]) for version in versions]
+        except Exception as error:  # reported, and the rest checked
+            problems.append(f"versions.json: cannot be read: {error!r}")
+        problems += [
+            f"versions.json: {url}, no page" for url in urls if asset(site, url) is None
+        ]
+    if "llms.txt" in text:
+        for link in re.findall(r"\]\(([^)\s]+)\)", text["llms.txt"]):
+            path = BASE_PATH + "/" + link.removeprefix(SITE_URL)
+            if not link.startswith(SITE_URL) or asset(site, path) is None:
+                problems.append(f"llms.txt: links to {link}, no page")
+        page = _Page()
+        page.feed(escape(text["llms.txt"]))
+        page.close()
+        problems += _root_site_problems(root, page, "llms.txt")
+    if "404.html" in text:
+        pages: dict[str, _Page] = {}
+        problems += _file_problems(
+            site / "404.html", "404.html", True, {}, pages, frozenset()
+        )
+        page = pages["404.html"]
+        problems += _root_site_problems(root, page, "404.html")
+        for href in page.hrefs:
+            if not href.startswith("/"):
+                problems.append(f"404.html: links to {href}, not a path from the root")
+            elif asset(site, href) is None:
+                problems.append(f"404.html: links to {href}, no page")
+    return problems
+
+
+def _root_site_problems(root: Path, page: _Page, rel: str) -> list[str]:
+    names = people(root)
+    named = (
+        re.compile(r"(?<![\w@])@?(?:" + "|".join(map(re.escape, names)) + r")\b", re.I)
+        if names
+        else None
+    )
+    try:
+        before = unreleased(root)
+    except DocsError:
+        before = True
+    return [f"{rel}: {said}" for said in _site_problems(page, rel, before, named, None)]
+
+
+def publish(
+    root: Path = ROOT, out: Path = OUT, extra: Mapping[str, str] | None = None
+) -> Result:
+    """Check a development build and assemble the site the Worker serves.
+
+    The build is a development build whatever ``__version__`` says: the check
+    runs with ``DEVELOPMENT_VARIABLE`` set to "1", and the variable is put
+    back after it. The HTML is copied to ``out/site/dev/`` (without Sphinx's
+    ``.buildinfo``), the files of ``root_files`` are written to ``out/site/``,
+    and ``root_problems`` checks them.
+
+    Returns:
+        The site's directory, with the check's problems and the root files'.
+
+    Raises:
+        DocsError: ``out`` is not a safe place to build.
+    """
+    out = prepare_out(root, out)
+    previous = os.environ.get(DEVELOPMENT_VARIABLE)
+    os.environ[DEVELOPMENT_VARIABLE] = "1"
+    try:
+        problems = check(root, out, extra)
+    finally:
+        if previous is None:
+            del os.environ[DEVELOPMENT_VARIABLE]
+        else:
+            os.environ[DEVELOPMENT_VARIABLE] = previous
+    site = out / "site"
+    if site.exists():
+        shutil.rmtree(site)
+    site.mkdir()
+    if (out / "html").is_dir():
+        shutil.copytree(
+            out / "html", site / DEV, ignore=shutil.ignore_patterns(".buildinfo")
+        )
+    for name, text in root_files(root).items():
+        (site / name).write_text(text, encoding="utf-8")
+    problems += root_problems(root, site)
+    return Result(site, problems)
 
 
 def serve(html: Path, port: int) -> None:
@@ -1584,7 +2090,9 @@ def serve(html: Path, port: int) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     """Run one command; return the exit status: 0 with no problem, else 1."""
     parser = argparse.ArgumentParser(description="Build and check the docs site.")
-    parser.add_argument("command", choices=["stage", "build", "check", "serve"])
+    parser.add_argument(
+        "command", choices=["stage", "build", "check", "serve", "publish"]
+    )
     parser.add_argument("--out", type=Path, default=OUT, help="where to build")
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args(argv)
@@ -1595,6 +2103,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             problems = build(ROOT, args.out).problems
         elif args.command == "check":
             problems = check(ROOT, args.out)
+        elif args.command == "publish":
+            problems = publish(ROOT, args.out).problems
         else:
             result = build(ROOT, args.out)
             for problem in result.problems:

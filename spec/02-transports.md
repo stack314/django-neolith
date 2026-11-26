@@ -1,6 +1,6 @@
 # 02. Transports and routing
 
-**Status:** outline.
+**Status:** draft. The transport interface, values across a call, the in-process transport, connectors, providers and routing, and the call context across calls are specified. Other transports are described, not yet specified.
 
 ## The transport interface
 

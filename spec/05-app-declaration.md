@@ -1,6 +1,6 @@
 # 05. App declaration and lifecycle
 
-**Status:** outline, except the form of a declaration, Resolve and Validate, the checks before Serve, Configure, Boot, Serve and Drain, the schema step, an app's database and a request's principal, which are specified.
+**Status:** draft. Specified are the declaration (Name, Contracts, What a host refuses), the lifecycle (Before Serve, Configure, Boot, Serve and Drain, the schema step, an app's database, Resolve and Validate, Connectors before Serve), a request's principal, the check before deployment and the operational settings.
 
 ## Declaration
 
@@ -80,7 +80,7 @@ A host running one app is a detached deployment. A host running several is a sha
 
 **APP-26.** When it boots, a host MUST warn about each such registration it has not warned about yet, such as one made while it loaded the code that maps requests to views.
 
-Other code in no app that serves requests is found by the check before deployment, which a later step adds ([ADR 0022](../docs/adr/0022-the-app-host-builds-settings-and-checks-before-it-serves.md) Decisions 5 and 7).
+The project's own code in no app that serves requests is reported by the check before deployment (APP-69), not when the host boots ([ADR 0030](../docs/adr/0030-the-boundary-check-uses-the-standard-library-only.md) Decision 9).
 
 ### Configure
 
@@ -168,7 +168,7 @@ An app that declares a database resource owns its data in every host ([ADR 0004]
 
 **APP-22.** A host MUST refuse to set a relation from one record to another record that lives in a different database.
 
-A relation declared in an app's data model to another app's records is found by the check before deployment ([ADR 0004](../docs/adr/0004-each-app-owns-its-data.md)), not when the host sets a relation: a record can also hold it by the other record's identifier alone, and an update of many records at once sets it without the host being asked.
+A relation declared in an app's data model to another app's records is reported by the check before deployment (APP-67; [ADR 0004](../docs/adr/0004-each-app-owns-its-data.md)), not when the host sets a relation: a record can also hold it by the other record's identifier alone, and an update of many records at once sets it without the host being asked.
 
 **APP-23.** A host MUST create an app's schema in the app's own database only, and nothing else there.
 
@@ -239,6 +239,25 @@ Two first calls made at once may each run a search, so a backend may be asked mo
 The host adds these names whatever the response holds, so a cache that keys on `Vary` keeps the responses of two principals apart. A cache placed inside the host, between the code that handles the request and the point where the host adds the names, stores a response before they are added; the host cannot reach it.
 
 Decision records: [0010](../docs/adr/0010-pluggable-principal-resolution.md), [0017](../docs/adr/0017-call-context-explicit-at-the-action-ambient-for-propagation.md), [0023](../docs/adr/0023-a-request-principal-comes-from-ordered-backends.md).
+
+### The check before deployment
+
+Apps attached in one host can reach each other's code and data in ways that work while they share a process and break once they run apart. A host does not see every such crossing when it starts, so a check run before deployment reports them ([ADR 0003](../docs/adr/0003-apps-communicate-through-contracts.md), [ADR 0030](../docs/adr/0030-the-boundary-check-uses-the-standard-library-only.md)). It reads the declarations of the apps a host holds, their data models and their code, and makes no call.
+
+An implementation SHOULD offer a check, run before deployment, that reports:
+
+- **APP-66.** each dependency of an app's code on anything of another app other than that app's contract package ([00](00-overview.md), OVR-2);
+- **APP-67.** each relation in an app's data model to records of another app, and each record type of an app stored where another app's records are;
+- **APP-68.** each place in an app's code that uses a database other than the app's own, whether it names that database or leaves the database unnamed, or that opens a root naming another app;
+- **APP-69.** each piece of the project's own code in no app that serves requests reachable from the host's URL configuration.
+
+**APP-70.** A check offered under APP-66 to APP-69 MUST NOT open a connection to a database.
+
+**APP-71.** Such a check MAY let a project choose, per app, whether that app's reports end the check with an outcome that differs from a check that reports none.
+
+The check sees what reading code shows. Code that reaches another app by a name it computes while it runs is not seen, and the host's own refusals while it runs stay the backstop ([ADR 0030](../docs/adr/0030-the-boundary-check-uses-the-standard-library-only.md) Decision 5).
+
+Decision records: [0003](../docs/adr/0003-apps-communicate-through-contracts.md), [0004](../docs/adr/0004-each-app-owns-its-data.md), [0030](../docs/adr/0030-the-boundary-check-uses-the-standard-library-only.md).
 
 ## Operational settings
 

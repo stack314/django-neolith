@@ -79,6 +79,7 @@ __all__ = [
     "schema_messages",
     "shadow_messages",
     "state_messages",
+    "static_messages",
 ]
 
 _log = logging.getLogger("neolith.host")
@@ -93,6 +94,9 @@ _NO_FILE: Final = (
     "the database is in memory, or nothing has created it yet (the migrate "
     "step creates the aliases it migrates)"
 )
+# E018 names the alias and the rule, never the NAME or the path it opens: a
+# value in DATABASES (ADR 0033 Decision 7, ADR 0034 Decision 3).
+_NO_DATABASE: Final = f"no database at its NAME; {_NO_FILE}"
 _IN_MEMORY: Final = (
     "an in-memory SQLite database is empty on a new thread, or gone once its "
     "last connection closes; a host that serves needs a file or a server"
@@ -234,15 +238,46 @@ def _warn_again() -> None:
     """Log each ``neolith.W001`` that set-up did not log, unless silenced: an
     admin registered while the URLconf's modules loaded.
     """
+    for message in _again():
+        with contextlib.suppress(Exception):
+            _log.warning("(%s) %s", message.id, message.msg)
+
+
+def _again() -> list[checks.CheckMessage]:
+    """Each ``neolith.W001`` that set-up did not log and that is not
+    silenced.
+    """
     from neolith._host import _current
 
     host = _current()
     logged = host.warned if host is not None else frozenset()
-    for message in _checks.admin_check():
-        if message.msg in logged or message.is_silenced():
-            continue
-        with contextlib.suppress(Exception):
-            _log.warning("(%s) %s", message.id, message.msg)
+    return [
+        message
+        for message in _checks.admin_check()
+        if message.msg not in logged and not message.is_silenced()
+    ]
+
+
+def static_messages() -> tuple[list[str], list[checks.CheckMessage]]:
+    """Boot's checks that read no database, for the check before
+    deployment (ADR 0030 Decision 7, phase 4): what is wrong with
+    ``ROOT_URLCONF``, each a line; and the messages of the other checks:
+    ``neolith.W001`` again, as Boot warns, ``neolith.W003`` when
+    ``ROOT_URLCONF`` imports, each unless silenced, and the checks of the
+    code (``code_messages``) over the hosted apps with a database. Keeps no
+    outcome and marks nothing booted.
+    """
+    problems = _urlconf_problems()
+    found = _again()
+    if not problems:
+        found += [m for m in shadow_messages() if not m.is_silenced()]
+    hosted: list[str] = []
+    for config in global_apps.get_app_configs():
+        declaration = declaration_of(type(config))
+        if declaration is not None and "database" in declaration.resources:
+            hosted.append(config.label)
+    found += code_messages(hosted, [])[0]
+    return problems, found
 
 
 def shadow_messages() -> list[checks.CheckMessage]:
@@ -719,11 +754,7 @@ def _state(
         return False
     if not path or not os.path.isfile(path) or os.path.getsize(path) == 0:
         messages.append(
-            checks.Error(
-                f"database {alias}: no database at "
-                f"{path or _naming.shown(name)}; {_NO_FILE}",
-                id="neolith.E018",
-            )
+            checks.Error(f"database {alias}: {_NO_DATABASE}", id="neolith.E018")
         )
         return False
     wrapper = load_backend(entry["ENGINE"]).DatabaseWrapper(entry, alias)
@@ -745,10 +776,7 @@ def _state(
         _close(wrapper)
     if not entries:
         messages.append(
-            checks.Error(
-                f"database {alias}: no database at {path}; {_NO_FILE}",
-                id="neolith.E018",
-            )
+            checks.Error(f"database {alias}: {_NO_DATABASE}", id="neolith.E018")
         )
         return False
     return True

@@ -234,12 +234,18 @@ def _deadline_problems(value: object) -> list[str]:
 
 
 def neolith_problems(
-    value: object = _MISSING, hosted: Sequence[Declaration] = ()
+    value: object = _MISSING,
+    hosted: Sequence[Declaration] = (),
+    *,
+    refused: Collection[str] = (),
 ) -> list[str]:
     """Judge ``NEOLITH``: present, a ``dict`` whose keys are in the key
     table, each with its one form (ADR 0022 Decision 3), against the
     declarations of the hosted apps. Leave ``value`` out when the setting is
-    absent.
+    absent. ``refused`` names the identities Resolve refuses whatever
+    ``REMOTE_PROVIDERS`` or ``ROUTING_POLICIES`` holds for them
+    (``_host.refused_identities``); see ``remote_problems`` and
+    ``routing_problems``.
     """
     if value is _MISSING:
         return ["settings: NEOLITH is required; it is {} when nothing is set"]
@@ -267,10 +273,10 @@ def neolith_problems(
         elif key == _caller.SIGNING:
             problems.extend(_caller.signing_problems(item, [d.label for d in hosted]))
         elif key == _REMOTE_KEY:
-            problems.extend(remote_problems(item, local_first(entries)))
+            problems.extend(remote_problems(item, local_first(entries), refused))
         elif key == _ROUTING_KEY:
-            problems.extend(routing_problems(item))
-    if "DATABASES" not in entries:
+            problems.extend(routing_problems(item, refused))
+    if not _naming.holds(entries, "DATABASES"):
         problems.extend(
             f"app {label}: no connection settings for its database"
             for label in with_database(hosted)
@@ -339,7 +345,9 @@ _ENTRY_KEYS: Final = ("BACKEND", "OPTIONS")
 _URL: Final = "url"
 
 
-def remote_problems(value: object, routed: Collection[str] = ()) -> list[str]:
+def remote_problems(
+    value: object, routed: Collection[str] = (), refused: Collection[str] = ()
+) -> list[str]:
     """Judge the form of ``NEOLITH["REMOTE_PROVIDERS"]`` (ADR 0014, the
     builder's rows, as ADR 0031 widens them): a ``dict`` of one or more
     contract identities, each mapped to a ``list`` of one or more entries,
@@ -350,6 +358,15 @@ def remote_problems(value: object, routed: Collection[str] = ()) -> list[str]:
     ``dict`` with exactly ``url``, an origin in its one spelling, and no two
     entries of one identity have one ``url``, compared as written. Every
     container is exactly the type named.
+
+    An identity in ``refused`` is one Resolve refuses with "remove the
+    entry" or "remove it", whatever its list holds: one no hosted app
+    requires or one an app of the host provides (``refused_identities``). Its
+    list of two or more entries gets no advice to name ``local-first``,
+    which would contradict that refusal and be refused in turn by the
+    ``ROUTING_POLICIES`` row of Resolve; the identity is refused all the
+    same, with Resolve's message (ADR 0031, the Resolve rows; ADR 0036
+    Decision 1).
 
     Every problem found is returned, those under a refused key included. A
     refused ``url`` is never shown, in whole or in part (ADR 0014 Decision
@@ -375,12 +392,13 @@ def remote_problems(value: object, routed: Collection[str] = ()) -> list[str]:
             )
             where, named = f"{REMOTE}[{shown}]", "it"
         ordered = type(key) is str and key in routed
-        problems.extend(_providers_problems(where, named, providers, ordered))
+        advised = not (type(key) is str and key in refused)
+        problems.extend(_providers_problems(where, named, providers, ordered, advised))
     return problems
 
 
 def _providers_problems(
-    where: str, named: str, value: object, ordered: bool
+    where: str, named: str, value: object, ordered: bool, advised: bool
 ) -> list[str]:
     if type(value) is not list:
         return [f"{where}: expected a list of providers, got {_type(value)}"]
@@ -388,7 +406,7 @@ def _providers_problems(
     if not providers:
         return [f"{where}: is empty; leave {named} out"]
     problems: list[str] = []
-    if len(providers) > 1 and not ordered:
+    if len(providers) > 1 and not ordered and advised:
         problems.append(
             f"{where}: lists {len(providers)} providers; with the single routing "
             "policy a contract has one provider; to try them in order, name "
@@ -491,11 +509,16 @@ LOCAL_FIRST: Final = "local-first"
 _SINGLE: Final = "single"
 
 
-def routing_problems(value: object) -> list[str]:
+def routing_problems(value: object, refused: Collection[str] = ()) -> list[str]:
     """Judge the form of ``NEOLITH["ROUTING_POLICIES"]`` (ADR 0031, the
     builder's rows): a ``dict`` of one or more contract identities, each
     mapped to exactly the ``str`` ``"local-first"``, compared as written.
     ``single`` is what an identity left out means, so it is not a value.
+
+    An identity in ``refused`` is one Resolve refuses with "remove it",
+    whatever its value (``refused_identities``): a value that is not a
+    policy gets no advice to name ``local-first``, which Resolve would
+    refuse in turn (ADR 0031, the Resolve rows; ADR 0036 Decision 1).
 
     Every problem found is returned, those under a refused key included. A
     refused value is never shown; a refused key is shown as
@@ -526,6 +549,8 @@ def routing_problems(value: object) -> list[str]:
             problems.append(
                 f"{where}: {_SINGLE} is what leaving {named} out means; leave it out"
             )
+        elif policy != LOCAL_FIRST and type(key) is str and key in refused:
+            problems.append(f"{where}: is not a routing policy of this host")
         elif policy != LOCAL_FIRST:
             problems.append(
                 f"{where}: is not a routing policy of this host; the one policy "
@@ -672,12 +697,18 @@ def remote_warnings(neolith: object) -> list[str]:
     ]
 
 
-def unsigned_problems(neolith: object, hosted: Sequence[Declaration]) -> list[str]:
+def unsigned_problems(
+    neolith: object, hosted: Sequence[Declaration], *, refused: Collection[str] = ()
+) -> list[str]:
     """Each hosted app that requires a contract ``NEOLITH["REMOTE_PROVIDERS"]``
     names and has no entry in ``NEOLITH["SIGNING_SECRETS"]``, with the
     message its call would get (ADR 0027 Decision 9). Nothing when
     ``SIGNING_SECRETS`` is not a ``dict``, which ``neolith.E001`` reports,
     since which apps it names cannot be read.
+
+    An identity in ``refused`` is one Resolve refuses with "remove the
+    entry" (``_host.refused_identities``): it is never called over HTTP, so
+    no app is told it lacks a key to call it (ADR 0036 Decision 2).
     """
     remote = remote_identities(neolith)
     if not remote:
@@ -692,7 +723,7 @@ def unsigned_problems(neolith: object, hosted: Sequence[Declaration]) -> list[st
         for declaration in hosted
         if not _naming.holds(named, declaration.label)
         for contract in declaration.requires
-        if contract.identity in remote
+        if contract.identity in remote and contract.identity not in refused
     )
 
 
@@ -971,7 +1002,8 @@ def _database_caches(caches: object) -> list[str]:
     for alias, entry in entries.items():
         if type(alias) is not str or type(entry) is not dict:
             continue
-        backend = entry.get("BACKEND")
+        # Read with _naming.entry, so that no key's own __eq__ runs.
+        backend = _naming.entry(cast("dict[object, object]", entry), "BACKEND")
         if type(backend) is not str:
             continue
         try:
