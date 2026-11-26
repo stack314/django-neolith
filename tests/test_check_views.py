@@ -307,6 +307,8 @@ urlpatterns = [
     path("placed/first/", site_more.First),
     path("placed/dotted/", site_dot.dotted),
     path("placed/borrows/", site_more.Borrows),
+    path("placed/lent/", site_more.Lent),
+    path("placed/oneline/", site_more.OneLine),
     path("kinds/abstract/", site_more.Abstract),
     path("kinds/metaview/", site_more.MetaView.as_view()),
     path("kinds/falsy/", vendorlib.wrap.wrapped(site_more.Falsy())),
@@ -492,6 +494,20 @@ class Borrows:
     handle = helper
 
 
+class LentMixin:
+    def handle(self, request):
+        return None
+
+
+# A function of a class whose name starts with its own.
+class Lent:
+    handle = LentMixin.handle
+
+
+# A class on one line, whose body is a lambda on that line.
+class OneLine: get = lambda self, request: None
+
+
 class Abstract(abc.ABC):
     def __call__(self, request):
         return None
@@ -589,9 +605,14 @@ from django.urls import path
 import site_views
 
 
+reads = 0
+
+
 def _endless():
+    global reads
     entry = path("p/", site_views.page)
     for _ in range(1_000):
+        reads += 1
         yield entry
     raise RuntimeError("read past the bound")
 
@@ -664,6 +685,16 @@ def layered(count, view=site_views.page):
     return view
 
 
+def parted(request):
+    return None
+
+
+# The project's function, then _LINKS library wrappers: the view is one
+# link past them. (Exact partials cannot make the chain: a partial of a
+# partial is flattened into one.)
+parted.__wrapped__ = layered(_LINKS)
+
+
 urlpatterns = [
     path("inside/", layered(60)),
     path("past/", layered(70)),
@@ -671,6 +702,7 @@ urlpatterns = [
     path("edge/hosted/", layered(_LINKS, shop_views.page)),
     path("beyond/project/", layered(_LINKS + 1)),
     path("beyond/hosted/", layered(_LINKS + 1, shop_views.page)),
+    path("beyond/partials/", parted),
 ]
 """
 
@@ -679,6 +711,7 @@ urlpatterns = [
 # its own; and one that no site registers, which W001 does not report.
 _ADMIN: Final = """\
 from django.contrib import admin
+from django.db import models
 from django.urls import path
 
 from legacy.models import Thing
@@ -729,6 +762,16 @@ class OtherAdmin(admin.ModelAdmin):
 
 admin.site.register(Thing, ThingAdmin)
 OTHER = OtherAdmin(Thing, admin.site)
+
+
+# A model of an app that is not installed, under Django's own admin class:
+# its admin is in no app and names no class.
+class Ghost(models.Model):
+    class Meta:
+        app_label = "ghost"
+
+
+admin.site.register(Ghost)
 
 
 # The project's views in the admin's module, none of them the admin's.
@@ -823,6 +866,7 @@ class Thing(models.Model):
 # import.
 _SCRIPT: Final = """\
 import json
+import sys
 
 import django
 
@@ -868,6 +912,7 @@ def attempt(make):
 
 _check_views._ENTRIES = 7
 flat = attempt(lambda: [r for r, _ in _check_views.patterns("flat")])
+flat_reads = sys.modules["flat"].reads
 _check_views._ENTRIES = entries
 raising = attempt(lambda: [r for r, _ in _check_views.patterns("raising")])
 
@@ -910,6 +955,7 @@ print(json.dumps({
     "capped": capped,
     "depth": _check_views._DEPTH,
     "flat": flat,
+    "flat reads": flat_reads,
     "raising": raising,
     "parsed": len(parsed),
     "counted": (
@@ -1246,12 +1292,13 @@ def test_an_include_of_a_urlconf_inside_itself_is_read_once(
 
 
 def test_the_walk_ends_at_its_bounds(ran: dict[str, Any]) -> None:
-    """A URLconf built anew at each include is followed ``_DEPTH`` includes
-    deep, and the walk reads no more than ``_ENTRIES`` entries: here 7, the
-    first an include.
+    """A URLconf built anew at each include is followed 64 includes deep
+    (``lazy/`` and 63 ``a/``), and not 65, and the walk reads no more than
+    ``_ENTRIES`` entries: here 7, the first an include.
     """
     lazy = sorted(route for route in ran["routes"] if route.startswith("lazy/"))
-    assert lazy == sorted("lazy/" + "a/" * k + "p/" for k in range(ran["depth"]))
+    assert lazy == sorted("lazy/" + "a/" * k + "p/" for k in range(64))
+    assert ran["depth"] == 64
     assert ran["capped"] == ran["full"][:6]
 
 
@@ -1283,6 +1330,11 @@ def test_a_walk_past_the_links_label_of_follows_is_not_reported(
         assert ran["routes"][f"deep/beyond/{owner}/"] == [
             {"label": None, "walked": None}
         ]
+    # A project function, then library wrappers past the bound: the walk
+    # holds that one function of the project's when the bound runs out, and
+    # still reports nothing.
+    assert ran["routes"]["deep/beyond/partials/"] == [{"label": None, "walked": None}]
+    assert not [line for line in ran["lines"] if "'deep/beyond/" in line]
 
 
 def test_admin_views_are_left_to_w001(ran: dict[str, Any]) -> None:
@@ -1292,7 +1344,8 @@ def test_admin_views_are_left_to_w001(ran: dict[str, Any]) -> None:
     own: a method behind the admin site's wrapper or bare, one it inherits
     from a class that is not an admin, and a function defined in the class.
     An admin class no site registers is not W001's, and its method is
-    reported (above).
+    reported (above). Django's own admin class over a model of an app that
+    is not installed names no class, and the rule runs past it.
     """
     admin = {
         route: seen
@@ -1310,6 +1363,7 @@ def test_admin_views_are_left_to_w001(ran: dict[str, Any]) -> None:
         [seen] = admin[f"admin/legacy/thing/{added}/"]
         assert seen == {"label": None, "walked": None}, added
     assert not [line for line in ran["lines"] if "'admin/" in line]
+    assert "admin/ghost/ghost/" in admin
 
 
 def test_an_entry_that_is_not_djangos_is_passed_over(ran: dict[str, Any]) -> None:
@@ -1345,8 +1399,9 @@ def test_a_class_is_placed_at_the_one_definition_that_agrees_with_it(
     ends a nested class's, a class inside an ``if`` inside a class, a method
     on a class's last line, and a first definition kept under another name
     (told apart by ``__firstlineno__``, from Python 3.13), a class that holds
-    a function defined outside it; and a function
-    whose code names its file by another path.
+    a function defined outside it, one that holds a function of a class whose
+    name starts with its own, a class on one line whose body is a lambda;
+    and a function whose code names its file by another path.
     """
     more = ran["site_more"]
     first = _line_of(more, "class Early:") if sys.version_info >= (3, 13) else 1
@@ -1387,6 +1442,18 @@ def test_a_class_is_placed_at_the_one_definition_that_agrees_with_it(
                 "placed/borrows/",
                 _line_of(more, "class Borrows:"),
                 "site_more.Borrows",
+                "site_more.py",
+            ),
+            _finding(
+                "placed/lent/",
+                _line_of(more, "class Lent:"),
+                "site_more.Lent",
+                "site_more.py",
+            ),
+            _finding(
+                "placed/oneline/",
+                _line_of(more, "class OneLine:"),
+                "site_more.OneLine",
                 "site_more.py",
             ),
             _finding(
@@ -1524,9 +1591,10 @@ def test_urlconfs_that_include_each_other_are_read_once_each(
 
 def test_one_urlconf_is_read_no_further_than_the_bound(ran: dict[str, Any]) -> None:
     """A flat ``urlpatterns`` without end is read to ``_ENTRIES`` (here 7),
-    not to the 1,000 past which it raises.
+    not to the 1,000 past which it raises, and not one entry further.
     """
     assert ran["flat"] == ["p/"] * 7
+    assert ran["flat reads"] == 7
 
 
 def test_patterns_that_raise_partway_are_passed_over_whole(
