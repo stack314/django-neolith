@@ -20,6 +20,13 @@ in a library, ``partial``, Django's ``csrf_exempt``, contrib's
 ``login_required``, and a wrapper of the project's, of the hosted app's and
 of the undeclared app's). Only a view that serves as no app and runs the
 project's own code is reported.
+
+Beside the matrix, each guard of the rule has a fixture that fails when the
+guard is deleted or loosened: the walk's bounds, cycle set and reads
+(``mutual/``, ``flat``, ``raising``, a resolver look-alike), the class
+placement's steps (``placed/``), the kinds of class and the admin's names
+(``kinds/``), the blind spots the module names (``blind/``), and the parse
+of each file once a run.
 """
 
 import itertools
@@ -104,6 +111,17 @@ def bare(view):
         return view(request, *args, **kwargs)
 
     return wrapper
+
+
+def plain(view):
+    def wrapper(request, *args, **kwargs):
+        return view(request, *args, **kwargs)
+
+    return wrapper
+
+
+class Part(functools.partial):
+    pass
 """
 
 # Every base view under every sequence of up to two wrappers, the outermost
@@ -168,6 +186,12 @@ for base, view in BASES.items():
 """
 
 _URLS: Final = """\
+import functools
+import importlib.util
+import os
+import sys
+
+from asgiref.sync import sync_to_async
 from django.contrib import admin
 from django.urls import URLPattern, include, path
 from django.urls.resolvers import RoutePattern
@@ -177,6 +201,10 @@ import site_admin
 import site_api
 import site_more
 import site_views
+import vendorlib.wrap
+from legacy import admin as legacy_admin
+from shop import admin as shop_admin
+from legacy.models import Thing
 from shop import views as shop_views
 
 
@@ -204,6 +232,32 @@ class Endless:
 class Lazy:
     def __init__(self):
         self.urlpatterns = Endless()
+
+
+class LookAlike:
+    \"\"\"Django's resolver in all but its type.\"\"\"
+
+    pattern = RoutePattern("alike/")
+    urlconf_module = site_views
+    url_patterns = [path("p/", site_views.page)]
+
+
+# site_dot loaded from a path that names its file another way.
+here = os.path.dirname(os.path.abspath(__file__))
+spec = importlib.util.spec_from_file_location(
+    "site_dot", os.path.join(here, ".", "site_dot.py")
+)
+site_dot = importlib.util.module_from_spec(spec)
+sys.modules["site_dot"] = site_dot
+spec.loader.exec_module(site_dot)
+
+# A function of the namespace package site_ns, which has no file.
+nowhere = {"__name__": "site_ns"}
+exec(compile("def nowhere(request):\\n    pass\\n", "<n>", "exec"), nowhere)
+
+# A function whose module's name cannot be looked up.
+unhashable = {"__name__": ["site_views"]}
+exec(compile("def odd(request):\\n    pass\\n", "<u>", "exec"), unhashable)
 
 
 # A function of site_views's whose code was compiled from no file.
@@ -242,12 +296,43 @@ urlpatterns = [
     URLPattern(Unnamed("unnamed/", is_endpoint=True), site_views.page),
     path("lazy/", include(Lazy())),
     Odd(),
+    path("mutual/", include("mutual_a")),
+    path("raising/", include("raising")),
+    LookAlike(),
+    path("placed/told/", site_more.Told),
+    path("placed/awaited/", site_more.Awaited),
+    path("placed/twin/", site_more.Twin),
+    path("placed/in/", site_more.Box.In),
+    path("placed/short/", site_more.Short),
+    path("placed/first/", site_more.First),
+    path("placed/dotted/", site_dot.dotted),
+    path("placed/borrows/", site_more.Borrows),
+    path("kinds/abstract/", site_more.Abstract),
+    path("kinds/metaview/", site_more.MetaView.as_view()),
+    path("kinds/falsy/", vendorlib.wrap.wrapped(site_more.Falsy())),
+    path("kinds/help/", site_admin.ThingAdminHelp),
+    path("kinds/renamed/", site_admin.renamed),
+    path("kinds/tagged/", site_admin.tagged),
+    path("kinds/stripped/", site_admin.stripped),
+    path("kinds/appadmin/", legacy_admin.site._registry[Thing].legacy),
+    path("kinds/hostedadmin/", shop_admin.site._registry[Thing].shared),
+    path("kinds/zero/", site_admin.zero),
+    path("kinds/unnamed/", site_admin.unnamed),
+    path("kinds/unhashable/", unhashable["odd"]),
+    path("blind/lru/", functools.lru_cache(site_views.page)),
+    path("blind/sync/", sync_to_async(site_views.page)),
+    path("blind/partial/", vendorlib.wrap.Part(site_views.page)),
+    path("blind/plain/", vendorlib.wrap.plain(site_views.page)),
+    path("blind/nowhere/", nowhere["nowhere"]),
 ]
 """
 
 # Classes that the project defines twice, and a partial of its own.
 _MORE: Final = """\
+import abc
 import functools
+
+from django.views import View
 
 
 class Part(functools.partial):
@@ -326,6 +411,106 @@ if True:
 
 
 Gone.__module__ = __name__
+
+
+# Defined twice, its __firstlineno__ dropped: told apart by a classmethod.
+class Told:
+    pass
+
+
+if True:
+
+    class Told:  # noqa: F811
+        @classmethod
+        def build(cls):
+            return None
+
+
+Told.__module__ = __name__
+
+
+async def amake():
+    class Awaited:
+        pass
+
+    return Awaited
+
+
+made = amake()
+try:
+    made.send(None)
+except StopIteration as done:
+    Awaited = done.value
+
+
+# A class beside a nested class of its name, its __firstlineno__ dropped.
+class Nest:
+    class Twin:
+        pass
+
+
+class Twin:
+    pass
+
+
+Twin.__module__ = __name__
+
+
+class Box:
+    def method(self):
+        return None
+
+    if True:
+
+        class In:
+            pass
+
+
+class Short:
+    def get(self, request): return None
+
+
+# Defined twice, the first kept under another name.
+class Early:
+    pass
+
+
+First = Early
+
+if True:
+
+    class Early:  # noqa: F811
+        pass
+
+
+def helper(request):
+    return None
+
+
+# A function of its body defined outside it, which does not place it.
+class Borrows:
+    handle = helper
+
+
+class Abstract(abc.ABC):
+    def __call__(self, request):
+        return None
+
+
+class Kind(type):
+    pass
+
+
+class MetaView(View, metaclass=Kind):
+    pass
+
+
+class Falsy:
+    def __call__(self, request):
+        return None
+
+    def __bool__(self):
+        return False
 """
 
 # Classes defined in one module that name another as theirs; the other is
@@ -369,6 +554,70 @@ from django.urls import path
 import site_views
 
 urlpatterns = [path("p/", site_views.page)]
+"""
+
+_DOT: Final = """\
+# Loaded by the root URLconf under a path with "/./" in it.
+
+
+def dotted(request):
+    return None
+"""
+
+# Two URLconfs that include each other.
+_MUTUAL_A: Final = """\
+from django.urls import include, path
+
+import site_views
+
+urlpatterns = [path("b/", include("mutual_b")), path("leaf/", site_views.page)]
+"""
+
+_MUTUAL_B: Final = """\
+from django.urls import include, path
+
+import site_views
+
+urlpatterns = [path("a/", include("mutual_a")), path("leaf/", site_views.page)]
+"""
+
+# A URLconf whose patterns never end, flat; read past 1,000 entries, it
+# raises. Each read of its urlpatterns is a new generator.
+_FLAT: Final = """\
+from django.urls import path
+
+import site_views
+
+
+def _endless():
+    entry = path("p/", site_views.page)
+    for _ in range(1_000):
+        yield entry
+    raise RuntimeError("read past the bound")
+
+
+def __getattr__(name):
+    if name == "urlpatterns":
+        return _endless()
+    raise AttributeError(name)
+"""
+
+# A URLconf whose patterns raise after the first.
+_RAISING: Final = """\
+from django.urls import path
+
+import site_views
+
+
+def _raising():
+    yield path("p/", site_views.page)
+    raise RuntimeError("a URLconf that fails partway")
+
+
+def __getattr__(name):
+    if name == "urlpatterns":
+        return _raising()
+    raise AttributeError(name)
 """
 
 _NESTED: Final = """\
@@ -440,6 +689,16 @@ class Mixin:
         return None
 
 
+class Shared:
+    def shared(self, request):
+        return None
+
+
+class Legacy:
+    def legacy(self, request):
+        return None
+
+
 class ThingAdmin(Mixin, admin.ModelAdmin):
     def changelist_view(self, request, extra_context=None):
         return super().changelist_view(request, extra_context)
@@ -464,9 +723,81 @@ class OtherAdmin(admin.ModelAdmin):
     def other(self, request):
         return None
 
+    def changelist_view(self, request, extra_context=None):
+        return None
+
 
 admin.site.register(Thing, ThingAdmin)
 OTHER = OtherAdmin(Thing, admin.site)
+
+
+# The project's views in the admin's module, none of them the admin's.
+def ThingAdminHelp(request):
+    return None
+
+
+def renamed(request):
+    return None
+
+
+renamed.__qualname__ = "ThingAdmin.renamed"
+
+
+def tagged(request):
+    return None
+
+
+tagged.model_admin = None
+
+
+# The function Django's admin builds for a view, with its model_admin taken
+# away: a wrapper like any other.
+[stripped] = [
+    entry.callback
+    for entry in OTHER.get_urls()
+    if getattr(entry.callback, "__wrapped__", None) == OTHER.changelist_view
+]
+del stripped.model_admin
+
+
+# An admin site whose registry is not a dict.
+odd = admin.AdminSite(name="odd")
+odd._registry = None
+
+
+# A function whose code starts at line 0, and one whose code names a file
+# that cannot be looked up.
+def zero(request):
+    return None
+
+
+zero.__code__ = zero.__code__.replace(co_firstlineno=0)
+
+
+def unnamed(request):
+    return None
+
+
+unnamed.__code__ = unnamed.__code__.replace(co_filename=__file__ + "\\0")
+"""
+
+# An admin of an undeclared app and one of the hosted app, each registered
+# on a site of its own, that inherit a view from the project. The first is
+# W001's (it names the project's class); the second serves as the hosted
+# app, so W001 does not name it.
+_APP_ADMIN: Final = """\
+from django.contrib import admin
+
+import site_admin
+from legacy.models import Thing
+
+
+class AppAdmin(site_admin.MIXIN, admin.ModelAdmin):
+    pass
+
+
+site = admin.AdminSite(name=__name__)
+site.register(Thing, AppAdmin)
 """
 
 _LEGACY_APP: Final = """\
@@ -526,6 +857,45 @@ for route, view in _check_views.patterns(settings.ROOT_URLCONF):
             for code in walked
         ],
     })
+
+
+def attempt(make):
+    try:
+        return make()
+    except Exception as error:
+        return f"raised {type(error).__name__}"
+
+
+_check_views._ENTRIES = 7
+flat = attempt(lambda: [r for r, _ in _check_views.patterns("flat")])
+_check_views._ENTRIES = entries
+raising = attempt(lambda: [r for r, _ in _check_views.patterns("raising")])
+
+# Each file is parsed once a run, however many classes are placed in it.
+import ast
+import os
+import types
+
+parsed = []
+counting = types.SimpleNamespace(**vars(ast))
+counting.parse = lambda *a, **k: parsed.append(1) or ast.parse(*a, **k)
+_check_views.ast = counting
+counted = attempt(lambda: _check_views.findings(source))
+_check_views.ast = ast
+
+# A file gone, or not Python, when a class is placed in it.
+import site_more
+
+files = os.environ["PROBE_FILES"]
+unread = {
+    name: attempt(
+        lambda: _check_views._class_line(
+            site_more.Bare, os.path.join(files, name), {}
+        )
+    )
+    for name in ("missing.py", "syntax.py", "nul.py")
+}
+
 skipped = {}
 for value in ("broken", "absent", 5, None, "no_patterns"):
     settings.ROOT_URLCONF = value
@@ -539,6 +909,14 @@ print(json.dumps({
     "full": full[:20],
     "capped": capped,
     "depth": _check_views._DEPTH,
+    "flat": flat,
+    "raising": raising,
+    "parsed": len(parsed),
+    "counted": (
+        counted if isinstance(counted, str)
+        else [_check._line(f, report_only=False) for f in counted]
+    ),
+    "unread": unread,
 }))
 """
 
@@ -644,6 +1022,8 @@ def ran(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
     project.write("legacy/apps.py", _LEGACY_APP)
     project.write("legacy/models.py", _LEGACY_MODELS)
     project.write("legacy/views.py", _VIEWS)
+    project.write("legacy/admin.py", _APP_ADMIN.replace("MIXIN", "Legacy"))
+    project.write("shop/admin.py", _APP_ADMIN.replace("MIXIN", "Shared"))
     project.write("site_views.py", _VIEWS)
     project.write("site_admin.py", _ADMIN)
     project.write("site_more.py", _MORE)
@@ -657,6 +1037,12 @@ def ran(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
     project.write("deeper.py", _DEEPER)
     project.write("loop.py", _LOOP)
     project.write("deep.py", _DEEP)
+    project.write("site_dot.py", _DOT)
+    project.write("site_ns/part.py")
+    project.write("mutual_a.py", _MUTUAL_A)
+    project.write("mutual_b.py", _MUTUAL_B)
+    project.write("flat.py", _FLAT)
+    project.write("raising.py", _RAISING)
     project.write("urls.py", _URLS)
     project.write("broken.py", "raise RuntimeError('a URLconf that fails')\n")
     library = root / "vendor"
@@ -678,15 +1064,26 @@ def ran(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
             ],
         },
     )
+    files = root / "files"
+    files.mkdir()
+    (files / "syntax.py").write_text("class (:\n")
+    (files / "nul.py").write_bytes(b"class A:\n    pass\0\n")
     path = os.pathsep.join([str(project.root), str(library), *sys.path])
     done = project.run(
-        "-c", _SCRIPT, env={"DJANGO_SETTINGS_MODULE": "settings", "PYTHONPATH": path}
+        "-c",
+        _SCRIPT,
+        env={
+            "DJANGO_SETTINGS_MODULE": "settings",
+            "PYTHONPATH": path,
+            "PROBE_FILES": str(files),
+        },
     )
     assert done.status == 0, done.stderr
     result: dict[str, Any] = json.loads(done.stdout)
     result["site_views"] = project.root.joinpath("site_views.py").read_text()
     result["site_more"] = project.root.joinpath("site_more.py").read_text()
     result["site_admin"] = project.root.joinpath("site_admin.py").read_text()
+    result["site_dot"] = project.root.joinpath("site_dot.py").read_text()
     result["database files"] = sorted(p.name for p in project.root.glob("*.sqlite3"))
     return result
 
@@ -752,7 +1149,8 @@ def test_the_walk_ends_where_label_of_ends(ran: dict[str, Any]) -> None:
                 assert one["label"] is None or route.startswith("admin/"), route
                 continue
             assert walked, route
-            assert (walked[-1] is None) == (one["label"] is None), route
+            # "?": a module whose name is not text, which is in no app.
+            assert (walked[-1] in (None, "?")) == (one["label"] is None), route
 
 
 def test_every_other_pattern_is_reported_at_its_innermost_project_code(
@@ -772,7 +1170,7 @@ def test_every_other_pattern_is_reported_at_its_innermost_project_code(
     others = sorted(
         line
         for line in ran["lines"]
-        if " URL pattern 'composed/" not in line and " URL pattern 'lazy/" not in line
+        if not re.search(r" URL pattern '(composed|lazy|placed|kinds|mutual)/", line)
     )
     assert others == sorted(
         [
@@ -933,3 +1331,215 @@ def test_nothing_is_reported_when_root_urlconf_is_missing_or_unreadable(
         "'no_patterns'": [],
     }
     assert ran["database files"] == []
+
+
+def _group(ran: dict[str, Any], prefix: str) -> list[str]:
+    return sorted(line for line in ran["lines"] if f" URL pattern '{prefix}" in line)
+
+
+def test_a_class_is_placed_at_the_one_definition_that_agrees_with_it(
+    ran: dict[str, Any],
+) -> None:
+    """Each step of the placement, pinned by a class it alone places: a
+    classmethod's line, a class made in an ``async def``, a name that only
+    ends a nested class's, a class inside an ``if`` inside a class, a method
+    on a class's last line, and a first definition kept under another name
+    (told apart by ``__firstlineno__``, from Python 3.13), a class that holds
+    a function defined outside it; and a function
+    whose code names its file by another path.
+    """
+    more = ran["site_more"]
+    first = _line_of(more, "class Early:") if sys.version_info >= (3, 13) else 1
+    assert _group(ran, "placed/") == sorted(
+        [
+            _finding(
+                "placed/told/",
+                _line_of(more, "    class Told:"),
+                "site_more.Told",
+                "site_more.py",
+            ),
+            _finding(
+                "placed/awaited/",
+                _line_of(more, "    class Awaited:"),
+                "site_more.amake.<locals>.Awaited",
+                "site_more.py",
+            ),
+            _finding(
+                "placed/twin/",
+                _line_of(more, "class Twin:"),
+                "site_more.Twin",
+                "site_more.py",
+            ),
+            _finding(
+                "placed/in/",
+                _line_of(more, "        class In:"),
+                "site_more.Box.In",
+                "site_more.py",
+            ),
+            _finding(
+                "placed/short/",
+                _line_of(more, "class Short:"),
+                "site_more.Short",
+                "site_more.py",
+            ),
+            _finding("placed/first/", first, "site_more.Early", "site_more.py"),
+            _finding(
+                "placed/borrows/",
+                _line_of(more, "class Borrows:"),
+                "site_more.Borrows",
+                "site_more.py",
+            ),
+            _finding(
+                "placed/dotted/",
+                _line_of(ran["site_dot"], "def dotted("),
+                "site_dot.dotted",
+                "site_dot.py",
+            ),
+        ]
+    )
+
+
+def test_a_file_that_cannot_be_read_or_parsed_places_a_class_at_line_1(
+    ran: dict[str, Any],
+) -> None:
+    assert ran["unread"] == {"missing.py": 1, "syntax.py": 1, "nul.py": 1}
+
+
+def test_each_file_is_parsed_once_a_run(ran: dict[str, Any]) -> None:
+    """However many classes are placed in one file (the matrix places
+    hundreds in ``site_views.py``), it is parsed once.
+    """
+    files = {line.split(":")[0] for line in ran["lines"]}
+    assert 0 < ran["parsed"] <= len(files)
+    assert ran["counted"] == ran["lines"]
+
+
+def test_every_kind_of_class_and_admin_name_is_judged_by_its_code(
+    ran: dict[str, Any],
+) -> None:
+    """A class with a metaclass, called or behind ``as_view``; a wrapper
+    whose ``__wrapped__`` is falsy; and, in the admin's module, a function
+    whose name only starts with the admin's, one whose ``__qualname__``
+    claims the admin's, one that carries ``model_admin``, and the function
+    Django's admin builds with its ``model_admin`` taken away: each is the
+    project's view, not the admin's. A project method bound to the hosted
+    app's admin is reported; bound to an undeclared app's, it is W001's. A
+    code that starts at line 0, or whose file cannot be looked up, is placed
+    at line 1; a function whose module's name is not text is passed over.
+    """
+    more = ran["site_more"]
+    admin = ran["site_admin"]
+    # OtherAdmin's changelist_view, the second in the file.
+    stripped = [
+        number
+        for number, line in enumerate(admin.splitlines(), 1)
+        if line.startswith("    def changelist_view(")
+    ][1]
+    assert stripped > _line_of(admin, "class OtherAdmin(")
+    assert _group(ran, "kinds/") == sorted(
+        [
+            _finding(
+                "kinds/abstract/",
+                _line_of(more, "class Abstract("),
+                "site_more.Abstract",
+                "site_more.py",
+            ),
+            _finding(
+                "kinds/metaview/",
+                _line_of(more, "class MetaView("),
+                "site_more.MetaView",
+                "site_more.py",
+            ),
+            _finding(
+                "kinds/falsy/",
+                _line_of(more, "class Falsy:"),
+                "site_more.Falsy",
+                "site_more.py",
+            ),
+            _finding(
+                "kinds/help/",
+                _line_of(admin, "def ThingAdminHelp("),
+                "site_admin.ThingAdminHelp",
+                "site_admin.py",
+            ),
+            _finding(
+                "kinds/renamed/",
+                _line_of(admin, "def renamed("),
+                "site_admin.renamed",
+                "site_admin.py",
+            ),
+            _finding(
+                "kinds/tagged/",
+                _line_of(admin, "def tagged("),
+                "site_admin.tagged",
+                "site_admin.py",
+            ),
+            _finding(
+                "kinds/stripped/",
+                stripped,
+                "site_admin.OtherAdmin.changelist_view",
+                "site_admin.py",
+            ),
+            _finding(
+                "kinds/hostedadmin/",
+                _line_of(admin, "    def shared("),
+                "site_admin.Shared.shared",
+                "site_admin.py",
+            ),
+            _finding("kinds/zero/", 1, "site_admin.zero", "site_admin.py"),
+            _finding("kinds/unnamed/", 1, "site_admin.unnamed", "site_admin.py"),
+        ]
+    )
+    [app_admin] = ran["routes"]["kinds/appadmin/"]
+    assert app_admin == {"label": None, "walked": None}
+
+
+def test_a_view_behind_a_wrapper_label_of_does_not_follow_is_not_reported(
+    ran: dict[str, Any],
+) -> None:
+    """The blind spots the module names: ``functools.lru_cache``,
+    ``sync_to_async``, a library's ``partial`` subclass and a library
+    wrapper with no ``__wrapped__`` around a project view; and a function of
+    a namespace package, which has no file.
+    """
+    blind = sorted(route for route in ran["routes"] if route.startswith("blind/"))
+    assert blind == [
+        "blind/lru/",
+        "blind/nowhere/",
+        "blind/partial/",
+        "blind/plain/",
+        "blind/sync/",
+    ]
+    assert all(ran["routes"][route][0]["label"] is None for route in blind)
+    assert _group(ran, "blind/") == []
+
+
+def test_urlconfs_that_include_each_other_are_read_once_each(
+    ran: dict[str, Any],
+) -> None:
+    mutual = sorted(route for route in ran["routes"] if route.startswith("mutual/"))
+    assert mutual == ["mutual/b/leaf/", "mutual/leaf/"]
+    assert len(_group(ran, "mutual/")) == 2
+
+
+def test_one_urlconf_is_read_no_further_than_the_bound(ran: dict[str, Any]) -> None:
+    """A flat ``urlpatterns`` without end is read to ``_ENTRIES`` (here 7),
+    not to the 1,000 past which it raises.
+    """
+    assert ran["flat"] == ["p/"] * 7
+
+
+def test_patterns_that_raise_partway_are_passed_over_whole(
+    ran: dict[str, Any],
+) -> None:
+    """Read in full before the walk, so that nothing escapes: as the root,
+    nothing is reported; as an include, its routes are passed over.
+    """
+    assert ran["raising"] == []
+    assert not [route for route in ran["routes"] if route.startswith("raising/")]
+
+
+def test_an_object_shaped_like_a_resolver_is_not_followed(
+    ran: dict[str, Any],
+) -> None:
+    assert not [route for route in ran["routes"] if route.startswith("alike/")]

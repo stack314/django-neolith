@@ -14,18 +14,27 @@ those: a bound method is its function, an exact ``functools.partial`` its
 ``View.as_view`` builds its ``view_class``, and a class or any other
 callable its own or its type's code. So Django's generic views,
 ``static.serve`` and a library's views are not reported, while a view of the
-project's, under any wrapper, and a wrapper of the project's around one of
-those, are. The finding is placed at the innermost such code: a function's
-first line in the file its code was compiled from, or a class's first line
-in the file of the module it names (as ``label_of`` judges it), each at line
-1 when that file does not hold it.
+project's under any wrapper ``label_of`` follows (a bound method, an exact
+``partial``, a function whose ``__wrapped__`` leads to it), and a wrapper of
+the project's around one of those, are. The finding is placed at the
+innermost such code: a function's first line in the file its code was
+compiled from, or a class's first line in the file of the module it names
+(as ``label_of`` judges it), each at line 1 when that file does not hold
+it. Each such file is parsed at most once in a run.
 
 Not reported, as blind spots:
 
 - an admin's view that ``neolith.W001`` reports: one Django builds for a
   ``ModelAdmin``, a method bound to an admin whose class W001 names, and a
   function defined in such a class;
+- a project view behind a wrapper ``label_of`` does not follow: a function
+  that sets no ``__wrapped__``, or a callable object of a library's type,
+  such as ``sync_to_async(view)``, ``functools.lru_cache(view)`` or a
+  library's ``partial`` subclass;
 - a walk deeper than ``label_of`` follows;
+- code of the project's in a module that has no file, such as a namespace
+  package: it is passed over, and the finding, if any, placed at the next
+  code out;
 - an entry of a URLconf that is neither Django's ``URLPattern`` nor its
   ``URLResolver``, and one whose route, view or patterns cannot be read
   (Django raises at the first request that reaches it);
@@ -73,6 +82,11 @@ _HINT: Final = (
 )
 
 
+# Each class statement of a file by its qualified name: its first and last
+# lines, from its first decorator.
+type _Classes = dict[str, list[tuple[int, int]]]
+
+
 class Code(NamedTuple):
     """One piece of code a view's request runs: the module it is in and the
     function or class itself.
@@ -98,6 +112,7 @@ def findings(source: Source) -> list[Finding]:
         return []
     first_party = source.map()
     admins = _reported_admins()
+    classes: dict[str, _Classes | None] = {}
     found: list[Finding] = []
     for route, view in patterns(name):
         if _serving.label_of(view) is not None:
@@ -124,7 +139,9 @@ def findings(source: Source) -> list[Finding]:
             hint=_HINT,
             id="neolith.W102",
         )
-        found.append(Finding(message, None, place(path), _line(code.thing, path)))
+        found.append(
+            Finding(message, None, place(path), _line(code.thing, path, classes))
+        )
     return found
 
 
@@ -269,23 +286,25 @@ def _named(code: Code) -> str:
     return f"{code.module}.{_serving._CODE.__get__(code.thing).co_qualname}"
 
 
-def _line(thing: object, path: str) -> int:
+def _line(thing: object, path: str, classes: dict[str, _Classes | None]) -> int:
     """The first line of a function or a class in the file ``path``; 1 when
-    that file does not hold it.
+    that file does not hold it. ``classes`` keeps each file's class
+    statements, read once for a run.
     """
     if type(thing) is not types.FunctionType:
-        return _class_line(thing, path)  # type: ignore[arg-type]
+        return _class_line(thing, path, classes)  # type: ignore[arg-type]
     found = _serving._CODE.__get__(thing)
     return max(found.co_firstlineno, 1) if _same(found.co_filename, path) else 1
 
 
-def _class_line(klass: type, path: str) -> int:
+def _class_line(klass: type, path: str, classes: dict[str, _Classes | None]) -> int:
     """The first line of the class ``klass`` in the file ``path``, its first
     decorator's if it has one: of the one definition there with its
     qualified name that agrees with the class, by its ``__firstlineno__``
     (Python 3.13 and later) and by the lines of the functions defined in its
-    body; 1 when no definition or more than one agrees, or when such a
-    function was compiled from another file.
+    body; 1 when no definition or more than one agrees, when such a
+    function was compiled from another file, or when the file cannot be read
+    or parsed.
     """
     held = _naming.namespace(klass)
     qualname = _naming.qualname(klass, None)
@@ -301,24 +320,39 @@ def _class_line(klass: type, path: str) -> int:
         if not _same(code.co_filename, path):
             return 1
         lines.append(code.co_firstlineno)
-    try:
-        with open(path, "rb") as file:
-            tree = ast.parse(file.read())
-    except (OSError, SyntaxError, ValueError):
+    if path not in classes:
+        classes[path] = _read(path)
+    held_classes = classes[path]
+    if held_classes is None:
         return 1
     first = _naming.entry(held, "__firstlineno__")
     found = [
         (start, end)
-        for start, end in _definitions(tree, qualname)
+        for start, end in held_classes.get(qualname, ())
         if (type(first) is not int or start == first)
         and all(start <= line <= end for line in lines)
     ]
     return found[0][0] if len(found) == 1 else 1
 
 
-def _definitions(tree: ast.AST, qualname: str) -> Iterator[tuple[int, int]]:
-    """The first and last lines of each class statement in ``tree`` with the
-    qualified name ``qualname``, from its first decorator.
+def _read(path: str) -> _Classes | None:
+    """The class statements of the file ``path``; ``None`` when it cannot be
+    read or parsed.
+    """
+    try:
+        with open(path, "rb") as file:
+            tree = ast.parse(file.read())
+    except (OSError, SyntaxError):  # SyntaxError for NUL too, from 3.12
+        return None
+    held: _Classes = {}
+    for qualname, start, end in _definitions(tree):
+        held.setdefault(qualname, []).append((start, end))
+    return held
+
+
+def _definitions(tree: ast.AST) -> Iterator[tuple[str, int, int]]:
+    """The qualified name and the first and last lines of each class
+    statement in ``tree``, from its first decorator.
     """
     stack: list[tuple[ast.AST, str]] = [(tree, "")]
     while stack:
@@ -327,19 +361,18 @@ def _definitions(tree: ast.AST, qualname: str) -> Iterator[tuple[int, int]]:
             inner = prefix
             if isinstance(child, ast.ClassDef):
                 inner = f"{prefix}{child.name}"
-                if inner == qualname:
-                    starts = [d.lineno for d in child.decorator_list]
-                    end = child.end_lineno or child.lineno
-                    yield min([child.lineno, *starts]), end
+                starts = [d.lineno for d in child.decorator_list]
+                end = child.end_lineno or child.lineno
+                yield inner, min([child.lineno, *starts]), end
                 inner += "."
             elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 inner = f"{prefix}{child.name}.<locals>."
             stack.append((child, inner))
 
 
-def _same(file: object, path: str) -> bool:
+def _same(file: str, path: str) -> bool:
     """Whether ``file`` names the file at ``path``."""
     try:
-        return type(file) is str and os.path.samefile(file, path)
+        return os.path.samefile(file, path)
     except (OSError, ValueError):
         return False
