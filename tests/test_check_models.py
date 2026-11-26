@@ -201,6 +201,22 @@ def _at(source: str, name: str) -> int:
     )
 
 
+def _model_rows(ran: Ran, imports: list[tuple[str, str]]) -> list[str]:
+    """The findings of the rules on models; every other finding of the run
+    is one of ``imports``, as (place, id), exactly: the rules on imports
+    report the imports a fixture needs to name another app's model (a
+    proxy or a parent class, for one).
+    """
+    rows = [line for line in ran.findings if re.search(r" neolith\.E10[67] ", line)]
+    others = sorted(
+        (line.split(" ")[0].rstrip(":"), line.split(" ")[1])
+        for line in ran.findings
+        if line not in rows
+    )
+    assert others == sorted(imports), ran.stdout
+    return rows
+
+
 def _summary(ran: Ran) -> tuple[int, int, int]:
     found = _SUMMARY.fullmatch(ran.summary)
     assert found is not None, ran.stdout
@@ -320,11 +336,20 @@ def test_each_relation_to_another_app_is_reported_and_none_inside_one(
         "has the table 'LEGACY_thing', the table of legacy.Thing, a model of app "
         f"legacy, compared without regard to case; {_TABLE_HINT}",
     ]
-    assert sorted(ran.findings) == sorted(relations + stored), ran.stdout + ran.stderr
+    # The imports desk and shop need to name the other apps' models.
+    imports = [
+        ("desk/models.py:3", "neolith.E102"),
+        ("desk/models.py:6", "neolith.E102"),
+        ("desk/models.py:7", "neolith.E101"),
+        ("shop/models.py:2", "neolith.E102"),
+    ]
+    assert sorted(_model_rows(ran, imports)) == sorted(relations + stored), (
+        ran.stdout + ran.stderr
+    )
     assert ran.findings == sorted(
         ran.findings, key=lambda line: (line.split(":")[0], int(line.split(":")[1]))
     )
-    assert _summary(ran) == (len(relations) + len(stored), 0, 0)
+    assert _summary(ran) == (len(ran.findings), 0, 0)
     assert ran.status == 1
     assert ran.errors == []
 
@@ -442,8 +467,11 @@ def test_records_stored_where_another_hosted_app_s_are_are_reported(
         table("shop.Item", shop_line, "shop_item", "desk.Unmanaged"),
         table("shop.Item", shop_line, "shop_item", "desk.Tagger_tags"),
     ]
-    assert sorted(ran.findings) == sorted(expected), ran.stdout + ran.stderr
-    assert _summary(ran) == (len(expected), 0, 0)
+    imports = [("desk/models.py:2", "neolith.E101")]
+    assert sorted(_model_rows(ran, imports)) == sorted(expected), (
+        ran.stdout + ran.stderr
+    )
+    assert _summary(ran) == (len(ran.findings), 0, 0)
     assert ran.status == 1
 
 

@@ -38,7 +38,7 @@ importing ``t``, runs first-party code in no hosted app from which a chain,
 as for E103, reaches such a module of ``<c>``: importing a contract package
 never loads its app's internals (ADR 0030 Decision 2). For each module the contract
 package of ``<b>`` leaves out, ``neolith.E105``: it defines a contract or a
-record, or is a package above one, and also defines a model or holds the
+record or enum, or is a package above one, and also defines a model or holds the
 implementation of a contract ``<b>`` provides.
 
 For each undeclared app ``<c>`` whose package is first-party,
@@ -477,7 +477,7 @@ class _Rules:
         if not file.source:
             return file.path, 1
         lines = [
-            _check_models._source(global_apps.get_model(label))[1]
+            _check_models.place_of(global_apps.get_model(label), self.source)[1]
             for label in out.models
         ]
         tree = self.source.read(file).tree
@@ -555,7 +555,7 @@ class _Rules:
                 obj=model,
                 id="neolith.W105",
             )
-            path, line = _check_models._source(model)
+            path, line = _check_models.place_of(model, self.source)
             found.append(Finding(message, other, place(path), line))
         return found
 

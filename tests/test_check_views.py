@@ -923,7 +923,8 @@ flat_reads = sys.modules["flat"].reads
 _check_views._ENTRIES = entries
 raising = attempt(lambda: [r for r, _ in _check_views.patterns("raising")])
 
-# Each file is parsed once a run, however many classes are placed in it.
+# Each file is parsed once a run, however many classes are placed in it:
+# a fresh run's reading, counted where the run reads its files.
 import ast
 import os
 import types
@@ -931,9 +932,10 @@ import types
 parsed = []
 counting = types.SimpleNamespace(**vars(ast))
 counting.parse = lambda *a, **k: parsed.append(1) or ast.parse(*a, **k)
-_check_views.ast = counting
-counted = attempt(lambda: _check_views.findings(source))
-_check_views.ast = ast
+fresh = _check_source.Source(hosted, _check._owner, settings_module="settings")
+_check_source.ast = counting
+counted = attempt(lambda: _check_views.findings(fresh))
+_check_source.ast = ast
 
 # A file gone, or not Python, when a class is placed in it.
 import site_more
@@ -942,7 +944,12 @@ files = os.environ["PROBE_FILES"]
 unread = {
     name: attempt(
         lambda: _check_views._class_line(
-            site_more.Bare, os.path.join(files, name), {}
+            site_more.Bare,
+            os.path.join(files, name),
+            {},
+            lambda: _check_source.read(
+                _check_source.File(os.path.join(files, name), "probe", "")
+            ).tree,
         )
     )
     for name in ("missing.py", "syntax.py", "nul.py")

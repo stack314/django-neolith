@@ -35,7 +35,7 @@ class Item(models.Model):
 """
 _NOTE = """\
 from django.db import models
-from shop.models import Item
+Item = "shop.Item"
 
 
 class Note(models.Model):
@@ -578,7 +578,7 @@ from typing import Protocol
 
 from pydantic import BaseModel
 
-from neolith import CallContext, action, contract
+from neolith import action, contract
 
 
 class Count(BaseModel):
@@ -589,6 +589,12 @@ class Count(BaseModel):
 class Shop(Protocol):
     @action(idempotent=True)
     def count(self, request: Count) -> Count: ...
+"""
+
+# The implementation in a module of its own, outside the contract package.
+_SERVICE = """\
+from neolith import CallContext
+from shop.contracts import Count
 
 
 class Service:
@@ -612,13 +618,14 @@ urlpatterns = [path("shop/v1/", anything)]
 def test_both_entries_print_the_same_lines_for_phases_4_and_5(tmp_path: Path) -> None:
     project = Two(tmp_path, urls=_SHADOWING_URLS)
     project.write("shop/contracts.py", _CONTRACT)
+    project.write("shop/services.py", _SERVICE)
     project.app(
         "shop",
         models=_ITEM,
         imports="from neolith import Provided\nfrom shop.contracts import Shop\n",
         config="""\
         provides = (
-            Provided(Shop, implementation="shop.contracts.Service", principal_from=()),
+            Provided(Shop, implementation="shop.services.Service", principal_from=()),
         )
         """,
     )
@@ -642,7 +649,11 @@ def test_both_entries_print_the_same_lines_for_phases_4_and_5(tmp_path: Path) ->
     ]
     assert script.lines == [
         f"{_FK} (report only)",
-        "neolith check: 0 errors, 1 errors in report-only apps, 0 warnings",
+        "urls.py:5: neolith.W102 URL pattern 'shop/v1/': view urls.anything is the "
+        "project's code in no installed app; a request it serves has no calling "
+        "app, and a contract call from it is refused; move the view into the app "
+        "whose work it does, so that its requests run in that app's root",
+        "neolith check: 0 errors, 1 errors in report-only apps, 1 warnings",
     ]
 
 
@@ -752,7 +763,7 @@ import sys
 
 import neolith._check_models
 
-def broken(hosted):
+def broken(hosted, source):
     raise {error}
 
 neolith._check_models.findings = broken
@@ -834,7 +845,7 @@ run()
 findings = neolith._check_models.findings
 
 
-def stopped(hosted):
+def stopped(hosted, source):
     assert BaseDatabaseWrapper.connect is not original
     raise KeyboardInterrupt
 

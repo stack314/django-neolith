@@ -49,7 +49,6 @@ and no code of an app runs.
 
 import ast
 import dataclasses
-import os
 from collections.abc import Iterator, Mapping
 from typing import Final, NamedTuple
 
@@ -61,7 +60,6 @@ from neolith._check_source import (
     _TRANSACTION,
     COMMAND_SCOPE,
     CONNECT,
-    File,
     Module,
     Source,
     _argument,
@@ -71,7 +69,6 @@ from neolith._check_source import (
     canonical,
     is_test_module,
     resolved,
-    split,
 )
 from neolith._declaration import declaration_of
 
@@ -531,15 +528,11 @@ def _first_party(source: Source) -> Iterator[Module]:
     module, read once in the run.
     """
     for dotted, placed in sorted(source.map().items()):
-        if placed.path is None or not placed.source or is_test_module(placed.parts()):
+        if is_test_module(placed.parts()):
             continue
-        parts = split(os.path.basename(placed.path))
-        package = (
-            dotted
-            if parts is not None and parts[0] == "__init__"
-            else (dotted.rpartition(".")[0])
-        )
-        yield source.read(File(placed.path, dotted, package))
+        module = source.placed(dotted)
+        if module is not None:
+            yield module
 
 
 def _boots(source: Source) -> list[Finding]:
