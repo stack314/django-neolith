@@ -22,11 +22,15 @@ the object it resolves to, never by its spelling:
   to a ``lambda``, which both read as ``default``; ``django.db.connection``
   at its import or at an attribute access. An alias the host does not
   hold, the alias of a hosted app without a database among them, is
-  Django's error at run time, and a computed alias is not judged.
+  Django's error at run time, and a computed alias is not judged: so is
+  any name in the place of ``using``, a view passed by name to ``atomic``
+  or ``non_atomic_requests`` included, since source alone cannot tell a
+  function from an alias held in a name.
 - ``neolith.E110``: ``command_scope("<label>")`` names another installed app.
 - ``neolith.E111``: a model or the config of another installed app is named
   by a string: ``get_model(...)`` and ``get_app_config("<label>")`` on any
-  receiver, a migration's registry parameter included; any keyword
+  receiver, a migration's registry parameter included, ``get_model`` with
+  a literal label whatever its model name, computed included; any keyword
   ``sender="<label>.<Model>"``; and ``get_user_model()`` when
   ``AUTH_USER_MODEL`` names a model of another installed app. A label no
   installed app has is not reported: Django refuses it at run time.
@@ -39,7 +43,8 @@ And ``neolith.W103``: every first-party module of the map, in an app or in
 no app, other than a test module, that calls ``neolith.testing.boot()``.
 
 A computed argument to these calls is ``neolith.W101``, which reading
-source reports. Nothing is imported and no code of an app runs.
+source reports, beside the E111 of a literal label. Nothing is imported
+and no code of an app runs.
 """
 
 import ast
@@ -224,11 +229,12 @@ def judged(
             if _object(node, followed) == _CONNECTION:
                 found.append(_connection(_line(node), app))
         elif isinstance(node, ast.ImportFrom):
-            if any(
-                dotted is not None and canonical(dotted) == _CONNECTION
-                for _, dotted in _binds(node, package)
-            ):
-                found.append(_connection(node.lineno, app))
+            # One bound name for each alias but *, in order: the line of the
+            # name imported, which may not be the line of from.
+            names = [alias for alias in node.names if alias.name != "*"]
+            for alias, (_, dotted) in zip(names, _binds(node, package), strict=True):
+                if dotted is not None and canonical(dotted) == _CONNECTION:
+                    found.append(_connection(alias.lineno, app))
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             for decorator in node.decorator_list:
                 target = _object(decorator, followed)
@@ -392,14 +398,21 @@ def _named(node: ast.Call, method: str | None, app: App) -> list[Judged]:
         return label != app.label and label in app.installed
 
     if method == "get_model":
-        named = _get_model(node)
-        if named is not None and other(named[0]):
-            text = shown(repr(".".join(named)))
+        reached = _get_model(node)
+        if reached is not None and other(reached[0]):
+            owner, model = reached
+            what = (
+                f"get_model() names a model of app {shown(owner)} by its label "
+                f"{shown(repr(owner))}"
+                if model is None
+                else f"get_model() names {shown(repr(f'{owner}.{model}'))}, a model "
+                f"of app {shown(owner)}"
+            )
             found.append(
                 Judged(
                     _written(_argument(node, 0, "app_label"), node),
                     "neolith.E111",
-                    f"get_model() names {text}, a model of app {shown(named[0])}",
+                    what,
                     _RECORDS_HINT,
                 )
             )
@@ -434,11 +447,15 @@ def _named(node: ast.Call, method: str | None, app: App) -> list[Judged]:
     return found
 
 
-def _get_model(node: ast.Call) -> tuple[str, str] | None:
-    """The label and model a call ``get_model(...)`` names by literals, as
+def _get_model(node: ast.Call) -> tuple[str, str | None] | None:
+    """The label and model a call ``get_model(...)`` names, as
     ``Apps.get_model(app_label, model_name=None, ...)`` reads them: both, or
-    ``"<label>.<Model>"`` alone. A model name alone, as
-    ``AppConfig.get_model(model_name, ...)`` takes it, names no label.
+    ``"<label>.<Model>"`` alone, or a literal label with a computed model
+    name, whose model is then ``None``: whatever model it picks, it is one
+    of that label's app, as ``get_app_config`` of the label reaches. A model
+    name alone, as ``AppConfig.get_model(model_name, ...)`` takes it, names
+    no label, nor does a literal label beside an empty or non-``str`` model
+    name, which Django refuses or reads as ``require_ready``.
     """
     label = _text(_argument(node, 0, "app_label"))
     if label is None:
@@ -446,10 +463,10 @@ def _get_model(node: ast.Call) -> tuple[str, str] | None:
     model = _argument(node, 1, "model_name")
     if _none(model):
         return _model(label)
-    name = _text(model)
-    if not name:
-        return None
-    return label, name
+    if isinstance(model, ast.Constant):
+        name = _text(model)
+        return (label, name) if name else None
+    return label, None
 
 
 def booted(tree: ast.Module, followed: Mapping[str, str]) -> list[int]:

@@ -357,7 +357,8 @@ def test_the_bare_decorators_are_those_that_read_a_callable_as_the_view() -> Non
         ("from django import db\nx = db.connection\n", 2),
         ("import django.db as d\nd.connection.ops\n", 2),
         ("def f():\n    from django.db import connection\n", 2),
-        ("from django.db import (\n    connections,\n    connection,\n)\n", 1),
+        ("from django.db import (\n    connections,\n    connection,\n)\n", 3),
+        ("from django.db import (\n    connection as c,\n)\nc.cursor()\n", 2),
     ],
 )
 def test_django_db_connection_at_its_import_or_attribute_access(
@@ -396,6 +397,11 @@ def test_django_db_connection_at_its_import_or_attribute_access(
         "from django.db import transaction\ntransaction.on_commit(f, **kwargs)\n",
         "from django.db import transaction\nx = transaction.atomic\n",
         "from django.db import DEFAULT_DB_ALIAS\nx = DEFAULT_DB_ALIAS\n",
+        # A callable passed by name in the place of using is read as a
+        # computed alias, as using=self._db is (ADR 0030 Decision 5).
+        "from django.db import transaction\ntransaction.atomic(views.checkout)\n",
+        "from django.db import transaction\ndef checkout(request):\n    pass\n"
+        "checkout = transaction.non_atomic_requests(checkout)\n",
     ],
 )
 def test_nothing_is_reported_where_no_rule_applies(code: str) -> None:

@@ -161,7 +161,10 @@ def test_e110_names_the_app_and_its_hint_names_the_own_label() -> None:
 
 # get_model on any receiver, as Apps.get_model(app_label, model_name=None,
 # require_ready=True) and AppConfig.get_model(model_name, require_ready=True)
-# read their arguments: (arguments, the model named, or None).
+# read their arguments: (arguments, the model named, its label alone when
+# the model name is computed, or None). A literal label of another app
+# names that app's model whatever the model name, as get_app_config of the
+# label does.
 _GET_MODEL = [
     ("'auth.User'", "auth.User"),
     ("'auth', 'User'", "auth.User"),
@@ -182,7 +185,14 @@ _GET_MODEL = [
     ("'.User'", None),
     ("'auth', ''", None),
     ("'', 'User'", None),
-    ("'auth', name", None),
+    ("'auth', name", "auth"),
+    ("'auth', model_name=name", "auth"),
+    ("'desk', *names", "desk"),
+    ("'desk', **names", "desk"),
+    ("'auth.User', name", None),
+    ("'shop', name", None),
+    ("'nosuch', name", None),
+    ("'auth', False", None),
     ("name, 'User'", None),
     ("*name", None),
 ]
@@ -193,10 +203,10 @@ _RECEIVERS = ["apps", "self.apps", "django_apps", "config", "registry().state"]
 def test_get_model_on_any_receiver_naming_another_app_is_e111() -> None:
     for receiver, (arguments, named) in itertools.product(_RECEIVERS, _GET_MODEL):
         found = _judge(_module("", f"{receiver}.get_model({arguments})"))
-        expected = (
-            []
-            if named is None
-            else [
+        if named is None:
+            expected = []
+        elif "." in named:
+            expected = [
                 Judged(
                     6,
                     "neolith.E111",
@@ -205,7 +215,15 @@ def test_get_model_on_any_receiver_naming_another_app_is_e111() -> None:
                     _RECORDS_HINT,
                 )
             ]
-        )
+        else:
+            expected = [
+                Judged(
+                    6,
+                    "neolith.E111",
+                    f"get_model() names a model of app {named} by its label {named!r}",
+                    _RECORDS_HINT,
+                )
+            ]
         assert found == expected, (receiver, arguments)
 
 
@@ -427,6 +445,21 @@ _SPREAD_VALUES = [
         "post_save.connect(\n    f,\n    weak=False,\n    sender='auth.User',\n)\n",
         "'auth.User'",
     ),
+    # A literal spread over lines is on the line it starts on.
+    (
+        "item.save(\n    force=True,\n    using=('de'\n           'fault'),\n)\n",
+        "'de'",
+    ),
+    (
+        "from django.db import connections\nconnections[\n    'de'\n    'sk'\n]\n",
+        "'de'",
+    ),
+    ("from neolith import connect\nconnect(\n    'stock'\n    '.v1',\n)\n", "'stock'"),
+    (
+        "from django.apps import apps\napps.get_model(\n    'au'\n    'th', name)\n",
+        "'au'",
+    ),
+    ("x.connect(\n    f,\n    sender='auth'\n    '.User',\n)\n", "'auth'"),
 ]
 
 
